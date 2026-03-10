@@ -1,0 +1,29 @@
+{
+    "name": "快速启动",
+    "trigger": "打开",
+    "llm_command": "open_app",
+    "aliases": [
+        "启动",
+        "open"
+    ],
+    "type": "direct",
+    "description": "直接打开本地软件",
+    "example_arg": "计算器",
+    "settings": {
+        "app_list": {
+            "type": "list",
+            "item_type": "app_list",
+            "label": "应用列表",
+            "description": "添加常用的应用程序，可以通过别名快速启动",
+            "default": [
+                "计算器|calc.exe",
+                "记事本|notepad.exe",
+                "画图|mspaint.exe",
+                "任务管理器|taskmgr.exe",
+                "命令提示符|cmd.exe",
+                "steam|D:/steam/steam.exe"
+            ]
+        }
+    },
+    "timeout_sec": 6
+}

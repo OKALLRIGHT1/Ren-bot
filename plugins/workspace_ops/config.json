@@ -1,0 +1,19 @@
+{
+  "name": "工作区与文件助手",
+  "trigger": "workspace_ops",
+  "llm_command": "workspace_ops",
+  "aliases": [
+    "代码助手",
+    "文件助手",
+    "写文件",
+    "读代码",
+    "改代码",
+    "搜代码",
+    "工作区",
+    "workspace",
+    "codex"
+  ],
+  "type": "react",
+  "description": "在项目工作区内执行代码读取、搜索与安全写入。参数格式：action ||| arg1 ||| arg2 ...；可用 action: help, pwd, list_files, read_file, read_range, search_code, write_file, append_file, replace_text",
+  "example_arg": "read_file ||| services/chat_service.py"
+}

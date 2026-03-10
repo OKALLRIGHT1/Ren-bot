@@ -1,0 +1,9 @@
+{
+  "name": "模式预设",
+  "trigger": "mode_preset",
+  "llm_command": "mode_preset",
+  "aliases": ["模式", "预设", "切换模式", "助手模式"],
+  "type": "react",
+  "description": "切换助手工作模式。参数格式：action ||| name；action可用 list/status/apply。name可用 companion/codex/quiet/eco。",
+  "example_arg": "apply ||| codex"
+}

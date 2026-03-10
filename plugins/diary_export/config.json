@@ -1,0 +1,17 @@
+{
+    "trigger": "diary_manager",
+    "name": "日记管家",
+    "type": "react",
+    "version": "1.1.0",
+    "description": "管理每日总结日记。功能：1.查询特定日期的日记(如:昨天干了什么)；2.导出所有日记为Markdown文件(如:导出日记)。",
+    "example_arg": "昨天 / export",
+    "aliases": [
+        "check_history",
+        "check_diary",
+        "review_yesterday",
+        "export_diary",
+        "save_diary"
+    ],
+    "author": "Suzu",
+    "timeout_sec": 15.0
+}

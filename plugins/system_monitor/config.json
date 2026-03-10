@@ -1,0 +1,67 @@
+{
+  "name": "系统运维",
+  "trigger": "monitor",
+  "llm_command": "check",
+  "aliases": ["硬件", "监控", "状态", "cpu", "memory", "内存", "温度", "temperature", "sys", "check", "检查", "音量", "亮度", "静音", "锁屏"],
+  "type": "react",
+  "description": "系统监控与控制中枢。支持：check / cpu / memory / disk / temperature / gpu / all / start / stop / status / set_volume / mute / set_brightness / lock_screen。",
+  "example_arg": "set_volume ||| +20",
+  "settings": {
+    "cpu_threshold": {
+      "type": "number",
+      "label": "CPU使用率阈值 (%)",
+      "description": "当CPU使用率超过此值时发出警告",
+      "default": 80,
+      "min": 1,
+      "max": 100
+    },
+    "memory_threshold": {
+      "type": "number",
+      "label": "内存使用率阈值 (%)",
+      "description": "当内存使用率超过此值时发出警告",
+      "default": 85,
+      "min": 1,
+      "max": 100
+    },
+    "disk_threshold": {
+      "type": "number",
+      "label": "磁盘使用率阈值 (%)",
+      "description": "当磁盘使用率超过此值时发出警告",
+      "default": 90,
+      "min": 1,
+      "max": 100
+    },
+    "cpu_temp_threshold": {
+      "type": "number",
+      "label": "CPU温度阈值 (℃)",
+      "description": "当CPU温度超过此值时发出警告",
+      "default": 75,
+      "min": 1,
+      "max": 120
+    },
+    "gpu_threshold": {
+      "type": "number",
+      "label": "GPU使用率阈值 (%)",
+      "description": "当GPU使用率超过此值时发出警告",
+      "default": 85,
+      "min": 1,
+      "max": 100
+    },
+    "gpu_temp_threshold": {
+      "type": "number",
+      "label": "GPU温度阈值 (℃)",
+      "description": "当GPU温度超过此值时发出警告",
+      "default": 80,
+      "min": 1,
+      "max": 120
+    },
+    "check_interval": {
+      "type": "number",
+      "label": "检查间隔 (秒)",
+      "description": "后台监控的检查间隔时间",
+      "default": 60,
+      "min": 10,
+      "max": 600
+    }
+  }
+}

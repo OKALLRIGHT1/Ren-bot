@@ -1,0 +1,9 @@
+{
+  "name": "模型监控",
+  "trigger": "llm_monitor",
+  "llm_command": "llm_monitor",
+  "aliases": ["模型监控", "模型状态", "llm监控", "成本监控"],
+  "type": "react",
+  "description": "查看最近模型调用记录与成功率。参数格式：action ||| limit；action可用 recent/summary。",
+  "example_arg": "summary ||| 50"
+}

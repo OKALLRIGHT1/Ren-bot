@@ -1,0 +1,24 @@
+{
+  "name": "视觉感知",
+  "trigger": "vision",
+  "llm_command": "screenshot",
+  "aliases": [
+    "截图",
+    "截屏",
+    "看屏幕",
+    "看看屏幕",
+    "屏幕分析",
+    "分析屏幕",
+    "拍照",
+    "看摄像头",
+    "看看摄像头",
+    "screenshot",
+    "capture",
+    "screen",
+    "camera",
+    "photo"
+  ],
+  "type": "observe",
+  "description": "能够截图或拍照，并分析当前屏幕或摄像头画面",
+  "example_arg": "看看屏幕"
+}

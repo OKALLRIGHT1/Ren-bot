@@ -1,0 +1,64 @@
+{
+    "name": "QQ远程截图",
+    "trigger": "qq截图",
+    "llm_command": "qq_screenshot",
+    "type": "direct",
+    "aliases": [
+        "截图发我",
+        "截图发给我",
+        "截个图发我",
+        "截个图发给我",
+        "发个截图",
+        "发张截图",
+        "发截图给我",
+        "把截图发我",
+        "把截图发给我",
+        "把屏幕发我",
+        "发屏幕给我",
+        "把屏幕截图发我",
+        "把屏幕截图发给我",
+        "给我看下屏幕",
+        "给我看看屏幕",
+        "截屏给我",
+        "截屏发我",
+        "截屏发给我",
+        "屏幕截图"
+    ],
+    "description": "在 QQ 中直接把当前电脑屏幕截图回发给主人。",
+    "example_arg": "截图发我",
+    "timeout_sec": 15,
+    "version": "1.0.0",
+    "access_control": {
+        "allow_local": false,
+        "allow_remote_qq": true,
+        "allow_qq_owner": true,
+        "allow_qq_others": false
+    },
+    "settings": {
+        "capture_target": {
+            "type": "choice",
+            "label": "默认截图范围",
+            "description": "可选主屏、全部屏幕，或固定抓取第 N 块屏幕。聊天里也能临时说“主屏 / 全部屏 / 第2屏”。",
+            "default": "primary",
+            "choices": [
+                "primary",
+                "all",
+                "monitor"
+            ]
+        },
+        "monitor_index": {
+            "type": "number",
+            "label": "默认屏幕序号",
+            "description": "当默认截图范围为 monitor 时生效，1 表示第一块屏幕。",
+            "default": 1,
+            "min": 1,
+            "max": 8
+        },
+        "include_window_title": {
+            "type": "bool",
+            "label": "附带当前窗口标题",
+            "description": "回发截图时，额外附上一行当前活跃窗口标题。",
+            "default": true
+        }
+    }
+}

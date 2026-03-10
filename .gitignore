@@ -1,0 +1,123 @@
+﻿# =========================
+# Python
+# =========================
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.ipynb_checkpoints/
+
+# =========================
+# Virtual Environments
+# =========================
+.venv/
+venv/
+env/
+
+# =========================
+# IDE / OS
+# =========================
+.idea/
+.vscode/
+*.iml
+.DS_Store
+Thumbs.db
+
+# =========================
+# Secrets / Local Config
+# =========================
+.env
+.env.*
+!.env.example
+config.py
+*.md
+*.db
+# =========================
+# Logs
+# =========================
+logs/
+*.log
+*.log.*
+
+# =========================
+# Build / Dist
+# =========================
+build/
+dist/
+*.egg-info/
+main.build/
+main.dist/
+output/
+
+# =========================
+# Runtime Cache / Temp
+# =========================
+audio_cache/
+temp_audio/
+tmp/
+*.tmp
+*.bak
+*.orig
+
+# =========================
+# Runtime State (local)
+# =========================
+data/codex_session.json
+data/codex_tasks.json
+data/runtime_settings.json
+data/sensor_stats.json
+data/events.sqlite
+data/events.db
+data/*.pid
+
+# =========================
+# Local Databases / Memory
+# =========================
+*.db
+*.db-*
+*.sqlite
+*.sqlite-*
+*.sqlite3
+memory/
+memory_db/
+userdata.db
+learning_tmp.db
+
+# =========================
+# Large Local Models
+# =========================
+model/
+sherpa_model/
+*.onnx
+*.pt
+*.pth
+*.safetensors
+*.ckpt
+
+# =========================
+# Optional Local Tool Builds
+# =========================
+data/pycdc/build/
+
+# =========================
+# Local helper/probe leftovers
+# =========================
+.codex_write_test*
+_tmp_probe.py
+_write_probe_root.tmp
+.tmp_rel_test.txt
+recovered_chat_service.py
+
+# =========================
+# Heavy Local Bundles
+# =========================
+tools/
+data/
+
+# =========================
+# Personal / Local Content
+# =========================
+knowledge_docs/
+profile.json

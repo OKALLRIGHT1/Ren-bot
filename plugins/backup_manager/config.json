@@ -1,0 +1,9 @@
+{
+  "name": "备份恢复",
+  "trigger": "backup_manager",
+  "llm_command": "backup_manager",
+  "aliases": ["备份", "恢复", "快照", "回滚快照"],
+  "type": "react",
+  "description": "管理关键文件快照。参数格式：action ||| arg；action可用 create/list/restore。",
+  "example_arg": "create ||| before_codex_change"
+}

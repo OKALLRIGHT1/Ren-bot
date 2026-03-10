@@ -1,0 +1,8 @@
+{
+  "trigger": "knowledge_base",
+  "name": "本地第二大脑",
+  "type": "react",
+  "description": "用于管理本地知识库。支持指令：learn (扫描文件夹并学习), search (搜索知识库)。参数：指令 ||| 内容(文件夹路径或查询词)",
+  "example_arg": "learn ||| ./docs/my_project",
+  "version": "1.0.0"
+}

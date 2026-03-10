@@ -1,0 +1,14 @@
+{
+    "name": "番茄钟/倒计时",
+    "trigger": "timer",
+    "llm_command": "timer",
+    "aliases": ["提醒", "定时", "闹钟", "倒计时", "番茄钟", "计时", "钟", "提醒我"],
+    "type": "react",
+    "description": "当用户要求倒计时、专注、番茄钟时使用。参数为分钟数(数字)。",
+    "example_arg": "25",
+    "timeout_sec": 360,
+    "icon": "icon.png",
+    "enabled_by_default": true,
+    "version": "1.0.0",
+    "author": "Live2D Suzu"
+}

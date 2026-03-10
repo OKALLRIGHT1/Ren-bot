@@ -1,0 +1,9 @@
+{
+  "name": "联网搜索",
+  "trigger": "search_web",
+  "llm_command": "search",
+  "aliases": ["搜索", "查", "百度", "google", "搜", "找资料", "查询", "查一下", "联网", "网络", "在线", "web", "query"],
+  "type": "react",
+  "description": "当用户询问实时新闻、百科知识、今天发生了什么、或者你不知道的事情时使用。参数为搜索关键词。",
+  "example_arg": "今天北京天气"
+}

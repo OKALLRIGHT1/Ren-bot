@@ -1,0 +1,53 @@
+{
+    "name": "音乐播放器",
+    "trigger": "播放音乐",
+    "llm_command": "play_music",
+    "is_direct": false,
+    "type": "react",
+    "aliases": [
+        "播放", "放歌", "来首", "点歌", "整首", "听歌", "听一首",
+        "放一下", "放给我听", "想听", "听听",
+        "放", "听", "歌", "曲", "音乐", "BGM"
+    ],
+    "description": "播放本地音乐工具。使用规则：\n1. 【明确歌名】用户说'播放XXX'时，参数填歌名：[CMD: play_music | 春日影]\n2. 【推荐模式】用户说'你喜欢的/推荐'时，参数必须填'推荐'：[CMD: play_music | 推荐]\n3. 【随机模式】用户说'随便来一首'时，参数填'随机'：[CMD: play_music | 随机]\n4. 【歌手搜索】用户提到歌手名时，参数填歌手名：[CMD: play_music | MyGO]\n5. 【纯聊天】如果只是评价歌曲，不要调用工具。",
+    "example_arg": "推荐",
+    "timeout_sec": 30,
+    "icon": "icon.png",
+    "enabled_by_default": true,
+    "access_control": {
+        "allow_local": true,
+        "allow_remote_qq": false,
+        "allow_qq_owner": false,
+        "allow_qq_others": false
+    },
+    "version": "1.2.0",
+    "settings": {
+        "music_directories": {
+            "type": "list",
+            "label": "音乐目录列表",
+            "description": "存储音乐文件的文件夹路径。",
+            "default": [
+                "G:/MyGO/Ave_Mujica",
+                "G:/MyGO/迷跡波",
+                "G:/圆环图书馆/官方音乐"
+            ],
+            "subtype": "path",
+            "item_type": "path",
+            "placeholder": "输入音乐文件夹路径"
+        },
+        "favorites": {
+            "type": "list",
+            "label": "五十铃的红心歌单",
+            "description": "当用户要求推荐或播放'你喜欢的歌'时，会优先从包含这些关键词的歌曲中选择。",
+            "default": [
+                "春日影",
+                "碧天伴走",
+                "迷星叫",
+                "诗超绊",
+                "焚音"
+            ],
+            "item_type": "text",
+            "placeholder": "输入歌曲名关键词"
+        }
+    }
+}

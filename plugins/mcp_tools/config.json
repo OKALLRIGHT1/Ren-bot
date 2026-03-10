@@ -1,0 +1,75 @@
+{
+    "name": "MCP 工具桥",
+    "trigger": "mcp_tools",
+    "llm_command": "mcp_tools",
+    "aliases": [
+        "mcp",
+        "mcp工具",
+        "远程工具",
+        "外部工具桥"
+    ],
+    "type": "react",
+    "description": "调用已接入的本地/远程 MCP 工具。参数格式：action ||| tool_name ||| JSON参数；action 可用：help, list_tools, server_status, call_tool",
+    "example_arg": "list_tools",
+    "access_control": {
+        "allow_local": true,
+        "allow_remote_qq": true,
+        "allow_qq_owner": true,
+        "allow_qq_others": false
+    },
+    "timeout_sec": 6,
+    "settings": {
+        "intent_route_enabled": {
+            "type": "boolean",
+            "default": true,
+            "label": "自然语言路由开关",
+            "description": "开启后，当消息命中品牌词+动作词时，会优先路由到 mcp_tools。"
+        },
+        "intent_route_brand_keywords": {
+            "type": "list",
+            "default": [
+                "麦当劳",
+                "mcd",
+                "mcdonald",
+                "麦乐送"
+            ],
+            "label": "品牌/领域关键词",
+            "description": "命中这些词会被视为 MCP 目标领域。"
+        },
+        "intent_route_action_keywords": {
+            "type": "list",
+            "default": [
+                "查",
+                "查一下",
+                "查询",
+                "看",
+                "看一下",
+                "领",
+                "领取",
+                "获取",
+                "优惠",
+                "优惠券",
+                "会员券",
+                "券",
+                "折扣",
+                "活动"
+            ],
+            "label": "动作关键词",
+            "description": "和品牌词同时命中时，会优先走 mcp_tools。"
+        },
+        "intent_route_web_search_override_keywords": {
+            "type": "list",
+            "default": [
+                "联网",
+                "上网",
+                "网页",
+                "百度",
+                "google",
+                "bing",
+                "搜索"
+            ],
+            "label": "显式联网搜索关键词",
+            "description": "命中这些词时优先走 search_web，不抢占 mcp_tools。"
+        }
+    }
+}

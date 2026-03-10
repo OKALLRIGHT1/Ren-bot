@@ -1,0 +1,31 @@
+{
+    "name": "代码执行器",
+    "trigger": "code",
+    "llm_command": "execute_code",
+    "aliases": [
+        "代码",
+        "执行",
+        "计算",
+        "分析",
+        "运行",
+        "python",
+        "编程",
+        "脚本",
+        "calculate",
+        "run",
+        "execute",
+        "script",
+        "eval"
+    ],
+    "type": "react",
+    "description": "当用户要求执行代码、计算、数据分析时使用。参数为要执行的Python代码。",
+    "example_arg": "print(sum([1,2,3,4,5]))",
+    "access_control": {
+        "allow_local": true,
+        "allow_remote_qq": false,
+        "allow_qq_owner": false,
+        "allow_qq_others": false
+    },
+    "timeout_sec": 6,
+    "settings": {}
+}

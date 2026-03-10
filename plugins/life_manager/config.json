@@ -1,0 +1,9 @@
+{
+  "name": "生活管家",
+  "trigger": "database",
+  "llm_command": "life_manager",
+  "aliases": ["记账", "生活提醒", "账单", "生活", "支出", "收入", "消费", "bill", "expense", "life"],
+  "type": "react",
+  "description": "记账与提醒。指令：add_bill 金额 事项 / list_bills / add_reminder 时间 事项",
+  "example_arg": "add_bill 15 奶茶"
+}
