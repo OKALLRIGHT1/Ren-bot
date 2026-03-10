@@ -5331,15 +5331,11 @@ class SettingsDialog(QtWidgets.QDialog):
     # ---------- Other tabs ----------
 
     def _init_costume_page(self):
-
         page = QtWidgets.QWidget()
-
         layout = QtWidgets.QVBoxLayout(page)
-
         layout.setContentsMargins(0, 0, 0, 0)
-
-        layout.addWidget(CharacterEditorWidget(self.main_app))
-
+        # 在这里加上拉伸因子 1，让形象管理面板自适应撑满整个页面的垂直空间
+        layout.addWidget(CharacterEditorWidget(self.main_app), 1)
         self.stack.addWidget(page)
 
 

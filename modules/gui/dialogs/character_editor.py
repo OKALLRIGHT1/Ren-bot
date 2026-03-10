@@ -4,12 +4,147 @@ import re
 
 from PySide6 import QtWidgets, QtCore, QtGui
 from modules.character_manager import character_manager, DEFAULT_EMOTION_KEYS
-from modules.gui.styles import get_character_editor_styles
+
+try:
+    from modules.gui.styles import get_ui_palette
+except Exception:
+    def get_ui_palette():
+        return {
+            "accent": "#6366F1",
+            "accent_hover": "#4F46E5",
+            "accent_soft": "#EEF2FF",
+            "bg_app": "#F5F7FB",
+            "bg_card": "#FFFFFF",
+            "bg_soft": "#F3F4F6",
+            "bg_console": "#111827",
+            "border": "#E5E7EB",
+            "border_strong": "#D1D5DB",
+            "text_primary": "#111827",
+            "text_secondary": "#6B7280",
+            "text_muted": "#9CA3AF",
+            "success": "#10B981",
+            "success_soft": "#D1FAE5",
+            "warning": "#F59E0B",
+            "danger": "#EF4444",
+        }
 
 try:
     from config import EMO_TO_LIVE2D
 except Exception:
     EMO_TO_LIVE2D = {}
+
+
+def get_character_editor_styles_v2() -> str:
+    p = get_ui_palette()
+    return f"""
+        QWidget {{
+            font-family: 'Segoe UI', 'Microsoft YaHei';
+            color: {p['text_primary']};
+        }}
+        QFrame#charLeftCard, QFrame#charRightCard {{
+            background: {p['bg_card']};
+            border: 1px solid {p['border']};
+            border-radius: 16px;
+        }}
+        QLabel#charSectionTitle {{
+            color: {p['text_primary']};
+            font-size: 16px;
+            font-weight: 700;
+        }}
+        QLabel#charHint {{
+            color: {p['text_secondary']};
+            font-size: 12px;
+        }}
+        QListWidget, QLineEdit, QTextEdit, QPlainTextEdit, QComboBox, QTableWidget {{
+            background: {p['bg_card']};
+            border: 1px solid {p['border']};
+            border-radius: 10px;
+        }}
+        QListWidget::item {{
+            padding: 8px 10px;
+            border-radius: 8px;
+            margin: 2px 0;
+            color: {p['text_secondary']};
+        }}
+        QListWidget::item:selected {{
+            background: {p['accent_soft']};
+            color: {p['accent_hover']};
+            font-weight: 700;
+        }}
+        QTabWidget::pane {{
+            border: 1px solid {p['border']};
+            border-radius: 12px;
+            background: {p['bg_card']};
+        }}
+        QTabBar::tab {{
+            background: {p['bg_soft']};
+            color: {p['text_secondary']};
+            border: 1px solid {p['border']};
+            border-top-left-radius: 10px;
+            border-top-right-radius: 10px;
+            padding: 8px 14px;
+            margin-right: 4px;
+        }}
+        QTabBar::tab:selected {{
+            background: {p['accent_soft']};
+            color: {p['accent_hover']};
+            font-weight: 700;
+        }}
+        QTableWidget {{
+            gridline-color: {p['border']};
+        }}
+        QHeaderView::section {{
+            background: {p['bg_card']};
+            color: {p['text_secondary']};
+            font-weight: 600;
+            padding: 8px;
+            border: none;
+            border-bottom: 1px solid {p['border']};
+        }}
+        QPushButton {{
+            background: {p['bg_card']};
+            color: {p['text_primary']};
+            border: 1px solid {p['border_strong']};
+            border-radius: 10px;
+            padding: 8px 14px;
+            font-weight: 600;
+        }}
+        QPushButton:hover {{
+            border-color: {p['accent']};
+            color: {p['accent_hover']};
+        }}
+        QPushButton#charPrimary {{
+            background: {p['accent']};
+            color: white;
+            border: none;
+        }}
+        QPushButton#charPrimary:hover {{
+            background: {p['accent_hover']};
+            color: white;
+        }}
+        QPushButton#charDanger {{
+            color: #DC2626;
+            background: #FEF2F2;
+            border: 1px solid #FECACA;
+        }}
+        QPushButton#charDanger:hover {{
+            color: #B91C1C;
+            background: #FEE2E2;
+            border-color: #FCA5A5;
+        }}
+        QGroupBox {{
+            border: 1px solid {p['border']};
+            border-radius: 12px;
+            margin-top: 10px;
+            padding: 10px;
+        }}
+        QGroupBox::title {{
+            subcontrol-origin: margin;
+            subcontrol-position: top left;
+            padding: 0 6px;
+            color: {p['text_secondary']};
+        }}
+    """
 
 
 class CharacterEditorWidget(QtWidgets.QWidget):
@@ -24,7 +159,7 @@ class CharacterEditorWidget(QtWidgets.QWidget):
         self._current_motion_options = []
         self._current_expression_options = []
 
-        self.setStyleSheet(get_character_editor_styles())
+        self.setStyleSheet(get_character_editor_styles_v2())
         self._init_ui()
         self._refresh_list()
 
@@ -76,17 +211,14 @@ class CharacterEditorWidget(QtWidgets.QWidget):
         self.right_panel = QtWidgets.QTabWidget()
         self.right_panel.setVisible(False)
 
-        # Tab 1: 设定 (Persona)
         self.tab_persona = QtWidgets.QWidget()
         self._init_tab_persona()
         self.right_panel.addTab(self.tab_persona, "人设与提示词")
 
-        # Tab 2: 服装 (Costumes)
         self.tab_costume = QtWidgets.QWidget()
         self._init_tab_costume()
         self.right_panel.addTab(self.tab_costume, "服装管理")
 
-        # 分割器
         right_shell_layout.addWidget(self.right_panel, 1)
 
         splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Horizontal)
@@ -101,26 +233,22 @@ class CharacterEditorWidget(QtWidgets.QWidget):
     def _init_tab_persona(self):
         layout = QtWidgets.QVBoxLayout(self.tab_persona)
 
-        # 名字
         form = QtWidgets.QFormLayout()
         self.edit_name = QtWidgets.QLineEdit()
         self.edit_name.textChanged.connect(self._save_current_char)
         form.addRow("角色名称:", self.edit_name)
         layout.addLayout(form)
 
-        # 提示词
-        layout.addWidget(QtWidgets.QLabel("System Prompt (人设提示词):"))
+        layout.addWidget(QtWidgets.QLabel("人设提示词 (System Prompt):"))
         self.edit_prompt = QtWidgets.QTextEdit()
         self.edit_prompt.textChanged.connect(self._save_current_char)
         layout.addWidget(self.edit_prompt)
 
-        # 激活按钮
         self.btn_activate = QtWidgets.QPushButton("🚀 切换为此角色")
         self.btn_activate.setObjectName("charPrimary")
         self.btn_activate.clicked.connect(self._activate_character)
         layout.addWidget(self.btn_activate)
 
-        # 删除按钮
         btn_del = QtWidgets.QPushButton("🗑️ 删除此角色")
         btn_del.setObjectName("charDanger")
         btn_del.clicked.connect(self._delete_current_char)
@@ -138,8 +266,10 @@ class CharacterEditorWidget(QtWidgets.QWidget):
         btn_import = QtWidgets.QPushButton("📂 导入模型 (.model3.json)")
         btn_import.clicked.connect(self._import_costume)
         btn_wear = QtWidgets.QPushButton("👕 立即换穿")
+        btn_wear.setObjectName("charPrimary")
         btn_wear.clicked.connect(self._wear_selected_costume)
         btn_del_cos = QtWidgets.QPushButton("✕ 删除")
+        btn_del_cos.setObjectName("charDanger")
         btn_del_cos.clicked.connect(self._delete_costume)
 
         btn_layout.addWidget(btn_import)
@@ -184,6 +314,7 @@ class CharacterEditorWidget(QtWidgets.QWidget):
         layout.addWidget(preview_group)
 
         self.emo_table = QtWidgets.QTableWidget()
+        self.emo_table.setMinimumHeight(100)
         self.emo_table.setColumnCount(4)
         self.emo_table.setHorizontalHeaderLabels(["情绪", "动作(mtn)", "表情(exp)", "来源"])
         self.emo_table.horizontalHeader().setStretchLastSection(True)
@@ -194,8 +325,10 @@ class CharacterEditorWidget(QtWidgets.QWidget):
 
         emo_btn_layout = QtWidgets.QHBoxLayout()
         btn_set = QtWidgets.QPushButton("✏️ 设置当前情绪映射")
+        btn_set.setObjectName("charPrimary")
         btn_set.clicked.connect(self._edit_selected_emotion_override)
         btn_clear = QtWidgets.QPushButton("🧹 清除当前情绪映射")
+        btn_clear.setObjectName("charDanger")
         btn_clear.clicked.connect(self._clear_selected_emotion_override)
         emo_btn_layout.addWidget(btn_set)
         emo_btn_layout.addWidget(btn_clear)
@@ -217,7 +350,8 @@ class CharacterEditorWidget(QtWidgets.QWidget):
 
     def _on_char_selected(self, row):
         item = self.char_list.currentItem()
-        if not item: return
+        if not item:
+            return
         cid = item.data(QtCore.Qt.UserRole)
         self.current_char_id = cid
         self._load_char_to_ui(cid)
@@ -225,9 +359,9 @@ class CharacterEditorWidget(QtWidgets.QWidget):
 
     def _load_char_to_ui(self, cid):
         data = self.mgr.get_character(cid)
-        if not data: return
+        if not data:
+            return
 
-        # Block signals to prevent auto-save loop
         self.edit_name.blockSignals(True)
         self.edit_prompt.blockSignals(True)
 
@@ -237,7 +371,6 @@ class CharacterEditorWidget(QtWidgets.QWidget):
         self.edit_name.blockSignals(False)
         self.edit_prompt.blockSignals(False)
 
-        # Load costumes
         self.costume_list.clear()
         costumes = data.get("costumes", {})
         for cname, cdata in costumes.items():
@@ -263,14 +396,15 @@ class CharacterEditorWidget(QtWidgets.QWidget):
         self.btn_activate.setText("当前已激活" if is_active else "🚀 切换为此角色")
 
     def _save_current_char(self):
-        if not self.current_char_id: return
+        if not self.current_char_id:
+            return
         data = self.mgr.get_character(self.current_char_id)
         data["name"] = self.edit_name.text()
         data["prompt"] = self.edit_prompt.toPlainText()
         self.mgr.save()
-        # 更新列表显示名字
         item = self.char_list.currentItem()
-        if item: item.setText(data["name"])
+        if item:
+            item.setText(data["name"])
 
     def _add_character(self):
         name, ok = QtWidgets.QInputDialog.getText(self, "新建角色", "请输入角色名称:")
@@ -281,7 +415,8 @@ class CharacterEditorWidget(QtWidgets.QWidget):
             self._refresh_list()
 
     def _delete_current_char(self):
-        if not self.current_char_id: return
+        if not self.current_char_id:
+            return
         ret = QtWidgets.QMessageBox.question(self, "确认", "确定要删除这个角色吗？")
         if ret == QtWidgets.QMessageBox.StandardButton.Yes:
             self.mgr.delete_character(self.current_char_id)
@@ -289,24 +424,21 @@ class CharacterEditorWidget(QtWidgets.QWidget):
             self.right_panel.setVisible(False)
 
     def _activate_character(self):
-        if not self.current_char_id: return
+        if not self.current_char_id:
+            return
 
-        # 1. 更新管理器状态
-        char_data = self.mgr.set_active_character(self.current_char_id)
+        self.mgr.set_active_character(self.current_char_id)
 
-        # 2. 更新 config.py 中的运行时变量 (这是关键！)
-        # 我们不能直接修改 config.py 文件，但可以修改内存里的变量
         if hasattr(self.main_app, "plugin_manager"):
-            # 如果你有地方存 PERSONA_PROMPT，这里需要更新它
-            # 通常需要重启 Brain 或者有一个 update_persona 接口
-            # 这里假设 main_app 暴露了 chat_service 或 brain
             pass
 
-        # 3. 通知主程序刷新
         self._refresh_list()
         self._load_char_to_ui(self.current_char_id)
-        QtWidgets.QMessageBox.information(self, "成功",
-                                          "角色已切换！\n提示词已更新。\n(请手动换穿该角色的一件衣服以同步Live2D)")
+        QtWidgets.QMessageBox.information(
+            self,
+            "成功",
+            "角色已切换！\n提示词已更新。\n(请手动换穿该角色的一件衣服以同步Live2D)"
+        )
 
     def _extract_expression_id(self, name: str, file_name: str):
         for text in [name or "", file_name or ""]:
@@ -348,7 +480,6 @@ class CharacterEditorWidget(QtWidgets.QWidget):
 
             refs = data.get("FileReferences", {})
 
-            # model3.json 新版
             motion_refs = refs.get("Motions", {}) if isinstance(refs, dict) else {}
             for group_name, motion_items in self._iter_motion_groups(motion_refs):
                 for idx, item in enumerate(motion_items):
@@ -379,7 +510,6 @@ class CharacterEditorWidget(QtWidgets.QWidget):
                         "exp_id": exp_id,
                     })
 
-            # 老版 model.json 兼容
             if not motions:
                 legacy_motions = data.get("motions", {})
                 for group_name, motion_items in self._iter_motion_groups(legacy_motions):
@@ -570,7 +700,8 @@ class CharacterEditorWidget(QtWidgets.QWidget):
         self._refresh_costume_detail_ui()
 
     def _import_costume(self):
-        if not self.current_char_id: return
+        if not self.current_char_id:
+            return
         path, _ = QtWidgets.QFileDialog.getOpenFileName(
             self, "选择 Live2D 模型定义文件", "", "Model3 JSON (*.model3.json)"
         )
@@ -582,20 +713,21 @@ class CharacterEditorWidget(QtWidgets.QWidget):
 
     def _delete_costume(self):
         item = self.costume_list.currentItem()
-        if not item: return
+        if not item:
+            return
         name = item.text()
         self.mgr.delete_costume(self.current_char_id, name)
         self._load_char_to_ui(self.current_char_id)
 
     def _wear_selected_costume(self):
         item = self.costume_list.currentItem()
-        if not item: return
+        if not item:
+            return
         path = item.data(QtCore.Qt.UserRole)
         name = item.text()
         cfg = self.mgr.get_costume_runtime_config(self.current_char_id, name)
         self.mgr.set_current_costume_name(self.current_char_id, name)
 
-        # 调用主程序的换装接口
         if self.main_app and self.main_app.on_costume_callback:
             self.main_app.on_costume_callback(path, cfg)
             if hasattr(self.main_app, "_refresh_character_status"):
