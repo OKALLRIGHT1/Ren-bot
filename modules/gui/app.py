@@ -85,6 +85,7 @@ class QtChatTrayApp(QtCore.QObject):
         # --- Qt 初始化 ---
         self._app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv)
         self._app.setQuitOnLastWindowClosed(False)
+        self._app.applicationStateChanged.connect(self._on_app_state_changed)
         self._icon = resolve_icon(self.cfg.icon_path)
 
         # --- 信号桥接 ---
@@ -425,6 +426,17 @@ class QtChatTrayApp(QtCore.QObject):
         except:
             pass
 
+    def _ensure_on_screen(self):
+        win = self._win.frameGeometry()
+        screen = QtGui.QGuiApplication.screenAt(QtGui.QCursor.pos()) or self._app.primaryScreen()
+        if not screen:
+            return
+        avail = screen.availableGeometry()
+        x = min(max(win.x(), avail.left()), avail.right() - win.width())
+        y = min(max(win.y(), avail.top()), avail.bottom() - win.height())
+        if (x, y) != (win.x(), win.y()):
+            self._win.move(x, y)
+
     def _switch_to_ball(self):
         if self._is_ball_mode: return
         curr = self._win.geometry()
@@ -433,6 +445,7 @@ class QtChatTrayApp(QtCore.QObject):
         s = BALL_CONFIG.get("size", 60)
         self._win.resize(s + 10, s + 10)
         self._win.move(curr.x() + OFFSET_X, curr.y())
+        self._ensure_on_screen()
 
     def _switch_to_panel(self):
         if not self._is_ball_mode: return
@@ -441,6 +454,7 @@ class QtChatTrayApp(QtCore.QObject):
         self._stack.setCurrentIndex(1)
         self._win.resize(self._last_panel_size)
         self._win.move(curr.x() - OFFSET_X, curr.y())
+        self._ensure_on_screen()
 
     def _toggle_full(self):
         is_full = getattr(self._win, "_is_full_mode", False)
@@ -739,6 +753,11 @@ class QtChatTrayApp(QtCore.QObject):
             self._win.hide()
         else:
             self._win.show()
+            self._ensure_on_screen()
+
+    def _on_app_state_changed(self, state):
+        if state == QtCore.Qt.ApplicationState.ApplicationActive:
+            QtCore.QTimer.singleShot(200, self._ensure_on_screen)
 
     def hide(self):
         self._win.hide()
