@@ -59,7 +59,7 @@ class Plugin:
             if not mode:
                 return None
 
-            print(f"?? [Vision] ?????? (??: {mode})...")
+            print(f"[Vision] 开始获取图像 (模式: {mode})...")
 
             if mode == "camera":
                 img_b64 = await asyncio.to_thread(take_camera_photo_base64)
@@ -69,7 +69,7 @@ class Plugin:
                 prompt_text = "用户让你看当前的屏幕截图。"
 
             if not img_b64:
-                return "?? 图像获取失败（可能是摄像头未连接或截图权限受限）。"
+                return "图像获取失败（可能是摄像头未连接或截图权限受限）。"
 
             return {
                 "__type__": "image_payload",
@@ -79,4 +79,4 @@ class Plugin:
             }
 
         except Exception as e:
-            return f"?? 视觉模块异常: {e}"
+            return f"视觉模块异常: {e}"

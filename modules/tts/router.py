@@ -48,18 +48,22 @@ class AudioItem:
 
 def _split_text(text: str, max_chars: int) -> list[str]:
     t = (text or "").strip()
-    if not t: return []
-    parts = re.split(r'(\n+|[。！？!?；;])', t)
+    if not t:
+        return []
+    parts = re.split(r"(\n+|[。！？!?；;])", t)
     buf, segs = [], []
     for p in parts:
-        if not p: continue
+        if not p:
+            continue
         buf.append(p)
-        if re.fullmatch(r'\n+|[。！？!?；;]', p):
-            s = ''.join(buf).strip()
-            if s: segs.append(s)
+        if re.fullmatch(r"\n+|[。！？!?；;]", p):
+            s = "".join(buf).strip()
+            if s:
+                segs.append(s)
             buf = []
-    tail = ''.join(buf).strip()
-    if tail: segs.append(tail)
+    tail = "".join(buf).strip()
+    if tail:
+        segs.append(tail)
 
     merged = []
     cur = ""
@@ -67,9 +71,11 @@ def _split_text(text: str, max_chars: int) -> list[str]:
         if len(cur) + len(s) <= max_chars:
             cur += s
         else:
-            if cur.strip(): merged.append(cur.strip())
+            if cur.strip():
+                merged.append(cur.strip())
             cur = s
-    if cur.strip(): merged.append(cur.strip())
+    if cur.strip():
+        merged.append(cur.strip())
 
     final = []
     for s in merged:
@@ -77,24 +83,26 @@ def _split_text(text: str, max_chars: int) -> list[str]:
             final.append(s)
         else:
             for i in range(0, len(s), max_chars):
-                final.append(s[i:i + max_chars].strip())
+                final.append(s[i : i + max_chars].strip())
     return [x for x in final if x]
 
 
 class TTSRouter:
     def __init__(
-            self,
-            edge_cfg: dict,
-            verbose: bool = True,
-            log_each_utterance: bool = False,
-            bubble_sender: Optional[Callable[[str, Optional[str], Optional[int]], Awaitable[None]]] = None,
-            go_idle_fn: Optional[Callable[[], Awaitable[None]]] = None,
-            split_long_default: bool = True,
-            chunk_chars_default: int = 90,
-            state_machine: Optional[AgentStateMachine] = None,
-            enable_lip_sync: Optional[bool] = None,
-            rhubarb_path: Optional[str] = None,
-            lip_sync_smooth_window: Optional[int] = None,
+        self,
+        edge_cfg: dict,
+        verbose: bool = True,
+        log_each_utterance: bool = False,
+        bubble_sender: Optional[
+            Callable[[str, Optional[str], Optional[int]], Awaitable[None]]
+        ] = None,
+        go_idle_fn: Optional[Callable[[], Awaitable[None]]] = None,
+        split_long_default: bool = True,
+        chunk_chars_default: int = 90,
+        state_machine: Optional[AgentStateMachine] = None,
+        enable_lip_sync: Optional[bool] = None,
+        rhubarb_path: Optional[str] = None,
+        lip_sync_smooth_window: Optional[int] = None,
     ):
         self.edge = EdgeTTS(**edge_cfg)
         self.verbose = bool(verbose)
@@ -111,10 +119,14 @@ class TTSRouter:
         cfg_rhubarb_path = edge_cfg.get("rhubarb_path", "./tools/rhubarb/rhubarb.exe")
         cfg_lip_sync_smooth_window = int(edge_cfg.get("lip_sync_smooth_window", 3))
 
-        self.enable_lip_sync = cfg_enable_lip_sync if enable_lip_sync is None else bool(enable_lip_sync)
+        self.enable_lip_sync = (
+            cfg_enable_lip_sync if enable_lip_sync is None else bool(enable_lip_sync)
+        )
         self.rhubarb_path = cfg_rhubarb_path if rhubarb_path is None else rhubarb_path
         self.lip_sync_smooth_window = (
-            cfg_lip_sync_smooth_window if lip_sync_smooth_window is None else int(lip_sync_smooth_window)
+            cfg_lip_sync_smooth_window
+            if lip_sync_smooth_window is None
+            else int(lip_sync_smooth_window)
         )
 
         self.gpt = None
@@ -130,10 +142,12 @@ class TTSRouter:
                 if not getattr(self.gpt, "ready", False):
                     self.gpt = None
             except Exception as e:
-                if self.verbose: print(f"⚠️ [TTS] GPT-SoVITS 初始化失败: {e}")
+                if self.verbose:
+                    print(f"⚠️ [TTS] GPT-SoVITS 初始化失败: {e}")
                 self.gpt = None
 
         self._active = "gpt" if self.gpt else "edge"
+        self.role_tts_config = {}
 
         self._q: asyncio.Queue[SpeakItem] = asyncio.Queue()  # 文本队列
         self._audio_q: asyncio.Queue[AudioItem] = asyncio.Queue()  # 音频队列 (流水线)
@@ -150,6 +164,22 @@ class TTSRouter:
         )
         self._cmd_re = re.compile(r"\[CMD:.*?\]", flags=re.DOTALL)
 
+    def _ensure_gpt_instance(self):
+        if self.gpt is not None or GPTSoVITSTTS is None:
+            return
+        try:
+            self.gpt = GPTSoVITSTTS(
+                enable_lip_sync=self.enable_lip_sync,
+                rhubarb_path=self.rhubarb_path,
+                lip_sync_smooth_window=self.lip_sync_smooth_window,
+            )
+            if not getattr(self.gpt, "ready", False):
+                self.gpt = None
+        except Exception as e:
+            if self.verbose:
+                print(f"⚠️ [TTS] GPT-SoVITS 延迟初始化失败: {e}")
+            self.gpt = None
+
     def _sanitize_tts_text(self, text: str) -> str:
         t = (text or "").strip()
         if not t:
@@ -160,9 +190,13 @@ class TTSRouter:
 
     def _ensure_worker(self):
         if not self._worker_task or self._worker_task.done():
-            self._worker_task = asyncio.create_task(self._synthesis_loop())  # 改名：合成循环
+            self._worker_task = asyncio.create_task(
+                self._synthesis_loop()
+            )  # 改名：合成循环
         if not self._player_task or self._player_task.done():
-            self._player_task = asyncio.create_task(self._player_loop())  # 新增：播放循环
+            self._player_task = asyncio.create_task(
+                self._player_loop()
+            )  # 新增：播放循环
 
     def _resolve_tail_padding(self, item: AudioItem) -> float:
         padding = float(getattr(item, "tail_padding", self.final_pause_sec) or 0.0)
@@ -177,10 +211,34 @@ class TTSRouter:
         return padding
 
     def _switch_to(self, backend: str, reason: str = ""):
-        if backend == self._active: return
+        if backend == self._active:
+            return
         self._active = backend
         if self.verbose:
-            print(f"🔁 [TTS] 切换后端 -> {'GPT-SoVITS' if backend == 'gpt' else 'Edge-TTS'} ({reason})")
+            print(
+                f"🔁 [TTS] 切换后端 -> {'GPT-SoVITS' if backend == 'gpt' else 'Edge-TTS'} ({reason})"
+            )
+
+    def apply_role_tts_config(self, cfg: Optional[dict] = None):
+        cfg = cfg if isinstance(cfg, dict) else {}
+        self.role_tts_config = cfg
+        if cfg.get("enabled"):
+            self._ensure_gpt_instance()
+        if self.gpt and hasattr(self.gpt, "apply_runtime_config"):
+            self.gpt.apply_runtime_config(cfg)
+            if cfg.get("enabled") and getattr(self.gpt, "ready", False):
+                self._switch_to("gpt", "角色TTS配置生效")
+                return
+        if cfg.get("enabled"):
+            if self.verbose:
+                print(
+                    "⚠️ [TTS] 角色TTS已启用，但 GPT-SoVITS 当前未就绪，回退到 Edge-TTS"
+                )
+        self._switch_to("edge", "角色TTS未就绪")
+
+    def _current_prompt_lang(self) -> str:
+        cfg = self.role_tts_config if isinstance(self.role_tts_config, dict) else {}
+        return str(cfg.get("prompt_lang") or "ja").strip().lower()
 
     async def _translate_to_jp(self, text: str) -> str:
         if not text or not chat_with_ai:
@@ -207,13 +265,21 @@ Output:
 
     # ==================== 接口逻辑 ====================
 
-    async def synthesize_once(self, text: str, emotion: Optional[str] = None) -> tuple[Optional[str], float]:
+    async def synthesize_once(
+        self, text: str, emotion: Optional[str] = None
+    ) -> tuple[Optional[str], float]:
         clean = self._sanitize_tts_text(text)
         if not clean:
             return None, 0.0
 
         text_to_speak = clean
-        if self.gpt and self._active == "gpt" and TTS_AUTO_TRANSLATE and len(clean) > 1:
+        if (
+            self.gpt
+            and self._active == "gpt"
+            and TTS_AUTO_TRANSLATE
+            and len(clean) > 1
+            and self._current_prompt_lang() in {"ja", "jp", "japanese"}
+        ):
             jp = await self._translate_to_jp(clean)
             if jp and len(jp) > 1:
                 text_to_speak = jp
@@ -232,22 +298,28 @@ Output:
         self._interrupt_event.set()  # 打断旧的
 
         # 清空所有队列
-        while not self._q.empty(): self._q.get_nowait(); self._q.task_done()
+        while not self._q.empty():
+            self._q.get_nowait()
+            self._q.task_done()
         while not self._audio_q.empty():
             item = self._audio_q.get_nowait()
             # 尝试删除未播放的文件
             try:
                 import os
-                if os.path.exists(item.audio_path): os.remove(item.audio_path)
+
+                if os.path.exists(item.audio_path):
+                    os.remove(item.audio_path)
             except:
                 pass
             self._audio_q.task_done()
 
         self._stream_buffer = StreamSentenceBuffer()
-        if self.verbose: print(f"🌊 [TTS] 流式会话开始 ID={self._current_stream_id}")
+        if self.verbose:
+            print(f"🌊 [TTS] 流式会话开始 ID={self._current_stream_id}")
 
     async def feed_stream(self, chunk: str, emotion: Optional[str] = None):
-        if self._stream_buffer is None: self.start_stream()
+        if self._stream_buffer is None:
+            self.start_stream()
         for sentence in self._stream_buffer.feed(chunk):
             await self._add_stream_item(sentence, emotion)
 
@@ -261,18 +333,34 @@ Output:
         clean = self._sanitize_tts_text(text)
         if not clean:
             return
-        item = SpeakItem(text=clean, emotion=emotion, interrupt=False, split_long=self.split_long_default,
-                         chunk_chars=self.chunk_chars_default, show_bubble=True)
+        item = SpeakItem(
+            text=clean,
+            emotion=emotion,
+            interrupt=False,
+            split_long=self.split_long_default,
+            chunk_chars=self.chunk_chars_default,
+            show_bubble=True,
+        )
         await self._q.put(item)
 
-    async def say(self, text: str, emotion: Optional[str] = None, *, interrupt: bool = True, split_long=None,
-                  chunk_chars=None, show_bubble=True):
+    async def say(
+        self,
+        text: str,
+        emotion: Optional[str] = None,
+        *,
+        interrupt: bool = True,
+        split_long=None,
+        chunk_chars=None,
+        show_bubble=True,
+    ):
         text = self._sanitize_tts_text(text)
-        if not text: return
+        if not text:
+            return
         self._ensure_worker()
 
         if interrupt:
-            if self.verbose: print("🛑 [TTS] 收到打断请求")
+            if self.verbose:
+                print("🛑 [TTS] 收到打断请求")
             self._interrupt_event.set()
             # 立即停止当前声音
             await stop_sound()
@@ -280,10 +368,18 @@ Output:
             self._current_stream_id += 1
             self._stream_buffer = None
 
-        item = SpeakItem(text=text, emotion=emotion, interrupt=interrupt,
-                         split_long=self.split_long_default if split_long is None else bool(split_long),
-                         chunk_chars=self.chunk_chars_default if chunk_chars is None else int(chunk_chars),
-                         show_bubble=show_bubble)
+        item = SpeakItem(
+            text=text,
+            emotion=emotion,
+            interrupt=interrupt,
+            split_long=self.split_long_default
+            if split_long is None
+            else bool(split_long),
+            chunk_chars=self.chunk_chars_default
+            if chunk_chars is None
+            else int(chunk_chars),
+            show_bubble=show_bubble,
+        )
         await self._q.put(item)
 
     # ==================== 🧵 线程 1: 翻译与合成 (生产者) ====================
@@ -295,12 +391,16 @@ Output:
 
                 # 处理打断逻辑
                 if item.interrupt:
-                    while not self._q.empty(): self._q.get_nowait(); self._q.task_done()
-                    while not self._audio_q.empty(): self._audio_q.get_nowait(); self._audio_q.task_done()
+                    while not self._q.empty():
+                        self._q.get_nowait()
+                        self._q.task_done()
+                    while not self._audio_q.empty():
+                        self._audio_q.get_nowait()
+                        self._audio_q.task_done()
 
                 self._interrupt_event.clear()
                 if self._interrupt_event.is_set():
-                    self._q.task_done();
+                    self._q.task_done()
                     continue
 
                 segments = [item.text]
@@ -308,16 +408,28 @@ Output:
                     segments = _split_text(item.text, item.chunk_chars)
 
                 for idx, seg in enumerate(segments):
-                    if self._interrupt_event.is_set(): break
+                    if self._interrupt_event.is_set():
+                        break
                     is_last_segment = idx == (len(segments) - 1)
-                    tail_padding = self.final_pause_sec if is_last_segment else self.segment_pause_sec
+                    tail_padding = (
+                        self.final_pause_sec
+                        if is_last_segment
+                        else self.segment_pause_sec
+                    )
 
                     # 1. 准备文本 (中译日)
                     text_to_speak = seg
-                    if self.gpt and self._active == "gpt" and TTS_AUTO_TRANSLATE and len(seg) > 1:
+                    if (
+                        self.gpt
+                        and self._active == "gpt"
+                        and TTS_AUTO_TRANSLATE
+                        and len(seg) > 1
+                        and self._current_prompt_lang() in {"ja", "jp", "japanese"}
+                    ):
                         jp = await self._translate_to_jp(seg)
                         if jp and len(jp) > 1:
-                            if self.verbose: print(f"🈯 [TTS] 翻译: {seg[:10]} -> {jp[:10]}")
+                            if self.verbose:
+                                print(f"🈯 [TTS] 翻译: {seg[:10]} -> {jp[:10]}")
                             text_to_speak = jp
 
                     # 2. 合成音频 (不播放)
@@ -327,7 +439,9 @@ Output:
 
                     # 尝试 GPT
                     if self.gpt and self._active == "gpt":
-                        path, dur = await self.gpt.synthesize(text_to_speak, item.emotion)
+                        path, dur = await self.gpt.synthesize(
+                            text_to_speak, item.emotion
+                        )
                         if path:
                             audio_path = path
                             duration = dur
@@ -338,7 +452,8 @@ Output:
 
                     # 尝试 Edge
                     if not audio_path and (not self._interrupt_event.is_set()):
-                        if self._active != "edge": self._switch_to("edge")
+                        if self._active != "edge":
+                            self._switch_to("edge")
                         path, dur = await self.edge.synthesize(seg)  # Edge读中文
                         if path:
                             audio_path = path
@@ -356,13 +471,23 @@ Output:
                             tail_padding=tail_padding,
                         )
                         await self._audio_q.put(audio_item)
-                        if self.verbose: print(f"📦 [TTS] 音频已入队 ({duration:.1f}s)")
+                        if self.verbose:
+                            print(f"📦 [TTS] 音频已入队 ({duration:.1f}s)")
 
                     # 如果全部生成失败，推入一个"静默"项用于显示气泡
                     elif not self._interrupt_event.is_set():
                         # 兜底：只显示气泡
                         est_dur = max(2.0, len(seg) * 0.3)
-                        await self._audio_q.put(AudioItem(None, est_dur, seg, item.emotion, None, tail_padding=tail_padding))
+                        await self._audio_q.put(
+                            AudioItem(
+                                None,
+                                est_dur,
+                                seg,
+                                item.emotion,
+                                None,
+                                tail_padding=tail_padding,
+                            )
+                        )
 
                 self._q.task_done()
             except Exception as e:
@@ -382,7 +507,9 @@ Output:
                     if item.audio_path:
                         try:
                             import os
-                            if os.path.exists(item.audio_path): os.remove(item.audio_path)
+
+                            if os.path.exists(item.audio_path):
+                                os.remove(item.audio_path)
                         except:
                             pass
                     self._audio_q.task_done()
@@ -395,12 +522,16 @@ Output:
                 if self.bubble_sender:
                     # 将秒转为毫秒，气泡显示时间稍微比音频长一点点 (500ms) 增加连贯性
                     ms = int(item.duration * 1000) + 500
-                    asyncio.create_task(self.bubble_sender(item.text_for_bubble, item.emotion, ms))
+                    asyncio.create_task(
+                        self.bubble_sender(item.text_for_bubble, item.emotion, ms)
+                    )
 
                 # 2. 播放音频
                 if item.audio_path and item.backend:
                     # 发送播放指令 (非阻塞)
-                    await item.backend.play_audio_file(item.audio_path, self._interrupt_event)
+                    await item.backend.play_audio_file(
+                        item.audio_path, self._interrupt_event
+                    )
 
                     # 按“中间段短、收尾段稳”的策略等待：
                     # - 同一轮内部的分段句间停顿更短；
@@ -414,6 +545,7 @@ Output:
                             # 立即通知前端停止当前频道声音
                             try:
                                 from modules.live2d import stop_sound
+
                                 await stop_sound()
                             except:
                                 pass
@@ -428,8 +560,13 @@ Output:
                 self._audio_q.task_done()
 
                 # 检查是否全部播完且没有新任务
-                if self._audio_q.empty() and self._q.empty() and not self._interrupt_event.is_set():
-                    if self.verbose: print("✅ [TTS Player] 队列清空，返回空闲状态")
+                if (
+                    self._audio_q.empty()
+                    and self._q.empty()
+                    and not self._interrupt_event.is_set()
+                ):
+                    if self.verbose:
+                        print("✅ [TTS Player] 队列清空，返回空闲状态")
                     if self.sm:
                         await self.sm.set_state(AgentState.IDLE, reason="all_done")
                     if self.go_idle_fn:

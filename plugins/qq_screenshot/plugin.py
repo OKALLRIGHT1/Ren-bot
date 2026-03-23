@@ -106,18 +106,18 @@ class Plugin:
     async def run(self, args: str, context: dict):
         source = str((context or {}).get("source") or "").strip().lower()
         if source not in {"qq_gateway", "napcat_qq"}:
-            return "?? 远程截图功能目前只支持 QQ 里调用。"
+            return "远程截图功能目前只支持 QQ 里调用。"
 
         text = str(args or "").strip()
         lowered = text.lower()
         if text and not any(keyword in text for keyword in QQ_SCREENSHOT_HINTS) and "screenshot" not in lowered:
-            return "?? 如果你想让我把当前屏幕发到 QQ，请直接说“截图发我”或“给我看看屏幕”。"
+            return "如果你想让我把当前屏幕发到 QQ，请直接说“截图发我”或“给我看看屏幕”。"
 
         target, monitor_index, include_window_title = self._resolve_capture_options(text)
         displays = get_display_regions()
         display_count = len(displays)
         if target == "monitor" and display_count and monitor_index > display_count:
-            return f"?? 当前只检测到 {display_count} 块屏，没找到第 {monitor_index} 块。"
+            return f"当前只检测到 {display_count} 块屏，没找到第 {monitor_index} 块。"
 
         image_path = await asyncio.to_thread(
             take_screenshot_file,
@@ -127,7 +127,7 @@ class Plugin:
             monitor_index,
         )
         if not image_path:
-            return "?? 截图失败了，可能是当前系统环境不允许截图。"
+            return "截图失败了，可能是当前系统环境不允许截图。"
 
         target_label = self._build_target_label(target, monitor_index, display_count or 1)
         active_title = get_active_window_title() if include_window_title else ""
@@ -139,5 +139,5 @@ class Plugin:
             "image_path": image_path,
             "caption": caption,
             "success_text": success_text,
-            "fallback_text": f"?? {target_label}已经截好了，但回发到 QQ 失败了。",
+            "fallback_text": f"{target_label}已经截好了，但回发到 QQ 失败了。",
         }

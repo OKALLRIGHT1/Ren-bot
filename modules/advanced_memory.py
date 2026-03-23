@@ -20,6 +20,22 @@ from chromadb import EmbeddingFunction, Documents, Embeddings
 from config import SYSTEM_RULES_PROMPT, DEFAULT_PERSONA
 from modules.character_manager import character_manager
 from config import MEMORY_DB_PATH, EMBEDDING_CONFIG, MEMORY_SETTINGS
+from modules.memory import (
+    GraphMemory as ModularGraphMemory,
+    ProfileStore as ModularProfileStore,
+    build_memory_metadata,
+    clean_injected_context,
+    deserialize_vector_metadata,
+    post_process_memory_candidates,
+    retrieve_knowledge_chunks,
+    serialize_vector_metadata,
+)
+from modules.memory.short_term import ShortTermMemoryManager
+from modules.memory.knowledge_store import (
+    delete_knowledge_by_dirs,
+    import_knowledge_from_file as import_knowledge_file_modular,
+    search_knowledge as search_knowledge_modular,
+)
 
 from core.logger import get_logger
 
@@ -31,24 +47,27 @@ except Exception:
     chat_with_ai = None
 
 
-
-
 # ========= 1) 远程嵌入函数（保持你原来的方式） =========
 class RemoteBGEFunction(EmbeddingFunction):
     """远程嵌入函数（增强版）"""
 
-    def __init__(self, api_url, api_key, model_name, fallback_fn=None, timeout=12, max_retries=2):
+    def __init__(
+        self, api_url, api_key, model_name, fallback_fn=None, timeout=12, max_retries=2
+    ):
         self._logger = get_logger()
         if self._logger is None:
             import logging
+
             self._logger = logging.getLogger(__name__)
             self._logger.setLevel(logging.INFO)
             if not self._logger.handlers:
                 handler = logging.StreamHandler()
-                handler.setFormatter(logging.Formatter(
-                    '%(asctime)s [%(levelname)s] %(message)s',
-                    datefmt='%Y-%m-%d %H:%M:%S'
-                ))
+                handler.setFormatter(
+                    logging.Formatter(
+                        "%(asctime)s [%(levelname)s] %(message)s",
+                        datefmt="%Y-%m-%d %H:%M:%S",
+                    )
+                )
                 self._logger.addHandler(handler)
 
         # ✅ 并发安全：添加线程锁
@@ -74,7 +93,7 @@ class RemoteBGEFunction(EmbeddingFunction):
         with self._lock:
             headers = {
                 "Authorization": f"Bearer {self.api_key}",
-                "Content-Type": "application/json"
+                "Content-Type": "application/json",
             }
             payload = {"input": input, "model": self.model_name}
 
@@ -85,12 +104,16 @@ class RemoteBGEFunction(EmbeddingFunction):
                         self.api_url,
                         json=payload,
                         headers=headers,
-                        timeout=self.timeout
+                        timeout=self.timeout,
                     )
 
                     if response.status_code == 200:
                         data = response.json()
-                        if isinstance(data, dict) and isinstance(data.get("data"), list) and data["data"]:
+                        if (
+                            isinstance(data, dict)
+                            and isinstance(data.get("data"), list)
+                            and data["data"]
+                        ):
                             embs = [item.get("embedding") for item in data["data"]]
                             embs = [e for e in embs if isinstance(e, list) and e]
 
@@ -100,7 +123,9 @@ class RemoteBGEFunction(EmbeddingFunction):
                             if len(embs) == len(input):
                                 return embs
 
-                            last_err = f"length mismatch: got {len(embs)} expect {len(input)}"
+                            last_err = (
+                                f"length mismatch: got {len(embs)} expect {len(input)}"
+                            )
                         else:
                             last_err = f"invalid response: {data}"
                     else:
@@ -134,6 +159,7 @@ class RemoteBGEFunction(EmbeddingFunction):
 # ========= 2) Profile（用户档案：稳定事实单独存） =========
 # modules/advanced_memory.py 中的 ProfileStore 类
 
+
 class ProfileStore:
     """
     用户与助手的静态档案管理 (JSON)
@@ -149,13 +175,13 @@ class ProfileStore:
                 "likes": {"general": []},
                 "dislikes": [],
                 "status": [],
-                "notes": []
+                "notes": [],
             },
             "agent": {
                 "name": "Suzu",
                 "likes": {"general": []},
                 "dislikes": [],
-                "traits": []
+                "traits": [],
             },
             "updated_at": None,
         }
@@ -170,8 +196,12 @@ class ProfileStore:
                     for role in ["user", "agent"]:
                         if role in loaded:
                             # 如果 likes 是旧的列表格式，转为字典
-                            if "likes" in loaded[role] and isinstance(loaded[role]["likes"], list):
-                                loaded[role]["likes"] = {"general": loaded[role]["likes"]}
+                            if "likes" in loaded[role] and isinstance(
+                                loaded[role]["likes"], list
+                            ):
+                                loaded[role]["likes"] = {
+                                    "general": loaded[role]["likes"]
+                                }
 
                             self.data[role].update(loaded[role])
 
@@ -241,7 +271,8 @@ Example: {{"likes": {{"music": ["MyGO"], "games": ["Minecraft"]}}, "status": ["b
             m = re.search(r"\{.*\}", response, flags=re.DOTALL)
             if m:
                 data = json.loads(m.group(0))
-                if not data: return
+                if not data:
+                    return
 
                 target_key = "user" if role == "user" else "agent"
                 has_update = False
@@ -253,7 +284,17 @@ Example: {{"likes": {{"music": ["MyGO"], "games": ["Minecraft"]}}, "status": ["b
                     current_name = self.data[target_key].get("name")
 
                     # 黑名单：这些绝对不是名字
-                    bad_names = ["user", "User", "USER", "用户", "unknown", "Unknown", "None", "我", "自己"]
+                    bad_names = [
+                        "user",
+                        "User",
+                        "USER",
+                        "用户",
+                        "unknown",
+                        "Unknown",
+                        "None",
+                        "我",
+                        "自己",
+                    ]
                     # 注意：如果您希望它叫您Master，可以把Master从黑名单去掉。
                     # 但通常建议名字手动改 json，不要让 AI 自动改，防止它改回 "User"
 
@@ -262,20 +303,29 @@ Example: {{"likes": {{"music": ["MyGO"], "games": ["Minecraft"]}}, "status": ["b
                     # 只有当：新名字不在黑名单 AND (当前没名字 OR 当前名字是默认User) 时，才允许改
                     # 意思是：一旦您手动改成了 "Soyo"，AI 就再也改不动它了
                     if not is_bad:
-                        if (not current_name) or (current_name in ["user", "User", "用户"]):
+                        if (not current_name) or (
+                            current_name in ["user", "User", "用户"]
+                        ):
                             self.data[target_key]["name"] = new_name
                             has_update = True
                             print(f"📝 [Profile] 自动捕获名字: {new_name}")
                         else:
                             # 如果已有名字且不同，记录日志但不覆盖
                             if current_name != new_name:
-                                print(f"🛡️ [Profile] 拦截名字覆盖: {current_name} -> {new_name} (已忽略)")
+                                print(
+                                    f"🛡️ [Profile] 拦截名字覆盖: {current_name} -> {new_name} (已忽略)"
+                                )
 
                 # B. 处理 Likes (嵌套字典)
                 if "likes" in data and isinstance(data["likes"], dict):
                     # 确保目标也是字典
                     if not isinstance(self.data[target_key].get("likes"), dict):
-                        self.data[target_key]["likes"] = {"music": [], "games": [], "food": [], "general": []}
+                        self.data[target_key]["likes"] = {
+                            "music": [],
+                            "games": [],
+                            "food": [],
+                            "general": [],
+                        }
 
                     for category, items in data["likes"].items():
                         # 只允许白名单分类
@@ -283,18 +333,25 @@ Example: {{"likes": {{"music": ["MyGO"], "games": ["Minecraft"]}}, "status": ["b
                             category = "general"
 
                         if isinstance(items, list):
-                            current_list = self.data[target_key]["likes"].get(category, [])
+                            current_list = self.data[target_key]["likes"].get(
+                                category, []
+                            )
                             for item in items:
                                 if item not in current_list and len(item) < 20:
                                     current_list.append(item)
                                     # 限制长度
                                     limit = 50 if category in ["music", "games"] else 30
-                                    if len(current_list) > limit: current_list.pop(0)
+                                    if len(current_list) > limit:
+                                        current_list.pop(0)
 
                                     # 写回
-                                    self.data[target_key]["likes"][category] = current_list
+                                    self.data[target_key]["likes"][category] = (
+                                        current_list
+                                    )
                                     has_update = True
-                                    print(f"📝 [Profile] 新增档案 ({target_key}.likes.{category}): {item}")
+                                    print(
+                                        f"📝 [Profile] 新增档案 ({target_key}.likes.{category}): {item}"
+                                    )
 
                 # C. 处理 Dislikes / Status / Traits (普通列表)
                 for field in ["dislikes", "status", "traits"]:
@@ -303,10 +360,13 @@ Example: {{"likes": {{"music": ["MyGO"], "games": ["Minecraft"]}}, "status": ["b
                         for item in data[field]:
                             if item not in current_list and len(item) < 20:
                                 current_list.append(item)
-                                if len(current_list) > 20: current_list.pop(0)
+                                if len(current_list) > 20:
+                                    current_list.pop(0)
                                 self.data[target_key][field] = current_list
                                 has_update = True
-                                print(f"📝 [Profile] 新增档案 ({target_key}.{field}): {item}")
+                                print(
+                                    f"📝 [Profile] 新增档案 ({target_key}.{field}): {item}"
+                                )
 
                 if has_update:
                     self.save()
@@ -340,13 +400,21 @@ Example: {{"likes": {{"music": ["MyGO"], "games": ["Minecraft"]}}, "status": ["b
             likes = data.get("likes", {})
             if isinstance(likes, dict):
                 if likes.get("music"):
-                    lines.append(f"- [{display_name}喜好] 音乐：{'、'.join(likes['music'][-8:])}")
+                    lines.append(
+                        f"- [{display_name}喜好] 音乐：{'、'.join(likes['music'][-8:])}"
+                    )
                 if likes.get("games"):
-                    lines.append(f"- [{display_name}喜好] 游戏：{'、'.join(likes['games'][-5:])}")
+                    lines.append(
+                        f"- [{display_name}喜好] 游戏：{'、'.join(likes['games'][-5:])}"
+                    )
                 if likes.get("food"):
-                    lines.append(f"- [{display_name}喜好] 食物：{'、'.join(likes['food'][-5:])}")
+                    lines.append(
+                        f"- [{display_name}喜好] 食物：{'、'.join(likes['food'][-5:])}"
+                    )
                 if likes.get("general"):
-                    lines.append(f"- [{display_name}喜好] 其他：{'、'.join(likes['general'][-5:])}")
+                    lines.append(
+                        f"- [{display_name}喜好] 其他：{'、'.join(likes['general'][-5:])}"
+                    )
 
             # 4. 讨厌
             dislikes = data.get("dislikes")
@@ -379,7 +447,21 @@ class GraphMemory:
     def __init__(self, graph_file="graph.json"):
         self.graph_file = os.path.join(MEMORY_DB_PATH, graph_file)
         self.G = nx.Graph()
-        self.stopwords = set(["什么", "怎么", "为什么", "因为", "就是", "然后", "但是", "如果", "我们", "你们", "他们"])
+        self.stopwords = set(
+            [
+                "什么",
+                "怎么",
+                "为什么",
+                "因为",
+                "就是",
+                "然后",
+                "但是",
+                "如果",
+                "我们",
+                "你们",
+                "他们",
+            ]
+        )
         self.last_decay_day = None
 
         # ✅ 性能优化：添加关键词关联缓存
@@ -493,7 +575,9 @@ class GraphMemory:
                             for neighbor in self.G.neighbors(node):
                                 if neighbor in self.stopwords:
                                     continue
-                                edge_weight = float(self.G[node][neighbor].get("weight", 1.0))
+                                edge_weight = float(
+                                    self.G[node][neighbor].get("weight", 1.0)
+                                )
                                 transfer = score * 0.5 * (1 - 1 / (edge_weight + 1))
                                 if neighbor not in activated_nodes:
                                     activated_nodes[neighbor] = 0.0
@@ -508,8 +592,6 @@ class GraphMemory:
         self._related_cache[cache_key] = (time.time(), filtered)
 
         return filtered
-
-
 
 
 class AdvancedMemorySystem:
@@ -534,7 +616,7 @@ class AdvancedMemorySystem:
                 api_url=EMBEDDING_CONFIG["api_url"],
                 api_key=EMBEDDING_CONFIG.get("api_key", ""),
                 model_name=EMBEDDING_CONFIG["model_name"],
-                fallback_fn=fallback
+                fallback_fn=fallback,
             )
         else:
             self.embedding_fn = fallback
@@ -547,19 +629,34 @@ class AdvancedMemorySystem:
         )
 
         # 3. 图谱
-        self.graph = GraphMemory()
+        self.graph = ModularGraphMemory()
 
         # 4. Profile 档案管理
-        self.profile_path = os.path.join(os.path.dirname(MEMORY_DB_PATH), "profile.json")
-        self.profile = ProfileStore(self.profile_path)
+        self.profile_path = os.path.join(
+            os.path.dirname(MEMORY_DB_PATH), "profile.json"
+        )
+        self.profile = ModularProfileStore(self.profile_path)
         self.profile_enabled = True
+        self.participant_filtering_enabled = bool(
+            MEMORY_SETTINGS.get("participant_filtering_enabled", True)
+        )
+        self.graph_rerank_enabled = bool(
+            MEMORY_SETTINGS.get("graph_rerank_enabled", True)
+        )
 
         # 5. 短期记忆 (RAM)
         self.max_short_term = int(MEMORY_SETTINGS.get("max_short_term", 12))
-        self.short_term_memory = []
-        self.session_short_term_memory = {}
-        self._session_short_term_loaded = set()
-        self._restore_short_term_from_db()
+        self.short_term_manager = ShortTermMemoryManager(
+            self.sqlite_store, self.max_short_term
+        )
+        self.short_term_manager.restore_global()
+        self.short_term_memory = self.short_term_manager.short_term_memory
+        self.session_short_term_memory = (
+            self.short_term_manager.session_short_term_memory
+        )
+        self._session_short_term_loaded = (
+            self.short_term_manager._session_short_term_loaded
+        )
 
         # 配置
         self.store_roles = set(MEMORY_SETTINGS.get("store_roles", ["user"]))
@@ -577,31 +674,61 @@ class AdvancedMemorySystem:
 
         # 检索配置
         # 兼容新旧 key，优先使用 config.py 中的新命名
-        self.cand_k = int(MEMORY_SETTINGS.get("memory_recall_candidates", MEMORY_SETTINGS.get("cand_k", 8)))
-        self.final_k = int(MEMORY_SETTINGS.get("memory_recall_final", MEMORY_SETTINGS.get("final_k", 3)))
-        self.sim_threshold = float(MEMORY_SETTINGS.get("memory_sim_threshold", MEMORY_SETTINGS.get("sim_threshold", 0.28)))
-        self.half_life_days = float(MEMORY_SETTINGS.get("memory_half_life_days", MEMORY_SETTINGS.get("half_life_days", 30.0)))
-        self.recall_roles = MEMORY_SETTINGS.get("recall_roles", ["user", "assistant", "summary"])
+        self.cand_k = int(
+            MEMORY_SETTINGS.get(
+                "memory_recall_candidates", MEMORY_SETTINGS.get("cand_k", 8)
+            )
+        )
+        self.final_k = int(
+            MEMORY_SETTINGS.get(
+                "memory_recall_final", MEMORY_SETTINGS.get("final_k", 3)
+            )
+        )
+        self.sim_threshold = float(
+            MEMORY_SETTINGS.get(
+                "memory_sim_threshold", MEMORY_SETTINGS.get("sim_threshold", 0.28)
+            )
+        )
+        self.half_life_days = float(
+            MEMORY_SETTINGS.get(
+                "memory_half_life_days", MEMORY_SETTINGS.get("half_life_days", 30.0)
+            )
+        )
+        self.recall_roles = MEMORY_SETTINGS.get(
+            "recall_roles", ["user", "assistant", "summary"]
+        )
         self.use_llm_selector = bool(MEMORY_SETTINGS.get("use_llm_selector", False))
-        self.llm_selector_min_interval_sec = float(MEMORY_SETTINGS.get("llm_selector_min_interval_sec", 20))
+        self.llm_selector_min_interval_sec = float(
+            MEMORY_SETTINGS.get("llm_selector_min_interval_sec", 20)
+        )
         self._last_llm_selector_ts = 0.0
-        self.recall_min_chars = int(MEMORY_SETTINGS.get("recall_min_chars", self.recall_min_chars))
+        self.recall_min_chars = int(
+            MEMORY_SETTINGS.get("recall_min_chars", self.recall_min_chars)
+        )
 
         # 图扩展配置
-        self.graph_expand_enabled = bool(MEMORY_SETTINGS.get("graph_expand_enabled", True))
-        self.graph_expand_min_chars = int(MEMORY_SETTINGS.get("graph_expand_min_chars", 6))
+        self.graph_expand_enabled = bool(
+            MEMORY_SETTINGS.get("graph_expand_enabled", True)
+        )
+        self.graph_expand_min_chars = int(
+            MEMORY_SETTINGS.get("graph_expand_min_chars", 6)
+        )
 
         # 调试配置
-        self.debug_prompt_injection = bool(MEMORY_SETTINGS.get("debug_prompt_injection", False))
+        self.debug_prompt_injection = bool(
+            MEMORY_SETTINGS.get("debug_prompt_injection", False)
+        )
 
         # 缓存
         self._query_cache = {}
         self._cache_ttl = 300
         self._cache_hits = 0
         self._cache_misses = 0
+
     def _extract_keywords(self, text: str):
         """提取关键词，用于图谱扩展"""
-        if not text: return []
+        if not text:
+            return []
         try:
             # 使用 jieba 提取关键词
             return jieba.analyse.extract_tags(text, topK=5)
@@ -610,53 +737,59 @@ class AdvancedMemorySystem:
 
     def _stable_md5(self, text: str) -> str:
         """生成稳定的 MD5 hash"""
-        if not text: return ""
+        if not text:
+            return ""
         return hashlib.md5(text.encode("utf-8")).hexdigest()
-    def _restore_short_term_from_db(self):
-        """启动时恢复最近对话"""
-        if not self.sqlite_store: return
+
+    def get_knowledge_stats(self) -> dict:
+        stats = {"chunk_count": 0, "collection_name": "waifu_knowledge_base"}
         try:
-            rows = self.sqlite_store.list_transcript(limit=self.max_short_term, session_scope="global")
-            if rows:
-                self.short_term_memory = [{"role": r["role"], "content": r["content"]} for r in reversed(rows)]
-                print(f"🧠 [Memory] 恢复 {len(self.short_term_memory)} 条短期记忆")
-        except Exception as e:
-            print(f"⚠️ 恢复短期记忆失败: {e}")
+            stats["chunk_count"] = int(self.knowledge_collection.count())
+        except Exception:
+            pass
+        embed_stats = getattr(self.embedding_fn, "stats", None)
+        if isinstance(embed_stats, dict):
+            stats.update(embed_stats)
+        return stats
+
+    def rebuild_knowledge_collection(self) -> bool:
+        try:
+            self.chroma_client.delete_collection("waifu_knowledge_base")
+        except Exception:
+            pass
+        try:
+            self.knowledge_collection = self.chroma_client.get_or_create_collection(
+                name="waifu_knowledge_base", embedding_function=self.embedding_fn
+            )
+            return True
+        except Exception:
+            return False
+
+    def delete_knowledge_by_dirs(self, dirs) -> int:
+        return delete_knowledge_by_dirs(self.knowledge_collection, dirs)
+
+    def _restore_short_term_from_db(self):
+        self.short_term_manager.restore_global()
+        self.short_term_memory = self.short_term_manager.short_term_memory
 
     def _restore_session_short_term_from_db(self, session_id: str):
-        session_key = str(session_id or "").strip()
-        if not session_key or not self.sqlite_store or session_key in self._session_short_term_loaded:
-            return
-        try:
-            rows = self.sqlite_store.list_transcript(
-                limit=self.max_short_term,
-                session_id=session_key,
-                session_scope="specific",
-            )
-            if rows:
-                self.session_short_term_memory[session_key] = [
-                    {"role": r["role"], "content": r["content"]} for r in reversed(rows)
-                ]
-            else:
-                self.session_short_term_memory.setdefault(session_key, [])
-            self._session_short_term_loaded.add(session_key)
-        except Exception as e:
-            print(f"⚠️ 恢复会话短期记忆失败({session_key}): {e}")
+        self.short_term_manager.restore_session(session_id)
+        self.session_short_term_memory = (
+            self.short_term_manager.session_short_term_memory
+        )
+        self._session_short_term_loaded = (
+            self.short_term_manager._session_short_term_loaded
+        )
 
     def _append_short_term_memory(self, role, content, session_id: str = None):
-        item = {"role": role, "content": content}
-        session_key = str(session_id or "").strip()
-        if session_key:
-            bucket = self.session_short_term_memory.setdefault(session_key, [])
-            bucket.append(item)
-            if len(bucket) > self.max_short_term:
-                bucket.pop(0)
-            self._session_short_term_loaded.add(session_key)
-            return
-        self.short_term_memory.append(item)
-        if len(self.short_term_memory) > self.max_short_term:
-            self.short_term_memory.pop(0)
-
+        self.short_term_manager.append(role, content, session_id=session_id)
+        self.short_term_memory = self.short_term_manager.short_term_memory
+        self.session_short_term_memory = (
+            self.short_term_manager.session_short_term_memory
+        )
+        self._session_short_term_loaded = (
+            self.short_term_manager._session_short_term_loaded
+        )
 
     # ================= 核心：添加记忆 (异步优化版) =================
 
@@ -678,7 +811,9 @@ class AdvancedMemorySystem:
             # A. 写入 SQLite (全量日志)
             if self.sqlite_store:
                 try:
-                    self.sqlite_store.add_transcript(role, content, session_id=session_id)
+                    self.sqlite_store.add_transcript(
+                        role, content, session_id=session_id
+                    )
                 except Exception as e:
                     print(f"❌ [Memory] SQLite 写入失败: {e}")
 
@@ -686,7 +821,8 @@ class AdvancedMemorySystem:
             # 如果开启了 Profile 且角色符合 (user/agent)，尝试提取
             if self.profile_enabled and self.profile:
                 try:
-                    self.profile.extract_and_update(role, content)
+                    profile_meta = {"session_id": str(session_id or "")}
+                    self.profile.extract_and_update(role, content, meta=profile_meta)
                 except Exception as e:
                     print(f"⚠️ [Profile] 后台提取失败: {e}")
 
@@ -695,17 +831,23 @@ class AdvancedMemorySystem:
                 meta = {
                     "role": role,
                     "ts": datetime.now(timezone.utc).isoformat(),
-                    "kind": "chat"
+                    "kind": "chat",
                 }
                 if session_id:
                     meta["session_id"] = str(session_id)
+                meta = build_memory_metadata(
+                    content,
+                    meta,
+                    extractor=self._extract_keywords,
+                )
                 # 确保 ID 唯一且有序
                 msg_id = f"mem_{int(time.time() * 1000)}_{role}_{uuid.uuid4().hex[:8]}"
 
                 try:
+                    stored_meta = serialize_vector_metadata(meta)
                     self.memory_collection.add(
                         documents=[content],
-                        metadatas=[meta],
+                        metadatas=[stored_meta],
                         ids=[msg_id],
                     )
                 except Exception as e:
@@ -723,13 +865,13 @@ class AdvancedMemorySystem:
         except Exception as e:
             print(f"❌ [Background Memory] 后台任务异常: {e}")
             import traceback
+
             traceback.print_exc()
-
-
 
     def _fetch_profile_from_db(self) -> str:
         """从 SQLite 获取 User 和 当前角色 的档案"""
-        if not self.sqlite_store: return ""
+        if not self.sqlite_store:
+            return ""
 
         # 获取当前角色ID
         active_id = "default_char"
@@ -765,7 +907,9 @@ class AdvancedMemorySystem:
                 elif "note" in tags:
                     user_lines.append(f"★ 备注：{text}")
                 elif "likes" in tags:
-                    cat = tags[-1] if len(tags) > 1 and tags[-1] != "likes" else "general"
+                    cat = (
+                        tags[-1] if len(tags) > 1 and tags[-1] != "likes" else "general"
+                    )
                     user_lines.append(f"- 喜好({cat})：{text}")
 
             # ---------------- Agent 档案 (需匹配 ID) ----------------
@@ -784,7 +928,9 @@ class AdvancedMemorySystem:
                 elif "dislikes" in tags:
                     agent_lines.append(f"- 讨厌：{text}")
                 elif "likes" in tags:
-                    cat = tags[-1] if len(tags) > 1 and tags[-1] != "likes" else "general"
+                    cat = (
+                        tags[-1] if len(tags) > 1 and tags[-1] != "likes" else "general"
+                    )
                     agent_lines.append(f"- 喜好({cat})：{text}")
 
         out = []
@@ -817,18 +963,53 @@ class AdvancedMemorySystem:
             return False
 
         # 过滤常见口语噪声
-        noise = ["嗯", "哦", "好的", "行", "哈哈", "ok", "OK", "emmm", "…", "...", "真的吗", "是吗"]
+        noise = [
+            "嗯",
+            "哦",
+            "好的",
+            "行",
+            "哈哈",
+            "ok",
+            "OK",
+            "emmm",
+            "…",
+            "...",
+            "真的吗",
+            "是吗",
+        ]
         if t.lower() in noise:
             return False
 
         # 2. 【快速通道】规则判断 (省流)
         # 如果包含这些强特征词，直接存，不需要问 LLM
         fast_triggers = [
-            "我叫", "名字", "生日", "住在", "工作", "学校",
-            "喜欢", "讨厌", "不爱", "爱好", "偏好",
-            "记住", "别忘", "提醒", "计划", "目标",
-            "正在", "打算", "准备", "最近", "忙", "专利", "项目",  # 把刚才加的也放这
-            "因为", "所以", "觉得", "认为"
+            "我叫",
+            "名字",
+            "生日",
+            "住在",
+            "工作",
+            "学校",
+            "喜欢",
+            "讨厌",
+            "不爱",
+            "爱好",
+            "偏好",
+            "记住",
+            "别忘",
+            "提醒",
+            "计划",
+            "目标",
+            "正在",
+            "打算",
+            "准备",
+            "最近",
+            "忙",
+            "专利",
+            "项目",  # 把刚才加的也放这
+            "因为",
+            "所以",
+            "觉得",
+            "认为",
         ]
         if any(k in t for k in fast_triggers):
             return True
@@ -898,11 +1079,37 @@ Output ONLY "YES" or "NO".
         t = (text or "").strip().lower()
         if not t:
             return False
+
+        if t.startswith("/"):
+            return False
         cues = [
-            "记得", "还记得", "忘了", "之前", "刚才", "上午", "早上", "昨天", "前天",
-            "说过", "提过", "怎么了", "为什么", "当时", "回忆",
-            "remember", "forgot", "earlier", "previously", "what happened",
-            "腹泻", "断食", "拉肚子", "体检", "医院", "生病", "不舒服",
+            "记得",
+            "还记得",
+            "忘了",
+            "之前",
+            "刚才",
+            "上午",
+            "早上",
+            "昨天",
+            "前天",
+            "说过",
+            "提过",
+            "怎么了",
+            "为什么",
+            "当时",
+            "回忆",
+            "remember",
+            "forgot",
+            "earlier",
+            "previously",
+            "what happened",
+            "腹泻",
+            "断食",
+            "拉肚子",
+            "体检",
+            "医院",
+            "生病",
+            "不舒服",
         ]
         return any(k in t for k in cues)
 
@@ -922,10 +1129,37 @@ Output ONLY "YES" or "NO".
             terms.append(w.lower())
 
         stop = {
-            "今天", "现在", "这个", "那个", "就是", "然后", "因为", "所以", "觉得",
-            "怎么", "什么", "一下", "一下子", "可以", "是不是", "有没有", "为什么",
-            "你", "我", "他", "她", "它", "我们", "你们", "他们",
-            "please", "could", "would", "should", "think", "about",
+            "今天",
+            "现在",
+            "这个",
+            "那个",
+            "就是",
+            "然后",
+            "因为",
+            "所以",
+            "觉得",
+            "怎么",
+            "什么",
+            "一下",
+            "一下子",
+            "可以",
+            "是不是",
+            "有没有",
+            "为什么",
+            "你",
+            "我",
+            "他",
+            "她",
+            "它",
+            "我们",
+            "你们",
+            "他们",
+            "please",
+            "could",
+            "would",
+            "should",
+            "think",
+            "about",
         }
         dedup, seen = [], set()
         for w in terms:
@@ -960,7 +1194,13 @@ Output ONLY "YES" or "NO".
         hit = sum(1 for t in terms if t in d)
         return min(1.0, hit / max(1.0, len(terms)))
 
-    def _retrieve_from_transcript_fallback(self, search_text: str, limit: int = 4, strict_user_fact: bool = False, session_id: str = None) -> list:
+    def _retrieve_from_transcript_fallback(
+        self,
+        search_text: str,
+        limit: int = 4,
+        strict_user_fact: bool = False,
+        session_id: str = None,
+    ) -> list:
         """
         向量召回为空时，从 transcript 做轻量兜底召回，避免“明明说过却回忆不到”。
         """
@@ -971,7 +1211,9 @@ Output ONLY "YES" or "NO".
             return []
 
         terms = self._extract_recall_terms(t)
-        role_allow = {"user", "summary"} if strict_user_fact else set(self.recall_roles or [])
+        role_allow = (
+            {"user", "summary"} if strict_user_fact else set(self.recall_roles or [])
+        )
         items = []
         seen = set()
         session_key = str(session_id or "").strip()
@@ -984,13 +1226,15 @@ Output ONLY "YES" or "NO".
             )
             for kw in terms[:6]:
                 try:
-                    rows.extend(self.sqlite_store.list_transcript(
-                        query=kw,
-                        limit=18,
-                        offset=0,
-                        session_id=session_key,
-                        session_scope="specific" if session_key else "global",
-                    ))
+                    rows.extend(
+                        self.sqlite_store.list_transcript(
+                            query=kw,
+                            limit=18,
+                            offset=0,
+                            session_id=session_key,
+                            session_scope="specific" if session_key else "global",
+                        )
+                    )
                 except Exception:
                     pass
 
@@ -1009,16 +1253,24 @@ Output ONLY "YES" or "NO".
                     continue
                 ts_iso = str(r.get("ts_iso") or "")
                 rec = self._recency_score(ts_iso)
-                role_w = self._role_recall_weight(role, strict_user_fact=strict_user_fact)
+                role_w = self._role_recall_weight(
+                    role, strict_user_fact=strict_user_fact
+                )
                 score = overlap * 0.62 + rec * 0.28 + role_w
-                items.append({
-                    "id": f"tr_{row_id}",
-                    "doc": doc,
-                    "meta": {"role": role, "ts": ts_iso, "kind": "transcript_fallback"},
-                    "sim": overlap,
-                    "rec": rec,
-                    "score": score,
-                })
+                items.append(
+                    {
+                        "id": f"tr_{row_id}",
+                        "doc": doc,
+                        "meta": {
+                            "role": role,
+                            "ts": ts_iso,
+                            "kind": "transcript_fallback",
+                        },
+                        "sim": overlap,
+                        "rec": rec,
+                        "score": score,
+                    }
+                )
                 if row_id:
                     seen.add(row_id)
         except Exception:
@@ -1028,36 +1280,15 @@ Output ONLY "YES" or "NO".
 
     # ---------- 新增：导入知识（修复 hash(chunk) 不稳定问题） ----------
     def import_knowledge_from_file(self, file_path):
-        if not os.path.exists(file_path):
-            return 0
+        result = import_knowledge_file_modular(
+            self.knowledge_collection, self._stable_md5, file_path
+        )
+        if isinstance(result, dict):
+            return result
+        return {"added": int(result or 0), "skipped": 0, "total": int(result or 0)}
 
-        print(f"📖 正在读取知识文件: {file_path}")
-        with open(file_path, "r", encoding="utf-8") as f:
-            content = f.read()
-
-        chunks = [c.strip() for c in content.split("\n") if c.strip()]
-        count = 0
-
-        for chunk in chunks:
-            if len(chunk) < 5:
-                continue
-
-            chunk_id = "know_" + self._stable_md5(chunk)
-            try:
-                existing = self.knowledge_collection.get(ids=[chunk_id])
-                if not existing.get("ids"):
-                    self.knowledge_collection.add(
-                        documents=[chunk],
-                        metadatas=[{"source": os.path.basename(file_path)}],
-                        ids=[chunk_id],
-                    )
-                    count += 1
-            except Exception:
-                # get/add 失败就跳过
-                pass
-
-        print(f"✅ 成功导入 {count} 条新知识！")
-        return count
+    def search_knowledge(self, search_text: str, k: int = 3):
+        return search_knowledge_modular(self.knowledge_collection, search_text, k=k)
 
     # ---------- 记忆写入 ----------
     # def add_memory(self, role, content):
@@ -1125,7 +1356,9 @@ Output ONLY "YES" or "NO".
         candidates = []
         seen_doc = set()
         strict_user_fact = self._is_recall_intent_query(search_text)
-        role_allow = {"user", "summary"} if strict_user_fact else set(self.recall_roles or [])
+        role_allow = (
+            {"user", "summary"} if strict_user_fact else set(self.recall_roles or [])
+        )
 
         try:
             query_kwargs = {
@@ -1150,6 +1383,8 @@ Output ONLY "YES" or "NO".
 
             for doc, meta, dist, _id in zip(docs, metas, dists, ids):
                 meta = meta or {}
+                if isinstance(meta, dict):
+                    meta = deserialize_vector_metadata(meta)
                 if not session_key and str(meta.get("session_id") or "").strip():
                     continue
                 role = (meta.get("role") or "user").strip()
@@ -1172,17 +1407,21 @@ Output ONLY "YES" or "NO".
                 seen_doc.add(doc_key)
 
                 rec = self._recency_score(meta.get("ts", ""))
-                role_w = self._role_recall_weight(role, strict_user_fact=strict_user_fact)
+                role_w = self._role_recall_weight(
+                    role, strict_user_fact=strict_user_fact
+                )
                 score = sim * 0.68 + rec * 0.27 + role_w
 
-                candidates.append({
-                    "id": _id,
-                    "doc": doc_norm,
-                    "meta": meta,
-                    "sim": sim,
-                    "rec": rec,
-                    "score": score,
-                })
+                candidates.append(
+                    {
+                        "id": _id,
+                        "doc": doc_norm,
+                        "meta": meta,
+                        "sim": sim,
+                        "rec": rec,
+                        "score": score,
+                    }
+                )
         except Exception:
             pass
 
@@ -1201,12 +1440,24 @@ Output ONLY "YES" or "NO".
                     continue
                 candidates.append(it)
 
+        sender_id = (
+            session_key.split(":", 1)[1] if session_key.startswith("private:") else ""
+        )
+        candidates = post_process_memory_candidates(
+            self,
+            candidates,
+            search_text,
+            sender_id=sender_id,
+        )
+
         # 先按综合分排序
         candidates.sort(key=lambda x: x["score"], reverse=True)
 
         # 可选：让 LLM 从 topN 里挑最相关的 2~3 条
         if self.use_llm_selector and chat_with_ai and len(candidates) > self.final_k:
-            picked = self._llm_pick_memories(search_text, candidates[: min(10, len(candidates))], want=self.final_k)
+            picked = self._llm_pick_memories(
+                search_text, candidates[: min(10, len(candidates))], want=self.final_k
+            )
             if picked:
                 id_set = set(picked)
                 candidates = [c for c in candidates if c["id"] in id_set]
@@ -1217,8 +1468,6 @@ Output ONLY "YES" or "NO".
         self._query_cache[cache_key] = (time.time(), top)
         return top
 
-
-
     def _llm_pick_memories(self, query: str, candidates: list, want: int = 3):
         """
         输出：候选 id 列表（最多 want 个）
@@ -1228,23 +1477,28 @@ Output ONLY "YES" or "NO".
             for i, c in enumerate(candidates):
                 role = c["meta"].get("role", "user")
                 ts = c["meta"].get("ts", "")
-                lines.append(f"{i}. id={c['id']} role={role} ts={ts}\n   内容：{c['doc']}")
+                lines.append(
+                    f"{i}. id={c['id']} role={role} ts={ts}\n   内容：{c['doc']}"
+                )
 
             prompt = (
-                    "你是一个“记忆筛选器”。任务：从候选记忆中挑选与当前问题最相关的记忆。\n"
-                    "规则：\n"
-                    f"- 最多选 {want} 条\n"
-                    "- 优先选择：用户偏好/身份信息/未完成计划/明确事实\n"
-                    "- 如果不相关就不要选\n"
-                    "输出要求：只输出 JSON，例如：{\"ids\":[\"id1\",\"id2\"]}\n\n"
-                    f"当前输入：{query}\n\n候选记忆：\n" + "\n".join(lines)
+                "你是一个“记忆筛选器”。任务：从候选记忆中挑选与当前问题最相关的记忆。\n"
+                "规则：\n"
+                f"- 最多选 {want} 条\n"
+                "- 优先选择：用户偏好/身份信息/未完成计划/明确事实\n"
+                "- 如果不相关就不要选\n"
+                '输出要求：只输出 JSON，例如：{"ids":["id1","id2"]}\n\n'
+                f"当前输入：{query}\n\n候选记忆：\n" + "\n".join(lines)
             )
 
-            resp = chat_with_ai(
-                [{"role": "system", "content": prompt}],
-                task_type="summary",
-                caller="memory_rerank",
-            ) or ""
+            resp = (
+                chat_with_ai(
+                    [{"role": "system", "content": prompt}],
+                    task_type="summary",
+                    caller="memory_rerank",
+                )
+                or ""
+            )
 
             m = re.search(r"\{.*\}", resp, flags=re.S)
             if not m:
@@ -1260,28 +1514,14 @@ Output ONLY "YES" or "NO".
             return []
 
     def _retrieve_knowledge(self, search_text: str, k: int = 2):
-        know = []
-        try:
-            res = self.knowledge_collection.query(
-                query_texts=[search_text],
-                n_results=k,
-                include=["documents", "metadatas", "distances"],
-            )
-            docs = (res.get("documents") or [[]])[0]
-            for d in docs:
-                if d:
-                    know.append(d)
-        except Exception:
-            pass
-        return know
+        return self.search_knowledge(search_text, k=k)
 
     # ---------- 缓存管理（性能优化） ----------
     def clear_query_cache(self):
         """清理过期的查询缓存"""
         now = time.time()
         self._query_cache = {
-            k: v for k, v in self._query_cache.items()
-            if now - v[0] < self._cache_ttl
+            k: v for k, v in self._query_cache.items() if now - v[0] < self._cache_ttl
         }
         # ✅ 修复：使用 self._logger
         if self._logger:
@@ -1299,7 +1539,7 @@ Output ONLY "YES" or "NO".
             "cache_hits": self._cache_hits,
             "cache_misses": self._cache_misses,
             "hit_rate": hit_rate,
-            "cached_items": len(self._query_cache)
+            "cached_items": len(self._query_cache),
         }
 
         # ✅ 修复：使用 self._logger
@@ -1315,7 +1555,11 @@ Output ONLY "YES" or "NO".
         # ✅ 并发安全：使用锁保护工具历史记录
         with self._lock:
             try:
-                trig = [t.strip() for t in (triggers or []) if isinstance(t, str) and t.strip()]
+                trig = [
+                    t.strip()
+                    for t in (triggers or [])
+                    if isinstance(t, str) and t.strip()
+                ]
                 if not trig and not tool_feedback:
                     return
                 item = {
@@ -1326,14 +1570,20 @@ Output ONLY "YES" or "NO".
                 }
                 self.tool_history.append(item)
                 if len(self.tool_history) > self.max_tool_history:
-                    self.tool_history = self.tool_history[-self.max_tool_history:]
+                    self.tool_history = self.tool_history[-self.max_tool_history :]
             except Exception:
                 pass
 
     def _format_tool_history(self, tool_intent=None) -> str:
         """只挑与本轮 tool_intent 相关的最近几条，避免浪费 token。"""
         try:
-            intent = set([t.strip() for t in (tool_intent or []) if isinstance(t, str) and t.strip()])
+            intent = set(
+                [
+                    t.strip()
+                    for t in (tool_intent or [])
+                    if isinstance(t, str) and t.strip()
+                ]
+            )
             if not intent:
                 return ""
             if not self.tool_history:
@@ -1361,12 +1611,18 @@ Output ONLY "YES" or "NO".
 
             out = "\n".join(lines).strip()
             if len(out) > self.tool_context_max_chars:
-                out = out[-self.tool_context_max_chars:]
+                out = out[-self.tool_context_max_chars :]
             return out
         except Exception:
             return ""
 
-    def build_prompt(self, current_user_text, system_persona, tool_intent=None, session_id: str = None):
+    def build_prompt(
+        self,
+        current_user_text,
+        system_persona,
+        tool_intent=None,
+        session_id: str = None,
+    ):
         print("🔍 [系统] 正在进行双路检索（向量记忆 + 知识库）.")
 
         # 0. 提取时间头
@@ -1403,7 +1659,9 @@ Output ONLY "YES" or "NO".
         raw_user = (current_user_text or "").strip()
         tool_mode = bool(tool_intent)
         recall_intent = self._is_recall_intent_query(raw_user)
-        do_recall = (not tool_mode) and ((len(raw_user) >= self.recall_min_chars) or recall_intent)
+        do_recall = (not tool_mode) and (
+            (len(raw_user) >= self.recall_min_chars) or recall_intent
+        )
 
         # 4. 图扩散关键词扩展
         search_text = raw_user
@@ -1418,10 +1676,16 @@ Output ONLY "YES" or "NO".
 
         # 5. 长期记忆检索 (Vector)
         session_key = str(session_id or "").strip()
-        mem_items = self._retrieve_memories(search_text, session_id=session_key) if do_recall else []
+        mem_items = (
+            self._retrieve_memories(search_text, session_id=session_key)
+            if do_recall
+            else []
+        )
         mem_text = ""
         if mem_items:
-            mem_text = "\n".join([self._format_memory_item(m["meta"], m["doc"]) for m in mem_items])
+            mem_text = "\n".join(
+                [self._format_memory_item(m["meta"], m["doc"]) for m in mem_items]
+            )
 
         # 6. 知识库检索
         know_items = [] if tool_mode else self._retrieve_knowledge(search_text, k=2)
@@ -1442,11 +1706,22 @@ Output ONLY "YES" or "NO".
         sqlite_tasks_text = ""
         sqlite_episodes_text = ""
         try:
-            from modules.memory_sqlite import format_active_tasks_for_prompt, format_notes_for_prompt, format_recent_episodes_for_prompt
+            from modules.memory_sqlite import (
+                format_active_tasks_for_prompt,
+                format_notes_for_prompt,
+                format_recent_episodes_for_prompt,
+            )
+
             if self.sqlite_store:
-                sqlite_tasks_text = format_active_tasks_for_prompt(self.sqlite_store, limit=6)
-                sqlite_notes_text = format_notes_for_prompt(self.sqlite_store, max_items=24)
-                sqlite_episodes_text = format_recent_episodes_for_prompt(self.sqlite_store, limit=3)
+                sqlite_tasks_text = format_active_tasks_for_prompt(
+                    self.sqlite_store, limit=6
+                )
+                sqlite_notes_text = format_notes_for_prompt(
+                    self.sqlite_store, max_items=24
+                )
+                sqlite_episodes_text = format_recent_episodes_for_prompt(
+                    self.sqlite_store, limit=3
+                )
         except Exception:
             pass
 
@@ -1464,13 +1739,13 @@ Output ONLY "YES" or "NO".
             final_system += "\n\n【近期对话摘要 (Episodes)】:\n" + sqlite_episodes_text
 
         if know_text:
-            final_system += "\n\n【相关知识库】:\n" + know_text
+            final_system += "\n\n【相关知识库】:\n" + clean_injected_context(know_text)
 
         if mem_text:
             final_system += (
-                    "\n\n【回忆片段】(仅供参考):\n"
-                    "当涉及用户既往事实时，优先相信 user 原话；assistant 推断若冲突则降级处理。\n"
-                    + mem_text
+                "\n\n【回忆片段】(仅供参考):\n"
+                "当涉及用户既往事实时，优先相信 user 原话；assistant 推断若冲突则降级处理。\n"
+                + mem_text
             )
 
         # 10. 工具上下文
@@ -1486,10 +1761,10 @@ Output ONLY "YES" or "NO".
         else:
             short_ctx = self.short_term_memory
         if recall_intent:
-            short_ctx = [m for m in short_ctx if (m.get("role") or "").strip() == "user"]
+            short_ctx = [
+                m for m in short_ctx if (m.get("role") or "").strip() == "user"
+            ]
         messages += short_ctx
         messages += [{"role": "user", "content": current_user_text}]
 
         return messages
-
-

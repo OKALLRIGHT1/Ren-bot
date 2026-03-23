@@ -1,6 +1,7 @@
 import json
 import os
 import re
+import requests
 
 from PySide6 import QtWidgets, QtCore, QtGui
 from modules.character_manager import character_manager, DEFAULT_EMOTION_KEYS
@@ -8,6 +9,7 @@ from modules.character_manager import character_manager, DEFAULT_EMOTION_KEYS
 try:
     from modules.gui.styles import get_ui_palette
 except Exception:
+
     def get_ui_palette():
         return {
             "accent": "#6366F1",
@@ -28,6 +30,7 @@ except Exception:
             "danger": "#EF4444",
         }
 
+
 try:
     from config import EMO_TO_LIVE2D
 except Exception:
@@ -39,87 +42,87 @@ def get_character_editor_styles_v2() -> str:
     return f"""
         QWidget {{
             font-family: 'Segoe UI', 'Microsoft YaHei';
-            color: {p['text_primary']};
+            color: {p["text_primary"]};
         }}
         QFrame#charLeftCard, QFrame#charRightCard {{
-            background: {p['bg_card']};
-            border: 1px solid {p['border']};
+            background: {p["bg_card"]};
+            border: 1px solid {p["border"]};
             border-radius: 16px;
         }}
         QLabel#charSectionTitle {{
-            color: {p['text_primary']};
+            color: {p["text_primary"]};
             font-size: 16px;
             font-weight: 700;
         }}
         QLabel#charHint {{
-            color: {p['text_secondary']};
+            color: {p["text_secondary"]};
             font-size: 12px;
         }}
         QListWidget, QLineEdit, QTextEdit, QPlainTextEdit, QComboBox, QTableWidget {{
-            background: {p['bg_card']};
-            border: 1px solid {p['border']};
+            background: {p["bg_card"]};
+            border: 1px solid {p["border"]};
             border-radius: 10px;
         }}
         QListWidget::item {{
             padding: 8px 10px;
             border-radius: 8px;
             margin: 2px 0;
-            color: {p['text_secondary']};
+            color: {p["text_secondary"]};
         }}
         QListWidget::item:selected {{
-            background: {p['accent_soft']};
-            color: {p['accent_hover']};
+            background: {p["accent_soft"]};
+            color: {p["accent_hover"]};
             font-weight: 700;
         }}
         QTabWidget::pane {{
-            border: 1px solid {p['border']};
+            border: 1px solid {p["border"]};
             border-radius: 12px;
-            background: {p['bg_card']};
+            background: {p["bg_card"]};
         }}
         QTabBar::tab {{
-            background: {p['bg_soft']};
-            color: {p['text_secondary']};
-            border: 1px solid {p['border']};
+            background: {p["bg_soft"]};
+            color: {p["text_secondary"]};
+            border: 1px solid {p["border"]};
             border-top-left-radius: 10px;
             border-top-right-radius: 10px;
             padding: 8px 14px;
             margin-right: 4px;
         }}
         QTabBar::tab:selected {{
-            background: {p['accent_soft']};
-            color: {p['accent_hover']};
+            background: {p["accent_soft"]};
+            color: {p["accent_hover"]};
             font-weight: 700;
         }}
         QTableWidget {{
-            gridline-color: {p['border']};
+            gridline-color: {p["border"]};
         }}
         QHeaderView::section {{
-            background: {p['bg_card']};
-            color: {p['text_secondary']};
+            background: {p["bg_card"]};
+            color: {p["text_secondary"]};
             font-weight: 600;
             padding: 8px;
             border: none;
-            border-bottom: 1px solid {p['border']};
+            border-bottom: 1px solid {p["border"]};
         }}
         QPushButton {{
-            background: {p['bg_card']};
-            color: {p['text_primary']};
-            border: 1px solid {p['border_strong']};
+            background: {p["bg_card"]};
+            color: {p["text_primary"]};
+            border: 1px solid {p["border_strong"]};
             border-radius: 10px;
             padding: 8px 14px;
             font-weight: 600;
         }}
         QPushButton:hover {{
-            border-color: {p['accent']};
-            color: {p['accent_hover']};
+            border-color: {p["accent"]};
+            color: {p["accent_hover"]};
         }}
         QPushButton#charPrimary {{
-            background: {p['accent']};
+            background: {p["accent"]};
             color: white;
             border: none;
         }}
         QPushButton#charPrimary:hover {{
-            background: {p['accent_hover']};
+            background: {p["accent_hover"]};
             color: white;
         }}
         QPushButton#charDanger {{
@@ -133,7 +136,7 @@ def get_character_editor_styles_v2() -> str:
             border-color: #FCA5A5;
         }}
         QGroupBox {{
-            border: 1px solid {p['border']};
+            border: 1px solid {p["border"]};
             border-radius: 12px;
             margin-top: 10px;
             padding: 10px;
@@ -142,7 +145,7 @@ def get_character_editor_styles_v2() -> str:
             subcontrol-origin: margin;
             subcontrol-position: top left;
             padding: 0 6px;
-            color: {p['text_secondary']};
+            color: {p["text_secondary"]};
         }}
     """
 
@@ -178,7 +181,9 @@ class CharacterEditorWidget(QtWidgets.QWidget):
         left_title.setObjectName("charSectionTitle")
         left_layout.addWidget(left_title)
 
-        left_hint = QtWidgets.QLabel("这里放你当前角色与已创建角色，激活角色会带 ⭐ 标识。")
+        left_hint = QtWidgets.QLabel(
+            "这里放你当前角色与已创建角色，激活角色会带 ⭐ 标识。"
+        )
         left_hint.setObjectName("charHint")
         left_hint.setWordWrap(True)
         left_layout.addWidget(left_hint)
@@ -203,7 +208,9 @@ class CharacterEditorWidget(QtWidgets.QWidget):
         right_title.setObjectName("charSectionTitle")
         right_shell_layout.addWidget(right_title)
 
-        right_hint = QtWidgets.QLabel("编辑人设、服装和情绪映射。左侧选择角色后，这里会显示详细配置。")
+        right_hint = QtWidgets.QLabel(
+            "编辑人设、服装和情绪映射。左侧选择角色后，这里会显示详细配置。"
+        )
         right_hint.setObjectName("charHint")
         right_hint.setWordWrap(True)
         right_shell_layout.addWidget(right_hint)
@@ -214,6 +221,10 @@ class CharacterEditorWidget(QtWidgets.QWidget):
         self.tab_persona = QtWidgets.QWidget()
         self._init_tab_persona()
         self.right_panel.addTab(self.tab_persona, "人设与提示词")
+
+        self.tab_tts = QtWidgets.QWidget()
+        self._init_tab_tts()
+        self.right_panel.addTab(self.tab_tts, "角色 TTS")
 
         self.tab_costume = QtWidgets.QWidget()
         self._init_tab_costume()
@@ -254,6 +265,99 @@ class CharacterEditorWidget(QtWidgets.QWidget):
         btn_del.clicked.connect(self._delete_current_char)
         layout.addWidget(btn_del, alignment=QtCore.Qt.AlignmentFlag.AlignRight)
 
+    def _init_tab_tts(self):
+        layout = QtWidgets.QVBoxLayout(self.tab_tts)
+        form = QtWidgets.QFormLayout()
+        self.tts_enabled = QtWidgets.QCheckBox("启用角色专属 GPT-SoVITS")
+        self.tts_enabled.stateChanged.connect(self._save_current_char)
+        form.addRow("开关:", self.tts_enabled)
+
+        base_hint = QtWidgets.QLabel(
+            "GPTSOVITS_BASE 使用全局配置；这里仅设置角色自己的 GPT/SoVITS 权重、参考音频和提示词。"
+        )
+        base_hint.setWordWrap(True)
+        layout.addWidget(base_hint)
+
+        self.tts_gpt_w = QtWidgets.QLineEdit()
+        self.tts_gpt_w.textChanged.connect(self._save_current_char)
+        gpt_row = QtWidgets.QHBoxLayout()
+        gpt_row.addWidget(self.tts_gpt_w, 1)
+        btn_pick_gpt = QtWidgets.QPushButton("选择文件")
+        btn_pick_gpt.clicked.connect(
+            lambda: self._pick_tts_file(
+                self.tts_gpt_w,
+                "选择 GPT 权重",
+                "模型文件 (*.ckpt *.pth);;所有文件 (*.*)",
+            )
+        )
+        gpt_row.addWidget(btn_pick_gpt)
+        gpt_wrap = QtWidgets.QWidget()
+        gpt_wrap.setLayout(gpt_row)
+        form.addRow("GPT_W:", gpt_wrap)
+
+        self.tts_sov_w = QtWidgets.QLineEdit()
+        self.tts_sov_w.textChanged.connect(self._save_current_char)
+        sov_row = QtWidgets.QHBoxLayout()
+        sov_row.addWidget(self.tts_sov_w, 1)
+        btn_pick_sov = QtWidgets.QPushButton("选择文件")
+        btn_pick_sov.clicked.connect(
+            lambda: self._pick_tts_file(
+                self.tts_sov_w,
+                "选择 SoVITS 权重",
+                "模型文件 (*.pth *.ckpt);;所有文件 (*.*)",
+            )
+        )
+        sov_row.addWidget(btn_pick_sov)
+        sov_wrap = QtWidgets.QWidget()
+        sov_wrap.setLayout(sov_row)
+        form.addRow("SOV_W:", sov_wrap)
+
+        self.tts_ref_wav = QtWidgets.QLineEdit()
+        self.tts_ref_wav.textChanged.connect(self._save_current_char)
+        ref_row = QtWidgets.QHBoxLayout()
+        ref_row.addWidget(self.tts_ref_wav, 1)
+        btn_pick_ref = QtWidgets.QPushButton("选择音频")
+        btn_pick_ref.clicked.connect(
+            lambda: self._pick_tts_file(
+                self.tts_ref_wav,
+                "选择参考音频",
+                "音频文件 (*.wav *.mp3 *.flac *.ogg);;所有文件 (*.*)",
+            )
+        )
+        ref_row.addWidget(btn_pick_ref)
+        ref_wrap = QtWidgets.QWidget()
+        ref_wrap.setLayout(ref_row)
+        form.addRow("REF_WAV:", ref_wrap)
+
+        self.tts_prompt_lang = QtWidgets.QLineEdit()
+        self.tts_prompt_lang.textChanged.connect(self._save_current_char)
+        form.addRow("PROMPT_LANG:", self.tts_prompt_lang)
+
+        self.tts_prompt_text = QtWidgets.QTextEdit()
+        self.tts_prompt_text.textChanged.connect(self._save_current_char)
+        form.addRow("PROMPT_TEXT:", self.tts_prompt_text)
+        layout.addLayout(form)
+
+        self.tts_status = QtWidgets.QPlainTextEdit()
+        self.tts_status.setReadOnly(True)
+        self.tts_status.setMaximumHeight(120)
+        layout.addWidget(self.tts_status)
+
+        test_row = QtWidgets.QHBoxLayout()
+        self.tts_test_text = QtWidgets.QLineEdit()
+        self.tts_test_text.setPlaceholderText(
+            "输入一段测试文本，例如：こんにちは、五十铃怜です。"
+        )
+        btn_check_tts = QtWidgets.QPushButton("检测配置")
+        btn_check_tts.clicked.connect(self._check_current_tts)
+        btn_test_tts = QtWidgets.QPushButton("测试发音")
+        btn_test_tts.setObjectName("charPrimary")
+        btn_test_tts.clicked.connect(self._test_current_tts)
+        test_row.addWidget(self.tts_test_text, 1)
+        test_row.addWidget(btn_check_tts)
+        test_row.addWidget(btn_test_tts)
+        layout.addLayout(test_row)
+
     def _init_tab_costume(self):
         layout = QtWidgets.QVBoxLayout(self.tab_costume)
 
@@ -263,7 +367,7 @@ class CharacterEditorWidget(QtWidgets.QWidget):
         layout.addWidget(self.costume_list)
 
         btn_layout = QtWidgets.QHBoxLayout()
-        btn_import = QtWidgets.QPushButton("📂 导入模型 (.model3.json)")
+        btn_import = QtWidgets.QPushButton("📂 导入模型 (.model3.json / model.json)")
         btn_import.clicked.connect(self._import_costume)
         btn_wear = QtWidgets.QPushButton("👕 立即换穿")
         btn_wear.setObjectName("charPrimary")
@@ -316,11 +420,17 @@ class CharacterEditorWidget(QtWidgets.QWidget):
         self.emo_table = QtWidgets.QTableWidget()
         self.emo_table.setMinimumHeight(100)
         self.emo_table.setColumnCount(4)
-        self.emo_table.setHorizontalHeaderLabels(["情绪", "动作(mtn)", "表情(exp)", "来源"])
+        self.emo_table.setHorizontalHeaderLabels(
+            ["情绪", "动作(mtn)", "表情(exp)", "来源"]
+        )
         self.emo_table.horizontalHeader().setStretchLastSection(True)
         self.emo_table.verticalHeader().setVisible(False)
-        self.emo_table.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
-        self.emo_table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
+        self.emo_table.setEditTriggers(
+            QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers
+        )
+        self.emo_table.setSelectionBehavior(
+            QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows
+        )
         layout.addWidget(self.emo_table, 1)
 
         emo_btn_layout = QtWidgets.QHBoxLayout()
@@ -367,9 +477,29 @@ class CharacterEditorWidget(QtWidgets.QWidget):
 
         self.edit_name.setText(data.get("name", ""))
         self.edit_prompt.setPlainText(data.get("prompt", ""))
+        tts_cfg = data.get("tts_config") or {}
+        self.tts_enabled.blockSignals(True)
+        self.tts_gpt_w.blockSignals(True)
+        self.tts_sov_w.blockSignals(True)
+        self.tts_ref_wav.blockSignals(True)
+        self.tts_prompt_lang.blockSignals(True)
+        self.tts_prompt_text.blockSignals(True)
+        self.tts_enabled.setChecked(bool(tts_cfg.get("enabled", False)))
+        self.tts_gpt_w.setText(str(tts_cfg.get("gpt_w", "")))
+        self.tts_sov_w.setText(str(tts_cfg.get("sov_w", "")))
+        self.tts_ref_wav.setText(str(tts_cfg.get("ref_wav", "")))
+        self.tts_prompt_lang.setText(str(tts_cfg.get("prompt_lang", "ja")))
+        self.tts_prompt_text.setPlainText(str(tts_cfg.get("prompt_text", "")))
+        self.tts_status.setPlainText("")
 
         self.edit_name.blockSignals(False)
         self.edit_prompt.blockSignals(False)
+        self.tts_enabled.blockSignals(False)
+        self.tts_gpt_w.blockSignals(False)
+        self.tts_sov_w.blockSignals(False)
+        self.tts_ref_wav.blockSignals(False)
+        self.tts_prompt_lang.blockSignals(False)
+        self.tts_prompt_text.blockSignals(False)
 
         self.costume_list.clear()
         costumes = data.get("costumes", {})
@@ -391,7 +521,7 @@ class CharacterEditorWidget(QtWidgets.QWidget):
             self.current_costume_name = None
             self._refresh_costume_detail_ui()
 
-        is_active = (cid == self.mgr.data.get("active_id"))
+        is_active = cid == self.mgr.data.get("active_id")
         self.btn_activate.setEnabled(not is_active)
         self.btn_activate.setText("当前已激活" if is_active else "🚀 切换为此角色")
 
@@ -401,15 +531,97 @@ class CharacterEditorWidget(QtWidgets.QWidget):
         data = self.mgr.get_character(self.current_char_id)
         data["name"] = self.edit_name.text()
         data["prompt"] = self.edit_prompt.toPlainText()
+        data["tts_config"] = {
+            "enabled": bool(self.tts_enabled.isChecked()),
+            "gpt_w": self.tts_gpt_w.text().strip(),
+            "sov_w": self.tts_sov_w.text().strip(),
+            "ref_wav": self.tts_ref_wav.text().strip(),
+            "prompt_lang": self.tts_prompt_lang.text().strip() or "ja",
+            "prompt_text": self.tts_prompt_text.toPlainText().strip(),
+        }
         self.mgr.save()
         item = self.char_list.currentItem()
         if item:
             item.setText(data["name"])
 
+    def _pick_tts_file(self, line_edit, title: str, file_filter: str):
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(self, title, "", file_filter)
+        if path:
+            line_edit.setText(path.replace("\\", "/"))
+
+    def _test_current_tts(self):
+        if not self.current_char_id:
+            return
+        app_ref = self.main_app
+        tts = getattr(app_ref, "tts", None)
+        if tts is None:
+            nested_app = getattr(app_ref, "app", None)
+            tts = getattr(nested_app, "tts", None)
+        if tts is None:
+            QtWidgets.QMessageBox.warning(
+                self,
+                "失败",
+                "未找到运行中的 TTSRouter 实例，请先确认主程序已完整启动。",
+            )
+            return
+        text = self.tts_test_text.text().strip() or "こんにちは、五十铃怜です。"
+        cfg = self.mgr.get_tts_config(self.current_char_id)
+        try:
+            tts.apply_role_tts_config(cfg)
+            import asyncio
+
+            loop = getattr(app_ref, "loop", None) or getattr(
+                getattr(app_ref, "app", None), "loop", None
+            )
+            if loop is None:
+                raise RuntimeError("未找到主事件循环")
+            asyncio.run_coroutine_threadsafe(
+                tts.say(text, emotion="neutral", interrupt=True, show_bubble=True),
+                loop,
+            )
+            QtWidgets.QMessageBox.information(self, "成功", "已发送测试发音请求。")
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(self, "错误", f"测试发音失败: {e}")
+
+    def _check_current_tts(self):
+        if not self.current_char_id:
+            return
+        cfg = self.mgr.get_tts_config(self.current_char_id)
+        lines = []
+        enabled = bool(cfg.get("enabled", False))
+        lines.append(f"开关: {'开启' if enabled else '关闭'}")
+
+        from config import GPTSOVITS_BASE
+
+        base = str(GPTSOVITS_BASE or "").strip()
+        lines.append(f"GPTSOVITS_BASE(全局): {base or '(未填写)'}")
+
+        for key in ("gpt_w", "sov_w", "ref_wav"):
+            path = str(cfg.get(key, "") or "").strip()
+            exists = os.path.isfile(path) if path else False
+            lines.append(f"{key}: {'OK' if exists else '缺失'} | {path or '(未填写)'}")
+
+        prompt_lang = str(cfg.get("prompt_lang", "") or "").strip()
+        prompt_text = str(cfg.get("prompt_text", "") or "").strip()
+        lines.append(f"PROMPT_LANG: {prompt_lang or '(未填写)'}")
+        lines.append(f"PROMPT_TEXT: {'已填写' if prompt_text else '未填写'}")
+
+        if base:
+            try:
+                requests.get(base.rstrip("/") + "/", timeout=2)
+                lines.append("服务连通: OK")
+            except Exception as e:
+                lines.append(f"服务连通: 失败 ({e})")
+        else:
+            lines.append("服务连通: 未检测（未填写 BASE）")
+
+        self.tts_status.setPlainText("\n".join(lines))
+
     def _add_character(self):
         name, ok = QtWidgets.QInputDialog.getText(self, "新建角色", "请输入角色名称:")
         if ok and name:
             import uuid
+
             cid = f"char_{uuid.uuid4().hex[:6]}"
             self.mgr.add_character(cid, name, "你是一个AI助手。")
             self._refresh_list()
@@ -426,8 +638,17 @@ class CharacterEditorWidget(QtWidgets.QWidget):
     def _activate_character(self):
         if not self.current_char_id:
             return
+        app_ref = getattr(self.main_app, "app", None) or self.main_app
+        try:
+            import __main__
 
-        self.mgr.set_active_character(self.current_char_id)
+            app_ref = getattr(__main__, "app_instance", app_ref)
+        except Exception:
+            pass
+        if app_ref and hasattr(app_ref, "switch_character_runtime"):
+            app_ref.switch_character_runtime(self.current_char_id)
+        else:
+            self.mgr.set_active_character(self.current_char_id)
 
         if hasattr(self.main_app, "plugin_manager"):
             pass
@@ -437,7 +658,7 @@ class CharacterEditorWidget(QtWidgets.QWidget):
         QtWidgets.QMessageBox.information(
             self,
             "成功",
-            "角色已切换！\n提示词已更新。\n(请手动换穿该角色的一件衣服以同步Live2D)"
+            "角色已切换！\n提示词、TTS 与默认服装已同步。",
         )
 
     def _extract_expression_id(self, name: str, file_name: str):
@@ -485,14 +706,28 @@ class CharacterEditorWidget(QtWidgets.QWidget):
                 for idx, item in enumerate(motion_items):
                     if not isinstance(item, dict):
                         continue
-                    raw_name = item.get("Name") or item.get("name") or item.get("mtn") or item.get("File") or item.get("file")
-                    motion_name = str(raw_name).strip() if raw_name else f"{group_name}:{idx}"
+                    raw_name = (
+                        item.get("Name")
+                        or item.get("name")
+                        or item.get("mtn")
+                        or item.get("File")
+                        or item.get("file")
+                    )
+                    motion_name = (
+                        str(raw_name).strip() if raw_name else f"{group_name}:{idx}"
+                    )
                     motion_name = self._normalize_motion_name(motion_name)
-                    motions.append({
-                        "name": motion_name,
-                        "group": group_name,
-                        "index": int(idx),
-                    })
+                    motions.append(
+                        {
+                            "name": motion_name,
+                            "raw_name": str(raw_name).strip()
+                            if raw_name
+                            else motion_name,
+                            "preview_mtn": motion_name,
+                            "group": group_name,
+                            "index": int(idx),
+                        }
+                    )
 
             expr_items = refs.get("Expressions", []) if isinstance(refs, dict) else []
             if isinstance(expr_items, list):
@@ -503,62 +738,93 @@ class CharacterEditorWidget(QtWidgets.QWidget):
                     file_name = str(item.get("File") or item.get("file") or "").strip()
                     exp_id = int(idx)
                     label = name or file_name or f"exp_{idx}"
-                    expressions.append({
-                        "label": label,
-                        "name": name,
-                        "file": file_name,
-                        "exp_id": exp_id,
-                    })
+                    expressions.append(
+                        {
+                            "label": label,
+                            "name": name,
+                            "file": file_name,
+                            "exp_id": exp_id,
+                            "preview_exp": name or file_name,
+                        }
+                    )
 
             if not motions:
                 legacy_motions = data.get("motions", {})
-                for group_name, motion_items in self._iter_motion_groups(legacy_motions):
+                for group_name, motion_items in self._iter_motion_groups(
+                    legacy_motions
+                ):
                     for idx, item in enumerate(motion_items):
                         if isinstance(item, dict):
-                            raw_name = item.get("name") or item.get("Name") or item.get("file") or item.get("File") or item.get("mtn")
+                            raw_name = (
+                                item.get("name")
+                                or item.get("Name")
+                                or item.get("file")
+                                or item.get("File")
+                                or item.get("mtn")
+                            )
                         else:
                             raw_name = str(item)
-                        motion_name = str(raw_name).strip() if raw_name else f"{group_name}:{idx}"
+                        motion_name = (
+                            str(raw_name).strip() if raw_name else f"{group_name}:{idx}"
+                        )
                         motion_name = self._normalize_motion_name(motion_name)
-                        motions.append({
-                            "name": motion_name,
-                            "group": group_name,
-                            "index": int(idx),
-                        })
+                        motions.append(
+                            {
+                                "name": motion_name,
+                                "raw_name": str(raw_name).strip()
+                                if raw_name
+                                else motion_name,
+                                "preview_mtn": str(group_name).strip() or motion_name,
+                                "group": group_name,
+                                "index": int(idx),
+                            }
+                        )
 
             if not expressions:
                 legacy_expr = data.get("expressions", [])
                 if isinstance(legacy_expr, list):
                     for idx, item in enumerate(legacy_expr):
                         if isinstance(item, dict):
-                            name = str(item.get("name") or item.get("Name") or "").strip()
-                            file_name = str(item.get("file") or item.get("File") or "").strip()
+                            name = str(
+                                item.get("name") or item.get("Name") or ""
+                            ).strip()
+                            file_name = str(
+                                item.get("file") or item.get("File") or ""
+                            ).strip()
                         else:
                             name = ""
                             file_name = str(item)
                         exp_id = int(idx)
                         label = name or file_name or f"exp_{idx}"
-                        expressions.append({
-                            "label": label,
-                            "name": name,
-                            "file": file_name,
-                            "exp_id": exp_id,
-                        })
+                        expressions.append(
+                            {
+                                "label": label,
+                                "name": name,
+                                "file": file_name,
+                                "exp_id": exp_id,
+                                "preview_exp": name or file_name,
+                            }
+                        )
         except Exception:
             pass
         return motions, expressions
 
     def _refresh_preview_options(self, motions, expressions):
         self._current_motion_options = motions if isinstance(motions, list) else []
-        self._current_expression_options = expressions if isinstance(expressions, list) else []
+        self._current_expression_options = (
+            expressions if isinstance(expressions, list) else []
+        )
 
         self.combo_motion.clear()
         if self._current_motion_options:
             for item in self._current_motion_options:
                 name = str(item.get("name") or "").strip()
+                raw_name = str(item.get("raw_name") or "").strip()
+                preview_mtn = str(item.get("preview_mtn") or "").strip()
                 group = str(item.get("group") or "").strip()
-                label = f"{name} [{group}]" if group else name
-                self.combo_motion.addItem(label, name)
+                preview_name = raw_name or name
+                label = f"{preview_name} [{group}]" if group else preview_name
+                self.combo_motion.addItem(label, preview_mtn or name)
         else:
             self.combo_motion.addItem("(未解析到动作)", "")
 
@@ -567,13 +833,15 @@ class CharacterEditorWidget(QtWidgets.QWidget):
             for item in self._current_expression_options:
                 label = str(item.get("label") or "").strip() or "(未命名表情)"
                 exp_id = item.get("exp_id")
-                suffix = f" (ID={exp_id})" if exp_id is not None else " (ID未识别)"
+                suffix = f" (ID={exp_id})" if exp_id is not None else " (按名预览)"
                 self.combo_expression.addItem(f"{label}{suffix}", exp_id)
         else:
             self.combo_expression.addItem("(未解析到表情)", None)
 
     def _resolve_emotion_row(self, emotion: str, overrides: dict):
-        default_cfg = EMO_TO_LIVE2D.get(emotion, {}) if isinstance(EMO_TO_LIVE2D, dict) else {}
+        default_cfg = (
+            EMO_TO_LIVE2D.get(emotion, {}) if isinstance(EMO_TO_LIVE2D, dict) else {}
+        )
         override_cfg = overrides.get(emotion, {}) if isinstance(overrides, dict) else {}
 
         if isinstance(override_cfg, dict) and override_cfg.get("mtn"):
@@ -581,7 +849,9 @@ class CharacterEditorWidget(QtWidgets.QWidget):
             exp = override_cfg.get("exp", "")
             source = "服装覆盖"
         else:
-            mtn = str(default_cfg.get("mtn", "")) if isinstance(default_cfg, dict) else ""
+            mtn = (
+                str(default_cfg.get("mtn", "")) if isinstance(default_cfg, dict) else ""
+            )
             exp = default_cfg.get("exp", "") if isinstance(default_cfg, dict) else ""
             source = "默认"
 
@@ -598,13 +868,25 @@ class CharacterEditorWidget(QtWidgets.QWidget):
         char = self.mgr.get_character(self.current_char_id) or {}
         costume = (char.get("costumes") or {}).get(self.current_costume_name) or {}
         model_path = costume.get("path", "")
-        overrides = costume.get("emotion_map", {}) if isinstance(costume.get("emotion_map", {}), dict) else {}
+        overrides = (
+            costume.get("emotion_map", {})
+            if isinstance(costume.get("emotion_map", {}), dict)
+            else {}
+        )
 
         motions, expressions = self._parse_model_meta(model_path)
-        motion_names = [str(item.get("name", "")) for item in motions if isinstance(item, dict)]
-        expr_labels = [str(item.get("label", "")) for item in expressions if isinstance(item, dict)]
-        self.lbl_motion_summary.setText(f"动作: {', '.join([x for x in motion_names if x]) if motion_names else '(未解析到)'}")
-        self.lbl_expr_summary.setText(f"表情: {', '.join([x for x in expr_labels if x]) if expr_labels else '(未解析到)'}")
+        motion_names = [
+            str(item.get("name", "")) for item in motions if isinstance(item, dict)
+        ]
+        expr_labels = [
+            str(item.get("label", "")) for item in expressions if isinstance(item, dict)
+        ]
+        self.lbl_motion_summary.setText(
+            f"动作: {', '.join([x for x in motion_names if x]) if motion_names else '(未解析到)'}"
+        )
+        self.lbl_expr_summary.setText(
+            f"表情: {', '.join([x for x in expr_labels if x]) if expr_labels else '(未解析到)'}"
+        )
         self._refresh_preview_options(motions, expressions)
 
         rows = list(DEFAULT_EMOTION_KEYS)
@@ -624,7 +906,9 @@ class CharacterEditorWidget(QtWidgets.QWidget):
 
         self.current_costume_name = current.text()
         if self.current_char_id and self.current_costume_name:
-            self.mgr.set_current_costume_name(self.current_char_id, self.current_costume_name)
+            self.mgr.set_current_costume_name(
+                self.current_char_id, self.current_costume_name
+            )
             if self.main_app and hasattr(self.main_app, "_refresh_character_status"):
                 self.main_app._refresh_character_status()
         self._refresh_costume_detail_ui()
@@ -641,7 +925,9 @@ class CharacterEditorWidget(QtWidgets.QWidget):
             return
         emo = self._selected_emotion()
         if not emo:
-            QtWidgets.QMessageBox.information(self, "提示", "请先在表格中选中一个情绪。")
+            QtWidgets.QMessageBox.information(
+                self, "提示", "请先在表格中选中一个情绪。"
+            )
             return
         self._apply_dropdown_to_selected_emotion()
 
@@ -650,7 +936,9 @@ class CharacterEditorWidget(QtWidgets.QWidget):
             return
         motion_name = str(self.combo_motion.currentData() or "").strip()
         if not motion_name:
-            QtWidgets.QMessageBox.information(self, "提示", "当前服装没有可预览的动作。")
+            QtWidgets.QMessageBox.information(
+                self, "提示", "当前服装没有可预览的动作。"
+            )
             return
         motion_type = int(self.combo_motion_type.currentData() or 0)
         self.main_app.preview_motion(motion_name, motion_type)
@@ -658,18 +946,22 @@ class CharacterEditorWidget(QtWidgets.QWidget):
     def _preview_selected_expression(self):
         if not self.main_app or not hasattr(self.main_app, "preview_expression"):
             return
-        exp_id = self.combo_expression.currentData()
-        if exp_id is None:
-            QtWidgets.QMessageBox.information(self, "提示", "该表情未识别到 exp ID，无法直接预览。")
+        exp_value = self.combo_expression.currentData()
+        if exp_value is None:
+            QtWidgets.QMessageBox.information(
+                self, "提示", "该表情未识别到 exp ID，无法直接预览。"
+            )
             return
-        self.main_app.preview_expression(int(exp_id))
+        self.main_app.preview_expression(exp_value)
 
     def _apply_dropdown_to_selected_emotion(self):
         if not self.current_char_id or not self.current_costume_name:
             return
         emo = self._selected_emotion()
         if not emo:
-            QtWidgets.QMessageBox.information(self, "提示", "请先在表格中选中一个情绪。")
+            QtWidgets.QMessageBox.information(
+                self, "提示", "请先在表格中选中一个情绪。"
+            )
             return
 
         mtn = str(self.combo_motion.currentData() or "").strip()
@@ -681,11 +973,16 @@ class CharacterEditorWidget(QtWidgets.QWidget):
             "mtn": mtn,
             "type": int(self.combo_motion_type.currentData() or 0),
         }
-        exp_id = self.combo_expression.currentData()
-        if exp_id is not None:
-            payload["exp"] = int(exp_id)
+        exp_value = self.combo_expression.currentData()
+        if exp_value is not None:
+            if isinstance(exp_value, str) and exp_value.strip():
+                payload["exp"] = exp_value.strip()
+            else:
+                payload["exp"] = int(exp_value)
 
-        self.mgr.set_costume_emotion_override(self.current_char_id, self.current_costume_name, emo, payload)
+        self.mgr.set_costume_emotion_override(
+            self.current_char_id, self.current_costume_name, emo, payload
+        )
         self._refresh_costume_detail_ui()
 
     def _clear_selected_emotion_override(self):
@@ -693,20 +990,37 @@ class CharacterEditorWidget(QtWidgets.QWidget):
             return
         emo = self._selected_emotion()
         if not emo:
-            QtWidgets.QMessageBox.information(self, "提示", "请先在表格中选中一个情绪。")
+            QtWidgets.QMessageBox.information(
+                self, "提示", "请先在表格中选中一个情绪。"
+            )
             return
 
-        self.mgr.set_costume_emotion_override(self.current_char_id, self.current_costume_name, emo, None)
+        self.mgr.set_costume_emotion_override(
+            self.current_char_id, self.current_costume_name, emo, None
+        )
         self._refresh_costume_detail_ui()
 
     def _import_costume(self):
         if not self.current_char_id:
             return
         path, _ = QtWidgets.QFileDialog.getOpenFileName(
-            self, "选择 Live2D 模型定义文件", "", "Model3 JSON (*.model3.json)"
+            self,
+            "选择 Live2D 模型定义文件",
+            "",
+            "Live2D JSON (*.model3.json *.json);;Model3 JSON (*.model3.json);;Model JSON (*.json)",
         )
         if path:
-            name, ok = QtWidgets.QInputDialog.getText(self, "服装名称", "给这件衣服起个名字:")
+            base = os.path.basename(path).lower()
+            if base not in {"model.json"} and not base.endswith(".model3.json"):
+                QtWidgets.QMessageBox.warning(
+                    self,
+                    "提示",
+                    "请选择标准的 .model3.json 或名为 model.json 的 Live2D 模型文件。",
+                )
+                return
+            name, ok = QtWidgets.QInputDialog.getText(
+                self, "服装名称", "给这件衣服起个名字:"
+            )
             if ok and name:
                 self.mgr.add_costume(self.current_char_id, name, path)
                 self._load_char_to_ui(self.current_char_id)

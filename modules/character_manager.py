@@ -22,16 +22,13 @@ DEFAULT_EMOTION_KEYS = [
 
 class CharacterManager:
     def __init__(self):
-        self.data = {
-            "active_id": None,
-            "characters": {}
-        }
+        self.data = {"active_id": None, "characters": {}}
         self.load()
 
     def load(self):
         if os.path.exists(DATA_FILE):
             try:
-                with open(DATA_FILE, 'r', encoding='utf-8') as f:
+                with open(DATA_FILE, "r", encoding="utf-8") as f:
                     self.data = json.load(f)
             except Exception as e:
                 print(f"❌ 加载角色数据失败: {e}")
@@ -44,7 +41,7 @@ class CharacterManager:
     def save(self):
         os.makedirs(os.path.dirname(DATA_FILE), exist_ok=True)
         try:
-            with open(DATA_FILE, 'w', encoding='utf-8') as f:
+            with open(DATA_FILE, "w", encoding="utf-8") as f:
                 json.dump(self.data, f, ensure_ascii=False, indent=2)
         except Exception as e:
             print(f"❌ 保存角色数据失败: {e}")
@@ -52,13 +49,16 @@ class CharacterManager:
     def _migrate_from_config(self):
         try:
             from config import COSTUME_MAP, PERSONA_PROMPT
+
             char_id = "default_char"
             costumes = {}
             for name, cfg in (COSTUME_MAP or {}).items():
                 if isinstance(cfg, dict):
                     costumes[name] = {
                         "path": cfg.get("path", ""),
-                        "emotion_map": cfg.get("emotion_map", {}) if isinstance(cfg.get("emotion_map", {}), dict) else {}
+                        "emotion_map": cfg.get("emotion_map", {})
+                        if isinstance(cfg.get("emotion_map", {}), dict)
+                        else {},
                     }
                 elif isinstance(cfg, str):
                     costumes[name] = {"path": cfg, "emotion_map": {}}
@@ -66,7 +66,7 @@ class CharacterManager:
                 "name": "默认角色",
                 "prompt": PERSONA_PROMPT,
                 "costumes": costumes,
-                "current_costume": next(iter(costumes.keys()), None)
+                "current_costume": next(iter(costumes.keys()), None),
             }
             self.data["active_id"] = char_id
             self.save()
@@ -107,6 +107,21 @@ class CharacterManager:
                 char_data["current_costume"] = next(iter(normalized.keys()), None)
                 changed = True
 
+            tts_cfg = char_data.get("tts_config") or {}
+            if not isinstance(tts_cfg, dict):
+                tts_cfg = {}
+            normalized_tts = {
+                "enabled": bool(tts_cfg.get("enabled", False)),
+                "gpt_w": str(tts_cfg.get("gpt_w", "") or ""),
+                "sov_w": str(tts_cfg.get("sov_w", "") or ""),
+                "ref_wav": str(tts_cfg.get("ref_wav", "") or ""),
+                "prompt_lang": str(tts_cfg.get("prompt_lang", "ja") or "ja"),
+                "prompt_text": str(tts_cfg.get("prompt_text", "") or ""),
+            }
+            if char_data.get("tts_config") != normalized_tts:
+                char_data["tts_config"] = normalized_tts
+                changed = True
+
         if changed:
             self.save()
 
@@ -126,13 +141,22 @@ class CharacterManager:
         self.data["characters"][char_id] = {
             "name": name,
             "prompt": prompt,
-            "costumes": {}
+            "costumes": {},
+            "tts_config": {
+                "enabled": False,
+                "gpt_w": "",
+                "sov_w": "",
+                "ref_wav": "",
+                "prompt_lang": "ja",
+                "prompt_text": "",
+            },
         }
         self.save()
 
         # 2. 同步写入 SQLite (记忆管理)
         try:
             from modules.memory_sqlite import get_memory_store
+
             store = get_memory_store()
             if store:
                 from datetime import datetime
@@ -140,25 +164,29 @@ class CharacterManager:
                 # 构造初始档案条目
                 # 条目1: 名字
                 name_id = f"p_init_name_{char_id}_{int(time.time())}"
-                store.upsert_item({
-                    "id": name_id,
-                    "type": "agent_profile",
-                    "text": name,
-                    "tags": [f"role:{char_id}", "name"],  # 关键标签
-                    "status": "active",
-                    "updated_at": datetime.now().isoformat()
-                })
+                store.upsert_item(
+                    {
+                        "id": name_id,
+                        "type": "agent_profile",
+                        "text": name,
+                        "tags": [f"role:{char_id}", "name"],  # 关键标签
+                        "status": "active",
+                        "updated_at": datetime.now().isoformat(),
+                    }
+                )
 
                 # 条目2: 默认性格占位符 (可选)
                 trait_id = f"p_init_trait_{char_id}_{int(time.time())}"
-                store.upsert_item({
-                    "id": trait_id,
-                    "type": "agent_profile",
-                    "text": "温柔 / 冷静 (初始性格)",
-                    "tags": [f"role:{char_id}", "traits"],  # 关键标签
-                    "status": "active",
-                    "updated_at": datetime.now().isoformat()
-                })
+                store.upsert_item(
+                    {
+                        "id": trait_id,
+                        "type": "agent_profile",
+                        "text": "温柔 / 冷静 (初始性格)",
+                        "tags": [f"role:{char_id}", "traits"],  # 关键标签
+                        "status": "active",
+                        "updated_at": datetime.now().isoformat(),
+                    }
+                )
 
                 print(f"✅ [Sync] 已同步创建角色档案: {name} (ID: {char_id})")
         except Exception as e:
@@ -181,16 +209,14 @@ class CharacterManager:
 
     def add_costume(self, char_id: str, costume_name: str, model_path: str):
         char = self.get_character(char_id)
-        if not char: return False
+        if not char:
+            return False
 
         rel_path = model_path.replace("\\", "/")
         if "assets/" in rel_path:
             rel_path = "assets/" + rel_path.split("assets/", 1)[1]
 
-        char["costumes"][costume_name] = {
-            "path": rel_path,
-            "emotion_map": {}
-        }
+        char["costumes"][costume_name] = {"path": rel_path, "emotion_map": {}}
         if not char.get("current_costume"):
             char["current_costume"] = costume_name
         self.save()
@@ -205,11 +231,11 @@ class CharacterManager:
         emotion_map = costume.get("emotion_map")
         if not isinstance(emotion_map, dict):
             emotion_map = {}
-        return {
-            "emotion_map": deepcopy(emotion_map)
-        }
+        return {"emotion_map": deepcopy(emotion_map)}
 
-    def set_costume_emotion_override(self, char_id: str, costume_name: str, emotion: str, cfg: Optional[dict]):
+    def set_costume_emotion_override(
+        self, char_id: str, costume_name: str, emotion: str, cfg: Optional[dict]
+    ):
         char = self.get_character(char_id)
         if not char:
             return False
@@ -300,6 +326,17 @@ class CharacterManager:
             self.save()
             return self.data["characters"][char_id]
         return None
+
+    def get_tts_config(self, char_id: Optional[str] = None) -> dict:
+        if not char_id:
+            char_id = self.data.get("active_id")
+        if not char_id:
+            return {}
+        char = self.get_character(char_id)
+        if not char:
+            return {}
+        cfg = char.get("tts_config") or {}
+        return cfg if isinstance(cfg, dict) else {}
 
     def get_active_character(self):
         aid = self.data.get("active_id")

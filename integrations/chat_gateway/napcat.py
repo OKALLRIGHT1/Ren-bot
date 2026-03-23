@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
 from urllib import error, request
@@ -67,6 +68,7 @@ class NapCatOneBotAdapter(BaseChatAdapter):
         user_blacklist: Optional[List[str]] = None,
         group_whitelist: Optional[List[str]] = None,
         group_blacklist: Optional[List[str]] = None,
+        group_no_at_keywords: Optional[List[str]] = None,
         ws_action_sender: Optional[Callable[[str, Dict[str, Any], float], Awaitable[Dict[str, Any]]]] = None,
     ):
         self.api_base = str(api_base or '').rstrip('/')
@@ -87,10 +89,14 @@ class NapCatOneBotAdapter(BaseChatAdapter):
         self.user_blacklist = {str(item).strip() for item in (user_blacklist or []) if str(item).strip()}
         self.group_whitelist = {str(item).strip() for item in (group_whitelist or []) if str(item).strip()}
         self.group_blacklist = {str(item).strip() for item in (group_blacklist or []) if str(item).strip()}
+        self.group_no_at_keywords = [str(item).strip() for item in (group_no_at_keywords or []) if str(item).strip()]
         self.ws_action_sender = ws_action_sender
 
     def set_ws_action_sender(self, sender: Optional[Callable[[str, Dict[str, Any], float], Awaitable[Dict[str, Any]]]]) -> None:
         self.ws_action_sender = sender
+
+    def set_group_no_at_keywords(self, keywords: Optional[List[str]]) -> None:
+        self.group_no_at_keywords = [str(item).strip() for item in (keywords or []) if str(item).strip()]
 
     def _passes_filter(self, message_type: str, user_id: str, group_id: Any) -> bool:
         mode = self.filter_mode
@@ -118,6 +124,26 @@ class NapCatOneBotAdapter(BaseChatAdapter):
             return not bool(user_key and user_key in self.user_blacklist)
 
         return True
+
+
+    def _allow_group_without_at(self, raw_message: str) -> bool:
+        if not self.group_no_at_keywords:
+            return False
+        text = str(raw_message or "").strip()
+        if not text:
+            return False
+        low = text.lower()
+        for key in self.group_no_at_keywords:
+            if key.startswith("re:"):
+                pattern = key[3:]
+                try:
+                    if re.search(pattern, text, flags=re.IGNORECASE | re.DOTALL):
+                        return True
+                except re.error:
+                    continue
+            elif key.lower() in low:
+                return True
+        return False
 
     def _message_targets_self(self, payload: Dict[str, Any], self_id: str) -> bool:
         if not self_id:
@@ -153,6 +179,17 @@ class NapCatOneBotAdapter(BaseChatAdapter):
         }
         return {key: value for key, value in image.items() if value}
 
+    def _extract_file_segment(self, seg: Dict[str, Any]) -> Dict[str, Any]:
+        data = seg.get('data') or {}
+        file_payload = {
+            'file': str(data.get('file') or '').strip(),
+            'name': str(data.get('name') or '').strip(),
+            'url': str(data.get('url') or '').strip(),
+            'size': data.get('size'),
+            'id': str(data.get('id') or data.get('file_id') or '').strip(),
+        }
+        return {key: value for key, value in file_payload.items() if value not in (None, '', [])}
+
     def _segment_to_text(self, seg: Dict[str, Any], self_id: str) -> str:
         seg_type = str(seg.get('type') or '').strip().lower()
         data = seg.get('data') or {}
@@ -177,9 +214,14 @@ class NapCatOneBotAdapter(BaseChatAdapter):
         }
         return placeholders.get(seg_type, '')
 
-    def _extract_message_payload(self, payload: Dict[str, Any], self_id: str) -> Tuple[str, List[Dict[str, Any]]]:
+    def _extract_message_payload(
+        self,
+        payload: Dict[str, Any],
+        self_id: str,
+    ) -> Tuple[str, List[Dict[str, Any]], List[Dict[str, Any]]]:
         message = payload.get('message')
         images: List[Dict[str, Any]] = []
+        files: List[Dict[str, Any]] = []
         if isinstance(message, list):
             parts: List[str] = []
             for seg in message:
@@ -190,13 +232,17 @@ class NapCatOneBotAdapter(BaseChatAdapter):
                     image_payload = self._extract_image_segment(seg)
                     if image_payload:
                         images.append(image_payload)
+                elif seg_type == 'file':
+                    file_payload = self._extract_file_segment(seg)
+                    if file_payload:
+                        files.append(file_payload)
                 text = self._segment_to_text(seg, self_id)
                 if text:
                     parts.append(text)
-            if parts or images:
-                return ' '.join(' '.join(parts).split()), images
+            if parts or images or files:
+                return ' '.join(' '.join(parts).split()), images, files
         raw_text = str(payload.get('raw_message') or payload.get('message') or '')
-        return ' '.join(raw_text.split()), images
+        return ' '.join(raw_text.split()), images, files
 
     def _parse_session(self, session_id: str) -> Tuple[str, str]:
         session_text = str(session_id or '').strip()
@@ -279,7 +325,7 @@ class NapCatOneBotAdapter(BaseChatAdapter):
         post_type = str(payload.get('post_type') or '')
         message_type = str(payload.get('message_type') or '')
         self_id = str(payload.get('self_id') or '')
-        raw_message, images = self._extract_message_payload(payload, self_id)
+        raw_message, images, files = self._extract_message_payload(payload, self_id)
         if post_type != 'message' or not raw_message:
             return None
 
@@ -294,7 +340,8 @@ class NapCatOneBotAdapter(BaseChatAdapter):
             if not self.allow_group:
                 return None
             if self.group_require_at and not self._message_targets_self(payload, self_id):
-                return None
+                if not self._allow_group_without_at(raw_message):
+                    return None
             session_id = f"group:{payload.get('group_id')}"
             raw_message = self._strip_self_mentions(raw_message, self_id).strip()
             if not raw_message:
@@ -328,6 +375,9 @@ class NapCatOneBotAdapter(BaseChatAdapter):
                 'images': images,
                 'has_image': bool(images),
                 'image_count': len(images),
+                'files': files,
+                'has_file': bool(files),
+                'file_count': len(files),
                 'image_vision_enabled': self.image_vision_enabled,
                 'image_prompt': self.image_prompt,
                 'filter_mode': self.filter_mode,
@@ -419,3 +469,79 @@ class NapCatOneBotAdapter(BaseChatAdapter):
             result.setdefault('image_path', str(image_file))
             result.setdefault('caption', caption)
         return result
+
+    async def send_file(self, session_id: str, file_path: str, **kwargs: Any) -> Any:
+        path_text = str(file_path or '').strip()
+        if not path_text:
+            return {'ok': False, 'reason': 'empty_file_path', 'session_id': session_id}
+        if not self.reply_enabled:
+            return {'ok': False, 'reason': 'reply_disabled', 'session_id': session_id, 'file_path': path_text}
+
+        file_item = Path(path_text).expanduser()
+        try:
+            file_item = file_item.resolve()
+        except Exception:
+            file_item = file_item.absolute()
+        if not file_item.exists() or not file_item.is_file():
+            return {'ok': False, 'reason': 'file_missing', 'session_id': session_id, 'file_path': str(file_item)}
+
+        file_name = str(kwargs.get('name') or '').strip() or file_item.name
+        message = [{
+            'type': 'file',
+            'data': {
+                'file': file_item.as_uri(),
+                'name': file_name,
+            },
+        }]
+        action_info = self._build_send_action(session_id, message)
+        if not action_info.get('ok'):
+            action_info.setdefault('file_path', str(file_item))
+            action_info.setdefault('file_name', file_name)
+            return action_info
+        result = await self._send_action(session_id, action_info['action'], action_info['payload'], **kwargs)
+        if isinstance(result, dict):
+            result.setdefault('file_path', str(file_item))
+            result.setdefault('file_name', file_name)
+        return result
+
+    async def send_share(self, session_id: str, url: str, **kwargs: Any) -> Any:
+        url_text = str(url or '').strip()
+        if not url_text:
+            return {'ok': False, 'reason': 'empty_share_url', 'session_id': session_id}
+        if not self.reply_enabled:
+            return {'ok': False, 'reason': 'reply_disabled', 'session_id': session_id, 'url': url_text}
+
+        title = str(kwargs.get('title') or '').strip() or url_text
+        content = str(kwargs.get('content') or '').strip()
+        image = str(kwargs.get('image') or '').strip()
+
+        data = {'url': url_text, 'title': title}
+        if content:
+            data['content'] = content
+        if image:
+            data['image'] = image
+
+        message = [{
+            'type': 'share',
+            'data': data,
+        }]
+        action_info = self._build_send_action(session_id, message)
+        if not action_info.get('ok'):
+            action_info.setdefault('url', url_text)
+            action_info.setdefault('title', title)
+            return action_info
+        result = await self._send_action(session_id, action_info['action'], action_info['payload'], **kwargs)
+        if isinstance(result, dict):
+            result.setdefault('url', url_text)
+            result.setdefault('title', title)
+        return result
+
+
+
+
+
+
+
+
+
+

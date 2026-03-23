@@ -1,41 +1,393 @@
-from duckduckgo_search import DDGS
+import asyncio
+import json
+import os
+import re
+from urllib.parse import urlparse
+from typing import Any, Dict, List, Optional
+from urllib import error, request
+
 from core.logger import get_logger
 from plugins.plugin_utils import handle_plugin_errors
 
 logger = get_logger()
 
+QUESTION_HINTS = (
+    "什么", "怎么", "如何", "为什么", "为何", "是不是", "能不能", "可以吗", "有没有",
+    "谁", "哪", "多少", "几", "解释", "原理", "区别", "比较",
+)
+TIME_SENSITIVE_HINTS = (
+    "最新", "今天", "刚刚", "实时", "新闻", "行情", "价格", "股价", "汇率", "天气", "时间",
+    "日期", "热搜", "热度", "趋势", "走势", "公告", "发生了什么", "有什么新",
+)
+
+NUMERIC_HINTS = (
+    "价格", "行情", "汇率", "指数", "点位", "价位", "现价", "报价",
+    "金价", "银价", "油价", "股价", "利率", "收益率", "现货", "期货",
+    "多少", "多少钱", "几块", "几元", "几美元", "涨跌幅", "涨幅", "跌幅",
+)
+
+NUMERIC_UNITS = (
+    "美元/盎司", "美元/克", "元/克", "元/盎司", "美元", "人民币", "CNY", "RMB", "USD", "HKD", "EUR", "JPY",
+    "盎司", "克", "吨", "元", "点", "点位", "%", "bps",
+)
+
+
 
 class Plugin:
     @handle_plugin_errors("联网搜索")
     async def run(self, args, ctx):
-        query = args.strip()
+        query = str(args or "").strip()
         if not query:
             logger.warning("搜索词为空")
             return "❌ 搜索词不能为空。"
 
+        settings = getattr(self, "settings", {}) or {}
+        base_url = str(self._read_setting(settings, "base_url", "")).strip()
+        if not base_url:
+            base_url = str(os.getenv("EXA_BASE_URL", "")).strip() or "http://localhost:7860"
+        api_key = str(self._read_setting(settings, "api_key", "")).strip()
+        if not api_key:
+            api_key = str(os.getenv("EXA_API_KEY", "")).strip()
+
+        num_results = self._to_int(self._read_setting(settings, "num_results", 5), 5, 1, 10)
+        use_answer = self._to_bool(self._read_setting(settings, "use_answer", True))
+        use_contents = self._to_bool(self._read_setting(settings, "use_contents", False))
+        contents_max = self._to_int(self._read_setting(settings, "contents_max", 3), 3, 1, 10)
+        fallback_ddg = self._to_bool(self._read_setting(settings, "fallback_ddg", True))
+        timeout_sec = self._to_int(self._read_setting(settings, "request_timeout_sec", 12), 12, 3, 60)
+        link_request = self._is_link_request(query, ctx)
+
         logger.info(f"正在搜索: {query}")
 
-        try:
-            # 使用上下文管理器，并限制结果数量为 3
-            # region: "cn-zh" 优化中文搜索结果
-            with DDGS() as ddgs:
-                results = list(ddgs.text(query, region="cn-zh", max_results=3))
+        if base_url:
+            try:
+                if use_answer and self._should_use_answer(query):
+                    answer_text = await self._exa_answer(base_url, api_key, query, timeout_sec)
+                    if answer_text:
+                        return answer_text
 
-            if not results:
-                logger.warning(f"未找到搜索结果: {query}")
+                results = await self._exa_search(base_url, api_key, query, num_results, timeout_sec)
+                if results:
+                    if use_contents:
+                        results = await self._exa_contents_merge(base_url, api_key, results, contents_max, timeout_sec)
+                    return self._format_results(query, results, provider="Exa", show_links=link_request)
+
+                if fallback_ddg:
+                    return await self._ddg_search(query, num_results, show_links=link_request)
                 return f"未找到关于 '{query}' 的相关结果。"
+            except Exception as exc:
+                logger.warning(f"Exa 搜索失败: {exc}")
+                if fallback_ddg:
+                    return await self._ddg_search(query, num_results, show_links=link_request)
+                return f"搜索失败: {exc}"
 
-            # 整理结果格式，供 LLM 阅读
-            summary = [f"关于 '{query}' 的搜索结果："]
-            for i, res in enumerate(results):
-                title = res.get('title', '无标题')
-                body = res.get('body', '无内容')
-                href = res.get('href', '')
-                summary.append(f"[{i + 1}] 标题：{title}\n    摘要：{body}\n    来源：{href}")
+        return await self._ddg_search(query, num_results, show_links=link_request)
 
-            logger.info(f"搜索成功，找到 {len(results)} 条结果")
-            return "\n".join(summary)
+    def _read_setting(self, settings: Dict[str, Any], key: str, default: Any) -> Any:
+        value = settings.get(key, default)
+        if isinstance(value, dict):
+            return value.get("default", default)
+        return default if value is None else value
 
-        except Exception as e:
-            logger.error(f"搜索错误: {e}")
-            return f"搜索时发生网络错误或接口限制: {e}"
+    def _to_bool(self, value: Any) -> bool:
+        if isinstance(value, bool):
+            return value
+        text = str(value or "").strip().lower()
+        if text in {"1", "true", "yes", "on"}:
+            return True
+        if text in {"0", "false", "no", "off"}:
+            return False
+        return bool(value)
+
+    def _to_int(self, value: Any, default: int, min_val: int, max_val: int) -> int:
+        try:
+            num = int(value)
+        except Exception:
+            num = default
+        return max(min_val, min(max_val, num))
+
+    def _should_use_answer(self, query: str) -> bool:
+        text = str(query or "").strip()
+        if not text:
+            return False
+        if self._is_time_sensitive(text):
+            return False
+        if "?" in text or "？" in text:
+            return True
+        if text.endswith(("吗", "么", "呢")):
+            return True
+        return any(k in text for k in QUESTION_HINTS)
+
+    def _is_time_sensitive(self, query: str) -> bool:
+        text = str(query or "")
+        if any(k in text for k in TIME_SENSITIVE_HINTS):
+            return True
+        lower = text.lower()
+        return bool(re.search(r"\b(latest|today|news|price|stock|weather|time|date|trend)\b", lower))
+
+    def _build_url(self, base_url: str, endpoint: str) -> str:
+        base = str(base_url or "").rstrip("/")
+        ep = str(endpoint or "").strip()
+        if not ep.startswith("/"):
+            ep = "/" + ep
+        return base + ep
+
+    def _build_headers(self, api_key: str) -> Dict[str, str]:
+        headers = {"Content-Type": "application/json"}
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
+        return headers
+
+    def _post_json(self, url: str, payload: Dict[str, Any], headers: Dict[str, str], timeout_sec: int) -> Dict[str, Any]:
+        data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        req = request.Request(url, data=data, headers=headers, method="POST")
+        try:
+            with request.urlopen(req, timeout=float(timeout_sec)) as resp:
+                raw = resp.read()
+        except error.HTTPError as exc:
+            body = exc.read().decode("utf-8", errors="replace") if hasattr(exc, "read") else ""
+            raise RuntimeError(f"HTTP {exc.code}: {body[:200]}")
+        except Exception as exc:
+            raise RuntimeError(str(exc))
+        try:
+            return json.loads(raw.decode("utf-8", errors="replace"))
+        except Exception:
+            return {"raw": raw.decode("utf-8", errors="replace")}
+
+    async def _post_json_async(self, url: str, payload: Dict[str, Any], headers: Dict[str, str], timeout_sec: int) -> Dict[str, Any]:
+        return await asyncio.to_thread(self._post_json, url, payload, headers, timeout_sec)
+
+    def _extract_results(self, payload: Any) -> List[Dict[str, Any]]:
+        if isinstance(payload, dict):
+            if isinstance(payload.get("results"), list):
+                return payload.get("results") or []
+            data = payload.get("data")
+            if isinstance(data, dict) and isinstance(data.get("results"), list):
+                return data.get("results") or []
+            if isinstance(data, list):
+                return data
+        if isinstance(payload, list):
+            return payload
+        return []
+
+    def _extract_answer(self, payload: Any) -> str:
+        if not isinstance(payload, dict):
+            return ""
+        answer = payload.get("answer")
+        if isinstance(answer, dict):
+            for key in ("text", "answer", "content"):
+                text = str(answer.get(key) or "").strip()
+                if text:
+                    return text
+        for key in ("answer", "text", "result", "output", "message"):
+            text = str(payload.get(key) or "").strip()
+            if text:
+                return text
+        return ""
+
+    def _extract_sources(self, payload: Any) -> List[Dict[str, Any]]:
+        if not isinstance(payload, dict):
+            return []
+        for key in ("sources", "citations", "results"):
+            value = payload.get(key)
+            if isinstance(value, list):
+                return value
+        data = payload.get("data")
+        if isinstance(data, dict) and isinstance(data.get("results"), list):
+            return data.get("results") or []
+        return []
+
+    async def _exa_search(self, base_url: str, api_key: str, query: str, num_results: int, timeout_sec: int) -> List[Dict[str, Any]]:
+        url = self._build_url(base_url, "/search")
+        payload = {"query": query, "numResults": num_results}
+        headers = self._build_headers(api_key)
+        data = await self._post_json_async(url, payload, headers, timeout_sec)
+        return self._extract_results(data)
+
+    async def _exa_answer(self, base_url: str, api_key: str, query: str, timeout_sec: int) -> str:
+        url = self._build_url(base_url, "/answer")
+        payload = {"query": query}
+        headers = self._build_headers(api_key)
+        data = await self._post_json_async(url, payload, headers, timeout_sec)
+        answer = self._extract_answer(data)
+        if not answer:
+            return ""
+        sources = self._extract_sources(data)
+        lines = ["【Exa Answer】", answer]
+        if sources:
+            lines.append("\n来源：")
+            for idx, item in enumerate(sources[:5], 1):
+                title = str(item.get("title") or item.get("name") or "无标题")
+                url = str(item.get("url") or item.get("link") or item.get("id") or "")
+                lines.append(f"[{idx}] {title} {url}".strip())
+        return "\n".join(lines)
+
+    async def _exa_contents_merge(
+        self,
+        base_url: str,
+        api_key: str,
+        results: List[Dict[str, Any]],
+        max_items: int,
+        timeout_sec: int,
+    ) -> List[Dict[str, Any]]:
+        ids = [str(item.get("id")) for item in results if item.get("id")]
+        urls = [str(item.get("url")) for item in results if item.get("url")]
+        if not ids and not urls:
+            return results
+        payload: Dict[str, Any] = {}
+        if ids:
+            payload["ids"] = ids[:max_items]
+        else:
+            payload["urls"] = urls[:max_items]
+
+        url = self._build_url(base_url, "/contents")
+        headers = self._build_headers(api_key)
+        data = await self._post_json_async(url, payload, headers, timeout_sec)
+        contents = self._extract_results(data)
+        if not contents:
+            return results
+
+        index: Dict[str, Dict[str, Any]] = {}
+        for item in contents:
+            key = str(item.get("id") or item.get("url") or "").strip()
+            if key:
+                index[key] = item
+
+        merged: List[Dict[str, Any]] = []
+        for item in results:
+            key = str(item.get("id") or item.get("url") or "").strip()
+            if key and key in index:
+                enriched = {**item, **index[key]}
+                merged.append(enriched)
+            else:
+                merged.append(item)
+        return merged
+
+    def _compact_text(self, text: str, limit: int = 220) -> str:
+        cleaned = re.sub(r"\s+", " ", str(text or "").strip())
+        if len(cleaned) > limit:
+            return cleaned[:limit] + "..."
+        return cleaned
+
+    def _short_date(self, value: str) -> str:
+        text = str(value or "").strip()
+        if not text:
+            return ""
+        if "T" in text:
+            return text.split("T", 1)[0]
+        return text
+
+    def _extract_domain(self, url: str) -> str:
+        text = str(url or "").strip()
+        if not text:
+            return ""
+        try:
+            host = urlparse(text).netloc
+        except Exception:
+            host = ""
+        if not host:
+            host = re.sub(r"^https?://", "", text).split("/")[0]
+        return host
+
+    def _strip_dates(self, text: str) -> str:
+        t = str(text or "")
+        t = re.sub(r"\b20\d{2}[-/年]\d{1,2}[-/月]\d{1,2}(?:日)?\b", " ", t)
+        return t
+
+    def _extract_numbers(self, text: str, limit: int = 3) -> List[str]:
+        if not text:
+            return []
+        cleaned = self._strip_dates(text)
+        unit_pattern = "|".join([re.escape(u) for u in NUMERIC_UNITS])
+        if unit_pattern:
+            pattern = re.compile(r"(\d{1,3}(?:,\d{3})*(?:\.\d+)?|\d+\.\d+|\d+)(?:\s*(" + unit_pattern + r"))?", flags=re.IGNORECASE)
+        else:
+            pattern = re.compile(r"(\d{1,3}(?:,\d{3})*(?:\.\d+)?|\d+\.\d+|\d+)")
+        seen = []
+        for m in pattern.finditer(cleaned):
+            num = m.group(1)
+            unit = m.group(2) if m.lastindex and m.lastindex >= 2 else ""
+            if not unit:
+                if re.fullmatch(r"\d{4}", num):
+                    yr = int(num)
+                    if 1900 <= yr <= 2100:
+                        continue
+            val = f"{num}{unit}".strip()
+            if not val or val in seen:
+                continue
+            seen.append(val)
+            if len(seen) >= limit:
+                break
+        return seen
+
+    def _needs_numeric(self, query: str) -> bool:
+        text = str(query or "")
+        if any(k in text for k in NUMERIC_HINTS):
+            return True
+        lower = text.lower()
+        return bool(re.search(r"\b(price|quote|rate|index|usd|cny|rmb)\b", lower))
+
+    def _is_link_request(self, query: str, ctx: Optional[dict] = None) -> bool:
+        text = str(query or "")
+        if isinstance(ctx, dict):
+            extra = str(ctx.get("user_text") or "").strip()
+            if extra:
+                text = f"{text} {extra}".strip()
+        lower = text.lower()
+        if "链接" in text or "网址" in text:
+            return True
+        return ("link" in lower) or ("url" in lower)
+
+    def _format_results(self, query: str, results: List[Dict[str, Any]], provider: str, show_links: bool = False) -> str:
+        if not results:
+            return f"未找到关于 '{query}' 的相关结果。"
+
+        lines = [f"关于 '{query}' 的搜索结果（{provider}）："]
+        display_max = 3
+        need_nums = self._needs_numeric(query)
+        any_nums = False
+        for i, res in enumerate(results[:display_max], 1):
+            title = str(res.get("title") or res.get("name") or "无标题")
+            snippet = self._compact_text(
+                res.get("text") or res.get("snippet") or res.get("content") or res.get("summary") or "",
+                limit=80,
+            )
+            url = str(res.get("url") or res.get("link") or res.get("id") or "")
+            published = self._short_date(res.get("publishedDate") or res.get("published_date") or "")
+            domain = self._extract_domain(url)
+            prefix = f"[{i}] {title}"
+            meta = " | ".join([x for x in (published, domain) if x])
+            if meta:
+                prefix += f"（{meta}）"
+            lines.append(prefix)
+            if snippet:
+                lines.append(f"    摘要：{snippet}")
+            if need_nums:
+                nums = self._extract_numbers(f"{title} {snippet}")
+                if nums:
+                    any_nums = True
+                    lines.append(f"    关键数值：{', '.join(nums)}")
+            if show_links and url:
+                lines.append(f"    链接：{url}")
+        if need_nums and not any_nums:
+            lines.append("未在摘要中发现具体数值。")
+        return "\n".join(lines)
+
+    async def _ddg_search(self, query: str, num_results: int, show_links: bool = False) -> str:
+        try:
+            from duckduckgo_search import DDGS
+        except Exception as exc:
+            return f"⚠️ Exa 不可用，DDG 也无法加载：{exc}"
+
+        def _search_sync() -> List[Dict[str, Any]]:
+            with DDGS() as ddgs:
+                return list(ddgs.text(query, region="cn-zh", max_results=num_results))
+
+        try:
+            results = await asyncio.to_thread(_search_sync)
+        except Exception as exc:
+            return f"搜索时发生网络错误或接口限制: {exc}"
+
+        if not results:
+            return f"未找到关于 '{query}' 的相关结果。"
+        return self._format_results(query, results, provider="DDG", show_links=show_links)

@@ -12,7 +12,7 @@ except Exception:
     gw = None
     _PYGETWINDOW_OK = False
 from datetime import datetime
-from typing import Optional, Dict, Tuple, List
+from typing import Optional, Dict, Tuple, List, Any
 
 import config
 from modules.llm import chat_with_ai
@@ -20,7 +20,9 @@ from modules.llm import chat_with_ai
 from config import (
     SCREEN_SENSOR_ENABLED, SCREEN_SENSOR_INTERVAL,
     WINDOW_CATEGORIES, WINDOW_IGNORE_KEYWORDS, SCREEN_SMART_DEBOUNCE,
-    SCREEN_REACTION_COOLDOWN, SCREEN_GLOBAL_COOLDOWN, SELF_WINDOW_TITLES
+    SCREEN_REACTION_COOLDOWN, SCREEN_GLOBAL_COOLDOWN, SELF_WINDOW_TITLES,
+    SEDENTARY_REMINDER_MINUTES, SEDENTARY_REMINDER_COOLDOWN_MINUTES,
+    SCREEN_OBSERVATION_MAX_ITEMS, SCREEN_ACTIVITY_MAX_ITEMS
 )
 from core.logger import get_logger
 try:
@@ -77,6 +79,16 @@ class ScreenSensor:
         self.app_cache: Dict[str, List[str]] = {}
         self.current_day = datetime.now().day
 
+        self.app_category_map: Dict[str, str] = {}
+        self.observation_entries: List[Dict[str, Any]] = []
+        self.activity_segments: List[Dict[str, Any]] = []
+        self.max_observations = int(SCREEN_OBSERVATION_MAX_ITEMS)
+        self.max_segments = int(SCREEN_ACTIVITY_MAX_ITEMS)
+
+        self.sedentary_interval_sec = max(60, int(SEDENTARY_REMINDER_MINUTES) * 60)
+        self.sedentary_cooldown_sec = max(300, int(SEDENTARY_REMINDER_COOLDOWN_MINUTES) * 60)
+        self.next_sedentary_alert_time = time.time() + self.sedentary_interval_sec
+
         self._load_stats()
         self._last_alert_app = None
         self._last_alert_time = 0
@@ -100,72 +112,365 @@ class ScreenSensor:
 
     # ==================== 数据接口 ====================
     def get_formatted_report(self) -> str:
-        """生成今日数据的格式化文本 (含时长)"""
-        if not self.daily_counts:
+        """生成今日数据的格式化文本 (含时长/分类/观察摘要)"""
+        if not self.daily_counts and not self.daily_durations:
             return "（今日尚无任何屏幕活动记录）"
 
-        # 按时长倒序排列 (通常时长比次数更重要)
-        # 如果你想按次数排，就把 x[1] 改成 self.daily_counts.get(x[0], 0)
         sorted_apps = sorted(self.daily_durations.items(), key=lambda x: x[1], reverse=True)
 
         lines = []
 
-        # 计算总时长 (秒 -> 小时)
         total_seconds = sum(self.daily_durations.values())
         total_hours = total_seconds / 3600.0
         lines.append(f"【今日屏幕活动统计】(活跃时长: {total_hours:.1f}小时)")
 
-        category_counts = {}
+        category_totals = self._compute_category_totals()
+        if category_totals:
+            lines.append("【按分类】")
+            for cat, seconds in sorted(category_totals.items(), key=lambda x: x[1], reverse=True):
+                if seconds <= 0:
+                    continue
+                lines.append(f"- {cat}: {self._format_duration(seconds)}")
 
+        lines.append("【按应用】")
         for app, duration_sec in sorted_apps:
             count = self.daily_counts.get(app, 0)
-
-            # 查缓存获取分类
-            cat = "other"
-            if app in self.app_cache:  # 你的代码里 app_cache key是title，这里逻辑可能要微调
-                # 为了简单，我们可以重新根据 analyze 获取，或者在 _monitor_loop 里维护 category_map
-                # 这里假设 app_cache 的结构能查到，或者直接展示 app
-                pass
-
-            # 格式化时长
-            if duration_sec < 60:
-                time_str = f"{int(duration_sec)}秒"
-            elif duration_sec < 3600:
-                time_str = f"{int(duration_sec / 60)}分钟"
-            else:
-                time_str = f"{duration_sec / 3600:.1f}小时"
-
+            time_str = self._format_duration(duration_sec)
             lines.append(f"- {app}: {time_str} ({count}次)")
+
+        obs_lines = self._format_compact_observations(self.observation_entries, limit=10)
+        if obs_lines:
+            lines.append("【今日观察摘要】")
+            lines.extend(obs_lines)
+
+        if self.activity_segments:
+            lines.append("【最近活动切片】")
+            recent_segments = self.activity_segments[-5:]
+            for seg in recent_segments:
+                start = seg.get("start_time", "--:--")
+                end = seg.get("end_time", "--:--")
+                app = seg.get("app", "")
+                cat = seg.get("category", "")
+                dur = self._format_duration(seg.get("duration_sec", 0))
+                if app:
+                    lines.append(f"- {start}-{end} {cat} | {app} ({dur})")
+                else:
+                    lines.append(f"- {start}-{end} {cat} ({dur})")
 
         return "\n".join(lines)
 
-    # ==================== 持久化 ====================
+    def _format_duration(self, seconds: float) -> str:
+        seconds = float(seconds or 0.0)
+        if seconds < 60:
+            return f"{int(seconds)}秒"
+        if seconds < 3600:
+            return f"{int(seconds / 60)}分钟"
+        return f"{seconds / 3600:.1f}小时"
+
+    def _parse_clock_to_minutes(self, value: str) -> Optional[int]:
+        text_val = str(value or "").strip()
+        if not text_val:
+            return None
+        try:
+            parts = text_val.split(":")
+            hour = int(parts[0])
+            minute = int(parts[1]) if len(parts) > 1 else 0
+            return hour * 60 + minute
+        except Exception:
+            return None
+
+    def _compute_category_totals(self) -> Dict[str, float]:
+        totals: Dict[str, float] = {}
+        for app, seconds in self.daily_durations.items():
+            app_name = str(app or "").strip()
+            if not app_name:
+                continue
+            cat = self.app_category_map.get(app_name)
+            if not cat:
+                if "离开" in app_name or "idle" in app_name.lower():
+                    cat = "away"
+                else:
+                    cat = "other"
+            totals[cat] = totals.get(cat, 0.0) + float(seconds or 0.0)
+        return totals
+
+    def _normalize_record_text(self, text: str) -> str:
+        text = str(text or "").strip().lower()
+        if not text:
+            return ""
+        text = re.sub(r"```[\s\S]*?```", " ", text)
+        text = re.sub(r"`[^`]+`", " ", text)
+        text = re.sub(r"[*#>\-_=~]+", " ", text)
+        text = re.sub(r"[^\w\u4e00-\u9fff]+", " ", text)
+        text = re.sub(r"\s+", " ", text).strip()
+        return text
+    def _is_low_value_record_text(self, text: str) -> bool:
+        normalized = self._normalize_record_text(text)
+        if len(normalized) < 12:
+            return True
+
+        low_value_patterns = (
+            "看不清",
+            "无法识别",
+            "识别失败",
+            "内容较少",
+            "没有明显内容",
+            "一个窗口",
+            "一个界面",
+            "屏幕截图",
+            "当前屏幕",
+            "未发现明确信息",
+            "暂无更多信息",
+            "未知内容",
+            "不确定",
+        )
+        return any(pattern in normalized for pattern in low_value_patterns)
+
+
+    def _is_similar_record(self, current_text: str, previous_text: str, threshold: float = 0.92) -> bool:
+        import difflib
+
+        current = self._normalize_record_text(current_text)
+        previous = self._normalize_record_text(previous_text)
+        if not current or not previous:
+            return False
+        if current == previous:
+            return True
+        return difflib.SequenceMatcher(None, current, previous).ratio() >= threshold
+
+    def _compress_recognition_text(self, text: str, max_length: int = 800) -> str:
+        compressed = str(text or "").replace("\r\n", "\n").strip()
+        if not compressed:
+            return compressed
+
+        compressed = re.sub(r"\n{3,}", "\n\n", compressed)
+        lines = [line.strip() for line in compressed.split("\n") if line.strip()]
+        if len(lines) > 8:
+            compressed = "\n".join(lines[:8])
+        else:
+            compressed = "\n".join(lines)
+
+        if len(compressed) > max_length:
+            compressed = compressed[: max_length - 3].rstrip() + "..."
+
+        return compressed
+
+    def _remember_app_category(self, app_name: str, category: str) -> None:
+        app_key = str(app_name or "").strip()
+        if not app_key:
+            return
+        cat = str(category or "other").strip() or "other"
+        if cat == "other" and app_key in self.app_category_map:
+            return
+        self.app_category_map[app_key] = cat
+
+    def add_observation(self, content: str, window_title: str, category: str, app_name: str = "", reason: str = "", source: str = "text") -> bool:
+        content = self._compress_recognition_text(content, max_length=800)
+        if not content:
+            content = str(window_title or "").strip()
+
+        normalized = self._normalize_record_text(content)
+        if self._is_low_value_record_text(normalized):
+            return False
+
+        recent_entries = list(self.observation_entries or [])[-5:]
+        for prev in reversed(recent_entries):
+            prev_text = prev.get("content", "")
+            prev_window = prev.get("window_title", "")
+            prev_category = prev.get("category", "")
+
+            same_context = False
+            if window_title and prev_window and window_title == prev_window:
+                same_context = True
+            elif category and prev_category and category == prev_category:
+                same_context = True
+
+            if same_context and self._is_similar_record(normalized, prev_text):
+                return False
+
+        now = time.time()
+        entry = {
+            "time": datetime.now().strftime("%H:%M"),
+            "ts": now,
+            "window_title": str(window_title or "").strip(),
+            "app": str(app_name or window_title or "").strip(),
+            "category": str(category or "").strip(),
+            "reason": str(reason or "").strip(),
+            "source": str(source or "text").strip(),
+            "content": content,
+        }
+        self.observation_entries.append(entry)
+        if len(self.observation_entries) > self.max_observations:
+            self.observation_entries = self.observation_entries[-self.max_observations:]
+        return True
+
+    def _append_activity_segment(self, app_name: str, category: str, start_ts: float, end_ts: float, reason: str = "switch") -> None:
+        if not app_name:
+            return
+        if not start_ts or not end_ts or end_ts <= start_ts:
+            return
+
+        duration = float(end_ts - start_ts)
+        if duration <= 1:
+            return
+
+        segment = {
+            "start_time": datetime.fromtimestamp(start_ts).strftime("%H:%M"),
+            "end_time": datetime.fromtimestamp(end_ts).strftime("%H:%M"),
+            "start_ts": start_ts,
+            "end_ts": end_ts,
+            "duration_sec": duration,
+            "app": str(app_name or "").strip(),
+            "category": str(category or "other").strip() or "other",
+            "reason": str(reason or "").strip(),
+        }
+        self.activity_segments.append(segment)
+        if len(self.activity_segments) > self.max_segments:
+            self.activity_segments = self.activity_segments[-self.max_segments:]
+
+    def _compact_observations(self, entries: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        compacted: List[Dict[str, Any]] = []
+        for raw_entry in entries or []:
+            entry_text = str(raw_entry.get("content") or "").strip()
+            normalized_text = self._normalize_record_text(entry_text)
+            if self._is_low_value_record_text(normalized_text):
+                continue
+
+            window_title = str(raw_entry.get("window_title") or raw_entry.get("app") or "").strip() or "当前窗口"
+            time_text = str(raw_entry.get("time") or "").strip() or "--:--"
+            entry_minutes = self._parse_clock_to_minutes(time_text)
+
+            if compacted:
+                previous = compacted[-1]
+                same_window = previous["window_title"] == window_title
+                last_minutes = previous.get("last_minutes")
+                close_in_time = (
+                    entry_minutes is not None
+                    and last_minutes is not None
+                    and entry_minutes - last_minutes <= 18
+                )
+                similar_to_previous = self._is_similar_record(
+                    normalized_text,
+                    previous.get("last_text", ""),
+                    threshold=0.72,
+                )
+                if same_window and (close_in_time or similar_to_previous):
+                    previous["end_time"] = time_text
+                    previous["last_minutes"] = entry_minutes
+                    if not previous["points"] or not self._is_similar_record(
+                        normalized_text,
+                        previous["points"][-1],
+                        threshold=0.9,
+                    ):
+                        previous["points"].append(entry_text)
+                    previous["last_text"] = normalized_text
+                    continue
+
+            compacted.append(
+                {
+                    "start_time": time_text,
+                    "end_time": time_text,
+                    "window_title": window_title,
+                    "points": [entry_text],
+                    "last_text": normalized_text,
+                    "last_minutes": entry_minutes,
+                }
+            )
+
+        return compacted
+
+    def _format_compact_observations(self, entries: List[Dict[str, Any]], limit: int = 8) -> List[str]:
+        if not entries:
+            return []
+        compacted = self._compact_observations(entries)
+        if not compacted:
+            return []
+        if limit and len(compacted) > limit:
+            compacted = compacted[-limit:]
+
+        lines = []
+        for item in compacted:
+            start = item.get("start_time", "--:--")
+            end = item.get("end_time", "--:--")
+            window_title = item.get("window_title", "")
+            points = item.get("points", [])
+            summary = "; ".join(points[:3])
+            if len(points) > 3:
+                summary = summary.rstrip() + "..."
+            if start == end:
+                time_range = start
+            else:
+                time_range = f"{start}-{end}"
+            if summary:
+                lines.append(f"- {time_range} {window_title}: {summary}")
+            else:
+                lines.append(f"- {time_range} {window_title}")
+        return lines
+
+    def get_recent_observations(self, limit: int = 3) -> List[Dict[str, Any]]:
+        try:
+            limit = int(limit)
+        except Exception:
+            limit = 3
+        if limit <= 0:
+            return []
+        return list(self.observation_entries[-limit:])
+
+    def get_stats_data(self) -> Dict[str, Any]:
+        return {
+            "summary_text": self.get_formatted_report(),
+            "counts": self.daily_counts,
+            "durations": self.daily_durations,
+            "category_totals": self._compute_category_totals(),
+            "app_categories": self.app_category_map,
+            "observations": self.observation_entries,
+            "observation_compact": self._compact_observations(self.observation_entries),
+            "segments": self.activity_segments,
+            "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        }
+
     def _load_stats(self):
         if not os.path.exists(self.stats_file): return
         try:
             with open(self.stats_file, 'r', encoding='utf-8') as f:
                 data = json.load(f)
-            self.app_cache = data.get("cache", {})
+            self.app_cache = data.get("cache", {}) or {}
+            self.app_category_map = data.get("app_categories", {}) or {}
             if data.get("day") == datetime.now().day:
-                self.daily_counts = data.get("counts", {})
-                # 🟢 读取时长
-                self.daily_durations = data.get("durations", {})
+                self.daily_counts = data.get("counts", {}) or {}
+                self.daily_durations = data.get("durations", {}) or {}
+                self.observation_entries = data.get("observations", []) or []
+                self.activity_segments = data.get("segments", []) or []
             else:
                 self.daily_counts = {}
                 self.daily_durations = {}
+                self.observation_entries = []
+                self.activity_segments = []
+
+            if len(self.observation_entries) > self.max_observations:
+                self.observation_entries = self.observation_entries[-self.max_observations:]
+            if len(self.activity_segments) > self.max_segments:
+                self.activity_segments = self.activity_segments[-self.max_segments:]
         except Exception:
             pass
 
     def _save_stats(self):
         try:
             os.makedirs(os.path.dirname(self.stats_file), exist_ok=True)
+            if len(self.observation_entries) > self.max_observations:
+                self.observation_entries = self.observation_entries[-self.max_observations:]
+            if len(self.activity_segments) > self.max_segments:
+                self.activity_segments = self.activity_segments[-self.max_segments:]
             data = {
                 "day": self.current_day,
                 "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 "counts": self.daily_counts,
-                # 🟢 保存时长
                 "durations": self.daily_durations,
-                "cache": self.app_cache
+                "cache": self.app_cache,
+                "app_categories": self.app_category_map,
+                "category_totals": self._compute_category_totals(),
+                "observations": self.observation_entries,
+                "segments": self.activity_segments,
             }
             with open(self.stats_file, 'w', encoding='utf-8') as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
@@ -174,7 +479,6 @@ class ScreenSensor:
         except Exception:
             pass
 
-    # ==================== 数据库同步 ====================
     def _sync_to_db(self):
         """将屏幕统计数据同步到 SQLite 数据库"""
         if not get_memory_store: return
@@ -187,26 +491,23 @@ class ScreenSensor:
                 total_seconds = sum(self.daily_durations.values())
                 total_hours = total_seconds / 3600.0
 
-                # 构造数据包
-                # 注意：memory_sqlite.py 的 save_daily_screen_stats 会从这个字典里提取 'total_hours'
-                # 并将整个字典存入 'summary_json' 字段
                 data_to_save = {
-                    "summary_text": self.get_formatted_report(),  # 预生成的文本报告
-                    "counts": self.daily_counts,  # 次数统计
-                    "durations": self.daily_durations,  # 时长统计 (秒)
-                    "total_hours": total_hours,  # 总时长 (小时)
-                    "cache": self.app_cache,  # 分类缓存
-                    "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    "summary_text": self.get_formatted_report(),
+                    "counts": self.daily_counts,
+                    "durations": self.daily_durations,
+                    "total_hours": total_hours,
+                    "cache": self.app_cache,
+                    "app_categories": self.app_category_map,
+                    "category_totals": self._compute_category_totals(),
+                    "observations": self.observation_entries,
+                    "segments": self.activity_segments,
+                    "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 }
 
-                # 调用 memory_sqlite.py 中的接口写入 daily_screen_stats 表
                 store.save_daily_screen_stats(today_str, data_to_save)
-
-                # self.logger.debug(f"💾 [Screen] 数据已同步至数据库: {today_str}")
         except Exception as e:
-            self.logger.error(f"⚠️ 屏幕数据同步 DB 失败: {e}")
+            self.logger.error(f"❌ 屏幕数据同步 DB 失败: {e}")
 
-    # ==================== 核心逻辑 ====================
     def _get_active_window_info(self):
         """
         获取当前活动窗口，并检测是否为全屏状态
@@ -383,6 +684,9 @@ class ScreenSensor:
                 asyncio.run_coroutine_threadsafe(_do_summary(raw_data), self._loop)
 
             self.daily_counts.clear()
+            self.daily_durations.clear()
+            self.observation_entries = []
+            self.activity_segments = []
             self.current_day = today
             self._save_stats()
 
@@ -410,6 +714,7 @@ class ScreenSensor:
                     self.logger.info(f"💤 [Screen] 检测到系统休眠苏醒 (跳过 {elapsed:.1f}s)")
                     self.current_window_start_time = now
                     self.next_duration_trigger_time = now + self.DURATION_TRIGGER_THRESHOLD
+                    self.next_sedentary_alert_time = now + self.sedentary_interval_sec
                     elapsed = SCREEN_SENSOR_INTERVAL
 
                 self._check_daily_reset()
@@ -421,10 +726,12 @@ class ScreenSensor:
                 if not current_title:
                     self.current_window_start_time = now
                     self.next_duration_trigger_time = now + self.DURATION_TRIGGER_THRESHOLD
+                    self.next_sedentary_alert_time = now + self.sedentary_interval_sec
                     continue
 
                 # 4. 分析分类
                 cat, app = self._analyze_window(current_title)
+                self._remember_app_category(app, cat)
 
                 # 🟢 [核心修复] 精准免打扰逻辑：手动开启，或者 (处于全屏 且 必须是打游戏/看视频)
                 is_dnd_active = getattr(config, 'DND_MODE', False) or (is_fullscreen and cat in ["gaming", "video"])
@@ -446,9 +753,12 @@ class ScreenSensor:
                         self.logger.info(
                             f"🚶 [Screen] 离开电脑 (空闲 {int(idle_sec)}s，当前阈值 {current_afk_threshold}s)")
                         self.is_afk = True
+                        if self.last_app_name:
+                            self._append_activity_segment(self.last_app_name, self.last_category or "other", self.current_window_start_time, now, reason="afk")
 
                     self.current_window_start_time = now
                     self.next_duration_trigger_time = now + self.DURATION_TRIGGER_THRESHOLD
+                    self.next_sedentary_alert_time = now + self.sedentary_interval_sec
                     self.daily_durations["[离开电脑]"] = self.daily_durations.get("[离开电脑]", 0.0) + elapsed
                     self._save_stats()
                     continue
@@ -458,6 +768,7 @@ class ScreenSensor:
                     self.is_afk = False
                     self.current_window_start_time = now
                     self.next_duration_trigger_time = now + self.DURATION_TRIGGER_THRESHOLD
+                    self.next_sedentary_alert_time = now + self.sedentary_interval_sec
                 # ========================================================
 
                 # 6. 正常累加当前软件时长
@@ -467,12 +778,15 @@ class ScreenSensor:
 
                 if is_switch:
                     # ========== 场景A: 切换窗口 ==========
+                    if self.last_app_name:
+                        self._append_activity_segment(self.last_app_name, self.last_category or "other", self.current_window_start_time, now, reason="switch")
                     self.last_window_title = current_title
                     self.last_app_name = app
                     self.last_category = cat
 
                     self.current_window_start_time = now
                     self.next_duration_trigger_time = now + self.DURATION_TRIGGER_THRESHOLD
+                    self.next_sedentary_alert_time = now + self.sedentary_interval_sec
                     self._last_alert_app = None
 
                     self.daily_counts[app] = self.daily_counts.get(app, 0) + 1
@@ -490,15 +804,15 @@ class ScreenSensor:
                     self._save_stats()
                     stay_minutes = int((now - self.current_window_start_time) / 60)
 
-                    # 久坐提醒
-                    if stay_minutes >= 60 and stay_minutes % 60 == 0:
-                        if self._last_alert_app != app or (now - self._last_alert_time) > 300:
+                    # 久坐提醒 (基于下一次触发时间戳)
+                    if self.sedentary_interval_sec > 0 and now >= self.next_sedentary_alert_time:
+                        if self._last_alert_app != app or (now - self._last_alert_time) > self.sedentary_cooldown_sec:
                             if is_dnd_active:
                                 self.logger.info(f"🔕 [Active] 免打扰生效，跳过久坐语音: {app}")
                                 self._last_alert_app = app
                                 self._last_alert_time = now
                             else:
-                                self.logger.info(f"⏰ [Active] 触发久坐提醒: {app} ({stay_minutes} min)")
+                                self.logger.info(f"⏰[Active] 触发久坐提醒: {app} ({stay_minutes} min)")
                                 self._last_alert_app = app
                                 self._last_alert_time = now
                                 if self._loop:
@@ -506,8 +820,8 @@ class ScreenSensor:
                                         self.chat_service.send_active_alert(app, stay_minutes),
                                         self._loop
                                     )
+                        self.next_sedentary_alert_time = now + self.sedentary_cooldown_sec
 
-                    # 沉浸时长吐槽
                     monitor_cats = ["gaming", "video", "coding", "work", "design"]
                     if cat in monitor_cats:
                         if now > self.next_duration_trigger_time:
@@ -592,7 +906,7 @@ class ScreenSensor:
         # - False -> ChatService 调用 Gatekeeper (判断是否无聊 -> 决定是否吐槽)
         if self._loop and self._loop.is_running():
             asyncio.run_coroutine_threadsafe(
-                self.chat_service.handle_sensor_event(full_title, category, count, use_vision=use_vision),
+                self.chat_service.handle_sensor_event(full_title, category, count, use_vision=use_vision, app_name=app_name, reason=reason),
                 self._loop
             )
 

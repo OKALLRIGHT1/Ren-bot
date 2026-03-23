@@ -1,8 +1,75 @@
 {
-  "trigger": "knowledge_base",
-  "name": "本地第二大脑",
-  "type": "react",
-  "description": "用于管理本地知识库。支持指令：learn (扫描文件夹并学习), search (搜索知识库)。参数：指令 ||| 内容(文件夹路径或查询词)",
-  "example_arg": "learn ||| ./docs/my_project",
-  "version": "1.0.0"
+    "trigger": "knowledge_base",
+    "name": "本地第二大脑",
+    "type": "react",
+    "description": "用于管理本地知识库。支持指令：learn (扫描文件夹并学习), search (搜索知识库)。参数：指令 ||| 内容(文件夹路径或查询词)",
+    "example_arg": "learn ||| ./docs/my_project",
+    "version": "1.1.0",
+    "settings": {
+        "knowledge_source_dirs": {
+            "type": "list",
+            "item_type": "path",
+            "label": "知识目录",
+            "description": "可在 GUI 中手动选择一个或多个知识目录，之后可一键学习这些目录；独立知识库窗口里支持按目录开关。",
+            "default": [
+                {
+                    "path": "D:/Desktop/乱七八糟/宝可梦知识库/abilities",
+                    "enabled": true
+                },
+                {
+                    "path": "D:/Desktop/乱七八糟/宝可梦知识库/moves",
+                    "enabled": true
+                },
+                {
+                    "path": "D:/Desktop/乱七八糟/宝可梦知识库/pokemon",
+                    "enabled": true
+                },
+                {
+                    "path": "D:/Desktop/live2d-suzu/live2d-llm/knowledge_docs",
+                    "enabled": true
+                }
+            ]
+        },
+        "session_kb_enabled": {
+            "type": "bool",
+            "label": "启用会话知识域",
+            "description": "开启后可按会话隔离知识来源标签，后续可扩展为更细粒度知识域。",
+            "default": true
+        },
+        "slow_ingest_enabled": {
+            "type": "bool",
+            "label": "慢速导入模式",
+            "description": "批量学习时自动分段暂停，降低远程嵌入 RPM 限频概率。",
+            "default": true
+        },
+        "slow_ingest_batch": {
+            "type": "number",
+            "label": "每批文件数",
+            "description": "处理多少个文件后暂停一次。",
+            "default": 20,
+            "min": 1,
+            "max": 500
+        },
+        "slow_ingest_sleep_ms": {
+            "type": "number",
+            "label": "每批暂停毫秒",
+            "description": "批量导入时每批之间暂停多久。",
+            "default": 1200,
+            "min": 0,
+            "max": 30000
+        },
+        "adaptive_slow_ingest": {
+            "type": "bool",
+            "label": "自适应慢速模式",
+            "description": "当检测到远程嵌入限频时，自动临时加大暂停时间。",
+            "default": true
+        }
+    },
+    "access_control": {
+        "allow_local": true,
+        "allow_remote_qq": true,
+        "allow_qq_owner": true,
+        "allow_qq_others": false,
+        "allow_group_without_at": false
+    }
 }

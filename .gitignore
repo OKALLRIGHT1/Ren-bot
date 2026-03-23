@@ -31,7 +31,7 @@ Thumbs.db
 .env
 .env.*
 !.env.example
-config.py
+
 *.md
 *.db
 # =========================

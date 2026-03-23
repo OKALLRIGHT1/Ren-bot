@@ -3,8 +3,7 @@
     "trigger": "打开",
     "llm_command": "open_app",
     "aliases": [
-        "启动",
-        "open"
+        "启动"
     ],
     "type": "direct",
     "description": "直接打开本地软件",

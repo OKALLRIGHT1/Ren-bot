@@ -1,7 +1,8 @@
-﻿"""
+"""
 聊天服务
 处理用户输入和AI响应的核心逻辑
 """
+
 import os
 import json
 import re
@@ -9,10 +10,11 @@ import asyncio
 import time
 import uuid
 import random  # ✅ 需要导入 random
-from datetime import datetime,timedelta, date
+from datetime import datetime, timedelta, date
 from typing import Optional, Dict, Any, Awaitable, Callable
 
 from modules.llm import chat_with_ai
+
 try:
     from modules.llm import chat_with_ai_stream
 except ImportError:
@@ -30,9 +32,15 @@ try:
         GATEKEEPER_WHITELIST,
         GATEKEEPER_BLACKLIST,
         GATEKEEPER_PROMPT_TEMPLATE,
-        GATEKEEPER_ACTIVE_SESSION_WINDOW, PERSONA_PROMPT, DEFAULT_PERSONA, VISION_MODE, WAKE_KEYWORDS,
-        CHARACTER_SHARING_ENABLED, CHAT_DEBUG_PRINTS, NAPCAT_OWNER_USER_IDS
-)
+        GATEKEEPER_ACTIVE_SESSION_WINDOW,
+        PERSONA_PROMPT,
+        DEFAULT_PERSONA,
+        VISION_MODE,
+        WAKE_KEYWORDS,
+        CHARACTER_SHARING_ENABLED,
+        CHAT_DEBUG_PRINTS,
+        NAPCAT_OWNER_USER_IDS,
+    )
 except ImportError:
     # 默认值兜底，防止 config 未更新导致报错
     EMO_LABELS = []
@@ -58,46 +66,166 @@ LEGACY_OWNER_PRIVATE_SESSION_IDS = {
 
 class ChatService:
     """聊天服务"""
+
     POSITIVE_FEEDBACK_KEYWORDS = (
-        "谢谢", "谢啦", "有帮助", "有用", "喜欢", "不错", "很好", "太好了",
-        "棒", "完美", "正是", "thanks", "thank you", "great", "good job",
+        "谢谢",
+        "谢啦",
+        "有帮助",
+        "有用",
+        "喜欢",
+        "不错",
+        "很好",
+        "太好了",
+        "棒",
+        "完美",
+        "正是",
+        "thanks",
+        "thank you",
+        "great",
+        "good job",
     )
     NEGATIVE_FEEDBACK_KEYWORDS = (
-        "不对", "不行", "不好", "没用", "不喜欢", "错了", "答非所问", "重来",
-        "离谱", "不准确", "不需要", "没帮上", "wrong", "bad", "not helpful",
+        "不对",
+        "不行",
+        "不好",
+        "没用",
+        "不喜欢",
+        "错了",
+        "答非所问",
+        "重来",
+        "离谱",
+        "不准确",
+        "不需要",
+        "没帮上",
+        "wrong",
+        "bad",
+        "not helpful",
     )
     APPLY_CONFIRM_KEYWORDS = ("确认", "应用", "执行", "同意", "apply")
     TASK_CREATE_KEYWORDS = (
-        "待办", "todo", "to do", "提醒我", "记得", "别忘了", "要记得",
-        "今天要", "明天要", "今晚要", "等会要", "待会要", "周末要",
-        "计划", "打算", "安排", "准备", "要去", "需要", "得去", "我得", "我要",
+        "待办",
+        "todo",
+        "to do",
+        "提醒我",
+        "记得",
+        "别忘了",
+        "要记得",
+        "今天要",
+        "明天要",
+        "今晚要",
+        "等会要",
+        "待会要",
+        "周末要",
+        "计划",
+        "打算",
+        "安排",
+        "准备",
+        "要去",
+        "需要",
+        "得去",
+        "我得",
+        "我要",
     )
     TASK_DONE_KEYWORDS = (
-        "做完了", "搞定了", "完成了", "弄完了", "处理完了", "解决了", "写完了",
-        "提交了", "发了", "结束了", "done", "finished", "搞好了", "已经好了",
+        "做完了",
+        "搞定了",
+        "完成了",
+        "弄完了",
+        "处理完了",
+        "解决了",
+        "写完了",
+        "提交了",
+        "发了",
+        "结束了",
+        "done",
+        "finished",
+        "搞好了",
+        "已经好了",
     )
     TASK_STATUS_KEYWORDS = (
-        "任务", "待办", "todo", "进度", "安排", "计划", "打算", "提醒",
+        "任务",
+        "待办",
+        "todo",
+        "进度",
+        "安排",
+        "计划",
+        "打算",
+        "提醒",
     )
     FOLLOWUP_TOPICS = {
         "health": (
-            "腹泻", "拉肚子", "肚子疼", "胃痛", "发烧", "咳嗽", "头痛", "生病", "不舒服",
-            "断食", "补液", "电解质", "医院", "就医",
+            "腹泻",
+            "拉肚子",
+            "肚子疼",
+            "胃痛",
+            "发烧",
+            "咳嗽",
+            "头痛",
+            "生病",
+            "不舒服",
+            "断食",
+            "补液",
+            "电解质",
+            "医院",
+            "就医",
         ),
         "sleep": (
-            "熬夜", "失眠", "没睡好", "睡不着", "睡眠", "困", "早睡", "晚睡", "睡觉",
+            "熬夜",
+            "失眠",
+            "没睡好",
+            "睡不着",
+            "睡眠",
+            "困",
+            "早睡",
+            "晚睡",
+            "睡觉",
         ),
         "diet": (
-            "没吃饭", "吃不下", "胃口", "饮食", "喝水", "脱水", "饿", "早餐", "午饭", "晚饭",
+            "没吃饭",
+            "吃不下",
+            "胃口",
+            "饮食",
+            "喝水",
+            "脱水",
+            "饿",
+            "早餐",
+            "午饭",
+            "晚饭",
         ),
         "work_study": (
-            "加班", "赶工", "ddl", "截止", "写代码", "开题", "报告", "复习", "考试", "作业", "项目",
+            "加班",
+            "赶工",
+            "ddl",
+            "截止",
+            "写代码",
+            "开题",
+            "报告",
+            "复习",
+            "考试",
+            "作业",
+            "项目",
         ),
         "emotion": (
-            "焦虑", "压力", "难受", "烦", "崩溃", "低落", "紧张", "心情", "不开心", "累",
+            "焦虑",
+            "压力",
+            "难受",
+            "烦",
+            "崩溃",
+            "低落",
+            "紧张",
+            "心情",
+            "不开心",
+            "累",
         ),
         "plan": (
-            "明天", "计划", "打算", "安排", "要去", "准备", "目标", "待办",
+            "明天",
+            "计划",
+            "打算",
+            "安排",
+            "要去",
+            "准备",
+            "目标",
+            "待办",
         ),
     }
 
@@ -125,6 +253,7 @@ class ChatService:
         # 延迟导入以避免循环依赖
         try:
             from modules.learning_system import get_learning_system
+
             self.learning = get_learning_system()
         except ImportError:
             self.learning = None
@@ -133,19 +262,28 @@ class ChatService:
         self._sensor_min_reply_interval_sec = 45
 
         # 情绪标签配置
-        self._emo_set = set([str(x).strip().lower() for x in (EMO_LABELS or [])] + ["idle", "think"])
-        self._emo_tag_re = re.compile(r"<\s*emo\s*=\s*([a-zA-Z_]+)\s*>", flags=re.IGNORECASE)
+        self._emo_set = set(
+            [str(x).strip().lower() for x in (EMO_LABELS or [])] + ["idle", "think"]
+        )
+        self._emo_tag_re = re.compile(
+            r"<\s*emo\s*=\s*([a-zA-Z_]+)\s*>", flags=re.IGNORECASE
+        )
         self._cmd_re = re.compile(r"\[CMD:.*?\]", flags=re.DOTALL)
         self._apply_cmd_re = re.compile(
             r"\[CMD:\s*workspace_ops\s*\|\s*apply_change\s*\|\|\|\s*([0-9a-fA-F]{10})\s*\|\|\|\s*([0-9a-fA-F]{8})\s*\]",
             flags=re.IGNORECASE,
         )
-        self._id_token_re = re.compile(r"\b([0-9a-fA-F]{10})\b[\s\S]{0,120}\b([0-9a-fA-F]{8})\b", flags=re.IGNORECASE)
+        self._id_token_re = re.compile(
+            r"\b([0-9a-fA-F]{10})\b[\s\S]{0,120}\b([0-9a-fA-F]{8})\b",
+            flags=re.IGNORECASE,
+        )
         self._last_proactive_followup_day = ""
         self._last_task_followup_day = ""
         self.gateway_voice_reply_enabled = False
         self.gateway_voice_reply_probability = 0
-        self.gateway_voice_renderer: Optional[Callable[..., Awaitable[Optional[str]]]] = None
+        self.gateway_voice_renderer: Optional[
+            Callable[..., Awaitable[Optional[str]]]
+        ] = None
 
     def configure_gateway_voice_reply(
         self,
@@ -199,12 +337,19 @@ class ChatService:
             return False
         if self.gateway_voice_reply_probability <= 0:
             return False
-        clean = self._clean_text_for_tts(self._strip_cmd_anywhere(self._strip_emo_tags_anywhere(text)))
+        clean = self._clean_text_for_tts(
+            self._strip_cmd_anywhere(self._strip_emo_tags_anywhere(text))
+        )
         if len(clean) < 2:
             return False
         return random.random() * 100 < self.gateway_voice_reply_probability
 
-    async def _send_gateway_reply(self, text: str, ctx: Optional[Dict[str, Any]] = None, emotion: Optional[str] = None):
+    async def _send_gateway_reply(
+        self,
+        text: str,
+        ctx: Optional[Dict[str, Any]] = None,
+        emotion: Optional[str] = None,
+    ):
         text = str(text or "").strip()
         if not text or not self.chat_gateway or not isinstance(ctx, dict):
             return
@@ -212,42 +357,133 @@ class ChatService:
         if source not in {"qq_gateway", "napcat_qq"}:
             return
         channel_meta = ctx.get("channel_meta") or {}
-        adapter_name = str(channel_meta.get("adapter") or "napcat_qq").strip() or "napcat_qq"
+        adapter_name = (
+            str(channel_meta.get("adapter") or "napcat_qq").strip() or "napcat_qq"
+        )
         session_id = str(channel_meta.get("session_id") or "").strip()
         if not session_id:
             self.logger.warning("Gateway reply skipped: missing session_id")
             return
+
+        sender_name = str(
+            channel_meta.get("sender_name") or channel_meta.get("user_id") or ""
+        ).strip()
+        session_label = self._qq_session_label(session_id)
+        preview = text.replace("\r", " ").replace("\n", " ").strip()
+        if len(preview) > 240:
+            preview = preview[:240] + "..."
+        self.logger.info(
+            f"[QQ-OUT][{session_label}][{session_id}][to={sender_name or 'unknown'}] {preview}"
+        )
+
+        user_text = str(ctx.get("user_text") or "")
+        link_request = self._is_link_request(user_text)
+        contains_url = bool(self._extract_first_url(text))
+        skip_voice = link_request or contains_url
+        sent_share = False
+
+        if link_request:
+            url = self._extract_first_url(text) or self._extract_url_from_tool_results(
+                ctx
+            )
+            if url:
+                title = self._build_share_title(text, url)
+                content = self._build_share_content(text, title)
+                try:
+                    share_result = await self.chat_gateway.send_share(
+                        adapter_name,
+                        session_id,
+                        url,
+                        title=title,
+                        content=content,
+                        metadata=channel_meta,
+                        source=source,
+                    )
+                    if isinstance(share_result, dict) and share_result.get("ok"):
+                        sent_share = True
+                except Exception as e:
+                    self.logger.warning(f"Gateway share send failed: {e}")
+
+                if sent_share:
+                    cleaned = self._strip_urls(text)
+                    text = cleaned or "已发送链接卡片。"
+
         voice_path = ""
-        if self._should_use_gateway_voice_reply(source, text):
-            clean_voice_text = self._clean_text_for_tts(self._strip_cmd_anywhere(self._strip_emo_tags_anywhere(text)))
+        if (not skip_voice) and self._should_use_gateway_voice_reply(source, text):
+            clean_voice_text = self._clean_text_for_tts(
+                self._strip_cmd_anywhere(self._strip_emo_tags_anywhere(text))
+            )
             try:
-                voice_path = str(await self.gateway_voice_renderer(
-                    clean_voice_text,
-                    emotion=emotion,
-                    source=source,
-                    channel_meta=channel_meta,
-                ) or "").strip()
+                voice_path = str(
+                    await self.gateway_voice_renderer(
+                        clean_voice_text,
+                        emotion=emotion,
+                        source=source,
+                        channel_meta=channel_meta,
+                    )
+                    or ""
+                ).strip()
             except Exception as e:
                 self.logger.warning(f"Gateway voice render failed: {e}")
                 voice_path = ""
             if voice_path:
                 try:
-                    result = await self.chat_gateway.send_voice(adapter_name, session_id, voice_path, metadata=channel_meta, source=source)
+                    result = await self.chat_gateway.send_voice(
+                        adapter_name,
+                        session_id,
+                        voice_path,
+                        metadata=channel_meta,
+                        source=source,
+                    )
                     if isinstance(result, dict) and result.get("ok"):
+                        try:
+                            text_result = await self.chat_gateway.send_text(
+                                adapter_name,
+                                session_id,
+                                text,
+                                metadata=channel_meta,
+                                source=source,
+                            )
+                            if isinstance(text_result, dict) and not text_result.get(
+                                "ok"
+                            ):
+                                self.logger.warning(
+                                    f"Gateway text companion reply failed: {text_result}"
+                                )
+                            else:
+                                self.logger.info(
+                                    f"[QQ-OUT-OK][{session_label}][{session_id}] voice_sent_with_text"
+                                )
+                        except Exception as e:
+                            self.logger.warning(
+                                f"Gateway voice companion text failed: {e}"
+                            )
                         return
-                    self.logger.warning(f"Gateway voice send fallback to text: {result}")
+                    self.logger.warning(
+                        f"Gateway voice send fallback to text: {result}"
+                    )
                 except Exception as e:
-                    self.logger.warning(f"Gateway voice send failed, fallback to text: {e}")
+                    self.logger.warning(
+                        f"Gateway voice send failed, fallback to text: {e}"
+                    )
                 finally:
                     asyncio.create_task(self._cleanup_gateway_voice_file(voice_path))
         try:
-            result = await self.chat_gateway.send_text(adapter_name, session_id, text, metadata=channel_meta, source=source)
+            result = await self.chat_gateway.send_text(
+                adapter_name, session_id, text, metadata=channel_meta, source=source
+            )
             if isinstance(result, dict) and not result.get("ok"):
                 self.logger.warning(f"Gateway text reply failed: {result}")
+            else:
+                self.logger.info(
+                    f"[QQ-OUT-OK][{session_label}][{session_id}] text_sent"
+                )
         except Exception as e:
             self.logger.error(f"Gateway reply failed: {e}")
 
-    async def _send_gateway_image_reply(self, image_path: str, ctx: Optional[Dict[str, Any]] = None, caption: str = "") -> bool:
+    async def _send_gateway_image_reply(
+        self, image_path: str, ctx: Optional[Dict[str, Any]] = None, caption: str = ""
+    ) -> bool:
         path_text = str(image_path or "").strip()
         if not path_text or not self.chat_gateway or not isinstance(ctx, dict):
             return False
@@ -255,11 +491,25 @@ class ChatService:
         if source not in {"qq_gateway", "napcat_qq"}:
             return False
         channel_meta = ctx.get("channel_meta") or {}
-        adapter_name = str(channel_meta.get("adapter") or "napcat_qq").strip() or "napcat_qq"
+        adapter_name = (
+            str(channel_meta.get("adapter") or "napcat_qq").strip() or "napcat_qq"
+        )
         session_id = str(channel_meta.get("session_id") or "").strip()
         if not session_id:
             self.logger.warning("Gateway image reply skipped: missing session_id")
             return False
+        sender_name = str(
+            channel_meta.get("sender_name") or channel_meta.get("user_id") or ""
+        ).strip()
+        session_label = self._qq_session_label(session_id)
+        caption_preview = (
+            str(caption or "").replace("\r", " ").replace("\n", " ").strip()
+        )
+        if len(caption_preview) > 160:
+            caption_preview = caption_preview[:160] + "..."
+        self.logger.info(
+            f"[QQ-OUT-IMAGE][{session_label}][{session_id}][to={sender_name or 'unknown'}] path={path_text} caption={caption_preview}"
+        )
         try:
             result = await self.chat_gateway.send_image(
                 adapter_name,
@@ -270,6 +520,9 @@ class ChatService:
                 source=source,
             )
             if isinstance(result, dict) and result.get("ok"):
+                self.logger.info(
+                    f"[QQ-OUT-IMAGE-OK][{session_label}][{session_id}] image_sent"
+                )
                 return True
             self.logger.warning(f"Gateway image reply failed: {result}")
             return False
@@ -277,7 +530,53 @@ class ChatService:
             self.logger.error(f"Gateway image reply failed: {e}")
             return False
 
-    async def _emit_idle_status(self, output_profile: Optional[Dict[str, Any]], reason: str) -> None:
+    async def _send_gateway_file_reply(
+        self, file_path: str, ctx: Optional[Dict[str, Any]] = None, file_name: str = ""
+    ) -> bool:
+        path_text = str(file_path or "").strip()
+        if not path_text or not self.chat_gateway or not isinstance(ctx, dict):
+            return False
+        source = str(ctx.get("source") or "").strip().lower()
+        if source not in {"qq_gateway", "napcat_qq"}:
+            return False
+        channel_meta = ctx.get("channel_meta") or {}
+        adapter_name = (
+            str(channel_meta.get("adapter") or "napcat_qq").strip() or "napcat_qq"
+        )
+        session_id = str(channel_meta.get("session_id") or "").strip()
+        if not session_id:
+            self.logger.warning("Gateway file reply skipped: missing session_id")
+            return False
+        sender_name = str(
+            channel_meta.get("sender_name") or channel_meta.get("user_id") or ""
+        ).strip()
+        session_label = self._qq_session_label(session_id)
+        self.logger.info(
+            f"[QQ-OUT-FILE][{session_label}][{session_id}][to={sender_name or 'unknown'}] file={file_name or path_text}"
+        )
+        try:
+            result = await self.chat_gateway.send_file(
+                adapter_name,
+                session_id,
+                path_text,
+                name=file_name,
+                metadata=channel_meta,
+                source=source,
+            )
+            if isinstance(result, dict) and result.get("ok"):
+                self.logger.info(
+                    f"[QQ-OUT-FILE-OK][{session_label}][{session_id}] file_sent"
+                )
+                return True
+            self.logger.warning(f"Gateway file reply failed: {result}")
+            return False
+        except Exception as e:
+            self.logger.error(f"Gateway file reply failed: {e}")
+            return False
+
+    async def _emit_idle_status(
+        self, output_profile: Optional[Dict[str, Any]], reason: str
+    ) -> None:
         live2d_enabled = True
         if isinstance(output_profile, dict):
             live2d_enabled = bool(output_profile.get("live2d_enabled", True))
@@ -294,7 +593,11 @@ class ChatService:
         if not self.mcp_bridge:
             return ""
         try:
-            specs = [spec for spec in self.mcp_bridge.list_tools() if getattr(spec, "provider", "local") != "local"]
+            specs = [
+                spec
+                for spec in self.mcp_bridge.list_tools()
+                if getattr(spec, "provider", "local") != "local"
+            ]
         except Exception:
             return ""
         if not specs:
@@ -303,7 +606,9 @@ class ChatService:
             specs = specs[:max_tools]
         lines = []
         for spec in specs:
-            desc = str(getattr(spec, "description", "") or "").replace("\n", " ").strip()
+            desc = (
+                str(getattr(spec, "description", "") or "").replace("\n", " ").strip()
+            )
             if len(desc) > 72:
                 desc = desc[:72] + "…"
             lines.append(f"- {spec.name}: {desc or 'MCP tool'}")
@@ -312,8 +617,7 @@ class ChatService:
             "如需调用远程 MCP 工具，可使用独立一行：\n"
             "[CMD: mcp_tools | call_tool ||| 工具名 ||| JSON参数]\n"
             "如需查看当前可用的远程工具，可使用：\n"
-            "[CMD: mcp_tools | list_tools]\n"
-            + "\n".join(lines)
+            "[CMD: mcp_tools | list_tools]\n" + "\n".join(lines)
         )
 
     def _is_qq_source(self, ctx: Optional[Dict[str, Any]]) -> bool:
@@ -322,12 +626,30 @@ class ChatService:
         source = str(ctx.get("source") or "").strip().lower()
         return source in QQ_REMOTE_SOURCES
 
-    def _build_transcript_channel_meta(self, ctx: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    def _qq_session_label(self, session_id: str) -> str:
+        text = str(session_id or "").strip().lower()
+        if text.startswith("group:"):
+            return "QQ-GROUP"
+        if text.startswith("private:"):
+            return "QQ-PRIVATE"
+        return "QQ"
+
+    def _build_transcript_channel_meta(
+        self, ctx: Optional[Dict[str, Any]]
+    ) -> Dict[str, Any]:
         if not self._is_qq_source(ctx):
             return {}
         channel_meta = (ctx or {}).get("channel_meta") or {}
         result: Dict[str, Any] = {}
-        for key in ("adapter", "user_id", "sender_name", "message_type", "group_id", "is_owner", "owner_label"):
+        for key in (
+            "adapter",
+            "user_id",
+            "sender_name",
+            "message_type",
+            "group_id",
+            "is_owner",
+            "owner_label",
+        ):
             value = channel_meta.get(key)
             if value in (None, "", [], {}):
                 continue
@@ -345,6 +667,15 @@ class ChatService:
         channel_meta = ctx.get("channel_meta") or {}
         return bool(channel_meta.get("is_owner"))
 
+    @property
+    def app(self):
+        try:
+            import __main__
+
+            return getattr(__main__, "app_instance", None)
+        except Exception:
+            return None
+
     async def _sync_qq_user_profile(self, ctx: Optional[Dict[str, Any]]) -> None:
         if not self._is_qq_source(ctx):
             return
@@ -356,12 +687,25 @@ class ChatService:
         if not store:
             return
         sender = channel_meta.get("sender") or {}
-        sender_name = str(channel_meta.get("sender_name") or sender.get("nickname") or user_id).strip()
+        sender_name = str(
+            channel_meta.get("sender_name") or sender.get("nickname") or user_id
+        ).strip()
         remark_name = str(sender.get("card") or sender.get("remark") or "").strip()
-        message_type = str(channel_meta.get("message_type") or "private").strip().lower() or "private"
+        message_type = (
+            str(channel_meta.get("message_type") or "private").strip().lower()
+            or "private"
+        )
         is_owner = bool(channel_meta.get("is_owner"))
-        relationship = "owner" if is_owner else ("group_member" if message_type == "group" else "contact")
-        memory_scope = OWNER_SHARED_SESSION_ID if is_owner else ("group_shared" if message_type == "group" else "private")
+        relationship = (
+            "owner"
+            if is_owner
+            else ("group_member" if message_type == "group" else "contact")
+        )
+        memory_scope = (
+            OWNER_SHARED_SESSION_ID
+            if is_owner
+            else ("group_shared" if message_type == "group" else "private")
+        )
         profile_payload = {
             "user_id": user_id,
             "nickname": sender_name,
@@ -380,17 +724,23 @@ class ChatService:
         if not self._is_qq_source(ctx):
             return ""
         channel_meta = ctx.get("channel_meta") or {}
-        sender_name = str(channel_meta.get("sender_name") or channel_meta.get("user_id") or "Unknown Contact").strip()
+        sender_name = str(
+            channel_meta.get("sender_name")
+            or channel_meta.get("user_id")
+            or "Unknown Contact"
+        ).strip()
         user_id = str(channel_meta.get("user_id") or "").strip()
         session_id = str(channel_meta.get("session_id") or "").strip()
         group_id = str(channel_meta.get("group_id") or "").strip()
-        message_type = str(channel_meta.get("message_type") or "private").strip() or "private"
+        message_type = (
+            str(channel_meta.get("message_type") or "private").strip() or "private"
+        )
         owner_label = str(channel_meta.get("owner_label") or "Owner").strip() or "Owner"
         is_owner = bool(channel_meta.get("is_owner"))
         relation = (
             f"The current sender is {owner_label}."
-            if is_owner else
-            f"The current sender is not {owner_label}; they are another QQ contact or a group member."
+            if is_owner
+            else f"The current sender is not {owner_label}; they are another QQ contact or a group member."
         )
         parts = [
             "[QQ Message Context]",
@@ -426,10 +776,14 @@ class ChatService:
                 "private": "private memory",
                 "group_shared": "group shared memory",
             }
-            display_name = str(profile.get("remark_name") or profile.get("nickname") or "").strip()
+            display_name = str(
+                profile.get("remark_name") or profile.get("nickname") or ""
+            ).strip()
             if display_name and display_name != sender_name:
                 parts.append(f"profile_name: {display_name}")
-            profile_relation = relation_map.get(str(profile.get("relationship_to_owner") or "").strip())
+            profile_relation = relation_map.get(
+                str(profile.get("relationship_to_owner") or "").strip()
+            )
             if profile_relation:
                 parts.append(f"profile_relation: {profile_relation}")
             identity_summary = str(profile.get("identity_summary") or "").strip()
@@ -479,7 +833,10 @@ class ChatService:
             self.logger.warning(f"QQ image helpers unavailable: {exc}")
             return ""
 
-        prompt = str(channel_meta.get("image_prompt") or "请客观详细描述这张QQ图片的内容，并提取其中可用于回复的关键信息。")
+        prompt = str(
+            channel_meta.get("image_prompt")
+            or "请客观详细描述这张QQ图片的内容，并提取其中可用于回复的关键信息。"
+        )
         image_summaries = []
         for index, image_meta in enumerate(images[:3], 1):
             try:
@@ -524,12 +881,20 @@ class ChatService:
             return True, m2.group(1), m2.group(2)
         return False, "", ""
 
-    def _set_codex_task_state(self, ctx: Dict[str, Any], state: str, *, summary: str = "", meta: Optional[dict] = None):
+    def _set_codex_task_state(
+        self,
+        ctx: Dict[str, Any],
+        state: str,
+        *,
+        summary: str = "",
+        meta: Optional[dict] = None,
+    ):
         task_id = str((ctx or {}).get("codex_task_id", "")).strip()
         if not task_id:
             return
         try:
             from modules.codex_task_state import set_task_state
+
             set_task_state(
                 task_id,
                 state,
@@ -578,7 +943,11 @@ class ChatService:
     def _split_text_clauses(self, text: str) -> list[str]:
         if not text:
             return []
-        return [seg.strip(" ，,、\t") for seg in re.split(r"[\n。！？!?；;]+", text or "") if seg.strip(" ，,、\t")]
+        return [
+            seg.strip(" ，,、\t")
+            for seg in re.split(r"[\n。！？!?；;]+", text or "")
+            if seg.strip(" ，,、\t")
+        ]
 
     def _normalize_task_text(self, text: str) -> str:
         t = (text or "").strip()
@@ -586,7 +955,11 @@ class ChatService:
             return ""
         t = re.sub(r"^(待办|todo|to do)\s*[:：]?\s*", "", t, flags=re.IGNORECASE)
         t = re.sub(r"^(提醒我|记得|别忘了|要记得)\s*", "", t)
-        t = re.sub(r"^(我(今天|明天|今晚|等会|待会|周末|之后|最近)?(要|得|想|准备|打算)|今天要|明天要|今晚要|等会要|待会要|周末要)\s*", "", t)
+        t = re.sub(
+            r"^(我(今天|明天|今晚|等会|待会|周末|之后|最近)?(要|得|想|准备|打算)|今天要|明天要|今晚要|等会要|待会要|周末要)\s*",
+            "",
+            t,
+        )
         t = re.sub(r"^(安排|计划|打算|准备|需要|要去|得去)\s*", "", t)
         t = re.sub(r"(一下|一下子|这件事|这个事|这事)$", "", t)
         t = re.sub(r"^[：:、，,\-\s]+|[：:、，,。！？!?；;\s]+$", "", t)
@@ -608,7 +981,11 @@ class ChatService:
         candidates = []
         seen = set()
         for raw in self._split_text_clauses(text):
-            parts = [seg.strip(" ，,、\t") for seg in re.split(r"[，,、]+", raw) if seg.strip(" ，,、\t")]
+            parts = [
+                seg.strip(" ，,、\t")
+                for seg in re.split(r"[，,、]+", raw)
+                if seg.strip(" ，,、\t")
+            ]
             for part in parts or [raw]:
                 lower = part.lower()
                 if len(part) < 4 or "?" in part or "？" in part:
@@ -675,13 +1052,17 @@ class ChatService:
         best = None
         best_score = -1.0
         for idx, item in enumerate(items):
-            score = self._task_match_score(hint, str(item.get("text") or "")) - (idx * 0.05)
+            score = self._task_match_score(hint, str(item.get("text") or "")) - (
+                idx * 0.05
+            )
             if score > best_score:
                 best = item
                 best_score = score
         return best if best_score >= 1.0 else None
 
-    async def _append_hidden_transcript_note(self, role: str, text: str, meta: Optional[Dict[str, Any]] = None):
+    async def _append_hidden_transcript_note(
+        self, role: str, text: str, meta: Optional[Dict[str, Any]] = None
+    ):
         store = self._get_memory_store()
         note = str(text or "").strip()
         if not store or not note:
@@ -689,7 +1070,9 @@ class ChatService:
         try:
             safe_meta = (meta or {}).copy()
             session_id = str(safe_meta.get("session_id") or "").strip() or None
-            await asyncio.to_thread(store.add_transcript, role, note, safe_meta, None, session_id)
+            await asyncio.to_thread(
+                store.add_transcript, role, note, safe_meta, None, session_id
+            )
         except Exception as e:
             self.logger.warning(f"隐藏 transcript 记录失败: {e}")
 
@@ -700,7 +1083,11 @@ class ChatService:
         created = []
         for task_text in self._extract_task_candidates(user_text):
             existing = self._find_matching_active_task(task_text)
-            if existing and self._task_match_score(task_text, str(existing.get("text") or "")) >= 5.0:
+            if (
+                existing
+                and self._task_match_score(task_text, str(existing.get("text") or ""))
+                >= 5.0
+            ):
                 item = dict(existing)
                 item["text"] = task_text
                 item["source"] = "task_agent"
@@ -731,7 +1118,9 @@ class ChatService:
         target = self._find_matching_active_task(hint)
         if not target:
             return None
-        await asyncio.to_thread(store.set_item_status, str(target.get("id") or ""), "done")
+        await asyncio.to_thread(
+            store.set_item_status, str(target.get("id") or ""), "done"
+        )
         return str(target.get("text") or "").strip() or None
 
     async def _update_task_agent(self, user_text: str):
@@ -779,7 +1168,9 @@ class ChatService:
         for item in items:
             updated_at = str(item.get("updated_at") or "").strip()
             try:
-                updated_date = datetime.fromisoformat(updated_at.replace("Z", "+00:00")).date()
+                updated_date = datetime.fromisoformat(
+                    updated_at.replace("Z", "+00:00")
+                ).date()
             except Exception:
                 updated_date = None
             if updated_date == yesterday:
@@ -788,7 +1179,9 @@ class ChatService:
                 fallback = item
         return fallback
 
-    async def _maybe_send_task_followup(self, user_text: str, ctx: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, str]]:
+    async def _maybe_send_task_followup(
+        self, user_text: str, ctx: Optional[Dict[str, Any]] = None
+    ) -> Optional[Dict[str, str]]:
         try:
             source = str((ctx or {}).get("source", ""))
             if source and source != "text_input":
@@ -835,12 +1228,59 @@ class ChatService:
 
     # 文本净化函数
     def _clean_text_for_tts(self, text: str) -> str:
-        if not text: return ""
+        if not text:
+            return ""
         # 1. 暴力去除所有星号 * 和 #
         text = re.sub(r"[\*#]+", "", text)
         # 2. 去除 markdown 链接
         text = re.sub(r"\[(.*?)\]\(.*?\)", r"\1", text)
         return text.strip()
+
+    def _is_link_request(self, text: str) -> bool:
+        raw = str(text or "")
+        lower = raw.lower()
+        if "链接" in raw or "网址" in raw:
+            return True
+        return ("link" in lower) or ("url" in lower)
+
+    def _extract_first_url(self, text: str) -> str:
+        if not text:
+            return ""
+        m = re.search(r"https?://[^\s)）]+", str(text))
+        if not m:
+            return ""
+        url = m.group(0).rstrip(".,;，。)")
+        return url
+
+    def _strip_urls(self, text: str) -> str:
+        return re.sub(r"https?://[^\s)）]+", "", str(text or "")).strip()
+
+    def _extract_url_from_tool_results(self, ctx: Optional[Dict[str, Any]]) -> str:
+        if not isinstance(ctx, dict):
+            return ""
+        results = ctx.get("_tool_results") or []
+        if not isinstance(results, list):
+            results = [results]
+        for item in results:
+            url = self._extract_first_url(str(item or ""))
+            if url:
+                return url
+        return ""
+
+    def _build_share_title(self, text: str, url: str) -> str:
+        cleaned = re.sub(r"\s+", " ", self._strip_urls(text)).strip()
+        if cleaned:
+            return cleaned[:48]
+        return url
+
+    def _build_share_content(self, text: str, title: str) -> str:
+        cleaned = re.sub(r"\s+", " ", self._strip_urls(text)).strip()
+        if not cleaned:
+            return ""
+        if cleaned.startswith(title):
+            cleaned = cleaned[len(title) :].strip()
+        return cleaned[:80]
+
     def _strip_emo_tags_anywhere(self, text: str) -> str:
         """移除所有情绪标签"""
         return self._emo_tag_re.sub("", text or "")
@@ -848,6 +1288,46 @@ class ChatService:
     def _strip_cmd_anywhere(self, text: str) -> str:
         """移除所有命令标签"""
         return self._cmd_re.sub("", text or "")
+
+    def _compress_sensor_text(self, text: str, max_len: int = 800) -> str:
+        compressed = str(text or "").replace("\r\n", "\n").strip()
+        if not compressed:
+            return ""
+
+        compressed = re.sub(r"\n{3,}", "\n\n", compressed)
+        lines = [line.strip() for line in compressed.split("\n") if line.strip()]
+        if len(lines) > 8:
+            compressed = "\n".join(lines[:8])
+        else:
+            compressed = "\n".join(lines)
+
+        if len(compressed) > max_len:
+            compressed = compressed[: max_len - 3].rstrip() + "..."
+
+        return compressed
+
+    def _format_sensor_observations(self, entries: list, max_items: int = 3) -> str:
+        if not entries:
+            return ""
+        lines = []
+        tail = list(entries)[-max_items:]
+        for item in tail:
+            time_text = str(item.get("time") or "").strip()
+            app = str(item.get("app") or item.get("window_title") or "").strip()
+            content = str(item.get("content") or "").strip()
+            if content:
+                content = self._compress_sensor_text(content, max_len=160)
+            prefix = f"{time_text} " if time_text else ""
+            if app and content:
+                line = f"- {prefix}{app}: {content}"
+            elif app:
+                line = f"- {prefix}{app}"
+            elif content:
+                line = f"- {prefix}{content}"
+            else:
+                continue
+            lines.append(line)
+        return "\n".join(lines)
 
     def _extract_emo_tag(self, text):
         """提取情绪标签"""
@@ -873,7 +1353,9 @@ class ChatService:
         if text:
             await self.event_bus.emit("ui.append", role="assistant", text=text)
 
-    async def _add_memory_safe(self, role: str, text: str, *, meta: Optional[dict] = None):
+    async def _add_memory_safe(
+        self, role: str, text: str, *, meta: Optional[dict] = None
+    ):
         """安全地添加记忆 (修复参数冲突BUG)"""
         # 🟢 1. 浅拷贝 meta，防止修改原字典
         safe_meta = (meta or {}).copy()
@@ -892,10 +1374,18 @@ class ChatService:
             await asyncio.to_thread(self.brain.add_memory, role, text, session_id)
 
             # 安全发射事件
-            await self.event_bus.emit("memory.add.ok", role=role, len=len(text or ""), **safe_meta)
+            await self.event_bus.emit(
+                "memory.add.ok", role=role, len=len(text or ""), **safe_meta
+            )
         except Exception as e:
             # 错误处理也要用 safe_meta
-            await self.event_bus.emit("memory.add.fail", role=role, error=repr(e), len=len(text or ""), **safe_meta)
+            await self.event_bus.emit(
+                "memory.add.fail",
+                role=role,
+                error=repr(e),
+                len=len(text or ""),
+                **safe_meta,
+            )
 
     # ==================== Gatekeeper 逻辑 ====================
     async def _should_reply(self, user_text: str) -> bool:
@@ -908,7 +1398,9 @@ class ChatService:
 
         # ListenerPlugin 规则并入：直接提及唤醒词，强制回复
         lower_text = text_clean.lower()
-        wake_words = [str(word).lower() for word in (WAKE_KEYWORDS or []) if str(word).strip()]
+        wake_words = [
+            str(word).lower() for word in (WAKE_KEYWORDS or []) if str(word).strip()
+        ]
         if any(word in lower_text for word in wake_words):
             self.logger.info("🟢 [Gatekeeper] 命中唤醒词 -> 强制回复")
             return True
@@ -938,7 +1430,9 @@ class ChatService:
         # 3. 活跃会话窗口检查 (连贯对话必回)
         time_diff = time.time() - self._last_reply_time
         if time_diff < GATEKEEPER_ACTIVE_SESSION_WINDOW:
-            self.logger.info(f"🟢 [Gatekeeper] 处于活跃会话窗口 ({int(time_diff)}s < {GATEKEEPER_ACTIVE_SESSION_WINDOW}s) -> 强制回复")
+            self.logger.info(
+                f"🟢 [Gatekeeper] 处于活跃会话窗口 ({int(time_diff)}s < {GATEKEEPER_ACTIVE_SESSION_WINDOW}s) -> 强制回复"
+            )
             return True
 
         # 4. LLM 智能判断 (调用 cheap model)
@@ -951,8 +1445,7 @@ class ChatService:
                         break
 
             prompt = GATEKEEPER_PROMPT_TEMPLATE.format(
-                user_text=text_clean,
-                last_ai_reply=last_ai_reply
+                user_text=text_clean, last_ai_reply=last_ai_reply
             )
 
             messages = [{"role": "user", "content": prompt}]
@@ -966,7 +1459,9 @@ class ChatService:
             )
             decision = decision.strip().upper()
 
-            self.logger.info(f"⚖️ [Gatekeeper] LLM 判断结果: {decision} | 输入: {text_clean[:20]}...")
+            self.logger.info(
+                f"⚖️ [Gatekeeper] LLM 判断结果: {decision} | 输入: {text_clean[:20]}..."
+            )
 
             if "YES" in decision:
                 return True
@@ -983,10 +1478,36 @@ class ChatService:
             return False
         t = text.lower().strip()
         keywords = [
-            "昨天", "前天", "大前天", "上周", "上个月", "过去",
-            "那一天", "那天", "几号", "星期", "礼拜", "周一", "周二", "周三", "周四", "周五", "周六", "周日",
-            "上午", "早上", "中午", "下午", "晚上", "刚才", "之前", "还记得",
-            "干了什么", "做了什么", "说过", "提过",
+            "昨天",
+            "前天",
+            "大前天",
+            "上周",
+            "上个月",
+            "过去",
+            "那一天",
+            "那天",
+            "几号",
+            "星期",
+            "礼拜",
+            "周一",
+            "周二",
+            "周三",
+            "周四",
+            "周五",
+            "周六",
+            "周日",
+            "上午",
+            "早上",
+            "中午",
+            "下午",
+            "晚上",
+            "刚才",
+            "之前",
+            "还记得",
+            "干了什么",
+            "做了什么",
+            "说过",
+            "提过",
         ]
         if any(k in t for k in keywords):
             return True
@@ -1004,9 +1525,23 @@ class ChatService:
             return False
         t = text.lower().strip()
         keys = [
-            "还记得", "记得吗", "忘了", "之前说", "我说过", "提过",
-            "我为什么", "怎么会", "当时", "怎么了", "到底为啥",
-            "腹泻", "断食", "体检", "医院", "不舒服", "拉肚子",
+            "还记得",
+            "记得吗",
+            "忘了",
+            "之前说",
+            "我说过",
+            "提过",
+            "我为什么",
+            "怎么会",
+            "当时",
+            "怎么了",
+            "到底为啥",
+            "腹泻",
+            "断食",
+            "体检",
+            "医院",
+            "不舒服",
+            "拉肚子",
         ]
         return any(k in t for k in keys)
 
@@ -1061,7 +1596,9 @@ class ChatService:
             return f"{followup}\n\n{reply}"
         return followup or reply
 
-    async def _record_proactive_followup(self, followup: Optional[Dict[str, Any]]) -> None:
+    async def _record_proactive_followup(
+        self, followup: Optional[Dict[str, Any]]
+    ) -> None:
         if not isinstance(followup, dict):
             return
         text = str(followup.get("text") or "").strip()
@@ -1177,7 +1714,9 @@ class ChatService:
             return False
         return False
 
-    async def _maybe_send_proactive_followup(self, user_text: str, ctx: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, str]]:
+    async def _maybe_send_proactive_followup(
+        self, user_text: str, ctx: Optional[Dict[str, Any]] = None
+    ) -> Optional[Dict[str, str]]:
         """
         今日首次文本交互时，基于昨天用户话题生成一次主动关心前缀。
         """
@@ -1211,7 +1750,13 @@ class ChatService:
             self.logger.warning(f"主动关心触发失败: {e}")
         return None
 
-    def _build_recent_transcript_context(self, limit: int = 28, max_chars: int = 1400, user_only: bool = False, session_id: str = "") -> str:
+    def _build_recent_transcript_context(
+        self,
+        limit: int = 28,
+        max_chars: int = 1400,
+        user_only: bool = False,
+        session_id: str = "",
+    ) -> str:
         """时间回顾类问题兜底：注入最近对话片段，降低“明明说过却忘记”的概率。"""
         store = getattr(self.brain, "sqlite_store", None)
         if not store:
@@ -1244,6 +1789,7 @@ class ChatService:
             return text
         except Exception:
             return ""
+
     # ==================== 主处理逻辑 ====================
 
     async def process(self, user_text: str, ctx: Optional[Dict[str, Any]] = None):
@@ -1254,7 +1800,8 @@ class ChatService:
         self._dbg(f"process() 开始，用户输入: {user_text}")
 
         # 1. 初始化上下文
-        if ctx is None: ctx = {}
+        if ctx is None:
+            ctx = {}
         ctx["chat_service"] = self
         ctx["brain"] = self.brain
         ctx["mcp_bridge"] = self.mcp_bridge
@@ -1264,6 +1811,22 @@ class ChatService:
 
         input_source = str(ctx.get("source", "unknown") or "unknown").strip()
         channel_meta = ctx.get("channel_meta") or {}
+        if input_source in {"qq_gateway", "napcat_qq"}:
+            sender_name = str(
+                channel_meta.get("sender_name")
+                or channel_meta.get("user_id")
+                or "unknown"
+            ).strip()
+            session_preview = str(channel_meta.get("session_id") or "").strip()
+            session_label = self._qq_session_label(session_preview)
+            incoming_preview = (
+                str(user_text or "").replace("\r", " ").replace("\n", " ").strip()
+            )
+            if len(incoming_preview) > 240:
+                incoming_preview = incoming_preview[:240] + "..."
+            self.logger.info(
+                f"[QQ-IN][{session_label}][{session_preview or 'unknown'}][from={sender_name}] {incoming_preview}"
+            )
         transcript_channel_meta = self._build_transcript_channel_meta(ctx)
         has_external_images = bool(channel_meta.get("has_image"))
         memory_session_id = self._get_memory_session_id(ctx)
@@ -1287,7 +1850,9 @@ class ChatService:
         allow_write = bool(ctx.get("allow_write", False))
         allow_exec = bool(ctx.get("allow_exec", False))
         feedback_type, feedback_reaction = self._detect_feedback(user_text)
-        apply_confirmed, confirm_change_id, confirm_token = self._extract_apply_confirmation(user_text)
+        apply_confirmed, confirm_change_id, confirm_token = (
+            self._extract_apply_confirmation(user_text)
+        )
         ctx["codex_user_confirmed_apply"] = bool(apply_confirmed)
         ctx["codex_confirm_change_id"] = str(confirm_change_id or "")
         ctx["codex_confirm_token"] = str(confirm_token or "")
@@ -1301,7 +1866,10 @@ class ChatService:
                     ctx,
                     "user_confirm_apply",
                     summary="用户确认应用变更",
-                    meta={"change_id": confirm_change_id, "confirm_token": confirm_token},
+                    meta={
+                        "change_id": confirm_change_id,
+                        "confirm_token": confirm_token,
+                    },
                 )
             self._add_codex_session_event("user_task", text=user_text, ctx=ctx)
 
@@ -1309,54 +1877,90 @@ class ChatService:
         # 2. Direct 模式：处理“控制类”硬指令
         # =========================================================================
         self._dbg("检查是否为direct命令")
-        is_direct, direct_result = await self.plugin_manager.execute_direct_commands(user_text, ctx)
+        is_direct, direct_result = await self.plugin_manager.execute_direct_commands(
+            user_text, ctx
+        )
 
         if is_direct:
             self._dbg("进入 Direct 命令处理流程")
             direct_meta = {"path": "direct"}
             if memory_session_id:
                 direct_meta["session_id"] = memory_session_id
-            await self._add_memory_safe("user", user_text, meta=direct_meta)
-
             direct_reply_text = str(direct_result) if direct_result is not None else ""
             handled_gateway_image = False
-            if isinstance(direct_result, dict) and str(direct_result.get("__type__") or "").strip() == "gateway_image":
+            handled_gateway_file = False
+            if (
+                isinstance(direct_result, dict)
+                and str(direct_result.get("__type__") or "").strip() == "gateway_file"
+            ):
+                file_path = str(direct_result.get("file_path") or "").strip()
+                file_name = str(direct_result.get("file_name") or "").strip()
+                success_text = str(
+                    direct_result.get("success_text") or "📎 已把文件发给你了。"
+                )
+                fallback_text = str(
+                    direct_result.get("fallback_text")
+                    or "⚠️ 文件已准备好，但回发失败了。"
+                )
+                file_ok = await self._send_gateway_file_reply(
+                    file_path, ctx, file_name=file_name
+                )
+                direct_reply_text = success_text if file_ok else fallback_text
+                handled_gateway_file = file_ok
+                if not file_ok and str(ctx.get("source") or "").strip().lower() in {
+                    "qq_gateway",
+                    "napcat_qq",
+                }:
+                    await self._send_gateway_reply(
+                        direct_reply_text, ctx, emotion="neutral"
+                    )
+            if (
+                isinstance(direct_result, dict)
+                and str(direct_result.get("__type__") or "").strip() == "gateway_image"
+            ):
                 image_path = str(direct_result.get("image_path") or "").strip()
                 image_caption = str(direct_result.get("caption") or "").strip()
-                success_text = str(direct_result.get("success_text") or "🖼️ 已把当前截图发给你了。")
-                fallback_text = str(direct_result.get("fallback_text") or "⚠️ 截图已生成，但回发失败了。")
-                image_ok = await self._send_gateway_image_reply(image_path, ctx, caption=image_caption)
+                success_text = str(
+                    direct_result.get("success_text") or "🖼️ 已把当前截图发给你了。"
+                )
+                fallback_text = str(
+                    direct_result.get("fallback_text") or "⚠️ 截图已生成，但回发失败了。"
+                )
+                image_ok = await self._send_gateway_image_reply(
+                    image_path, ctx, caption=image_caption
+                )
                 if image_path:
                     asyncio.create_task(self._cleanup_gateway_image_file(image_path))
                 direct_reply_text = success_text if image_ok else fallback_text
                 handled_gateway_image = image_ok
-                if not image_ok and str(ctx.get("source") or "").strip().lower() in {"qq_gateway", "napcat_qq"}:
-                    await self._send_gateway_reply(direct_reply_text, ctx, emotion="neutral")
-
-            await self._add_memory_safe("assistant", direct_reply_text, meta=direct_meta)
+                if not image_ok and str(ctx.get("source") or "").strip().lower() in {
+                    "qq_gateway",
+                    "napcat_qq",
+                }:
+                    await self._send_gateway_reply(
+                        direct_reply_text, ctx, emotion="neutral"
+                    )
 
             if direct_reply_text:
-                if self.learning:
-                    self.learning.record_interaction(
-                        user_text,
-                        direct_reply_text,
-                        "neutral",
-                        feedback_type,
-                        feedback_reaction,
-                    )
                 if output_profile.get("ui_append", True):
-                    await self.event_bus.emit("ui.append", role="assistant", text=direct_reply_text)
+                    await self.event_bus.emit(
+                        "ui.append", role="assistant", text=direct_reply_text
+                    )
                 await self.presenter.present(
                     direct_reply_text,
                     emotion="neutral",
                     speak=output_profile.get("speak", True),
                     show_bubble=output_profile.get("show_bubble", True),
                 )
-                if not handled_gateway_image:
-                    await self._send_gateway_reply(direct_reply_text, ctx, emotion="neutral")
+                if not handled_gateway_image and not handled_gateway_file:
+                    await self._send_gateway_reply(
+                        direct_reply_text, ctx, emotion="neutral"
+                    )
                 self._update_active_time()
                 if codex_mode:
-                    self._set_codex_task_state(ctx, "finalize", summary=direct_reply_text[:200])
+                    self._set_codex_task_state(
+                        ctx, "finalize", summary=direct_reply_text[:200]
+                    )
 
             self._dbg("Direct 流程结束，返回 Idle")
             await self._emit_idle_status(output_profile, reason="direct_complete")
@@ -1365,32 +1969,54 @@ class ChatService:
         # =========================================================================
         # 3. 特殊指令拦截 (每日总结/补写)
         # =========================================================================
-        if "总结今天" in user_text or "今天干了什么" in user_text or "今天的总结" in user_text:
+        if (
+            "总结今天" in user_text
+            or "今天干了什么" in user_text
+            or "今天的总结" in user_text
+        ):
             print("📅 [System] 拦截到每日总结请求")
             if hasattr(self, "screen_sensor_ref") and self.screen_sensor_ref:
                 report = self.screen_sensor_ref.get_formatted_report()
-                raw_stats = getattr(self.screen_sensor_ref, "get_stats_data", lambda: {})()
+                raw_stats = getattr(
+                    self.screen_sensor_ref, "get_stats_data", lambda: {}
+                )()
 
                 await self.summarize_day(report, raw_stats=raw_stats, auto=False)
-                asyncio.create_task(self._add_memory_safe("user", user_text, meta={"path": "summary"}))
+                asyncio.create_task(
+                    self._add_memory_safe("user", user_text, meta={"path": "summary"})
+                )
                 await self._emit_idle_status(output_profile, reason="summary_complete")
                 return
 
         if "总结昨天" in user_text or "补写昨天" in user_text:
             print("📅 [System] 拦截到补写昨天日记请求")
             yesterday = datetime.now().date() - timedelta(days=1)
-            await self.summarize_day(report_data=None, auto=False, target_date=yesterday)
-            asyncio.create_task(self._add_memory_safe("user", user_text, meta={"path": "summary_makeup"}))
+            await self.summarize_day(
+                report_data=None, auto=False, target_date=yesterday
+            )
+            asyncio.create_task(
+                self._add_memory_safe(
+                    "user", user_text, meta={"path": "summary_makeup"}
+                )
+            )
             await self._emit_idle_status(output_profile, reason="summary_complete")
             return
 
         # =========================================================================
         # 4. Gatekeeper 拦截层
         # =========================================================================
-        remote_sources = {str(x).strip().lower() for x in set(REMOTE_CHAT_SOURCES or set()) if str(x).strip()}
+        remote_sources = {
+            str(x).strip().lower()
+            for x in set(REMOTE_CHAT_SOURCES or set())
+            if str(x).strip()
+        }
         direct_chat_sources = {"text_input", "voice", "codex_input", *remote_sources}
         source_key = str(input_source or "").strip().lower()
-        should_reply = True if source_key in direct_chat_sources or codex_mode or has_external_images else await self._should_reply(user_text)
+        should_reply = (
+            True
+            if source_key in direct_chat_sources or codex_mode or has_external_images
+            else await self._should_reply(user_text)
+        )
         if not should_reply:
             print(f"🛑 [系统] Gatekeeper 决定忽略此消息")
             await self.event_bus.emit("chat.ignored", content=user_text)
@@ -1418,27 +2044,41 @@ class ChatService:
         user_log_meta = {"source": chat_log_source, **transcript_channel_meta}
         if memory_session_id:
             user_log_meta["session_id"] = memory_session_id
-        await self.event_bus.emit("chat.log", role="user", content=user_text, meta=user_log_meta)
+        await self.event_bus.emit(
+            "chat.log", role="user", content=user_text, meta=user_log_meta
+        )
         self._dbg("准备切换状态为 thinking")
         if live2d_enabled:
-            await self.event_bus.emit("state.changed", state="thinking", reason="user_input")
+            await self.event_bus.emit(
+                "state.changed", state="thinking", reason="user_input"
+            )
         else:
             await self.event_bus.emit("ui.status", text="Thinking.")
-        await self.personality.think_before_respond(user_text, self._show_thinking_emotion if live2d_enabled else None)
+        await self.personality.think_before_respond(
+            user_text, self._show_thinking_emotion if live2d_enabled else None
+        )
 
         # --- Observe 模式 ---
         if hasattr(self.plugin_manager, "execute_observe_commands"):
             self._dbg("检查 Observe 插件...")
-            is_observe, obs_result = await self.plugin_manager.execute_observe_commands(user_text, ctx)
+            is_observe, obs_result = await self.plugin_manager.execute_observe_commands(
+                user_text, ctx
+            )
 
             if is_observe:
                 self._dbg("Observe 触发成功")
                 obs_text = ""
-                if isinstance(obs_result, dict) and obs_result.get("__type__") == "image_payload":
+                if (
+                    isinstance(obs_result, dict)
+                    and obs_result.get("__type__") == "image_payload"
+                ):
                     await self.event_bus.emit("ui.status", text="Analyzing Visuals...")
                     try:
                         from modules import llm
-                        desc = await llm.analyze_image(obs_result["image_base64"], "请客观详细描述这张图片的内容。")
+
+                        desc = await llm.analyze_image(
+                            obs_result["image_base64"], "请客观详细描述这张图片的内容。"
+                        )
                         obs_text = f"【当前视觉环境】\n{desc}"
                         self._dbg("视觉描述获取成功")
                     except Exception as e:
@@ -1451,20 +2091,32 @@ class ChatService:
                     observe_meta = {"path": "observe"}
                     if memory_session_id:
                         observe_meta["session_id"] = memory_session_id
-                    asyncio.create_task(self._add_memory_safe("system", f"观察插件运行结果: {obs_text[:100]}...",
-                                                              meta=observe_meta))
+                    asyncio.create_task(
+                        self._add_memory_safe(
+                            "system",
+                            f"观察插件运行结果: {obs_text[:100]}...",
+                            meta=observe_meta,
+                        )
+                    )
                     user_text = f"{user_text}\n\n{obs_text}"
 
         # --- 路由与 Prompt 构建 ---
         self._dbg(f"进入 LLM 对话/工具流程, Input: {user_text[:50]}...")
         route = self.tool_router.route(user_text)
-        self._dbg(f"路由结果: need_tools={route.need_tools}, triggers={route.tool_triggers}")
+        self._dbg(
+            f"路由结果: need_tools={route.need_tools}, triggers={route.tool_triggers}"
+        )
         effective_triggers = list(route.tool_triggers or [])
         if codex_mode and "workspace_ops" not in effective_triggers:
             effective_triggers.append("workspace_ops")
         need_tools = bool(route.need_tools or (codex_mode and effective_triggers))
         if codex_mode and need_tools:
-            self._set_codex_task_state(ctx, "execute", summary=user_text[:200], meta={"triggers": effective_triggers[:8]})
+            self._set_codex_task_state(
+                ctx,
+                "execute",
+                summary=user_text[:200],
+                meta={"triggers": effective_triggers[:8]},
+            )
         task_reasoning = "codex" if codex_mode else "tool_reasoning"
         task_default = "codex" if codex_mode else "default"
 
@@ -1483,9 +2135,14 @@ class ChatService:
                 store = getattr(self.brain, "sqlite_store", None)
                 if store:
                     episodes = store.list_episodes(limit=15)
-                    logs = [f"📅 [{ep.get('title')}] 摘要：{ep.get('summary')}" for ep in episodes]
+                    logs = [
+                        f"📅 [{ep.get('title')}] 摘要：{ep.get('summary')}"
+                        for ep in episodes
+                    ]
                     if logs:
-                        special_context += f"\n\n【系统强制注入：近期活动日志】\n" + "\n".join(logs)
+                        special_context += (
+                            f"\n\n【系统强制注入：近期活动日志】\n" + "\n".join(logs)
+                        )
                 transcript_ctx = self._build_recent_transcript_context(
                     limit=30,
                     max_chars=1400,
@@ -1493,7 +2150,9 @@ class ChatService:
                     session_id=memory_session_id,
                 )
                 if transcript_ctx:
-                    special_context += f"\n\n【系统强制注入：最近对话片段】\n{transcript_ctx}"
+                    special_context += (
+                        f"\n\n【系统强制注入：最近对话片段】\n{transcript_ctx}"
+                    )
             except Exception as e:
                 print(f"❌ 历史回溯失败: {e}")
 
@@ -1520,10 +2179,13 @@ class ChatService:
 
         tool_prompt = ""
         if need_tools:
-            tool_prompt = self.plugin_manager.get_tool_prompt_for_triggers(list(effective_triggers), compact=True)
+            tool_prompt = self.plugin_manager.get_tool_prompt_for_triggers(
+                list(effective_triggers), compact=True
+            )
         else:
             tool_prompt = self.plugin_manager.get_system_prompt_addition()
-        if tool_prompt: system_text += "\n" + tool_prompt
+        if tool_prompt:
+            system_text += "\n" + tool_prompt
         mcp_prompt = self._build_mcp_tool_prompt()
         if mcp_prompt:
             system_text += "\n" + mcp_prompt
@@ -1535,6 +2197,24 @@ class ChatService:
             tool_intent=list(effective_triggers),
             session_id=memory_session_id,
         )
+        cleaned_context_messages = []
+        for message in context_messages:
+            if not isinstance(message, dict):
+                continue
+            role = str(message.get("role") or "")
+            content = message.get("content")
+            if role != "system":
+                cleaned_context_messages.append(message)
+                continue
+            try:
+                from modules.memory import clean_injected_context
+
+                sanitized = dict(message)
+                sanitized["content"] = clean_injected_context(str(content or ""))
+                cleaned_context_messages.append(sanitized)
+            except Exception:
+                cleaned_context_messages.append(message)
+        context_messages = cleaned_context_messages
 
         # =========================================================================
         # 6. 分支 A: ReAct 工具链
@@ -1551,10 +2231,15 @@ class ChatService:
             )
 
             allow_tools = bool(need_tools) or self._contains_cmd(reply1 or "")
-            ret = await self.plugin_manager.execute_commands(reply1, ctx, allow_tools=allow_tools)
+            ret = await self.plugin_manager.execute_commands(
+                reply1, ctx, allow_tools=allow_tools
+            )
             triggered, clean_thought, tool_results, used_triggers = ret
+            ctx["_tool_results"] = tool_results
             reasoning_text = self._clean_text_for_tts(
-                self._strip_cmd_anywhere(self._strip_emo_tags_anywhere(clean_thought or reply1 or ""))
+                self._strip_cmd_anywhere(
+                    self._strip_emo_tags_anywhere(clean_thought or reply1 or "")
+                )
             ).strip()
             if reasoning_text:
                 self._add_codex_session_event(
@@ -1564,13 +2249,13 @@ class ChatService:
                     meta={"used_triggers": list(used_triggers or [])[:8]},
                 )
 
-
             final_reply = ""
             final_emo = "neutral"
 
             if triggered and tool_results:
                 _, clean1 = self._extract_emo_tag(clean_thought or "")
-                if clean1: context_messages.append({"role": "assistant", "content": clean1})
+                if clean1:
+                    context_messages.append({"role": "assistant", "content": clean1})
 
                 feedback = "\n".join([str(r) for r in tool_results])
                 if used_triggers:
@@ -1578,9 +2263,24 @@ class ChatService:
                     if memory_session_id:
                         tool_use_meta["session_id"] = memory_session_id
                     asyncio.create_task(
-                        self._add_memory_safe("assistant", f"[tool_use] {used_triggers}", meta=tool_use_meta))
+                        self._add_memory_safe(
+                            "assistant",
+                            f"[tool_use] {used_triggers}",
+                            meta=tool_use_meta,
+                        )
+                    )
 
-                context_messages.append({"role": "system", "content": f"【系统反馈】工具结果：\n{feedback}\n请据此回答。"})
+                compact_hint = ""
+                if used_triggers:
+                    used_set = {str(t or "").strip().lower() for t in used_triggers}
+                    if used_set & {"search", "search_web"}:
+                        compact_hint = "\n请只输出关键信息（<=3条），不要表格，不要展示思考过程，不要输出完整链接。如是行情/价格/汇率/指数问题，尽量给出具体数值+单位+时间；找不到数值就直说未找到。"
+                context_messages.append(
+                    {
+                        "role": "system",
+                        "content": f"【系统反馈】工具结果：\n{feedback}{compact_hint}\n请据此回答。",
+                    }
+                )
                 reply2 = await asyncio.to_thread(
                     chat_with_ai,
                     context_messages,
@@ -1607,7 +2307,9 @@ class ChatService:
                     if sharing:
                         final_reply += f"\n\n{sharing}"
 
-            final_reply = self._clean_text_for_tts(self._strip_cmd_anywhere(self._strip_emo_tags_anywhere(final_reply)))
+            final_reply = self._clean_text_for_tts(
+                self._strip_cmd_anywhere(self._strip_emo_tags_anywhere(final_reply))
+            )
             final_reply = self._merge_preface_texts(preface_text, final_reply)
 
             if self.learning:
@@ -1627,13 +2329,24 @@ class ChatService:
                     ctx=ctx,
                     meta={"emotion": final_emo, "tool": True},
                 )
-                assistant_log_meta = {"tool": True, "emotion": final_emo, "source": chat_log_source, **transcript_channel_meta}
+                assistant_log_meta = {
+                    "tool": True,
+                    "emotion": final_emo,
+                    "source": chat_log_source,
+                    **transcript_channel_meta,
+                }
                 if memory_session_id:
                     assistant_log_meta["session_id"] = memory_session_id
-                await self.event_bus.emit("chat.log", role="assistant", content=final_reply,
-                                          meta=assistant_log_meta)
+                await self.event_bus.emit(
+                    "chat.log",
+                    role="assistant",
+                    content=final_reply,
+                    meta=assistant_log_meta,
+                )
                 if output_profile.get("ui_append", True):
-                    await self.event_bus.emit("ui.append", role="assistant", text=final_reply)
+                    await self.event_bus.emit(
+                        "ui.append", role="assistant", text=final_reply
+                    )
                 await self.presenter.present(
                     final_reply,
                     final_emo,
@@ -1644,7 +2357,9 @@ class ChatService:
                 await self._record_proactive_followup(proactive_followup)
                 await self._record_task_followup(task_followup)
                 if codex_mode:
-                    self._set_codex_task_state(ctx, "finalize", summary=final_reply[:200])
+                    self._set_codex_task_state(
+                        ctx, "finalize", summary=final_reply[:200]
+                    )
 
                 # 写入记忆 (ReAct 分支)
                 chat_meta = {"path": "chat"}
@@ -1685,7 +2400,9 @@ class ChatService:
                 proactive_chunk = f"{preface_text}\n\n"
                 full_reply += proactive_chunk
                 if output_profile.get("speak", True):
-                    await self.event_bus.emit("state.changed", state="speaking", reason="proactive_followup")
+                    await self.event_bus.emit(
+                        "state.changed", state="speaking", reason="proactive_followup"
+                    )
                 await self.event_bus.emit(
                     "assistant.stream.feed",
                     chunk=proactive_chunk,
@@ -1695,16 +2412,22 @@ class ChatService:
                 )
 
             try:
-                async for chunk in chat_with_ai_stream(context_messages, task_type=task_default):
-                    if not chunk: continue
+                async for chunk in chat_with_ai_stream(
+                    context_messages, task_type=task_default
+                ):
+                    if not chunk:
+                        continue
                     if not first:
                         first = True
                         if output_profile.get("speak", True):
-                            await self.event_bus.emit("state.changed", state="speaking", reason="stream_start")
+                            await self.event_bus.emit(
+                                "state.changed", state="speaking", reason="stream_start"
+                            )
 
                     buffer += chunk
 
-                    if "[CMD:" in buffer and "]" in buffer: buffer = self._cmd_re.sub("", buffer)
+                    if "[CMD:" in buffer and "]" in buffer:
+                        buffer = self._cmd_re.sub("", buffer)
 
                     if "<" in buffer and ">" in buffer:
                         m = self._emo_tag_re.search(buffer)
@@ -1714,11 +2437,20 @@ class ChatService:
                             print(f"🎭 [Stream] 检测到情绪标签: {raw} -> {curr_emo}")
                             if live2d_enabled:
                                 asyncio.create_task(
-                                    self.event_bus.emit("live2d.emotion", emotion=curr_emo, prefer_motion=False))
+                                    self.event_bus.emit(
+                                        "live2d.emotion",
+                                        emotion=curr_emo,
+                                        prefer_motion=False,
+                                    )
+                                )
                             buffer = self._emo_tag_re.sub("", buffer, count=1)
 
                     if len(buffer) > 15 and any(p in buffer for p in "，。！？,.!?\n"):
-                        safe = self._clean_text_for_tts(self._strip_cmd_anywhere(self._strip_emo_tags_anywhere(buffer)))
+                        safe = self._clean_text_for_tts(
+                            self._strip_cmd_anywhere(
+                                self._strip_emo_tags_anywhere(buffer)
+                            )
+                        )
                         if safe:
                             full_reply += safe
                             await self.event_bus.emit(
@@ -1732,7 +2464,9 @@ class ChatService:
 
                 # 处理剩余尾巴
                 if buffer:
-                    safe = self._clean_text_for_tts(self._strip_cmd_anywhere(self._strip_emo_tags_anywhere(buffer)))
+                    safe = self._clean_text_for_tts(
+                        self._strip_cmd_anywhere(self._strip_emo_tags_anywhere(buffer))
+                    )
                     if safe:
                         full_reply += safe
                         await self.event_bus.emit(
@@ -1765,7 +2499,7 @@ class ChatService:
                 if CHARACTER_SHARING_ENABLED:
                     sharing = self.personality.try_share()
                     if sharing:
-                    # 分享内容追加到最终文本
+                        # 分享内容追加到最终文本
                         full_reply = f"{full_reply}\n\n{sharing}"
                     # 额外播放分享内容的语音
 
@@ -1779,12 +2513,23 @@ class ChatService:
                     meta={"emotion": curr_emo, "stream": True},
                 )
                 if output_profile.get("ui_append", True):
-                    await self.event_bus.emit("ui.append", role="assistant", text=full_reply)
-                stream_log_meta = {"stream": True, "emotion": curr_emo, "source": chat_log_source, **transcript_channel_meta}
+                    await self.event_bus.emit(
+                        "ui.append", role="assistant", text=full_reply
+                    )
+                stream_log_meta = {
+                    "stream": True,
+                    "emotion": curr_emo,
+                    "source": chat_log_source,
+                    **transcript_channel_meta,
+                }
                 if memory_session_id:
                     stream_log_meta["session_id"] = memory_session_id
-                await self.event_bus.emit("chat.log", role="assistant", content=full_reply,
-                                          meta=stream_log_meta)
+                await self.event_bus.emit(
+                    "chat.log",
+                    role="assistant",
+                    content=full_reply,
+                    meta=stream_log_meta,
+                )
                 await self._send_gateway_reply(full_reply, ctx, emotion=curr_emo)
                 await self._record_proactive_followup(proactive_followup)
                 await self._record_task_followup(task_followup)
@@ -1804,9 +2549,13 @@ class ChatService:
                 if memory_session_id:
                     stream_chat_meta["session_id"] = memory_session_id
                 await self._add_memory_safe("user", user_text, meta=stream_chat_meta)
-                await self._add_memory_safe("assistant", full_reply, meta=stream_chat_meta)
+                await self._add_memory_safe(
+                    "assistant", full_reply, meta=stream_chat_meta
+                )
                 if codex_mode:
-                    self._set_codex_task_state(ctx, "finalize", summary=full_reply[:200])
+                    self._set_codex_task_state(
+                        ctx, "finalize", summary=full_reply[:200]
+                    )
 
     # 🟢 [新增] 主动关怀提醒
     async def send_active_alert(self, app_name: str, minutes: int):
@@ -1817,8 +2566,10 @@ class ChatService:
         base_prompt = DEFAULT_PERSONA
         try:
             from modules.character_manager import character_manager
+
             c = character_manager.get_active_character()
-            if c: base_prompt = c.get("prompt", DEFAULT_PERSONA)
+            if c:
+                base_prompt = c.get("prompt", DEFAULT_PERSONA)
         except:
             pass
 
@@ -1845,7 +2596,9 @@ class ChatService:
             if reply:
                 # 3. 触发弹窗和语音
                 # 发送给 UI 显示弹窗 (需 UI 支持 'ui.popup' 事件，或者直接用 append)
-                await self.event_bus.emit("ui.append", role="assistant", text=f"【温馨提醒】{reply}")
+                await self.event_bus.emit(
+                    "ui.append", role="assistant", text=f"【温馨提醒】{reply}"
+                )
                 await self.presenter.present(reply, emotion="concern", interrupt=True)
 
         except Exception as e:
@@ -1853,7 +2606,15 @@ class ChatService:
 
     # ==================== 屏幕感知事件处理 (完整版：含自我意识+视觉+文本) ====================
 
-    async def handle_sensor_event(self, window_title: str, category: str, count: int = 1, use_vision: bool = False):
+    async def handle_sensor_event(
+        self,
+        window_title: str,
+        category: str,
+        count: int = 1,
+        use_vision: bool = False,
+        app_name: str = "",
+        reason: str = "",
+    ):
         import time
         import random
         import asyncio
@@ -1868,15 +2629,19 @@ class ChatService:
         if not clean_title.strip():
             clean_title = category
 
+        display_app = app_name or clean_title
+
         if time.time() - self._last_reply_time < self._sensor_min_reply_interval_sec:
             return
 
-        print(f"🤖 [Sensor] 观察: {clean_title} ({category}) | Count: {count}")
-
+        print(
+            f"🤖 [Sensor] 观察: {clean_title} ({category}) | App: {display_app} | Count: {count}"
+        )
         # 获取人设
         base_prompt = DEFAULT_PERSONA
         try:
             from modules.character_manager import character_manager
+
             c = character_manager.get_active_character()
             if c:
                 base_prompt = c.get("prompt", DEFAULT_PERSONA)
@@ -1884,11 +2649,50 @@ class ChatService:
             pass
 
         # ================= [分支 A] 自我意识 =================
+        recent_context = ""
+        try:
+            if hasattr(self, "screen_sensor_ref") and self.screen_sensor_ref:
+                recent_entries = self.screen_sensor_ref.get_recent_observations(3)
+                recent_context = self._format_sensor_observations(
+                    recent_entries, max_items=3
+                )
+        except Exception:
+            recent_context = ""
+
+        context_block = f"\n【近期观察】\n{recent_context}\n" if recent_context else ""
+
+        def record_observation(content: str, source: str):
+            sensor_ref = getattr(self, "screen_sensor_ref", None)
+            if not sensor_ref:
+                return
+            add_fn = getattr(sensor_ref, "add_observation", None) or getattr(
+                sensor_ref, "_append_observation", None
+            )
+            if not add_fn:
+                return
+            try:
+                add_fn(
+                    content,
+                    clean_title,
+                    category,
+                    app_name=display_app,
+                    reason=reason,
+                    source=source,
+                )
+            except TypeError:
+                try:
+                    add_fn(content, clean_title, category, display_app, reason, source)
+                except Exception:
+                    return
+            except Exception:
+                return
+
         if category == "self":
             if count > 1 and random.random() > 0.7:
                 return
 
             sys_prompt = f"""{base_prompt}
+{context_block}
     用户正在盯着【你的】程序窗口({clean_title})看。
     请打破第四面墙，对他简短说一句话。
     【警告】绝不能超过 15 个字！"""
@@ -1901,7 +2705,9 @@ class ChatService:
                     caller="sensor_self_talk",
                 )
                 if reply:
-                    await self._send_sensor_reply(reply, "self", count, clean_title, False)
+                    await self._send_sensor_reply(
+                        reply, "self", count, clean_title, False
+                    )
             except:
                 pass
             return
@@ -1909,11 +2715,13 @@ class ChatService:
         # ================= [分支：看门人 (Gatekeeper) 判断] =================
         if not use_vision:
             if count <= 2 and category not in {"self", "work"}:
-                self.logger.info(f"🛑 [Sensor Gatekeeper] 低强度事件跳过 ({clean_title})")
+                self.logger.info(
+                    f"🛑 [Sensor Gatekeeper] 低强度事件跳过 ({clean_title})"
+                )
                 return
 
             gk_prompt = f"""
-【场景】
+{context_block}【场景】
 用户刚切换到窗口: [{clean_title}] (分类: {category})，今天第 {count} 次。
 
 【判断任务】
@@ -1935,10 +2743,14 @@ class ChatService:
                     task_type="gatekeeper",
                     caller="sensor_gatekeeper",
                 )
-                self.logger.info(f"⚖️ [Sensor Gatekeeper] 判断是否值得吐槽: {gk_decision.strip()}")
+                self.logger.info(
+                    f"⚖️ [Sensor Gatekeeper] 判断是否值得吐槽: {gk_decision.strip()}"
+                )
 
                 if "YES" not in gk_decision.upper():
-                    self.logger.info(f"🛑 [Sensor Gatekeeper] 拦截本次纯文本吐槽 ({clean_title})，保持高冷")
+                    self.logger.info(
+                        f"🛑 [Sensor Gatekeeper] 拦截本次纯文本吐槽 ({clean_title})，保持高冷"
+                    )
                     return
             except Exception as e:
                 self.logger.warning(f"⚠️ [Sensor Gatekeeper] 调用失败，默认放行: {e}")
@@ -1962,7 +2774,10 @@ class ChatService:
                         reply = await analyze_image(img_b64, v_prompt)
 
                         if reply:
-                            await self._send_sensor_reply(reply, category, count, window_title, True)
+                            record_observation(clean_title, "vision")
+                            await self._send_sensor_reply(
+                                reply, category, count, window_title, True
+                            )
                             return
 
                     # ===== 模式 2：视觉只描述 → 默认模型吐槽 =====
@@ -1974,7 +2789,12 @@ class ChatService:
                         description = await analyze_image(img_b64, v_desc_prompt)
 
                         if description:
+                            description = self._compress_sensor_text(
+                                description, max_len=800
+                            )
+                            record_observation(description, "vision")
                             sys_prompt = f"""{base_prompt}
+{context_block}
 
     【场景】用户当前屏幕内容如下：
     {description}
@@ -1993,7 +2813,9 @@ class ChatService:
                             )
 
                             if reply:
-                                await self._send_sensor_reply(reply, category, count, window_title, True)
+                                await self._send_sensor_reply(
+                                    reply, category, count, window_title, True
+                                )
                                 return
 
             except Exception as e:
@@ -2001,6 +2823,7 @@ class ChatService:
 
         # ================= [分支 C] 文本模式 =================
         sys_prompt = f"""{base_prompt}
+{context_block}
 
     用户刚切换到窗口: [{clean_title}] ({category})，这是今天第 {count} 次。
 
@@ -2009,6 +2832,7 @@ class ChatService:
     """
 
         try:
+            record_observation(clean_title, "text")
             reply = await asyncio.to_thread(
                 chat_with_ai,
                 [{"role": "system", "content": sys_prompt}],
@@ -2016,12 +2840,25 @@ class ChatService:
                 caller="sensor_text_talk",
             )
             if reply:
-                await self._send_sensor_reply(reply, category, count, window_title, False)
+                await self._send_sensor_reply(
+                    reply, category, count, window_title, False
+                )
         except Exception as e:
             self.logger.error(f"Sensor Gen failed: {e}")
 
-    # 辅助方法：统一发送 (只提取情绪，不暴力改内容的版本)
-    async def _send_sensor_reply(self, reply: str, category: str, count: int, title: str, is_vision: bool):
+    # Helper: reset sensor motion after sensor replies.
+    async def _reset_sensor_motion_after(self, delay_s: float) -> None:
+        """Reset sensor motion back to idle to avoid think sticking."""
+        try:
+            await asyncio.sleep(max(0.2, float(delay_s)))
+            await self.event_bus.emit("live2d.go_idle")
+        except Exception:
+            return
+
+    # Helper: send sensor replies (extract emotion only; no forced rewrite).
+    async def _send_sensor_reply(
+        self, reply: str, category: str, count: int, title: str, is_vision: bool
+    ):
         """统一发送传感器回复"""
         extracted_emo, clean_text = self._extract_emo_tag(reply)
 
@@ -2045,12 +2882,17 @@ class ChatService:
 
         await self.presenter.present(clean_text, emotion=final_emo, interrupt=False)
 
+        # Sensor replies often use "think"; return to idle after a short delay.
+        if final_emo == "think":
+            delay = max(2.0, min(6.0, 1.2 + len(clean_text) * 0.12))
+            asyncio.create_task(self._reset_sensor_motion_after(delay))
+
         # ✅ 改为串行写入
         tag = "[视觉观察]" if is_vision else "[屏幕观察]"
         await self._add_memory_safe(
             "assistant",
             f"{tag} {clean_text}",
-            meta={"path": "sensor", "emotion": final_emo}
+            meta={"path": "sensor", "emotion": final_emo},
         )
 
     # ==================== 音乐感知事件处理 ====================
@@ -2063,12 +2905,15 @@ class ChatService:
         print(f"🎵 [Music] 正在聆听: {title} by {artist}")
 
         # 1. 切换到听歌动作
-        asyncio.create_task(self.event_bus.emit("live2d.emotion", emotion="music", intensity=1.0))
+        asyncio.create_task(
+            self.event_bus.emit("live2d.emotion", emotion="music", intensity=1.0)
+        )
 
         # 2. 使用当前激活角色设定
         base_prompt = DEFAULT_PERSONA
         try:
             from modules.character_manager import character_manager
+
             active_char = character_manager.get_active_character()
             if active_char:
                 base_prompt = active_char.get("prompt", DEFAULT_PERSONA)
@@ -2127,48 +2972,68 @@ class ChatService:
                 self._add_memory_safe(
                     "assistant",
                     f"我评价了歌曲《{title}》: {clean_text}",
-                    meta={"path": "music"}
+                    meta={"path": "music"},
                 )
             )
 
         except Exception as e:
             self.logger.error(f"处理音乐事件失败: {e}")
 
-
-
-    async def summarize_day(self, report_data: str = None, raw_stats: Optional[Dict[str, Any]] = None, auto: bool = False, target_date: date = None):
+    async def summarize_day(
+        self,
+        report_data: str = None,
+        raw_stats: Optional[Dict[str, Any]] = None,
+        auto: bool = False,
+        target_date: date = None,
+    ):
         if not target_date:
             target_date = datetime.now().date()
 
         date_str = target_date.strftime("%Y-%m-%d")
-        is_makeup = (target_date < datetime.now().date())
+        is_makeup = target_date < datetime.now().date()
 
         print(f"[Diary] Build summary ({date_str}) | makeup={is_makeup}")
 
         store = getattr(self.brain, "sqlite_store", None)
 
-        stats_payload = raw_stats if isinstance(raw_stats, dict) else (report_data if isinstance(report_data, dict) else None)
+        stats_payload = (
+            raw_stats
+            if isinstance(raw_stats, dict)
+            else (report_data if isinstance(report_data, dict) else None)
+        )
         if store and isinstance(stats_payload, dict):
             try:
                 normalized_stats = dict(stats_payload)
                 if "summary_text" not in normalized_stats:
-                    normalized_stats["summary_text"] = json.dumps(stats_payload, ensure_ascii=False)
-                await asyncio.to_thread(store.save_daily_screen_stats, date_str, normalized_stats)
+                    normalized_stats["summary_text"] = json.dumps(
+                        stats_payload, ensure_ascii=False
+                    )
+                await asyncio.to_thread(
+                    store.save_daily_screen_stats, date_str, normalized_stats
+                )
                 print(f"[Diary] Screen stats saved: {date_str}")
             except Exception as e:
                 print(f"[Diary] Screen stats save failed: {e}")
 
         report_text = report_data
         if isinstance(report_data, dict):
-            report_text = report_data.get("summary_text", json.dumps(report_data, ensure_ascii=False))
+            report_text = report_data.get(
+                "summary_text", json.dumps(report_data, ensure_ascii=False)
+            )
         elif not report_text and isinstance(raw_stats, dict):
-            report_text = raw_stats.get("summary_text", json.dumps(raw_stats, ensure_ascii=False))
+            report_text = raw_stats.get(
+                "summary_text", json.dumps(raw_stats, ensure_ascii=False)
+            )
 
         if not report_text and store:
-            report_text = await asyncio.to_thread(store.format_screen_stats_for_prompt, date_str)
+            report_text = await asyncio.to_thread(
+                store.format_screen_stats_for_prompt, date_str
+            )
 
         chat_history = await asyncio.to_thread(self._fetch_day_chat_history, date_str)
-        owner_chat_history = await asyncio.to_thread(self._fetch_day_owner_chat_history, date_str)
+        owner_chat_history = await asyncio.to_thread(
+            self._fetch_day_owner_chat_history, date_str
+        )
 
         if not report_text and not chat_history and not owner_chat_history:
             print(f"[Diary] Skip {date_str}: no data")
@@ -2180,6 +3045,7 @@ class ChatService:
 
         try:
             from modules.character_manager import character_manager
+
             active_char = character_manager.get_active_character()
             if active_char:
                 active_char_name = active_char.get("name", "AI Assistant")
@@ -2188,30 +3054,32 @@ class ChatService:
         except Exception:
             pass
 
-        task_desc = f"You are {active_char_name}. Write today's diary entry."
+        task_desc = f"你是 {active_char_name}。请用简体中文写今天的日记。"
         if is_makeup:
-            task_desc = f"You are {active_char_name}. Write a makeup diary entry for {date_str} and mention that it is a makeup entry at the start."
+            task_desc = f"你是 {active_char_name}。请用简体中文补写 {date_str} 的日记，并在开头明确说明这是补写内容。"
 
         system_prompt = f"""
 {base_prompt}
 
-[Task]
+[任务]
 {task_desc}
 
-[Data Source 1: Screen Activity]
+[数据源1：屏幕活动]
 {report_text if report_text else "(none)"}
 
-[Data Source 2: Full Conversation History]
+[数据源2：完整对话历史]
 {chat_history if chat_history else "(none)"}
 
-[Data Source 3: Owner Cross-Channel History]
+[数据源3：主人跨渠道聊天记录]
 {owner_chat_history if owner_chat_history else "(no owner local/QQ shared history today)"}
 
-[Requirements]
-1. Use first person and write from the perspective of "{active_char_name}".
-2. Include concrete details such as software used and topics discussed.
-3. If Data Source 3 is not empty, explicitly include the interactions with the owner across local chat and QQ.
-4. Keep it concise, within 500 Chinese characters.
+[输出要求]
+1. 必须只使用简体中文，不要输出英文段落、日文句子或混合语言。
+2. 必须使用第一人称，并以“{active_char_name}”的视角来写。
+3. 要包含具体细节，例如使用过的软件、讨论过的话题、发生过的互动。
+4. 如果数据源3不为空，要明确写出和主人的本地聊天与 QQ 互动。
+5. 保持简洁，控制在 500 字以内。
+6. 不要输出标题，不要输出项目符号，直接给出自然的一段或几段日记正文。
 """
 
         try:
@@ -2231,24 +3099,40 @@ class ChatService:
                 title += " (补)"
 
             if store:
-                store.upsert_episode({
-                    "title": title,
-                    "summary": diary_content,
-                    "status": "active",
-                    "tags": ["daily_log", f"role:{active_char_id}", f"date:{date_str}"],
-                    "created_at": datetime.now().isoformat()
-                })
+                store.upsert_episode(
+                    {
+                        "title": title,
+                        "summary": diary_content,
+                        "status": "active",
+                        "tags": [
+                            "daily_log",
+                            f"role:{active_char_id}",
+                            f"date:{date_str}",
+                        ],
+                        "created_at": datetime.now().isoformat(),
+                    }
+                )
             print(f"[Diary] Archived: {title}")
 
-            asyncio.create_task(self._add_memory_safe(
-                "assistant",
-                f"【日记 {date_str}】{diary_content}",
-                meta={"type": "episodic_memory", "date": date_str, "role": active_char_id}
-            ))
+            asyncio.create_task(
+                self._add_memory_safe(
+                    "assistant",
+                    f"【日记 {date_str}】{diary_content}",
+                    meta={
+                        "type": "episodic_memory",
+                        "date": date_str,
+                        "role": active_char_id,
+                    },
+                )
+            )
 
             if not auto and not is_makeup:
-                await self.event_bus.emit("ui.append", role="assistant", text=diary_content)
-                await self.presenter.present(diary_content, emotion="neutral", interrupt=False)
+                await self.event_bus.emit(
+                    "ui.append", role="assistant", text=diary_content
+                )
+                await self.presenter.present(
+                    diary_content, emotion="neutral", interrupt=False
+                )
 
         except Exception as e:
             self.logger.error(f"Diary build failed: {e}")
@@ -2270,7 +3154,7 @@ class ChatService:
             with store._connect() as conn:
                 cursor = conn.execute(
                     "SELECT ts, role, content, session_id, meta_json FROM transcript WHERE ts >= ? AND ts < ? ORDER BY ts ASC",
-                    (start_ts, end_ts)
+                    (start_ts, end_ts),
                 )
                 rows = cursor.fetchall()
 
@@ -2283,13 +3167,15 @@ class ChatService:
                         meta = json.loads(raw_meta)
                     except Exception:
                         meta = {}
-                result.append({
-                    "ts": int(row["ts"]),
-                    "role": str(row["role"] or ""),
-                    "content": str(row["content"] or ""),
-                    "session_id": str(row["session_id"] or ""),
-                    "meta": meta,
-                })
+                result.append(
+                    {
+                        "ts": int(row["ts"]),
+                        "role": str(row["role"] or ""),
+                        "content": str(row["content"] or ""),
+                        "session_id": str(row["session_id"] or ""),
+                        "meta": meta,
+                    }
+                )
             return result
         except Exception as e:
             print(f"[ChatService] Load day transcript failed: {e}")
@@ -2324,14 +3210,19 @@ class ChatService:
         meta = row.get("meta") if isinstance(row.get("meta"), dict) else {}
         source = str(meta.get("source") or "").strip().lower()
         sender_name = str(meta.get("sender_name") or meta.get("user_id") or "").strip()
-        message_type = str(meta.get("message_type") or "private").strip().lower() or "private"
+        message_type = (
+            str(meta.get("message_type") or "private").strip().lower() or "private"
+        )
 
         if role == "assistant":
             speaker = "AI"
         elif role == "system":
             speaker = "System"
         elif self._is_owner_shared_row(row):
-            if source in QQ_REMOTE_SOURCES or session_id in LEGACY_OWNER_PRIVATE_SESSION_IDS:
+            if (
+                source in QQ_REMOTE_SOURCES
+                or session_id in LEGACY_OWNER_PRIVATE_SESSION_IDS
+            ):
                 speaker = "Owner(QQ)"
             else:
                 speaker = "Owner(Local)"

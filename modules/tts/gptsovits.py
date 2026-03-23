@@ -49,19 +49,27 @@ os.makedirs(CACHE_DIR, exist_ok=True)
 
 class GPTSoVITSTTS(BaseTTS):
     def __init__(
-            self,
-            base: str | None = None,
-            timeout: int = 300,
-            verbose: bool = True,
-            enable_lip_sync: bool = False,
-            rhubarb_path: str = "./tools/rhubarb/rhubarb.exe",
-            lip_sync_smooth_window: int = 3,
+        self,
+        base: str | None = None,
+        timeout: int = 300,
+        verbose: bool = True,
+        enable_lip_sync: bool = False,
+        rhubarb_path: str = "./tools/rhubarb/rhubarb.exe",
+        lip_sync_smooth_window: int = 3,
     ):
         self.base = (base or GPTSOVITS_BASE or "http://127.0.0.1:9880").rstrip("/")
         self.timeout = int(timeout)
         self.verbose = bool(verbose)
         self.lock = asyncio.Lock()
         self.ready = False
+        self.runtime_cfg = {
+            "enabled": False,
+            "gpt_w": str(GPT_W or "").strip(),
+            "sov_w": str(SOV_W or "").strip(),
+            "ref_wav": str(REF_WAV or "").strip(),
+            "prompt_lang": str(PROMPT_LANG or "ja").strip(),
+            "prompt_text": str(PROMPT_TEXT or "").strip(),
+        }
 
         # 口型同步配置
         self.enable_lip_sync = bool(enable_lip_sync)
@@ -71,6 +79,7 @@ class GPTSoVITSTTS(BaseTTS):
         if self.enable_lip_sync:
             try:
                 from modules.lip_sync import RhubarbLipSync
+
                 self.lip_sync_engine = RhubarbLipSync(rhubarb_path=rhubarb_path)
                 if not self.lip_sync_engine.is_available():
                     self.enable_lip_sync = False
@@ -79,6 +88,19 @@ class GPTSoVITSTTS(BaseTTS):
             except Exception as e:
                 self.enable_lip_sync = False
 
+        self._init_model()
+
+    def apply_runtime_config(self, cfg: Optional[dict] = None):
+        cfg = cfg if isinstance(cfg, dict) else {}
+        self.base = (GPTSOVITS_BASE or self.base or "http://127.0.0.1:9880").rstrip("/")
+        self.runtime_cfg = {
+            "enabled": bool(cfg.get("enabled", False)),
+            "gpt_w": str(cfg.get("gpt_w") or GPT_W or "").strip(),
+            "sov_w": str(cfg.get("sov_w") or SOV_W or "").strip(),
+            "ref_wav": str(cfg.get("ref_wav") or REF_WAV or "").strip(),
+            "prompt_lang": str(cfg.get("prompt_lang") or PROMPT_LANG or "ja").strip(),
+            "prompt_text": str(cfg.get("prompt_text") or PROMPT_TEXT or "").strip(),
+        }
         self._init_model()
 
     def _req(self, path, params=None) -> requests.Response:
@@ -93,9 +115,10 @@ class GPTSoVITSTTS(BaseTTS):
             except Exception as e:
                 raise ConnectionError(f"无法连接 GPT-SoVITS 服务: {self.base} ({e})")
 
-            gpt_path = _abs_exist(GPT_W, "GPT_W")
-            sov_path = _abs_exist(SOV_W, "SOV_W")
-            _abs_exist(REF_WAV, "REF_WAV")
+            runtime_cfg = getattr(self, "runtime_cfg", {}) or {}
+            gpt_path = _abs_exist(runtime_cfg.get("gpt_w") or GPT_W, "GPT_W")
+            sov_path = _abs_exist(runtime_cfg.get("sov_w") or SOV_W, "SOV_W")
+            _abs_exist(runtime_cfg.get("ref_wav") or REF_WAV, "REF_WAV")
 
             self._req("/set_gpt_weights", {"weights_path": gpt_path})
             self._req("/set_sovits_weights", {"weights_path": sov_path})
@@ -111,22 +134,34 @@ class GPTSoVITSTTS(BaseTTS):
 
     def _pick_ref_prompt(self, emotion: str | None):
         emo = (emotion or "neutral").strip().lower()
+        runtime_cfg = getattr(self, "runtime_cfg", {}) or {}
         cfg = TTS_EMO_MAP.get(emo) or TTS_EMO_MAP.get("neutral") or {}
-        ref = os.path.abspath(cfg.get("ref") or REF_WAV)
-        prompt = cfg.get("prompt") or PROMPT_TEXT
+
+        if runtime_cfg.get("ref_wav"):
+            ref = os.path.abspath(runtime_cfg.get("ref_wav") or REF_WAV)
+            prompt = runtime_cfg.get("prompt_text") or PROMPT_TEXT
+        else:
+            ref = os.path.abspath(
+                cfg.get("ref") or runtime_cfg.get("ref_wav") or REF_WAV
+            )
+            prompt = cfg.get("prompt") or runtime_cfg.get("prompt_text") or PROMPT_TEXT
         if not os.path.isfile(ref):
-            ref = os.path.abspath(REF_WAV)
-            prompt = PROMPT_TEXT
+            ref = os.path.abspath(runtime_cfg.get("ref_wav") or REF_WAV)
+            prompt = runtime_cfg.get("prompt_text") or PROMPT_TEXT
         return ref, prompt
 
     # 🟢 [新增] 只生成，不播放 (用于流水线)
-    async def synthesize(self, text: str, emotion: str | None = None) -> Tuple[Optional[str], float]:
+    async def synthesize(
+        self, text: str, emotion: str | None = None
+    ) -> Tuple[Optional[str], float]:
         """
         返回: (wav_abs_path, duration_sec)
         """
-        if not self.ready: return None, 0.0
+        if not self.ready:
+            return None, 0.0
         text = (text or "").strip()
-        if not text: return None, 0.0
+        if not text:
+            return None, 0.0
 
         ref_abs, prompt = self._pick_ref_prompt(emotion)
 
@@ -138,10 +173,16 @@ class GPTSoVITSTTS(BaseTTS):
             try:
                 params = {
                     "text": text,
-                    "text_lang": "auto",
+                    "text_lang": (
+                        (getattr(self, "runtime_cfg", {}) or {}).get("prompt_lang")
+                        or "auto"
+                    ),
                     "ref_audio_path": ref_abs,
                     "prompt_text": prompt,
-                    "prompt_lang": PROMPT_LANG,
+                    "prompt_lang": (getattr(self, "runtime_cfg", {}) or {}).get(
+                        "prompt_lang"
+                    )
+                    or PROMPT_LANG,
                     "media_type": "wav",
                     "streaming_mode": "false",
                 }
@@ -163,13 +204,16 @@ class GPTSoVITSTTS(BaseTTS):
                     print(f"⚠️ [GPT-SoVITS] synthesize() 失败: {e}")
                 # 失败时尝试清理
                 try:
-                    if os.path.exists(wav_path): os.remove(wav_path)
+                    if os.path.exists(wav_path):
+                        os.remove(wav_path)
                 except:
                     pass
                 return None, 0.0
 
     # 纯播放逻辑 (增加延迟清理)
-    async def play_audio_file(self, wav_path: str, interrupt_event: asyncio.Event = None):
+    async def play_audio_file(
+        self, wav_path: str, interrupt_event: asyncio.Event = None
+    ):
         if not wav_path or not os.path.exists(wav_path):
             return
 

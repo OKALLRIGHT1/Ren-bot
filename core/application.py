@@ -2,6 +2,7 @@
 应用主类
 管理整个应用的生命周期和组件初始化
 """
+
 import asyncio
 import json
 import os
@@ -13,14 +14,33 @@ from typing import Optional, Any, Dict
 from datetime import datetime
 from datetime import timedelta
 from config import (
-    TTS_ENABLED, TTS_MAX_CHARS, TTS_USE_LIVE2D_PLAYER, TTS_CHANNEL, TTS_VOLUME,
-    VOICE_NAME, GUI_BACKEND, TTS_RATE,
+    TTS_ENABLED,
+    TTS_MAX_CHARS,
+    TTS_USE_LIVE2D_PLAYER,
+    TTS_CHANNEL,
+    TTS_VOLUME,
+    VOICE_NAME,
+    GUI_BACKEND,
+    TTS_RATE,
     EMO_TO_LIVE2D,
-    LIP_SYNC_ENABLED, RHUBARB_PATH, LIP_SYNC_SMOOTH_WINDOW,
+    LIP_SYNC_ENABLED,
+    RHUBARB_PATH,
+    LIP_SYNC_SMOOTH_WINDOW,
     MCP_SERVER_CONFIGS,
-    MCP_ENABLED, NAPCAT_ENABLED, NAPCAT_WEBHOOK_HOST, NAPCAT_WEBHOOK_PORT, NAPCAT_WEBHOOK_PATH, NAPCAT_ACCESS_TOKEN,
-    NAPCAT_API_BASE, NAPCAT_API_TOKEN, NAPCAT_REPLY_ENABLED, NAPCAT_ALLOW_PRIVATE, NAPCAT_ALLOW_GROUP,
-    NAPCAT_GROUP_REQUIRE_AT, NAPCAT_VOICE_REPLY_ENABLED, NAPCAT_VOICE_REPLY_PROBABILITY,
+    MCP_ENABLED,
+    NAPCAT_ENABLED,
+    NAPCAT_WEBHOOK_HOST,
+    NAPCAT_WEBHOOK_PORT,
+    NAPCAT_WEBHOOK_PATH,
+    NAPCAT_ACCESS_TOKEN,
+    NAPCAT_API_BASE,
+    NAPCAT_API_TOKEN,
+    NAPCAT_REPLY_ENABLED,
+    NAPCAT_ALLOW_PRIVATE,
+    NAPCAT_ALLOW_GROUP,
+    NAPCAT_GROUP_REQUIRE_AT,
+    NAPCAT_VOICE_REPLY_ENABLED,
+    NAPCAT_VOICE_REPLY_PROBABILITY,
 )
 
 from modules.advanced_memory import AdvancedMemorySystem
@@ -30,8 +50,13 @@ from modules.plugin_manager import PluginManager
 from modules.tool_router import ToolRouter
 from modules.tts import TTSRouter
 from modules.state_machine import AgentStateMachine, AgentState
-from modules.live2d import send_bubble, trigger_motion, change_costume, play_motion, set_expression
-
+from modules.live2d import (
+    send_bubble,
+    trigger_motion,
+    change_costume,
+    play_motion,
+    set_expression,
+)
 
 
 # 导出ChatService（在chat_service.py中定义）
@@ -49,7 +74,13 @@ from core.event_bus import EventBus, Events
 from core.message_source import build_output_profile
 from modules.event_logger import EventLogger
 from integrations.mcp import MCPToolBridge
-from integrations.chat_gateway import ChatGateway, NapCatOneBotAdapter, NapCatWebhookServer
+from integrations.chat_gateway import (
+    ChatGateway,
+    NapCatOneBotAdapter,
+    NapCatWebhookServer,
+)
+from integrations.gui_ws import GuiWebSocketServer
+from integrations.gui_http import GuiHttpServer
 
 try:
     from modules.live2d import go_idle
@@ -61,6 +92,7 @@ try:
     from modules.music_sensor import MusicSensor
 except ImportError:
     MusicSensor = None
+
 
 class Live2DApplication:
     """Live2D应用主类"""
@@ -93,6 +125,8 @@ class Live2DApplication:
         # GUI相关
         self.qt_ui = None
         self.loop = None
+        self.gui_ws_server = None
+        self.gui_http_server = None
 
         # 日记状态标记，防止重复记录
         self.last_summary_date = None
@@ -103,6 +137,7 @@ class Live2DApplication:
         self.think_motion_enabled = True
         try:
             from config import THINK_MOTION_ENABLED, THINK_MOTION_NAME
+
             self.think_motion_enabled = bool(THINK_MOTION_ENABLED)
             self.think_motion_name = THINK_MOTION_NAME or "think"
         except Exception:
@@ -144,14 +179,22 @@ class Live2DApplication:
     def _load_external_runtime_settings(self) -> Dict[str, Any]:
         return self._normalize_external_runtime_settings(self._load_runtime_settings())
 
-    def _normalize_external_runtime_settings(self, settings: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    def _normalize_external_runtime_settings(
+        self, settings: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
         settings = settings if isinstance(settings, dict) else {}
+
         def _parse_id_list(value):
             if isinstance(value, str):
-                return [item.strip() for item in re.split(r"[,，\n\s]+", value) if item.strip()]
+                return [
+                    item.strip()
+                    for item in re.split(r"[,，\n\s]+", value)
+                    if item.strip()
+                ]
             if isinstance(value, list):
                 return [str(item).strip() for item in value if str(item).strip()]
             return []
+
         owner_ids_raw = settings.get("napcat_owner_user_ids", [])
         owner_ids = _parse_id_list(owner_ids_raw)
         user_whitelist = _parse_id_list(settings.get("napcat_user_whitelist", []))
@@ -159,39 +202,79 @@ class Live2DApplication:
         group_whitelist = _parse_id_list(settings.get("napcat_group_whitelist", []))
         group_blacklist = _parse_id_list(settings.get("napcat_group_blacklist", []))
         image_prompt = str(settings.get("napcat_image_prompt", "") or "").strip()
-        voice_probability_raw = settings.get("napcat_voice_reply_probability", NAPCAT_VOICE_REPLY_PROBABILITY)
+        voice_probability_raw = settings.get(
+            "napcat_voice_reply_probability", NAPCAT_VOICE_REPLY_PROBABILITY
+        )
         try:
             voice_probability = max(0, min(100, int(voice_probability_raw)))
         except Exception:
             voice_probability = int(NAPCAT_VOICE_REPLY_PROBABILITY)
         return {
             "mcp_enabled": bool(settings.get("mcp_enabled", MCP_ENABLED)),
-            "mcp_server_configs": settings.get("mcp_server_configs", MCP_SERVER_CONFIGS) if isinstance(settings.get("mcp_server_configs", MCP_SERVER_CONFIGS), list) else MCP_SERVER_CONFIGS,
+            "mcp_server_configs": settings.get("mcp_server_configs", MCP_SERVER_CONFIGS)
+            if isinstance(settings.get("mcp_server_configs", MCP_SERVER_CONFIGS), list)
+            else MCP_SERVER_CONFIGS,
             "napcat_enabled": bool(settings.get("napcat_enabled", NAPCAT_ENABLED)),
-            "napcat_webhook_host": str(settings.get("napcat_webhook_host", NAPCAT_WEBHOOK_HOST) or NAPCAT_WEBHOOK_HOST),
-            "napcat_webhook_port": int(settings.get("napcat_webhook_port", NAPCAT_WEBHOOK_PORT) or NAPCAT_WEBHOOK_PORT),
-            "napcat_webhook_path": str(settings.get("napcat_webhook_path", NAPCAT_WEBHOOK_PATH) or NAPCAT_WEBHOOK_PATH),
-            "napcat_access_token": str(settings.get("napcat_access_token", NAPCAT_ACCESS_TOKEN) or ""),
-            "napcat_api_base": str(settings.get("napcat_api_base", NAPCAT_API_BASE) or NAPCAT_API_BASE),
-            "napcat_api_token": str(settings.get("napcat_api_token", NAPCAT_API_TOKEN) or ""),
-            "napcat_reply_enabled": bool(settings.get("napcat_reply_enabled", NAPCAT_REPLY_ENABLED)),
-            "napcat_allow_private": bool(settings.get("napcat_allow_private", NAPCAT_ALLOW_PRIVATE)),
-            "napcat_allow_group": bool(settings.get("napcat_allow_group", NAPCAT_ALLOW_GROUP)),
-            "napcat_group_require_at": bool(settings.get("napcat_group_require_at", NAPCAT_GROUP_REQUIRE_AT)),
+            "napcat_webhook_host": str(
+                settings.get("napcat_webhook_host", NAPCAT_WEBHOOK_HOST)
+                or NAPCAT_WEBHOOK_HOST
+            ),
+            "napcat_webhook_port": int(
+                settings.get("napcat_webhook_port", NAPCAT_WEBHOOK_PORT)
+                or NAPCAT_WEBHOOK_PORT
+            ),
+            "napcat_webhook_path": str(
+                settings.get("napcat_webhook_path", NAPCAT_WEBHOOK_PATH)
+                or NAPCAT_WEBHOOK_PATH
+            ),
+            "napcat_access_token": str(
+                settings.get("napcat_access_token", NAPCAT_ACCESS_TOKEN) or ""
+            ),
+            "napcat_api_base": str(
+                settings.get("napcat_api_base", NAPCAT_API_BASE) or NAPCAT_API_BASE
+            ),
+            "napcat_api_token": str(
+                settings.get("napcat_api_token", NAPCAT_API_TOKEN) or ""
+            ),
+            "napcat_reply_enabled": bool(
+                settings.get("napcat_reply_enabled", NAPCAT_REPLY_ENABLED)
+            ),
+            "napcat_allow_private": bool(
+                settings.get("napcat_allow_private", NAPCAT_ALLOW_PRIVATE)
+            ),
+            "napcat_allow_group": bool(
+                settings.get("napcat_allow_group", NAPCAT_ALLOW_GROUP)
+            ),
+            "napcat_group_require_at": bool(
+                settings.get("napcat_group_require_at", NAPCAT_GROUP_REQUIRE_AT)
+            ),
             "napcat_owner_user_ids": owner_ids,
-            "napcat_owner_label": str(settings.get("napcat_owner_label", "主人") or "主人"),
-            "napcat_image_vision_enabled": bool(settings.get("napcat_image_vision_enabled", True)),
-            "napcat_image_prompt": image_prompt or "请客观详细描述这张QQ图片的内容，并提取其中可用于回复的关键信息。",
-            "napcat_voice_reply_enabled": bool(settings.get("napcat_voice_reply_enabled", NAPCAT_VOICE_REPLY_ENABLED)),
+            "napcat_owner_label": str(
+                settings.get("napcat_owner_label", "主人") or "主人"
+            ),
+            "napcat_image_vision_enabled": bool(
+                settings.get("napcat_image_vision_enabled", True)
+            ),
+            "napcat_image_prompt": image_prompt
+            or "请客观详细描述这张QQ图片的内容，并提取其中可用于回复的关键信息。",
+            "napcat_voice_reply_enabled": bool(
+                settings.get("napcat_voice_reply_enabled", NAPCAT_VOICE_REPLY_ENABLED)
+            ),
             "napcat_voice_reply_probability": voice_probability,
-            "napcat_filter_mode": str(settings.get("napcat_filter_mode", "off") or "off").strip().lower(),
+            "napcat_filter_mode": str(
+                settings.get("napcat_filter_mode", "off") or "off"
+            )
+            .strip()
+            .lower(),
             "napcat_user_whitelist": user_whitelist,
             "napcat_user_blacklist": user_blacklist,
             "napcat_group_whitelist": group_whitelist,
             "napcat_group_blacklist": group_blacklist,
         }
 
-    async def render_gateway_voice_reply(self, text: str, emotion: Optional[str] = None, **kwargs) -> Optional[str]:
+    async def render_gateway_voice_reply(
+        self, text: str, emotion: Optional[str] = None, **kwargs
+    ) -> Optional[str]:
         clean = str(text or "").strip()
         if not clean or self.tts is None:
             return None
@@ -209,14 +292,24 @@ class Live2DApplication:
         self.mcp_bridge.clear_local_tools()
         self.mcp_bridge.register_local_tool(
             "plugin.list",
-            lambda: [getattr(p, "name", k) for k, p in self.plugin_manager.plugins.items()],
+            lambda: [
+                getattr(p, "name", k) for k, p in self.plugin_manager.plugins.items()
+            ],
             description="List currently loaded local plugin display names.",
         )
         self.mcp_bridge.register_local_tool(
             "chat.process",
-            lambda text, source="text_input": self.on_gui_send(text, {"source": source}),
+            lambda text, source="text_input": self.on_gui_send(
+                text, {"source": source}
+            ),
             description="Send a message into the chat pipeline.",
-            input_schema={"type": "object", "properties": {"text": {"type": "string"}, "source": {"type": "string"}}},
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "text": {"type": "string"},
+                    "source": {"type": "string"},
+                },
+            },
         )
         self.mcp_bridge.register_local_tool(
             "chat.gateway.dispatch",
@@ -243,7 +336,10 @@ class Live2DApplication:
                 for spec in self.mcp_bridge.list_tools(provider=provider or None)
             ],
             description="List currently available MCP tools, including remote tools.",
-            input_schema={"type": "object", "properties": {"provider": {"type": "string"}}},
+            input_schema={
+                "type": "object",
+                "properties": {"provider": {"type": "string"}},
+            },
         )
         self.mcp_bridge.register_local_tool(
             "mcp.server_status",
@@ -272,8 +368,12 @@ class Live2DApplication:
         except Exception:
             return []
 
-    def apply_external_settings(self, settings: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-        external_settings = self._normalize_external_runtime_settings(settings or self._load_runtime_settings())
+    def apply_external_settings(
+        self, settings: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
+        external_settings = self._normalize_external_runtime_settings(
+            settings or self._load_runtime_settings()
+        )
         result = {
             "mcp_enabled": bool(external_settings["mcp_enabled"]),
             "napcat_enabled": bool(external_settings["napcat_enabled"]),
@@ -287,7 +387,9 @@ class Live2DApplication:
         if self.mcp_bridge is not None:
             if external_settings["mcp_enabled"]:
                 self._register_mcp_local_tools()
-                result["mcp_servers"] = self.mcp_bridge.configure_remote_servers(external_settings.get("mcp_server_configs") or [])
+                result["mcp_servers"] = self.mcp_bridge.configure_remote_servers(
+                    external_settings.get("mcp_server_configs") or []
+                )
             else:
                 self.mcp_bridge.clear_local_tools()
                 self.mcp_bridge.clear_remote_servers()
@@ -295,6 +397,12 @@ class Live2DApplication:
             result["mcp_tools"] = self.get_mcp_tool_names()
 
         napcat_adapter = None
+        group_no_at_keywords = []
+        if self.plugin_manager is not None:
+            try:
+                group_no_at_keywords = self.plugin_manager.get_group_no_at_keywords()
+            except Exception:
+                group_no_at_keywords = []
         if self.chat_gateway is not None:
             napcat_adapter = NapCatOneBotAdapter(
                 api_base=external_settings["napcat_api_base"],
@@ -312,6 +420,7 @@ class Live2DApplication:
                 user_blacklist=external_settings["napcat_user_blacklist"],
                 group_whitelist=external_settings["napcat_group_whitelist"],
                 group_blacklist=external_settings["napcat_group_blacklist"],
+                group_no_at_keywords=group_no_at_keywords,
             )
             self.chat_gateway.register_adapter(napcat_adapter)
             result["napcat_live_applied"] = True
@@ -337,8 +446,12 @@ class Live2DApplication:
                     logger=self.logger,
                 )
                 self.chat_gateway_server.start()
-                if napcat_adapter is not None and hasattr(napcat_adapter, "set_ws_action_sender"):
-                    napcat_adapter.set_ws_action_sender(self.chat_gateway_server.call_action)
+                if napcat_adapter is not None and hasattr(
+                    napcat_adapter, "set_ws_action_sender"
+                ):
+                    napcat_adapter.set_ws_action_sender(
+                        self.chat_gateway_server.call_action
+                    )
                 result["napcat_server_running"] = True
             except Exception as e:
                 result["napcat_live_applied"] = False
@@ -357,12 +470,14 @@ class Live2DApplication:
                 probability=external_settings.get("napcat_voice_reply_probability", 0),
                 renderer=self.render_gateway_voice_reply,
             )
+
         return result
 
     def initialize(self):
         """初始化应用"""
         # 1. 设置日志
         from core.logger import setup_logging, set_logger
+
         self.logger = setup_logging(log_dir="./logs", log_name="agent", level="INFO")
         set_logger(self.logger)
 
@@ -370,6 +485,7 @@ class Live2DApplication:
         self.tts_enabled = self._load_runtime_tts_enabled()
         try:
             import config as runtime_config
+
             runtime_config.TTS_ENABLED = self.tts_enabled
         except Exception:
             pass
@@ -425,14 +541,20 @@ class Live2DApplication:
         if LIP_SYNC_ENABLED:
             rhubarb_abs = os.path.abspath(RHUBARB_PATH)
             if os.path.exists(rhubarb_abs):
-                self.logger.info(f"口型同步已启用 (Rhubarb: {rhubarb_abs}, 平滑窗口: {LIP_SYNC_SMOOTH_WINDOW})")
+                self.logger.info(
+                    f"口型同步已启用 (Rhubarb: {rhubarb_abs}, 平滑窗口: {LIP_SYNC_SMOOTH_WINDOW})"
+                )
             else:
                 self.logger.warning(f"口型同步已开启但 Rhubarb 不存在: {rhubarb_abs}")
         else:
             self.logger.info("口型同步未启用 (LIP_SYNC_ENABLED=0)")
 
-        async def _bubble_to_event(text: str, emo: Optional[str], duration_ms: Optional[int]):
-            await self.event_bus.emit(Events.UI_BUBBLE, text=text, emotion=emo, duration_ms=duration_ms)
+        async def _bubble_to_event(
+            text: str, emo: Optional[str], duration_ms: Optional[int]
+        ):
+            await self.event_bus.emit(
+                Events.UI_BUBBLE, text=text, emotion=emo, duration_ms=duration_ms
+            )
 
         self.tts = TTSRouter(
             edge_cfg=edge_cfg,
@@ -445,6 +567,12 @@ class Live2DApplication:
             rhubarb_path=RHUBARB_PATH,
             lip_sync_smooth_window=LIP_SYNC_SMOOTH_WINDOW,
         )
+        try:
+            from modules.character_manager import character_manager
+
+            self.tts.apply_role_tts_config(character_manager.get_tts_config())
+        except Exception:
+            pass
 
         # 6. 初始化Presenter
         self.presenter = EventPresenter(
@@ -473,9 +601,15 @@ class Live2DApplication:
         )
         self.chat_service.configure_gateway_voice_reply(
             enabled=initial_external_settings.get("napcat_voice_reply_enabled", False),
-            probability=initial_external_settings.get("napcat_voice_reply_probability", 0),
+            probability=initial_external_settings.get(
+                "napcat_voice_reply_probability", 0
+            ),
             renderer=self.render_gateway_voice_reply,
         )
+
+        self.gui_ws_server = GuiWebSocketServer(logger=self.logger)
+        self.gui_ws_server.set_message_handler(self._on_gui_ws_message)
+        self.gui_http_server = GuiHttpServer(logger=self.logger, app_ref=self)
 
         if MusicSensor:
             self.music_sensor = MusicSensor(self.chat_service)
@@ -500,7 +634,7 @@ class Live2DApplication:
             self.voice_sensor = VoiceSensor(
                 chat_service=self.chat_service,
                 event_bus=self.event_bus,
-                config_path=SHERPA_MODEL_CONFIG
+                config_path=SHERPA_MODEL_CONFIG,
             )
             self.logger.info("🎤 VoiceSensor 语音模块已加载 (就绪待命)")
         except ImportError:
@@ -544,18 +678,23 @@ class Live2DApplication:
 
         # 日志事件
         self.event_bus.on(Events.CHAT_LOG, self._on_chat_log)
-        self.event_bus.on(Events.MEMORY_ADD_OK, lambda p: print(f"✅ [Memory] 记忆已添加"))
-        self.event_bus.on(Events.MEMORY_ADD_FAIL, lambda p: print(f"⚠️ [Memory] 记忆添加失败"))
+        self.event_bus.on(
+            Events.MEMORY_ADD_OK, lambda p: print(f"✅ [Memory] 记忆已添加")
+        )
+        self.event_bus.on(
+            Events.MEMORY_ADD_FAIL, lambda p: print(f"⚠️ [Memory] 记忆添加失败")
+        )
 
         # [可选] 监听被忽略的消息
-        self.event_bus.on("chat.ignored", lambda p: print(f"🚫 [Gatekeeper] 已忽略: {p.get('content', '')[:20]}..."))
+        self.event_bus.on(
+            "chat.ignored",
+            lambda p: print(f"🚫 [Gatekeeper] 已忽略: {p.get('content', '')[:20]}..."),
+        )
 
     async def _on_ui_bubble(self, payload: Dict[str, Any]):
         """处理UI气泡事件"""
         await send_bubble(
-            payload.get("text", ""),
-            payload.get("emotion"),
-            payload.get("duration_ms")
+            payload.get("text", ""), payload.get("emotion"), payload.get("duration_ms")
         )
 
     def _on_ui_status(self, payload: Dict[str, Any]):
@@ -566,13 +705,430 @@ class Live2DApplication:
             except Exception as e:
                 self.logger.warning(f"设置UI状态失败: {e}")
 
+        self._emit_gui_ws(
+            {
+                "type": "status",
+                "text": payload.get("text", ""),
+                "level": "info",
+            }
+        )
+
     def _on_ui_append(self, payload: Dict[str, Any]):
         """处理UI追加事件"""
         if self.qt_ui:
             try:
-                self.qt_ui.append(payload.get("role", "assistant"), payload.get("text", ""))
+                self.qt_ui.append(
+                    payload.get("role", "assistant"), payload.get("text", "")
+                )
             except Exception as e:
                 self.logger.warning(f"追加UI内容失败: {e}")
+
+        self._emit_gui_ws(
+            {
+                "type": "log",
+                "role": payload.get("role", "assistant"),
+                "text": payload.get("text", ""),
+            }
+        )
+
+    def _emit_gui_ws(self, payload: Dict[str, Any]):
+        if self.gui_ws_server:
+            self.gui_ws_server.emit(payload)
+
+    def _build_gui_config(self) -> Dict[str, Any]:
+        try:
+            import config
+        except Exception:
+            return {"tts": True, "voice": False, "dnd": False}
+        return {
+            "tts": bool(getattr(config, "TTS_ENABLED", True)),
+            "voice": bool(getattr(config, "VOICE_SENSOR_ENABLED", False)),
+            "dnd": bool(getattr(config, "DND_MODE", False)),
+        }
+
+    def _build_gui_character(self) -> Dict[str, Any]:
+        try:
+            from modules.character_manager import character_manager
+        except Exception:
+            return {"name": "", "costume": ""}
+        try:
+            active_id = character_manager.data.get("active_id")
+            char = (character_manager.data.get("characters") or {}).get(active_id or "")
+            if not isinstance(char, dict):
+                return {"name": "", "costume": ""}
+            return {
+                "name": str(char.get("name") or ""),
+                "costume": str(char.get("current_costume") or ""),
+            }
+        except Exception:
+            return {"name": "", "costume": ""}
+
+    def _build_gui_costumes(self) -> Dict[str, Any]:
+        try:
+            from modules.character_manager import character_manager
+        except Exception:
+            return {"items": [], "current": ""}
+        try:
+            # Refresh from JSON so GUI does not depend on storage path.
+            character_manager.load()
+            active_id = character_manager.data.get("active_id")
+            char = (character_manager.data.get("characters") or {}).get(active_id or "")
+            costumes = (char or {}).get("costumes") or {}
+            items = [{"name": k} for k in sorted(costumes.keys())]
+            current = (
+                character_manager.get_current_costume_name(active_id)
+                or (char or {}).get("current_costume")
+                or ""
+            )
+            return {"items": items, "current": str(current or "")}
+        except Exception:
+            return {"items": [], "current": ""}
+
+    def _current_gui_status_text(self) -> str:
+        state = getattr(self.state_machine, "state", None)
+        if state == AgentState.THINKING:
+            return "Thinking."
+        if state == AgentState.SPEAKING:
+            return "Speaking."
+        return "Idle"
+
+    async def _send_gui_snapshot(self, ws=None) -> None:
+        if not self.gui_ws_server:
+            return
+        payloads = [
+            {
+                "type": "status",
+                "text": self._current_gui_status_text(),
+                "level": "info",
+            },
+            {"type": "config", **self._build_gui_config()},
+            {"type": "character", **self._build_gui_character()},
+            {"type": "costumes", **self._build_gui_costumes()},
+        ]
+        for payload in payloads:
+            if ws is None:
+                await self.gui_ws_server.broadcast(payload)
+            else:
+                await self.gui_ws_server.send(ws, payload)
+
+    def _apply_mode_preset(self, preset: str) -> str:
+        name = str(preset or "").strip().lower()
+        if not name:
+            return "mode preset is empty"
+        try:
+            from plugins.mode_preset.plugin import Plugin as ModePresetPlugin
+
+            plugin = ModePresetPlugin()
+            result = plugin._apply(name, {"chat_service": self.chat_service})
+            try:
+                import config as runtime_config
+
+                self.tts_enabled = bool(
+                    getattr(runtime_config, "TTS_ENABLED", self.tts_enabled)
+                )
+            except Exception:
+                pass
+            return str(result or "")
+        except Exception as exc:
+            return f"mode preset apply failed: {exc}"
+
+    async def _on_gui_ws_message(self, payload: Dict[str, Any], ws) -> None:
+        msg_type = str(payload.get("type") or "").strip().lower()
+        if msg_type == "hello":
+            await self._send_gui_snapshot(ws)
+            return
+        if msg_type != "command":
+            return
+        name = str(payload.get("name") or "").strip().lower()
+        if not name:
+            return
+        if name == "send_text":
+            text = str(payload.get("text") or "").strip()
+            if text:
+                self.on_gui_send(text, {"source": "tauri_gui"})
+            return
+        if name == "toggle_tts":
+            desired = payload.get("value")
+            if desired is None:
+                desired = not bool(self.tts_enabled)
+            self.set_tts_enabled(bool(desired))
+            await self._send_gui_snapshot(ws)
+            return
+        if name == "toggle_voice":
+            try:
+                import config as runtime_config
+
+                desired = payload.get("value")
+                if desired is None:
+                    desired = not bool(
+                        getattr(runtime_config, "VOICE_SENSOR_ENABLED", False)
+                    )
+                runtime_config.VOICE_SENSOR_ENABLED = bool(desired)
+                self.set_voice_sensor_enabled(bool(desired))
+            except Exception:
+                pass
+            await self._send_gui_snapshot(ws)
+            return
+        if name == "toggle_dnd":
+            try:
+                import config as runtime_config
+
+                desired = payload.get("value")
+                if desired is None:
+                    desired = not bool(getattr(runtime_config, "DND_MODE", False))
+                runtime_config.DND_MODE = bool(desired)
+            except Exception:
+                pass
+            await self._send_gui_snapshot(ws)
+            return
+        if name == "mode_status":
+            await self._send_gui_snapshot(ws)
+            return
+        if name == "mode_preset":
+            preset = payload.get("value") or payload.get("preset")
+            result = self._apply_mode_preset(str(preset or "").strip())
+            if result:
+                await self.gui_ws_server.send(
+                    ws, {"type": "log", "role": "system", "text": result}
+                )
+            await self._send_gui_snapshot(ws)
+            return
+        if name in {"reload_models", "reload_runtime", "reload_characters"}:
+            status_text = ""
+            level = "info"
+            try:
+                if name == "reload_models":
+                    import config as runtime_config
+
+                    runtime_config.load_custom_models(force=True)
+                    status_text = "Models reloaded"
+                elif name == "reload_runtime":
+                    self.apply_external_settings()
+                    status_text = "Runtime settings applied"
+                else:
+                    from modules.character_manager import character_manager
+
+                    character_manager.load()
+                    status_text = "Character data reloaded"
+            except Exception as exc:
+                status_text = f"Reload failed: {exc}"
+                level = "error"
+            try:
+                await self.gui_ws_server.send(
+                    ws, {"type": "status", "text": status_text, "level": level}
+                )
+            except Exception:
+                pass
+            await self._send_gui_snapshot(ws)
+            return
+        if name == "costume_list":
+            try:
+                payload = {"type": "costumes", **self._build_gui_costumes()}
+                await self.gui_ws_server.send(ws, payload)
+            except Exception as exc:
+                await self.gui_ws_server.send(
+                    ws,
+                    {
+                        "type": "status",
+                        "text": f"Fetch costume list failed: {exc}",
+                        "level": "error",
+                    },
+                )
+            return
+        if name == "costume_apply":
+            costume_name = str(
+                payload.get("value")
+                or payload.get("costume")
+                or payload.get("name")
+                or ""
+            ).strip()
+            if not costume_name:
+                await self.gui_ws_server.send(
+                    ws,
+                    {
+                        "type": "status",
+                        "text": "Costume name is empty",
+                        "level": "warn",
+                    },
+                )
+                return
+            try:
+                from modules.character_manager import character_manager
+
+                active_id = character_manager.data.get("active_id")
+                char = (character_manager.data.get("characters") or {}).get(
+                    active_id or ""
+                )
+                costumes = (char or {}).get("costumes") or {}
+                costume_entry = costumes.get(costume_name)
+                if costume_entry is None:
+                    await self.gui_ws_server.send(
+                        ws,
+                        {
+                            "type": "status",
+                            "text": "Costume not found",
+                            "level": "warn",
+                        },
+                    )
+                    return
+                if isinstance(costume_entry, dict):
+                    path = str(costume_entry.get("path") or "")
+                else:
+                    path = str(costume_entry)
+                if not path:
+                    await self.gui_ws_server.send(
+                        ws,
+                        {
+                            "type": "status",
+                            "text": "Costume path empty",
+                            "level": "warn",
+                        },
+                    )
+                    return
+                runtime_cfg = character_manager.get_costume_runtime_config(
+                    active_id, costume_name
+                )
+                character_manager.set_current_costume_name(active_id, costume_name)
+                self.on_gui_change_costume(path, runtime_cfg)
+                await self.gui_ws_server.send(
+                    ws,
+                    {
+                        "type": "status",
+                        "text": f"Switched to {costume_name}",
+                        "level": "info",
+                    },
+                )
+                await self.gui_ws_server.send(
+                    ws,
+                    {
+                        "type": "character",
+                        "name": str((char or {}).get("name") or ""),
+                        "costume": costume_name,
+                    },
+                )
+            except Exception as exc:
+                await self.gui_ws_server.send(
+                    ws,
+                    {
+                        "type": "status",
+                        "text": f"Switch costume failed: {exc}",
+                        "level": "error",
+                    },
+                )
+            return
+        if name in {"open_panel", "open_settings", "quick_costume"}:
+            if not self.qt_ui:
+                await self.gui_ws_server.send(
+                    ws, {"type": "status", "text": "Qt GUI ??????????", "level": "warn"}
+                )
+                return
+            try:
+                if name == "open_settings":
+                    if hasattr(self.qt_ui, "_on_settings_clicked"):
+                        self.qt_ui._on_settings_clicked()
+                    await self.gui_ws_server.send(
+                        ws,
+                        {
+                            "type": "status",
+                            "text": "Costume name is empty",
+                            "level": "info",
+                        },
+                    )
+                    return
+                if name == "quick_costume":
+                    if hasattr(self.qt_ui, "_on_quick_costume_clicked"):
+                        self.qt_ui._on_quick_costume_clicked()
+                    await self.gui_ws_server.send(
+                        ws, {"type": "status", "text": "???????", "level": "info"}
+                    )
+                    return
+
+                value = (
+                    str(payload.get("value") or payload.get("panel") or "")
+                    .strip()
+                    .lower()
+                )
+                if value in {"panel", "main", "toggle"}:
+                    if hasattr(self.qt_ui, "toggle_show_hide"):
+                        self.qt_ui.toggle_show_hide()
+                    await self.gui_ws_server.send(
+                        ws,
+                        {
+                            "type": "status",
+                            "text": "Costume not found",
+                            "level": "info",
+                        },
+                    )
+                    return
+                if value == "codex":
+                    if hasattr(self.qt_ui, "_on_codex_clicked"):
+                        self.qt_ui._on_codex_clicked()
+                    await self.gui_ws_server.send(
+                        ws, {"type": "status", "text": "???????", "level": "info"}
+                    )
+                    return
+                if value == "monitor":
+                    if hasattr(self.qt_ui, "_on_monitor_clicked"):
+                        self.qt_ui._on_monitor_clicked()
+                    await self.gui_ws_server.send(
+                        ws, {"type": "status", "text": "???????", "level": "info"}
+                    )
+                    return
+                if value == "plugins":
+                    if hasattr(self.qt_ui, "_on_plugin_clicked"):
+                        self.qt_ui._on_plugin_clicked()
+                    await self.gui_ws_server.send(
+                        ws, {"type": "status", "text": "???????", "level": "info"}
+                    )
+                    return
+                if value == "memory":
+                    if hasattr(self.qt_ui, "_on_memory_clicked"):
+                        self.qt_ui._on_memory_clicked()
+                    await self.gui_ws_server.send(
+                        ws, {"type": "status", "text": "???????", "level": "info"}
+                    )
+                    return
+                if value == "settings":
+                    if hasattr(self.qt_ui, "_on_settings_clicked"):
+                        self.qt_ui._on_settings_clicked()
+                    await self.gui_ws_server.send(
+                        ws,
+                        {
+                            "type": "status",
+                            "text": "Costume name is empty",
+                            "level": "info",
+                        },
+                    )
+                    return
+                if value == "restart":
+                    if hasattr(self.qt_ui, "_handle_restart"):
+                        self.qt_ui._handle_restart()
+                    else:
+                        self.restart_app()
+                    await self.gui_ws_server.send(
+                        ws,
+                        {
+                            "type": "status",
+                            "text": "Costume name is empty",
+                            "level": "warn",
+                        },
+                    )
+                    return
+
+                await self.gui_ws_server.send(
+                    ws, {"type": "status", "text": f"????: {value}", "level": "warn"}
+                )
+                return
+            except Exception as exc:
+                await self.gui_ws_server.send(
+                    ws,
+                    {
+                        "type": "status",
+                        "text": f"Switch costume failed: {exc}",
+                        "level": "error",
+                    },
+                )
+                return
 
     async def _on_live2d_emotion(self, payload: Dict[str, Any]):
         """处理Live2D情绪事件 - 使用 EmotionController 管理"""
@@ -585,7 +1141,9 @@ class Live2DApplication:
             return
 
         try:
-            self.logger.debug(f"🎭 [Emotion] 收到情绪请求: {emo} (prefer_motion={prefer_motion})")
+            self.logger.debug(
+                f"🎭 [Emotion] 收到情绪请求: {emo} (prefer_motion={prefer_motion})"
+            )
 
             # 标记活动（退出空闲模式）
             self.emotion_controller.mark_activity(reason or "emotion_request")
@@ -595,7 +1153,7 @@ class Live2DApplication:
                 label=emo,
                 intensity=intensity,
                 prefer_motion=prefer_motion,
-                reason=reason
+                reason=reason,
             )
 
             self.logger.debug(f"✅ [Emotion] 情绪处理完成: {emo}")
@@ -638,7 +1196,7 @@ class Live2DApplication:
         state_map = {
             "idle": AgentState.IDLE,
             "thinking": AgentState.THINKING,
-            "speaking": AgentState.SPEAKING
+            "speaking": AgentState.SPEAKING,
         }
 
         target_state = state_map.get(state_name.lower() if state_name else "")
@@ -647,10 +1205,14 @@ class Live2DApplication:
         else:
             self.logger.warning(f"未知状态: {state_name}")
 
-    async def _on_state_machine_change(self, new_state: AgentState, prev_state: AgentState, meta: dict):
+    async def _on_state_machine_change(
+        self, new_state: AgentState, prev_state: AgentState, meta: dict
+    ):
         """状态机监听器（直接处理状态变化）"""
-        reason = meta.get('reason', 'unknown')
-        self.logger.debug(f"🔄 [State] {prev_state.value} -> {new_state.value} (原因: {reason})")
+        reason = meta.get("reason", "unknown")
+        self.logger.debug(
+            f"🔄 [State] {prev_state.value} -> {new_state.value} (原因: {reason})"
+        )
 
         try:
             # 更新 EmotionController 的状态
@@ -661,10 +1223,14 @@ class Live2DApplication:
                 self.logger.debug(f"💭 [State] 进入思考状态")
 
                 # 异步触发 UI 状态更新
-                asyncio.create_task(self.event_bus.emit(Events.UI_STATUS, text="Thinking."))
+                asyncio.create_task(
+                    self.event_bus.emit(Events.UI_STATUS, text="Thinking.")
+                )
 
                 if self.think_motion_enabled:
-                    self.logger.debug(f"🎬 [State] 触发思考动作: {self.think_motion_name}")
+                    self.logger.debug(
+                        f"🎬 [State] 触发思考动作: {self.think_motion_name}"
+                    )
 
                     # 标记活动（退出空闲）
                     self.emotion_controller.mark_activity("thinking")
@@ -674,13 +1240,15 @@ class Live2DApplication:
                         self.emotion_controller.request_emotion(
                             label=self.think_motion_name,
                             prefer_motion=True,
-                            reason="thinking_state"
+                            reason="thinking_state",
                         )
                     )
 
             elif new_state == AgentState.SPEAKING:
                 self.logger.debug(f"🗣️ [State] 进入说话状态")
-                asyncio.create_task(self.event_bus.emit(Events.UI_STATUS, text="Speaking."))
+                asyncio.create_task(
+                    self.event_bus.emit(Events.UI_STATUS, text="Speaking.")
+                )
 
                 # 说话时标记活动
                 self.emotion_controller.mark_activity("speaking")
@@ -715,16 +1283,22 @@ class Live2DApplication:
 
         if not speak:
             if show_bubble:
-                await self.event_bus.emit(Events.UI_BUBBLE, text=text, emotion=emotion, duration_ms=None)
+                await self.event_bus.emit(
+                    Events.UI_BUBBLE, text=text, emotion=emotion, duration_ms=None
+                )
                 self.logger.debug("TTS disabled; set idle")
-                await self.state_machine.set_state(AgentState.IDLE, reason="tts_disabled")
+                await self.state_machine.set_state(
+                    AgentState.IDLE, reason="tts_disabled"
+                )
             else:
                 self.logger.debug("Silent output finished; UI only")
                 await self.event_bus.emit(Events.UI_STATUS, text="Idle")
             return
 
         self.logger.debug(f"TTS预览: {text[:50]}...")
-        await self.tts.say(text, emotion=emotion, interrupt=interrupt, show_bubble=show_bubble)
+        await self.tts.say(
+            text, emotion=emotion, interrupt=interrupt, show_bubble=show_bubble
+        )
 
     async def _on_stream_start(self, payload: Dict[str, Any]):
         """处理流开始事件"""
@@ -745,7 +1319,9 @@ class Live2DApplication:
         self.logger.debug(f"流结束，等待 TTS 播放完成")
         if not bool(payload.get("speak", True)):
             if bool(payload.get("show_bubble", True)):
-                await self.state_machine.set_state(AgentState.IDLE, reason="tts_stream_disabled")
+                await self.state_machine.set_state(
+                    AgentState.IDLE, reason="tts_stream_disabled"
+                )
             else:
                 await self.event_bus.emit(Events.UI_STATUS, text="Idle")
             return
@@ -769,9 +1345,11 @@ class Live2DApplication:
 
         # 2. 退出进程，返回 100 给守护进程
         import sys
+
         sys.exit(100)
+
     def _on_chat_log(self, payload: Dict[str, Any]):
-        """????????"""
+        """将聊天日志打印到控制台，并写入事件日志/转录。"""
         role = payload.get("role", "unknown")
         content = payload.get("content", "")
         meta = payload.get("meta", {})
@@ -779,19 +1357,21 @@ class Live2DApplication:
         try:
             source = str((meta or {}).get("source") or "").strip().lower()
             session_id = str((meta or {}).get("session_id") or "").strip()
-            sender_name = str((meta or {}).get("sender_name") or (meta or {}).get("user_id") or "").strip()
+            sender_name = str(
+                (meta or {}).get("sender_name") or (meta or {}).get("user_id") or ""
+            ).strip()
 
             if source in {"qq_gateway", "napcat_qq"}:
                 channel_label = "QQ"
                 if sender_name and role == "user":
                     channel_label = f"QQ:{sender_name}"
             else:
-                channel_label = "??"
+                channel_label = "LOCAL"
 
             role_map = {
-                "user": "??",
-                "assistant": "??",
-                "system": "??",
+                "user": "USER",
+                "assistant": "BOT",
+                "system": "SYS",
             }
             role_label = role_map.get(str(role).strip().lower(), str(role))
 
@@ -800,7 +1380,14 @@ class Live2DApplication:
                 text_line = text_line[:240] + "..."
 
             sid_suffix = f"[{session_id}]" if session_id else ""
-            self.logger.info(f"[??]{sid_suffix}[{channel_label}][{role_label}] {text_line}")
+            prefix = (
+                "QQ-IN"
+                if source in {"qq_gateway", "napcat_qq"} and role == "user"
+                else "CHAT"
+            )
+            self.logger.info(
+                f"[{prefix}]{sid_suffix}[{channel_label}][{role_label}] {text_line}"
+            )
         except Exception:
             pass
 
@@ -811,7 +1398,13 @@ class Live2DApplication:
 
         try:
             session_id = str((meta or {}).get("session_id") or "").strip() or None
-            self.memory_store.add_transcript(role, content, meta, session_id=session_id)
+            store = self.memory_store
+            if store is not None:
+                brain_store = getattr(
+                    getattr(self, "brain", None), "sqlite_store", None
+                )
+                if store is not brain_store:
+                    store.add_transcript(role, content, meta, session_id=session_id)
         except Exception:
             pass
 
@@ -861,9 +1454,16 @@ class Live2DApplication:
 
                                 # 准点记录后，标记数据库
                                 if self.memory_store:
-                                    stats = self.memory_store.get_daily_screen_stats(current_date_str) or {}
+                                    stats = (
+                                        self.memory_store.get_daily_screen_stats(
+                                            current_date_str
+                                        )
+                                        or {}
+                                    )
                                     stats["diary_done"] = True
-                                    self.memory_store.save_daily_screen_stats(current_date_str, stats)
+                                    self.memory_store.save_daily_screen_stats(
+                                        current_date_str, stats
+                                    )
 
                                 self.logger.info("✅ 今日日记已归档")
 
@@ -871,7 +1471,9 @@ class Live2DApplication:
                 # 🟢 [修改] 去掉了 and now.hour < 12
                 # 只要今天还没检查过补录(内存标记)，就去检查一次
                 if AUTO_DIARY_ENABLED and _last_makeup_check_date != current_date_str:
-                    _last_makeup_check_date = current_date_str  # 标记：今天已经检查过了，别再查了
+                    _last_makeup_check_date = (
+                        current_date_str  # 标记：今天已经检查过了，别再查了
+                    )
 
                     yesterday_str = (now - timedelta(days=1)).strftime("%Y-%m-%d")
 
@@ -881,17 +1483,27 @@ class Live2DApplication:
 
                         # 1. 如果已经做过，跳过
                         if stats and stats.get("diary_done") is True:
-                            self.logger.info(f"👀 昨日({yesterday_str}) 日记已存在，跳过补录。")
+                            self.logger.info(
+                                f"👀 昨日({yesterday_str}) 日记已存在，跳过补录。"
+                            )
 
                         # 2. 如果没做过，且有数据，补录！
-                        elif stats and stats.get("summary_text") and len(stats["summary_text"]) > 10:
+                        elif (
+                            stats
+                            and stats.get("summary_text")
+                            and len(stats["summary_text"]) > 10
+                        ):
                             self.logger.info(f"✨ 发现昨日数据未归档，正在补录日记...")
 
-                            await self.chat_service.summarize_day(stats["summary_text"], auto=True)
+                            await self.chat_service.summarize_day(
+                                stats["summary_text"], auto=True
+                            )
 
                             # 补录完立刻标记
                             stats["diary_done"] = True
-                            self.memory_store.save_daily_screen_stats(yesterday_str, stats)
+                            self.memory_store.save_daily_screen_stats(
+                                yesterday_str, stats
+                            )
 
                             self.logger.info(f"✅ 昨日({yesterday_str})日记补录完成。")
                         else:
@@ -902,6 +1514,7 @@ class Live2DApplication:
             except Exception as e:
                 self.logger.error(f"调度器出错: {e}")
                 import traceback
+
                 traceback.print_exc()
                 await asyncio.sleep(60)
 
@@ -916,6 +1529,17 @@ class Live2DApplication:
                 self.voice_sensor.stop()
             except Exception as e:
                 print(f"关闭语音传感器出错: {e}")
+
+        if self.gui_ws_server:
+            try:
+                self.gui_ws_server.stop()
+            except Exception as e:
+                print(f"GUI WS shutdown error: {e}")
+        if self.gui_http_server:
+            try:
+                self.gui_http_server.stop()
+            except Exception as e:
+                print(f"GUI HTTP shutdown error: {e}")
 
         # 尝试最后一次保存（如果今天还没写日记）
         try:
@@ -968,7 +1592,11 @@ class Live2DApplication:
                     self.logger.error(f"❌ 情绪控制器启动失败: {e}")
 
             # 3. 启动所有插件
-            self.loop.create_task(self.plugin_manager.start_all_plugins())
+            self.loop.create_task(
+                self.plugin_manager.start_all_plugins(
+                    {"chat_service": self.chat_service}
+                )
+            )
 
             # 4. 启动定时调度器
             self.loop.create_task(self._scheduler_loop())
@@ -991,7 +1619,8 @@ class Live2DApplication:
 
             # 🟢 7. 启动语音监听 (如果配置为开启)
             import config
-            if getattr(config, 'VOICE_SENSOR_ENABLED', False) and self.voice_sensor:
+
+            if getattr(config, "VOICE_SENSOR_ENABLED", False) and self.voice_sensor:
                 try:
                     self.logger.info("🎤 启动 VoiceSensor 监听线程...")
                     self.voice_sensor.start(self.loop)
@@ -1003,6 +1632,15 @@ class Live2DApplication:
                 self.apply_external_settings()
             except Exception as e:
                 self.logger.error(f"External settings apply failed: {e}")
+            if self.gui_ws_server:
+                self.loop.create_task(self.gui_ws_server.start(self.loop))
+            if self.gui_http_server:
+                try:
+                    self.gui_http_server.start()
+                except Exception as exc:
+                    if self.logger:
+                        self.logger.error(f"GUI HTTP start failed: {exc}")
+
             self.loop.run_forever()
 
         t = threading.Thread(target=async_worker, daemon=True)
@@ -1025,9 +1663,13 @@ class Live2DApplication:
                 await self.chat_service.process(text, ctx=merged_ctx)
             except Exception:
                 try:
-                    output_profile = build_output_profile(str(merged_ctx.get("source") or "text_input"))
+                    output_profile = build_output_profile(
+                        str(merged_ctx.get("source") or "text_input")
+                    )
                     if output_profile.get("live2d_enabled", True):
-                        await self.event_bus.emit("state.changed", state="idle", reason="process_error")
+                        await self.event_bus.emit(
+                            "state.changed", state="idle", reason="process_error"
+                        )
                         await self.event_bus.emit(Events.LIVE2D_GO_IDLE)
                     await self.event_bus.emit(Events.UI_STATUS, text="Idle")
                 except Exception:
@@ -1044,18 +1686,30 @@ class Live2DApplication:
 
         fut.add_done_callback(_done)
 
-    def on_external_message(self, text: str, *, source: str = "qq_gateway", channel: str = "qq", metadata: Optional[Dict[str, Any]] = None):
+    def on_external_message(
+        self,
+        text: str,
+        *,
+        source: str = "qq_gateway",
+        channel: str = "qq",
+        metadata: Optional[Dict[str, Any]] = None,
+    ):
         """处理外部渠道消息。
 
         外部消息直接进入 chat_service，对话链路保持完整，但默认不驱动 Live2D 与桌面语音。
         """
-        self.on_gui_send(text, {
-            "source": source,
-            "channel": channel,
-            "channel_meta": metadata or {},
-        })
+        self.on_gui_send(
+            text,
+            {
+                "source": source,
+                "channel": channel,
+                "channel_meta": metadata or {},
+            },
+        )
 
-    async def dispatch_gateway_payload(self, adapter_name: str, payload: Dict[str, Any]):
+    async def dispatch_gateway_payload(
+        self, adapter_name: str, payload: Dict[str, Any]
+    ):
         if not self.chat_gateway:
             raise RuntimeError("Chat gateway not initialized")
         return await self.chat_gateway.dispatch_incoming(adapter_name, payload or {})
@@ -1083,12 +1737,74 @@ class Live2DApplication:
                 await asyncio.to_thread(
                     self.brain.add_memory,
                     "system",
-                    f"用户为你更换了服装，文件路径为: {path}"
+                    f"用户为你更换了服装，文件路径为: {path}",
                 )
             except Exception as e:
                 self.logger.error(f"换装失败: {e}")
 
         asyncio.run_coroutine_threadsafe(_do(), self.loop)
+
+    def sync_active_character_live2d(self):
+        try:
+            from modules.character_manager import character_manager
+
+            active_id = character_manager.data.get("active_id")
+            if not active_id:
+                return False
+            active_char = character_manager.get_character(active_id) or {}
+            current_costume = character_manager.get_current_costume_name(active_id)
+            if not current_costume:
+                return False
+            costume_cfg = (active_char.get("costumes") or {}).get(current_costume) or {}
+            costume_path = str(costume_cfg.get("path") or "").strip()
+            if not costume_path:
+                return False
+            runtime_cfg = character_manager.get_costume_runtime_config(
+                active_id, current_costume
+            )
+            self.on_gui_change_costume(costume_path, runtime_cfg)
+            return True
+        except Exception as e:
+            if self.logger:
+                self.logger.warning(f"同步当前角色 Live2D 失败: {e}")
+            return False
+
+    def switch_character_runtime(self, char_id: str) -> bool:
+        try:
+            from modules.character_manager import character_manager
+
+            char = character_manager.set_active_character(char_id)
+            if not char:
+                return False
+            try:
+                self.tts.apply_role_tts_config(
+                    character_manager.get_tts_config(char_id)
+                )
+            except Exception:
+                pass
+            try:
+                current_costume = character_manager.get_current_costume_name(char_id)
+                self.logger.info(
+                    f"[RoleSync] 切换角色: {char_id} -> {char.get('name', char_id)} | costume={current_costume}"
+                )
+                if getattr(self, "qt_ui", None):
+                    if current_costume and hasattr(
+                        self.qt_ui, "trigger_costume_by_name"
+                    ):
+                        self.qt_ui.trigger_costume_by_name(current_costume)
+                    elif hasattr(self.qt_ui, "sync_active_character_visual"):
+                        self.qt_ui.sync_active_character_visual()
+                    if hasattr(self.qt_ui, "refresh_character_status"):
+                        self.qt_ui.refresh_character_status()
+                else:
+                    self.sync_active_character_live2d()
+            except Exception:
+                pass
+            return True
+        except Exception as e:
+            if self.logger:
+                self.logger.warning(f"切换角色运行时失败: {e}")
+            return False
 
     def on_gui_preview_motion(self, motion_name: str, motion_type: int = 0):
         """GUI预览动作回调"""
@@ -1103,14 +1819,14 @@ class Live2DApplication:
 
         asyncio.run_coroutine_threadsafe(_do(), self.loop)
 
-    def on_gui_preview_expression(self, exp_id: int):
+    def on_gui_preview_expression(self, exp_value):
         """GUI预览表情回调"""
         if self.loop is None:
             return
 
         async def _do():
             try:
-                await set_expression(int(exp_id))
+                await set_expression(int(exp_value))
             except Exception as e:
                 self.logger.error(f"预览表情失败: {e}")
 
@@ -1124,6 +1840,7 @@ class Live2DApplication:
         # 保持 config 运行时状态与 UI 显示一致
         try:
             import config as runtime_config
+
             runtime_config.TTS_ENABLED = enabled
         except Exception:
             pass
@@ -1206,15 +1923,32 @@ class Live2DApplication:
                 start_minimized_to_tray=False,
             ),
         )
+        self.qt_ui.brain = self.brain
+        self.qt_ui.tts = self.tts
+        self.qt_ui.loop = self.loop
+        self.qt_ui.chat_service = self.chat_service
         self.qt_ui.set_status("Idle")
+        try:
+            self.logger.info("[RoleSync] 启动时同步当前角色形象")
+            if hasattr(self.qt_ui, "sync_active_character_visual"):
+                self.qt_ui.sync_active_character_visual()
+            else:
+                self.sync_active_character_live2d()
+        except Exception:
+            pass
         self.qt_ui.run()
 
 
 class EventPresenter:
     """事件展示器"""
 
-    def __init__(self, tts_enabled: bool = True, speak_direct_result: bool = False,
-                 verbose: bool = True, event_bus: EventBus = None):
+    def __init__(
+        self,
+        tts_enabled: bool = True,
+        speak_direct_result: bool = False,
+        verbose: bool = True,
+        event_bus: EventBus = None,
+    ):
         self.tts_enabled = bool(tts_enabled)
         self.speak_direct_result = bool(speak_direct_result)
         self.verbose = bool(verbose)
@@ -1233,8 +1967,16 @@ class EventPresenter:
             print(f"🎚️ [Presenter] TTS: {'开' if self.tts_enabled else '关'}")
 
         # 🟢 [修改] 增加 interrupt 参数
-    async def present(self, text: str, emotion: Optional[str] = None, *,
-                      speak: Optional[bool] = None, interrupt: bool = True, show_bubble: bool = True):
+
+    async def present(
+        self,
+        text: str,
+        emotion: Optional[str] = None,
+        *,
+        speak: Optional[bool] = None,
+        interrupt: bool = True,
+        show_bubble: bool = True,
+    ):
         """展示文本"""
         text = (text or "").strip()
         if not text:

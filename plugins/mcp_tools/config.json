@@ -20,7 +20,7 @@
     "timeout_sec": 6,
     "settings": {
         "intent_route_enabled": {
-            "type": "boolean",
+            "type": "bool",
             "default": true,
             "label": "自然语言路由开关",
             "description": "开启后，当消息命中品牌词+动作词时，会优先路由到 mcp_tools。"

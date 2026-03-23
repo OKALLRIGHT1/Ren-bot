@@ -28,6 +28,7 @@ from core.logger import get_logger
 _CURRENT_COSTUME_CONFIG = {}
 _CURRENT_COSTUME_EMOTION_MAP = {}
 
+
 def _get_logger():
     """延迟获取 logger 实例"""
     return get_logger()
@@ -59,8 +60,10 @@ _RESOLVED_HOST = None
 from typing import Optional
 import websockets
 
+
 class WebSocketConnectionPool:
     """WebSocket 连接池：复用连接避免频繁创建/关闭，并串行化发送。"""
+
     def __init__(self):
         self._connection: Optional[websockets.WebSocketClientProtocol] = None
         self._lock = asyncio.Lock()
@@ -133,15 +136,13 @@ class WebSocketConnectionPool:
                     self._is_connected = False
 
 
-
 # 全局连接池实例
 _connection_pool = WebSocketConnectionPool()
 
 
 async def _ws_connect(host: str):
     return await asyncio.wait_for(
-        websockets.connect(host, ping_interval=None),
-        timeout=CONNECT_TIMEOUT
+        websockets.connect(host, ping_interval=None), timeout=CONNECT_TIMEOUT
     )
 
 
@@ -159,9 +160,9 @@ async def _resolve_host() -> str:
     if _RESOLVED_HOST:
         return _RESOLVED_HOST
 
-    _get_logger().info("正在并发扫描端口 10086-10100 ...")
+    _get_logger().info("正在并发扫描端口 10086-10100, 20000-20020 ...")
 
-    ports = range(10086, 10101)
+    ports = list(range(10086, 10101)) + list(range(20000, 20021))
     tasks = []
     for p in ports:
         host = f"ws://127.0.0.1:{p}/api"
@@ -181,7 +182,6 @@ async def _resolve_host() -> str:
     return _RESOLVED_HOST
 
 
-
 async def _send_to_models(msg: int, msg_id: int, data_builder, max_retries: int = 2):
     """
     无 ACK 模式下的稳定发送：
@@ -198,7 +198,9 @@ async def _send_to_models(msg: int, msg_id: int, data_builder, max_retries: int 
             async with _connection_pool._send_lock:
                 for mid in LIVE2D_MODEL_IDS:
                     payload = {"msg": msg, "msgId": msg_id, "data": data_builder(mid)}
-                    await asyncio.wait_for(ws.send(json.dumps(payload)), timeout=SEND_TIMEOUT)
+                    await asyncio.wait_for(
+                        ws.send(json.dumps(payload)), timeout=SEND_TIMEOUT
+                    )
 
             return  # 成功发送，结束
 
@@ -207,7 +209,9 @@ async def _send_to_models(msg: int, msg_id: int, data_builder, max_retries: int 
             await _connection_pool.mark_broken()
 
             if retry_count <= max_retries:
-                _get_logger().warning(f"发送失败(尝试 {retry_count}/{max_retries}): {e}")
+                _get_logger().warning(
+                    f"发送失败(尝试 {retry_count}/{max_retries}): {e}"
+                )
                 await asyncio.sleep(0.1)
                 continue
 
@@ -215,10 +219,10 @@ async def _send_to_models(msg: int, msg_id: int, data_builder, max_retries: int 
             raise
 
 
-
 # ==========================================
 # 核心控制函数
 # ==========================================
+
 
 async def play_motion(mtn: str, motion_type: int = 0):
     await _send_to_models(
@@ -228,11 +232,11 @@ async def play_motion(mtn: str, motion_type: int = 0):
     )
 
 
-async def set_expression(exp_id: int):
+async def set_expression(exp_value):
     await _send_to_models(
         msg=13300,
         msg_id=1,
-        data_builder=lambda mid: {"id": mid, "expId": int(exp_id)},
+        data_builder=lambda mid: {"id": mid, "expId": int(exp_value)},
     )
 
 
@@ -252,7 +256,13 @@ async def clear_expression():
     )
 
 
-async def play_sound_file(path: str, channel: int = 0, volume: float = 1.0, delay_ms: int = 0, loop: bool = False):
+async def play_sound_file(
+    path: str,
+    channel: int = 0,
+    volume: float = 1.0,
+    delay_ms: int = 0,
+    loop: bool = False,
+):
     abs_path = os.path.abspath(path)
     await _send_to_models(
         msg=13500,
@@ -293,18 +303,18 @@ async def change_costume(model_path: str, config: dict = None):
     safe_cfg = config if isinstance(config, dict) else {}
     global _CURRENT_COSTUME_CONFIG, _CURRENT_COSTUME_EMOTION_MAP
     _CURRENT_COSTUME_CONFIG = safe_cfg
-    _CURRENT_COSTUME_EMOTION_MAP = safe_cfg.get("emotion_map", {}) if isinstance(safe_cfg.get("emotion_map", {}), dict) else {}
+    _CURRENT_COSTUME_EMOTION_MAP = (
+        safe_cfg.get("emotion_map", {})
+        if isinstance(safe_cfg.get("emotion_map", {}), dict)
+        else {}
+    )
 
     _get_logger().info(f"切换服装: {abs_path} | Config: {safe_cfg}")
 
     await _send_to_models(
         msg=12000,
         msg_id=10,
-        data_builder=lambda mid: {
-            "id": mid,
-            "path": abs_path,
-            "config": safe_cfg
-        },
+        data_builder=lambda mid: {"id": mid, "path": abs_path, "config": safe_cfg},
     )
 
 
@@ -337,8 +347,6 @@ def _pick_keyword_mapping(text: str):
     return (MOTION_MAPPING or {}).get("默认")
 
 
-
-
 async def trigger_emotion(emotion: Optional[str]) -> bool:
     if not emotion:
         return False
@@ -354,7 +362,6 @@ async def trigger_emotion(emotion: Optional[str]) -> bool:
     if mtn:
         await play_motion(str(mtn), motion_type=mtype)
     return True
-
 
 
 async def trigger_motion(text: str):
@@ -379,12 +386,11 @@ async def trigger_motion(text: str):
         await play_motion(str(mtn), motion_type=mtype)
 
 
-
 async def send_bubble(
     text: str,
     emotion: Optional[str] = None,
     duration_ms: Optional[int] = None,
-    **kwargs
+    **kwargs,
 ):
     text = (text or "").strip()
 
@@ -405,21 +411,24 @@ async def send_bubble(
     await _send_to_models(
         msg=11000,
         msg_id=3,
-        data_builder=lambda mid: {"id": mid, "text": text, "duration": int(duration_ms)},
+        data_builder=lambda mid: {
+            "id": mid,
+            "text": text,
+            "duration": int(duration_ms),
+        },
     )
-
 
 
 # ========== 🎤 新增：口型同步指令 ==========
 async def send_lip_sync(lip_data: list):
     """
     发送口型同步数据到 Live2D 前端 [msg: 13600]
-    
+
     Args:
         lip_data: 口型数据列表，格式：[{"time": 0.0, "mouth": 0.3}, ...]
                  - time: 时间点（秒）
                  - mouth: 嘴部张开程度（0.0-1.0）
-    
+
     前端接收到的消息格式：
     {
         "msg": 13600,
@@ -438,12 +447,14 @@ async def send_lip_sync(lip_data: list):
     if not lip_data:
         _get_logger().debug("口型数据为空，跳过发送")
         return
-    
+
     # 计算总时长
     duration = lip_data[-1]["time"] if lip_data else 0
-    
-    _get_logger().info(f"[Live2D msg=13600] 发送口型同步数据: {len(lip_data)} 个时间点, 总时长 {duration:.2f}s")
-    
+
+    _get_logger().info(
+        f"[Live2D msg=13600] 发送口型同步数据: {len(lip_data)} 个时间点, 总时长 {duration:.2f}s"
+    )
+
     try:
         await _send_to_models(
             msg=13600,
@@ -451,10 +462,11 @@ async def send_lip_sync(lip_data: list):
             data_builder=lambda mid: {
                 "id": mid,
                 "lipSync": lip_data,
-                "duration": float(duration)
+                "duration": float(duration),
             },
         )
     except Exception as e:
         _get_logger().error(f"口型同步数据发送失败: {e}")
+
 
 # ==========================================

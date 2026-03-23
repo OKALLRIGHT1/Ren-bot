@@ -3,8 +3,10 @@ import importlib.util
 import re
 import asyncio
 import json
+import inspect
 from typing import Dict, Any, Tuple, List, Optional, Iterable
 from pathlib import Path
+from modules.plugin_secret_store import PluginSecretStore
 
 try:
     from config import CHAT_DEBUG_PRINTS
@@ -18,6 +20,7 @@ DEFAULT_ACCESS_CONTROL = {
     "allow_remote_qq": True,
     "allow_qq_owner": True,
     "allow_qq_others": False,
+    "allow_group_without_at": False,
 }
 
 
@@ -31,7 +34,10 @@ class PluginManager:
         self.disabled_plugins = set()  # 禁用的插件 trigger 列表
         self.plugin_configs: Dict[str, dict] = {}  # 存储每个插件的配置
         self.plugin_dirs: Dict[str, str] = {}  # ✅ 新增：存储 trigger -> 文件夹名的映射
-        self.llm_command_map: Dict[str, str] = {}  # ✅ 新增：存储 llm_command -> trigger 的映射
+        self.llm_command_map: Dict[
+            str, str
+        ] = {}  # ✅ 新增：存储 llm_command -> trigger 的映射
+        self.secret_store = PluginSecretStore()
 
         if not os.path.exists(plugin_dir):
             os.makedirs(plugin_dir)
@@ -39,7 +45,9 @@ class PluginManager:
         self.default_timeout_sec = 6.0
         self.debug_enabled = bool(CHAT_DEBUG_PRINTS)
         # 支持多种分隔符：| 、/ 和空格，非贪婪匹配直到右括号
-        self._cmd_pattern = r"\[CMD:\s*([A-Za-z0-9_\-]+)\s*(?:[\|／\/]\s*|\s+)([^\]]*?)\]"
+        self._cmd_pattern = (
+            r"\[CMD:\s*([A-Za-z0-9_\-]+)\s*(?:[\|／\/]\s*|\s+)([^\]]*?)\]"
+        )
 
     def _dbg(self, message: str):
         if self.debug_enabled:
@@ -68,6 +76,44 @@ class PluginManager:
         adapter = str(channel_meta.get("adapter") or "").strip().lower()
         return adapter == "napcat_qq"
 
+    def _is_secret_setting(self, setting_key: str, setting_info: Any) -> bool:
+        key_lower = str(setting_key or "").strip().lower()
+        if any(
+            token in key_lower
+            for token in ("api_key", "token", "secret", "password", "access_key")
+        ):
+            return True
+        if isinstance(setting_info, dict):
+            return str(setting_info.get("type") or "").strip().lower() in {
+                "secret",
+                "password",
+            }
+        return False
+
+    def _apply_secret_overrides(self, trigger: str, config: dict) -> dict:
+        if not isinstance(config, dict):
+            return config
+        settings = config.get("settings")
+        if not isinstance(settings, dict):
+            return config
+        config = dict(config)
+        settings_copy = dict(settings)
+        secrets = self.secret_store.get_all_for_plugin(trigger)
+        for key, value in list(settings_copy.items()):
+            if not self._is_secret_setting(key, value):
+                continue
+            if key not in secrets:
+                continue
+            secret_value = secrets.get(key, "")
+            if isinstance(value, dict):
+                new_value = dict(value)
+                new_value["default"] = secret_value
+                settings_copy[key] = new_value
+            else:
+                settings_copy[key] = secret_value
+        config["settings"] = settings_copy
+        return config
+
     def _is_owner_context(self, context: Optional[dict]) -> bool:
         if not isinstance(context, dict):
             return False
@@ -90,7 +136,9 @@ class PluginManager:
         return f"本地：{local_summary}｜QQ：{qq_summary}"
 
     def _is_plugin_allowed(self, plugin, context: Optional[dict]) -> Tuple[bool, str]:
-        access_control = self._normalize_access_control(getattr(plugin, "access_control", None))
+        access_control = self._normalize_access_control(
+            getattr(plugin, "access_control", None)
+        )
 
         if self._is_remote_qq_context(context):
             if not access_control["allow_remote_qq"]:
@@ -106,10 +154,14 @@ class PluginManager:
             return False, "当前插件已关闭本地触发"
         return True, ""
 
-    def _get_access_denied_message(self, plugin, context: Optional[dict], reason: str) -> str:
+    def _get_access_denied_message(
+        self, plugin, context: Optional[dict], reason: str
+    ) -> str:
         plugin_name = getattr(plugin, "name", getattr(plugin, "plugin_trigger", "工具"))
         if self._is_remote_qq_context(context):
-            sender_label = "QQ 主人" if self._is_owner_context(context) else "其他 QQ 联系人"
+            sender_label = (
+                "QQ 主人" if self._is_owner_context(context) else "其他 QQ 联系人"
+            )
             return f"⚠️ 插件“{plugin_name}”当前不允许由{sender_label}触发：{reason}"
         return f"⚠️ 插件“{plugin_name}”当前不允许由本地入口触发：{reason}"
 
@@ -137,7 +189,7 @@ class PluginManager:
                 continue
 
             # 跳过以下划线开头的文件夹
-            if item_name.startswith('_'):
+            if item_name.startswith("_"):
                 continue
 
             try:
@@ -147,7 +199,7 @@ class PluginManager:
                     print(f"⚠️ 插件文件夹 {item_name} 缺少 config.json，已跳过")
                     continue
 
-                with open(config_path, 'r', encoding='utf-8') as f:
+                with open(config_path, "r", encoding="utf-8-sig") as f:
                     config = json.load(f)
 
                 # 保存配置
@@ -156,9 +208,14 @@ class PluginManager:
                     print(f"⚠️ 插件 {item_name} 的配置缺少 trigger，已跳过")
                     continue
 
-                config["access_control"] = self._normalize_access_control(config.get("access_control"))
+                config["access_control"] = self._normalize_access_control(
+                    config.get("access_control")
+                )
+                config = self._apply_secret_overrides(trigger, config)
                 self.plugin_configs[trigger] = config
-                self.plugin_dirs[trigger] = item_name  # ✅ 关键修复：记录 trigger 对应的真实文件夹名称
+                self.plugin_dirs[trigger] = (
+                    item_name  # ✅ 关键修复：记录 trigger 对应的真实文件夹名称
+                )
 
                 # 尝试加载插件代码
                 module_path = os.path.join(plugin_path, "plugin.py")
@@ -182,8 +239,14 @@ class PluginManager:
                 llm_command = config.get("llm_command", trigger)
                 inst.llm_command = llm_command
                 inst.plugin_trigger = trigger
-                inst.access_control = self._normalize_access_control(config.get("access_control"))
-                inst.settings = config.get("settings", {}) if isinstance(config.get("settings", {}), dict) else {}
+                inst.access_control = self._normalize_access_control(
+                    config.get("access_control")
+                )
+                inst.settings = (
+                    config.get("settings", {})
+                    if isinstance(config.get("settings", {}), dict)
+                    else {}
+                )
 
                 # 从配置中设置显示元数据，name 始终以 config 为准，保证 UI/列表使用中文名
                 inst.name = config.get("name", trigger)
@@ -196,11 +259,21 @@ class PluginManager:
                 if not hasattr(inst, "aliases"):
                     inst.aliases = config.get("aliases", [trigger])
                 if not hasattr(inst, "timeout_sec"):
-                    inst.timeout_sec = config.get("timeout_sec") or self.default_timeout_sec
+                    inst.timeout_sec = (
+                        config.get("timeout_sec") or self.default_timeout_sec
+                    )
+
+                if hasattr(inst, "reload_config") and callable(inst.reload_config):
+                    try:
+                        inst.reload_config()
+                    except Exception as e:
+                        print(f"⚠️ 插件 {trigger} 初始 reload_config 失败: {e}")
 
                 self.plugins[trigger] = inst
                 p_type = getattr(inst, "type", "react")
-                print(f"   ✅ 加载插件 [{p_type}]: {getattr(inst, 'name', trigger)} (v{config.get('version', '1.0.0')})")
+                print(
+                    f"   ✅ 加载插件 [{p_type}]: {getattr(inst, 'name', trigger)} (v{config.get('version', '1.0.0')})"
+                )
 
                 # 构建LLM命令映射
                 llm_command = config.get("llm_command", trigger)
@@ -238,13 +311,24 @@ class PluginManager:
             except Exception as e:
                 print(f"❌ 插件加载失败 {item_name}: {e}")
                 import traceback
+
                 traceback.print_exc()
 
-    async def start_all_plugins(self):
+    async def start_all_plugins(self, context: Optional[dict] = None):
         for name, plugin in self.plugins.items():
             if hasattr(plugin, "start") and asyncio.iscoroutinefunction(plugin.start):
                 try:
-                    await plugin.start()
+                    if context is not None:
+                        try:
+                            params = inspect.signature(plugin.start).parameters
+                        except Exception:
+                            params = {}
+                        if len(params) >= 1:
+                            await plugin.start(context)
+                        else:
+                            await plugin.start()
+                    else:
+                        await plugin.start()
                 except Exception as e:
                     print(f"❌ 启动插件 {name} 后台任务失败: {e}")
 
@@ -253,13 +337,60 @@ class PluginManager:
         """获取插件配置"""
         return self.plugin_configs.get(trigger)
 
+    def get_group_no_at_keywords(self) -> List[str]:
+        keywords: List[str] = []
+        for trigger, config in self.plugin_configs.items():
+            access = self._normalize_access_control(config.get("access_control"))
+            if not access.get("allow_group_without_at"):
+                continue
+            if not access.get("allow_remote_qq"):
+                continue
+            if str(config.get("type") or "react") != "direct":
+                continue
+            aliases = config.get("aliases") or []
+            if not isinstance(aliases, list):
+                aliases = [trigger]
+            if trigger not in aliases:
+                aliases = list(aliases) + [trigger]
+            for alias in aliases:
+                text = str(alias or "").strip()
+                if text:
+                    keywords.append(text)
+        # 去重并按长度降序，避免短词抢占
+        unique = list(dict.fromkeys(keywords))
+        return sorted(unique, key=len, reverse=True)
+
     def save_plugin_config(self, trigger: str, config: dict) -> bool:
         """保存插件配置到文件"""
         if trigger not in self.plugins:
             return False
 
         config = dict(config or {})
-        config["access_control"] = self._normalize_access_control(config.get("access_control"))
+        provided_secret_values = config.pop("_secret_values", {})
+        config["access_control"] = self._normalize_access_control(
+            config.get("access_control")
+        )
+        secret_settings = {}
+        settings = config.get("settings", {})
+        if isinstance(settings, dict):
+            sanitized_settings = {}
+            for key, value in settings.items():
+                if self._is_secret_setting(key, value):
+                    secret_value = ""
+                    if isinstance(value, dict):
+                        secret_value = str(
+                            provided_secret_values.get(key, value.get("default") or "")
+                        )
+                        stored_value = dict(value)
+                        stored_value["default"] = ""
+                        sanitized_settings[key] = stored_value
+                    else:
+                        secret_value = str(provided_secret_values.get(key, value or ""))
+                        sanitized_settings[key] = ""
+                    secret_settings[key] = secret_value
+                else:
+                    sanitized_settings[key] = value
+            config["settings"] = sanitized_settings
 
         # ✅ 关键修复：从 self.plugin_dirs 获取真实的文件夹名称
         # 如果找不到映射（理论上不可能），则回退到使用 trigger
@@ -267,11 +398,16 @@ class PluginManager:
 
         config_path = os.path.join(self.plugin_dir, dir_name, "config.json")
         try:
-            with open(config_path, 'w', encoding='utf-8') as f:
+            with open(config_path, "w", encoding="utf-8") as f:
                 json.dump(config, f, ensure_ascii=False, indent=4)
 
+            for secret_key, secret_value in secret_settings.items():
+                self.secret_store.set_secret(trigger, secret_key, secret_value)
+
+            effective_config = self._apply_secret_overrides(trigger, config)
+
             # 更新内存中的配置
-            self.plugin_configs[trigger] = config
+            self.plugin_configs[trigger] = effective_config
 
             # 更新插件实例的属性
             plugin = self.plugins[trigger]
@@ -286,10 +422,18 @@ class PluginManager:
             if hasattr(plugin, "aliases"):
                 plugin.aliases = config.get("aliases", [trigger])
             if hasattr(plugin, "timeout_sec"):
-                plugin.timeout_sec = config.get("timeout_sec") or self.default_timeout_sec
+                plugin.timeout_sec = (
+                    effective_config.get("timeout_sec") or self.default_timeout_sec
+                )
             plugin.plugin_trigger = trigger
-            plugin.access_control = self._normalize_access_control(config.get("access_control"))
-            plugin.settings = config.get("settings", {}) if isinstance(config.get("settings", {}), dict) else {}
+            plugin.access_control = self._normalize_access_control(
+                effective_config.get("access_control")
+            )
+            plugin.settings = (
+                effective_config.get("settings", {})
+                if isinstance(effective_config.get("settings", {}), dict)
+                else {}
+            )
 
             # 调用插件的 reload_config 方法（如果存在）
             if hasattr(plugin, "reload_config") and callable(plugin.reload_config):
@@ -353,7 +497,9 @@ class PluginManager:
             out.append(p)
         return out
 
-    def get_tool_prompt_for_triggers(self, triggers: List[str], *, compact: bool = True, max_tools: int = 12) -> str:
+    def get_tool_prompt_for_triggers(
+        self, triggers: List[str], *, compact: bool = True, max_tools: int = 12
+    ) -> str:
         plugins = self._unique_react_plugins_by_keys(triggers)
         if not plugins:
             return ""
@@ -371,7 +517,9 @@ class PluginManager:
                 # 添加别名信息到描述中
                 aliases = getattr(p, "aliases", [])
                 if aliases and len(aliases) > 1:
-                    alias_str = ", ".join([a for a in aliases if a != getattr(p, "trigger", "")])
+                    alias_str = ", ".join(
+                        [a for a in aliases if a != getattr(p, "trigger", "")]
+                    )
                     desc = f"{desc} (别名: {alias_str})"
                 if desc:
                     if len(desc) > 50:  # 增加描述长度限制以容纳别名信息
@@ -380,13 +528,13 @@ class PluginManager:
                 else:
                     lines.append(f"- {llm_cmd}")
             return (
-                    "\n\n【工具】\n"
-                    + "\n".join(lines)
-                    + "\n\n【调用格式】\n"
-                    + "只在需要工具时输出\"工具调用行\"，且必须独占一行：\n"
-                    + "[CMD: 命令 | 参数]\n"
-                    + "注意：必须使用上面列出的命令名称，格式为[CMD: 命令 | 参数]。\n"
-                    + "工具调用行之外，正常回复里不要出现 [CMD: 字样。\n"
+                "\n\n【工具】\n"
+                + "\n".join(lines)
+                + "\n\n【调用格式】\n"
+                + '只在需要工具时输出"工具调用行"，且必须独占一行：\n'
+                + "[CMD: 命令 | 参数]\n"
+                + "注意：必须使用上面列出的命令名称，格式为[CMD: 命令 | 参数]。\n"
+                + "工具调用行之外，正常回复里不要出现 [CMD: 字样。\n"
             )
 
         tools = []
@@ -399,18 +547,20 @@ class PluginManager:
             aliases = getattr(p, "aliases", [])
             alias_info = ""
             if aliases and len(aliases) > 1:
-                alias_str = ", ".join([a for a in aliases if a != getattr(p, "trigger", "")])
+                alias_str = ", ".join(
+                    [a for a in aliases if a != getattr(p, "trigger", "")]
+                )
                 alias_info = f" (别名: {alias_str})"
-            tools.append(f"- {name}: [CMD: {llm_cmd} | {example_arg}] ({desc}){alias_info}")
+            tools.append(
+                f"- {name}: [CMD: {llm_cmd} | {example_arg}] ({desc}){alias_info}"
+            )
 
         return (
-                "\n\n【可用工具能力】\n"
-                + "\n".join(tools)
-                + "\n\n【工具调用规则】\n"
-                  "1) 只在确实需要工具时使用。\n"
-                  "2) 工具调用必须单独成行，格式严格为：[CMD: 命令 | 参数]（参数多个用空格分隔）。\n"
-                  "3) 重要：必须使用上面列出的命令名称（CMD:后面的第一个单词）。\n"
-                  "4) 正常回复正文里不要出现 [CMD: 字样。\n"
+            "\n\n【可用工具能力】\n" + "\n".join(tools) + "\n\n【工具调用规则】\n"
+            "1) 只在确实需要工具时使用。\n"
+            "2) 工具调用必须单独成行，格式严格为：[CMD: 命令 | 参数]（参数多个用空格分隔）。\n"
+            "3) 重要：必须使用上面列出的命令名称（CMD:后面的第一个单词）。\n"
+            "4) 正常回复正文里不要出现 [CMD: 字样。\n"
         )
 
     def get_system_prompt_addition(self) -> str:
@@ -444,7 +594,9 @@ class PluginManager:
                 pass
             return f"⚠️ 工具超时（>{timeout}s）"
 
-    async def execute_direct_commands(self, user_text: str, context: dict) -> Tuple[bool, Optional[str]]:
+    async def execute_direct_commands(
+        self, user_text: str, context: dict
+    ) -> Tuple[bool, Optional[str]]:
         """
         Direct 模式：只要用户输入中包含插件定义的 aliases 关键词，就直接触发。
         """
@@ -463,11 +615,25 @@ class PluginManager:
             # 【核心修改】这里从 startswith 改为 in，实现“关键词包含即触发”
             if key.lower() in low:
                 plugin = self.direct_map[key]
-                plugin_name = getattr(plugin, 'name', key)
+                plugin_name = getattr(plugin, "name", key)
+
+                try:
+                    should_handle = getattr(plugin, "should_handle_direct", None)
+                    if callable(should_handle) and not bool(
+                        should_handle(text, context, key)
+                    ):
+                        continue
+                except Exception as e:
+                    self._dbg(
+                        f"🔌 [Direct] should_handle_direct 检查失败: {plugin_name} -> {e}"
+                    )
+                    continue
 
                 allowed, reason = self._is_plugin_allowed(plugin, context)
                 if not allowed:
-                    denied_message = denied_message or self._get_access_denied_message(plugin, context, reason)
+                    denied_message = denied_message or self._get_access_denied_message(
+                        plugin, context, reason
+                    )
                     self._dbg(f"🔌 [Direct] 插件无权触发: {plugin_name} -> {reason}")
                     continue
 
@@ -485,6 +651,7 @@ class PluginManager:
                 except Exception as e:
                     self._dbg(f"🔌 [Direct] 执行失败: {e}")
                     import traceback
+
                     traceback.print_exc()
                     return True, f"⚠️ 视觉模块异常: {e}"
 
@@ -561,21 +728,27 @@ class PluginManager:
         info = []
         for trigger, plugin in self.plugins.items():
             config = self.plugin_configs.get(trigger, {})
-            access_control = self._normalize_access_control(config.get("access_control"))
-            info.append({
-                "trigger": trigger,
-                "name": getattr(plugin, "name", trigger),
-                "type": getattr(plugin, "type", "react"),
-                "description": getattr(plugin, "description", ""),
-                "enabled": self.is_plugin_enabled(trigger),
-                "version": config.get("version", "1.0.0"),
-                "author": config.get("author", ""),
-                "access_control": access_control,
-                "access_summary": self._build_access_summary(access_control),
-            })
+            access_control = self._normalize_access_control(
+                config.get("access_control")
+            )
+            info.append(
+                {
+                    "trigger": trigger,
+                    "name": getattr(plugin, "name", trigger),
+                    "type": getattr(plugin, "type", "react"),
+                    "description": getattr(plugin, "description", ""),
+                    "enabled": self.is_plugin_enabled(trigger),
+                    "version": config.get("version", "1.0.0"),
+                    "author": config.get("author", ""),
+                    "access_control": access_control,
+                    "access_summary": self._build_access_summary(access_control),
+                }
+            )
         return info
 
-    async def execute_observe_commands(self, user_text: str, context: dict) -> Tuple[bool, Any]:
+    async def execute_observe_commands(
+        self, user_text: str, context: dict
+    ) -> Tuple[bool, Any]:
         """
         Observe 模式：匹配关键词 -> 执行插件 -> 返回结果(但不阻断流程)
         """
@@ -592,9 +765,13 @@ class PluginManager:
                 plugin = self.observe_map[key]
                 allowed, reason = self._is_plugin_allowed(plugin, context)
                 if not allowed:
-                    self._dbg(f"🔌 [Observe] 插件无权触发: {getattr(plugin, 'name', key)} -> {reason}")
+                    self._dbg(
+                        f"🔌 [Observe] 插件无权触发: {getattr(plugin, 'name', key)} -> {reason}"
+                    )
                     continue
-                self._dbg(f"🔌 [Observe] 命中关键词 [{key}] -> 触发观察: {getattr(plugin, 'name', key)}")
+                self._dbg(
+                    f"🔌 [Observe] 命中关键词 [{key}] -> 触发观察: {getattr(plugin, 'name', key)}"
+                )
 
                 try:
                     # 复用 run_with_timeout 逻辑
@@ -606,25 +783,27 @@ class PluginManager:
                     return True, f"（数据获取失败: {e}）"
 
         return False, None
-    async def execute_commands(self, text: str, context: dict, allow_tools: bool = True) -> Tuple[
-        bool, str, List[str], List[str]]:
+
+    async def execute_commands(
+        self, text: str, context: dict, allow_tools: bool = True
+    ) -> Tuple[bool, str, List[str], List[str]]:
         """
         ReAct 工具执行：
         - 从 LLM 输出中解析 [CMD: trigger | args]
         - 返回：triggered, clean_text, tool_outputs, used_triggers
         """
         raw = text or ""
-        
-        self._dbg(f"\n{'='*60}")
+
+        self._dbg(f"\n{'=' * 60}")
         self._dbg("🔌 [ReAct] ========== 开始执行工具命令 ==========")
         self._dbg(f"🔌 [ReAct] LLM原始输出: {raw}")
         self._dbg(f"🔌 [ReAct] 允许工具: {allow_tools}")
         self._dbg(f"🔌 [ReAct] 上下文: {context}")
-        
+
         matches = re.findall(self._cmd_pattern, raw, flags=re.DOTALL)
 
         clean_text = re.sub(self._cmd_pattern, "", raw, flags=re.DOTALL).strip()
-        
+
         self._dbg(f"🔌 [ReAct] 解析到 {len(matches)} 个命令: {matches}")
         self._dbg(f"🔌 [ReAct] 清理后的文本: {clean_text}")
 
@@ -638,7 +817,7 @@ class PluginManager:
             return False, clean_text, [], []
 
         self._dbg(f"🔌 [ReAct] 当前已注册的react插件: {list(self.react_map.keys())}")
-        
+
         for idx, (llm_cmd, args) in enumerate(matches, 1):
             llm_cmd = (llm_cmd or "").strip()
             args = (args or "").strip()
@@ -647,32 +826,36 @@ class PluginManager:
                 continue
 
             self._dbg(f"\n🔌 [ReAct] ----- 处理命令#{idx}: {llm_cmd} | {args} -----")
-            
+
             # 首先尝试通过LLM命令映射找到实际的trigger
             trigger = self.llm_command_map.get(llm_cmd, llm_cmd)
             if trigger != llm_cmd:
                 self._dbg(f"🔌 [ReAct] LLM命令映射: {llm_cmd} -> {trigger}")
-            
+
             triggered = True
             plugin = self.react_map.get(trigger) or self.plugins.get(trigger)
-            
+
             if not plugin:
                 self._dbg(f"🔌 [ReAct] 未找到插件: {trigger}")
                 self._dbg(f"🔌 [ReAct] 可用的triggers: {list(self.plugins.keys())}")
-                tool_outputs.append(f"【{trigger} 结果】未找到该工具（可能未安装/trigger 写错）")
+                tool_outputs.append(
+                    f"【{trigger} 结果】未找到该工具（可能未安装/trigger 写错）"
+                )
                 continue
 
             plugin_type = getattr(plugin, "type", "react")
             self._dbg(f"🔌 [ReAct] 插件类型: {plugin_type}")
-            
+
             if plugin_type != "react":
                 self._dbg("🔌 [ReAct] 插件类型不是react，跳过")
                 continue
 
-            plugin_name = getattr(plugin, 'name', trigger)
+            plugin_name = getattr(plugin, "name", trigger)
             allowed, reason = self._is_plugin_allowed(plugin, context)
             if not allowed:
-                denied_message = self._get_access_denied_message(plugin, context, reason)
+                denied_message = self._get_access_denied_message(
+                    plugin, context, reason
+                )
                 self._dbg(f"🔌 [ReAct] 插件无权触发: {plugin_name} -> {reason}")
                 tool_outputs.append(f"【{trigger} 不可用】{denied_message}")
                 continue
@@ -689,6 +872,7 @@ class PluginManager:
             except Exception as e:
                 self._dbg(f"🔌 [ReAct] 插件执行异常: {e}")
                 import traceback
+
                 traceback.print_exc()
                 tool_outputs.append(f"【{trigger} 错误】{e}")
 
@@ -697,9 +881,13 @@ class PluginManager:
         self._dbg(f"🔌 [ReAct] 使用的插件: {used_triggers}")
         self._dbg(f"🔌 [ReAct] 工具输出数量: {len(tool_outputs)}")
         for i, output in enumerate(tool_outputs, 1):
-            self._dbg(f"🔌 [ReAct] 输出#{i}: {output[:100]}..." if len(output) > 100 else f"🔌 [ReAct] 输出#{i}: {output}")
+            self._dbg(
+                f"🔌 [ReAct] 输出#{i}: {output[:100]}..."
+                if len(output) > 100
+                else f"🔌 [ReAct] 输出#{i}: {output}"
+            )
         self._dbg("🔌 [ReAct] ========== 工具执行结束 ==========\n")
-        
+
         return triggered, clean_text, tool_outputs, used_triggers
 
     # 在 PluginManager 类中添加以下方法
@@ -721,9 +909,10 @@ class PluginManager:
         try:
             # 1. 停止旧插件
             old_plugin = self.plugins[trigger]
-            if hasattr(old_plugin, 'stop') and callable(old_plugin.stop):
+            if hasattr(old_plugin, "stop") and callable(old_plugin.stop):
                 try:
                     import asyncio
+
                     if asyncio.iscoroutinefunction(old_plugin.stop):
                         asyncio.run(old_plugin.stop())
                     else:
@@ -737,13 +926,17 @@ class PluginManager:
 
             # 3. 重新加载配置
             config_path = os.path.join(plugin_path, "config.json")
-            with open(config_path, 'r', encoding='utf-8') as f:
+            with open(config_path, "r", encoding="utf-8-sig") as f:
                 config = json.load(f)
-            config["access_control"] = self._normalize_access_control(config.get("access_control"))
+            config["access_control"] = self._normalize_access_control(
+                config.get("access_control")
+            )
 
             # 4. 重新加载代码
             module_path = os.path.join(plugin_path, "plugin.py")
-            spec = importlib.util.spec_from_file_location(f"{trigger}_reload", module_path)
+            spec = importlib.util.spec_from_file_location(
+                f"{trigger}_reload", module_path
+            )
             module = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(module)
 
@@ -754,8 +947,14 @@ class PluginManager:
             llm_command = config.get("llm_command", trigger)
             inst.llm_command = llm_command
             inst.plugin_trigger = trigger
-            inst.access_control = self._normalize_access_control(config.get("access_control"))
-            inst.settings = config.get("settings", {}) if isinstance(config.get("settings", {}), dict) else {}
+            inst.access_control = self._normalize_access_control(
+                config.get("access_control")
+            )
+            inst.settings = (
+                config.get("settings", {})
+                if isinstance(config.get("settings", {}), dict)
+                else {}
+            )
 
             inst.name = config.get("name", trigger)
             if not hasattr(inst, "type"):
@@ -782,6 +981,7 @@ class PluginManager:
         except Exception as e:
             print(f"❌ 热重载插件 {trigger} 失败: {e}")
             import traceback
+
             traceback.print_exc()
             return False
 
@@ -826,7 +1026,5 @@ class PluginManager:
                     self.react_map[a] = inst
 
         print(
-            f"✅ 插件映射已重建: react={len(self.react_map)}, direct={len(self.direct_map)}, observe={len(self.observe_map)}")
-
-
-
+            f"✅ 插件映射已重建: react={len(self.react_map)}, direct={len(self.direct_map)}, observe={len(self.observe_map)}"
+        )

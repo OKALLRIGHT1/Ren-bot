@@ -6,7 +6,9 @@ from typing import Any, Dict, List
 class Plugin:
     name = "MCP 工具桥"
     type = "react"
-    description = "调用已接入的本地/远程 MCP 工具。参数格式：action ||| tool_name ||| JSON参数。"
+    description = (
+        "调用已接入的本地/远程 MCP 工具。参数格式：action ||| tool_name ||| JSON参数。"
+    )
     example_arg = "list_tools"
 
     async def run(self, args: str, ctx: Dict[str, Any]) -> str:
@@ -25,17 +27,17 @@ class Plugin:
             return self._format_server_status(bridge.list_server_status())
         if action == "call_tool":
             if not parts:
-                return "call_tool ?????? tool_name?\n\n" + self._help_text()
+                return "call_tool 缺少 tool_name。\n\n" + self._help_text()
             tool_name = str(parts[0] or "").strip()
             if not tool_name:
-                return "tool_name ?????"
+                return "tool_name 不能为空。"
             arguments = self._parse_json_arguments(parts[1] if len(parts) >= 2 else "")
             try:
                 result = await bridge.call_tool(tool_name, arguments=arguments)
             except asyncio.CancelledError:
-                return "MCP ??????????????? server_status ???????"
+                return "MCP 调用已取消，可用 server_status 查看状态。"
             except Exception as exc:
-                return f"MCP ???????{exc}"
+                return f"MCP 调用失败：{exc}"
             return self._format_call_result(tool_name, result)
 
         return f"不支持的 action: {action}\n\n{self._help_text()}"
@@ -59,7 +61,7 @@ class Plugin:
             return {}
         data = json.loads(text)
         if not isinstance(data, dict):
-            raise ValueError("JSON 参数必须是对象，例如 {\"path\": \"README.md\"}")
+            raise ValueError('JSON 参数必须是对象，例如 {"path": "README.md"}')
         return data
 
     def _format_tools(self, specs: List[Any]) -> str:
@@ -69,7 +71,9 @@ class Plugin:
         for spec in specs:
             name = str(getattr(spec, "name", "") or "")
             provider = str(getattr(spec, "provider", "") or "")
-            desc = str(getattr(spec, "description", "") or "").replace("\n", " ").strip()
+            desc = (
+                str(getattr(spec, "description", "") or "").replace("\n", " ").strip()
+            )
             prefix = f"[{provider}] " if provider else ""
             lines.append(f"- {prefix}{name}: {desc or '无描述'}")
         return "可用 MCP 工具：\n" + "\n".join(lines)
@@ -118,7 +122,9 @@ class Plugin:
                 text_parts.append(json.dumps(structured, ensure_ascii=False, indent=2))
             if not text_parts:
                 text_parts.append(json.dumps(result, ensure_ascii=False, indent=2))
-            prefix = "MCP 工具返回错误：" if is_error else f"MCP 工具 `{tool_name}` 返回："
+            prefix = (
+                "MCP 工具返回错误：" if is_error else f"MCP 工具 `{tool_name}` 返回："
+            )
             return prefix + "\n" + "\n".join(text_parts)
         return f"MCP 工具 `{tool_name}` 返回：\n{result}"
 
@@ -127,6 +133,6 @@ class Plugin:
             "mcp_tools 用法：\n"
             "- [CMD: mcp_tools | list_tools]\n"
             "- [CMD: mcp_tools | server_status]\n"
-            "- [CMD: mcp_tools | call_tool ||| mcp.server.tool ||| {\"key\": \"value\"}]\n"
+            '- [CMD: mcp_tools | call_tool ||| mcp.server.tool ||| {"key": "value"}]\n'
             "说明：远程工具名统一使用 mcp.<server>.<tool> 格式。"
         )

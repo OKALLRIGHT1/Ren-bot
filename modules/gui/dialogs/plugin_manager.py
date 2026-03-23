@@ -1,18 +1,28 @@
+import asyncio
 import functools
+import json
 import os
+import re
 import shutil
 
 from PySide6 import QtWidgets, QtCore, QtGui
 from modules.gui.styles import get_tool_dialog_styles
+
+
 class PluginManagerDialog(QtWidgets.QDialog):
-    def __init__(self, parent=None, plugin_manager=None, main_app=None, embedded: bool = False):
+    def __init__(
+        self, parent=None, plugin_manager=None, main_app=None, embedded: bool = False
+    ):
         super().__init__(parent)
         self.plugin_manager = plugin_manager
         self.main_app = main_app
         self.embedded = bool(embedded)
         if self.embedded:
             self.setWindowFlags(QtCore.Qt.WindowType.Widget)
-            self.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding, QtWidgets.QSizePolicy.Policy.Expanding)
+            self.setSizePolicy(
+                QtWidgets.QSizePolicy.Policy.Expanding,
+                QtWidgets.QSizePolicy.Policy.Expanding,
+            )
         self.setWindowTitle("插件管理")
         self.resize(700, 500)
 
@@ -70,7 +80,9 @@ class PluginManagerDialog(QtWidgets.QDialog):
         self.table.setHorizontalHeaderLabels(["名称 / 触发词", "类型", "状态", "操作"])
 
         # 表格交互设置
-        self.table.setSelectionBehavior(QtWidgets.QTableWidget.SelectionBehavior.SelectRows)
+        self.table.setSelectionBehavior(
+            QtWidgets.QTableWidget.SelectionBehavior.SelectRows
+        )
         self.table.setEditTriggers(QtWidgets.QTableWidget.EditTrigger.NoEditTriggers)
         self.table.verticalHeader().setVisible(False)
         self.table.setShowGrid(False)  # 去除网格线
@@ -78,7 +90,9 @@ class PluginManagerDialog(QtWidgets.QDialog):
 
         # 调整列宽模式
         header = self.table.horizontalHeader()
-        header.setSectionResizeMode(0, QtWidgets.QHeaderView.ResizeMode.Stretch)  # 名称自适应
+        header.setSectionResizeMode(
+            0, QtWidgets.QHeaderView.ResizeMode.Stretch
+        )  # 名称自适应
         header.setSectionResizeMode(1, QtWidgets.QHeaderView.ResizeMode.Fixed)
         header.setSectionResizeMode(2, QtWidgets.QHeaderView.ResizeMode.Fixed)
         header.setSectionResizeMode(3, QtWidgets.QHeaderView.ResizeMode.Fixed)
@@ -127,7 +141,9 @@ class PluginManagerDialog(QtWidgets.QDialog):
             name_layout.setAlignment(QtCore.Qt.AlignmentFlag.AlignVCenter)
 
             lbl_name = QtWidgets.QLabel(info["name"])
-            lbl_name.setStyleSheet("font-weight: bold; font-size: 14px; color: #1F2937;")
+            lbl_name.setStyleSheet(
+                "font-weight: bold; font-size: 14px; color: #1F2937;"
+            )
 
             lbl_trigger = QtWidgets.QLabel(f"触发: {info['trigger']}")
             lbl_trigger.setStyleSheet("font-size: 12px; color: #6B7280;")
@@ -203,7 +219,9 @@ class PluginManagerDialog(QtWidgets.QDialog):
                     }
                     QPushButton:hover { background-color: #047857; }
                 """)
-            toggle_btn.clicked.connect(functools.partial(self._toggle_plugin, info["trigger"]))
+            toggle_btn.clicked.connect(
+                functools.partial(self._toggle_plugin, info["trigger"])
+            )
 
             # 编辑按钮
             edit_btn = QtWidgets.QPushButton("编辑")
@@ -215,14 +233,17 @@ class PluginManagerDialog(QtWidgets.QDialog):
                 }
                 QPushButton:hover { background-color: #EFF6FF; border-color: #2563EB; }
             """)
-            edit_btn.clicked.connect(functools.partial(self._edit_plugin, info["trigger"]))
+            edit_btn.clicked.connect(
+                functools.partial(self._edit_plugin, info["trigger"])
+            )
 
             btn_layout.addWidget(toggle_btn)
             btn_layout.addWidget(edit_btn)
             self.table.setCellWidget(row, 3, btn_widget)
 
     def _toggle_plugin(self, trigger: str):
-        if not self.plugin_manager: return
+        if not self.plugin_manager:
+            return
         try:
             if self.plugin_manager.is_plugin_enabled(trigger):
                 if self.plugin_manager.disable_plugin(trigger):
@@ -240,16 +261,23 @@ class PluginManagerDialog(QtWidgets.QDialog):
             self.main_app.append("system", message)
 
     def _edit_plugin(self, trigger: str):
-        if not self.plugin_manager: return
+        if not self.plugin_manager:
+            return
         try:
-            dialog = PluginEditorDialog(parent=self, plugin_manager=self.plugin_manager, trigger=trigger)
+            dialog = PluginEditorDialog(
+                parent=self, plugin_manager=self.plugin_manager, trigger=trigger
+            )
             dialog.exec()
             self._refresh_plugins()
         except Exception as e:
-            QtWidgets.QMessageBox.critical(self, "错误", f"打开编辑对话框失败: {str(e)}")
+            QtWidgets.QMessageBox.critical(
+                self, "错误", f"打开编辑对话框失败: {str(e)}"
+            )
+
     def _import_local_plugin(self):
         dir_path = QtWidgets.QFileDialog.getExistingDirectory(self, "选择插件文件夹")
-        if not dir_path: return
+        if not dir_path:
+            return
 
         # 简单校验：文件夹里有没有 plugin.py 和 config.json
         if not os.path.exists(os.path.join(dir_path, "plugin.py")):
@@ -273,7 +301,9 @@ class PluginManagerDialog(QtWidgets.QDialog):
 
         try:
             shutil.copytree(dir_path, target_path)
-            QtWidgets.QMessageBox.information(self, "成功", f"插件 {folder_name} 已导入！\n请点击刷新列表。")
+            QtWidgets.QMessageBox.information(
+                self, "成功", f"插件 {folder_name} 已导入！\n请点击刷新列表。"
+            )
 
             # 自动刷新并重载
             if self.plugin_manager:
@@ -284,17 +314,21 @@ class PluginManagerDialog(QtWidgets.QDialog):
             QtWidgets.QMessageBox.critical(self, "错误", f"导入失败: {e}")
 
 
-
 class PluginEditorDialog(QtWidgets.QDialog):
+    _geometry_settings = QtCore.QSettings("Live2D-LLM", "PluginEditorDialog")
+
     def __init__(self, parent=None, plugin_manager=None, trigger=None):
         super().__init__(parent)
         self.plugin_manager = plugin_manager
         self.trigger = trigger
         self.original_config = None
         self.config_fields = {}
+        self._initial_geometry_applied = False
+        self._restored_geometry = False
 
         self.setWindowTitle(f"编辑插件 - {trigger}")
-        self.setFixedSize(600, 500)
+        self.resize(600, 500)
+        self.setMinimumSize(600, 500)
 
         # 样式
         self.setStyleSheet("""
@@ -412,6 +446,11 @@ class PluginEditorDialog(QtWidgets.QDialog):
         btn_layout = QtWidgets.QHBoxLayout()
         btn_layout.addStretch()
 
+        if str(self.trigger or "").strip() == "knowledge_base":
+            ingest_btn = QtWidgets.QPushButton("📚 保存并学习")
+            ingest_btn.clicked.connect(self._save_and_run_knowledge_ingest)
+            btn_layout.addWidget(ingest_btn)
+
         reset_btn = QtWidgets.QPushButton("🔄 重置")
         reset_btn.setObjectName("reset_btn")
         reset_btn.clicked.connect(self._reset_config)
@@ -430,6 +469,109 @@ class PluginEditorDialog(QtWidgets.QDialog):
 
         # 加载配置
         self._load_config()
+
+    def showEvent(self, arg__1):
+        super().showEvent(arg__1)
+        self._reposition_within_screen()
+
+    def closeEvent(self, arg__1):
+        self._save_window_geometry()
+        super().closeEvent(arg__1)
+
+    def reject(self):
+        self._save_window_geometry()
+        super().reject()
+
+    def _settings_key(self) -> str:
+        trigger = str(self.trigger or "default").strip() or "default"
+        return f"geometry/{trigger}"
+
+    def _save_window_geometry(self):
+        try:
+            self._geometry_settings.setValue(self._settings_key(), self.saveGeometry())
+        except Exception:
+            pass
+
+    def _restore_saved_geometry(self) -> bool:
+        if self._restored_geometry:
+            return False
+        self._restored_geometry = True
+        try:
+            raw = self._geometry_settings.value(self._settings_key())
+            if raw is None:
+                return False
+            if isinstance(raw, QtCore.QByteArray):
+                return bool(self.restoreGeometry(raw))
+            if isinstance(raw, (bytes, bytearray)):
+                return bool(self.restoreGeometry(QtCore.QByteArray(raw)))
+        except Exception:
+            return False
+        return False
+
+    def _apply_initial_geometry(self, available: QtCore.QRect):
+        if self._initial_geometry_applied:
+            return
+
+        if self._restore_saved_geometry():
+            self._initial_geometry_applied = True
+            return
+
+        preferred_width = min(max(720, self.width()), int(available.width() * 0.62))
+        preferred_height = min(max(620, self.height()), int(available.height() * 0.8))
+
+        target_width = max(520, min(preferred_width, available.width()))
+        target_height = max(420, min(preferred_height, available.height()))
+
+        self.resize(target_width, target_height)
+        self._initial_geometry_applied = True
+
+    def _reposition_within_screen(self):
+        screen = None
+        parent = self.parentWidget()
+        if parent is not None and parent.windowHandle() is not None:
+            screen = parent.windowHandle().screen()
+        if screen is None:
+            screen = QtGui.QGuiApplication.screenAt(self.frameGeometry().center())
+        if screen is None:
+            screen = QtGui.QGuiApplication.primaryScreen()
+        if screen is None:
+            return
+
+        available = screen.availableGeometry()
+        self._apply_initial_geometry(available)
+        frame = self.frameGeometry()
+
+        target_width = min(max(self.minimumWidth(), self.width()), available.width())
+        target_height = min(
+            max(self.minimumHeight(), self.height()), available.height()
+        )
+        if target_width != self.width() or target_height != self.height():
+            self.resize(target_width, target_height)
+            frame = self.frameGeometry()
+
+        if parent is not None:
+            parent_frame = parent.frameGeometry()
+            target_x = parent_frame.center().x() - frame.width() // 2
+            target_y = parent_frame.center().y() - frame.height() // 2
+        else:
+            target_x = available.center().x() - frame.width() // 2
+            target_y = available.center().y() - frame.height() // 2
+
+        min_x = available.left()
+        max_x = available.right() - frame.width() + 1
+        min_y = available.top()
+        max_y = available.bottom() - frame.height() + 1
+
+        if max_x < min_x:
+            target_x = min_x
+        else:
+            target_x = max(min_x, min(target_x, max_x))
+        if max_y < min_y:
+            target_y = min_y
+        else:
+            target_y = max(min_y, min(target_y, max_y))
+
+        self.move(target_x, target_y)
 
     def _setup_basic_tab(self):
         """设置基本信息标签页"""
@@ -487,20 +629,28 @@ class PluginEditorDialog(QtWidgets.QDialog):
         access_layout = QtWidgets.QVBoxLayout(access_group)
         access_layout.setSpacing(8)
 
-        access_hint = QtWidgets.QLabel("控制插件能否被桌面本地入口、QQ 主人或其他 QQ 联系人触发。")
+        access_hint = QtWidgets.QLabel(
+            "控制插件能否被桌面本地入口、QQ 侧触发，以及是否允许群聊免 @。"
+        )
         access_hint.setWordWrap(True)
         access_hint.setStyleSheet("color: #6B7280; font-size: 12px;")
         access_layout.addWidget(access_hint)
 
-        self.allow_local_checkbox = QtWidgets.QCheckBox("允许本地触发（桌面 / 语音 / 传感器）")
+        self.allow_local_checkbox = QtWidgets.QCheckBox(
+            "允许本地触发（桌面 / 语音 / 传感器）"
+        )
         self.allow_remote_qq_checkbox = QtWidgets.QCheckBox("允许 QQ 触发")
         self.allow_qq_owner_checkbox = QtWidgets.QCheckBox("允许 QQ 主人触发")
         self.allow_qq_others_checkbox = QtWidgets.QCheckBox("允许其他 QQ 联系人触发")
+        self.allow_group_without_at_checkbox = QtWidgets.QCheckBox(
+            "允许群聊免 @ 触发（仅当前插件）"
+        )
 
         access_layout.addWidget(self.allow_local_checkbox)
         access_layout.addWidget(self.allow_remote_qq_checkbox)
         access_layout.addWidget(self.allow_qq_owner_checkbox)
         access_layout.addWidget(self.allow_qq_others_checkbox)
+        access_layout.addWidget(self.allow_group_without_at_checkbox)
 
         self.allow_remote_qq_checkbox.toggled.connect(self._sync_access_control_inputs)
         layout.addWidget(access_group)
@@ -509,13 +659,16 @@ class PluginEditorDialog(QtWidgets.QDialog):
         layout.addStretch()
 
     def _normalize_access_control(self, access_control):
-        if self.plugin_manager and hasattr(self.plugin_manager, "_normalize_access_control"):
+        if self.plugin_manager and hasattr(
+            self.plugin_manager, "_normalize_access_control"
+        ):
             return self.plugin_manager._normalize_access_control(access_control)
         base = {
             "allow_local": True,
             "allow_remote_qq": True,
             "allow_qq_owner": True,
             "allow_qq_others": False,
+            "allow_group_without_at": False,
         }
         if isinstance(access_control, dict):
             for key in base.keys():
@@ -527,6 +680,7 @@ class PluginEditorDialog(QtWidgets.QDialog):
         qq_enabled = self.allow_remote_qq_checkbox.isChecked()
         self.allow_qq_owner_checkbox.setEnabled(qq_enabled)
         self.allow_qq_others_checkbox.setEnabled(qq_enabled)
+        self.allow_group_without_at_checkbox.setEnabled(qq_enabled)
 
     def _setup_settings_tab(self):
         """设置自定义配置标签页"""
@@ -575,11 +729,24 @@ class PluginEditorDialog(QtWidgets.QDialog):
             self.example_input.setText(config.get("example_arg", ""))
             self.timeout_input.setValue(config.get("timeout_sec", 6))
 
-            access_control = self._normalize_access_control(config.get("access_control"))
-            self.allow_local_checkbox.setChecked(access_control.get("allow_local", True))
-            self.allow_remote_qq_checkbox.setChecked(access_control.get("allow_remote_qq", True))
-            self.allow_qq_owner_checkbox.setChecked(access_control.get("allow_qq_owner", True))
-            self.allow_qq_others_checkbox.setChecked(access_control.get("allow_qq_others", False))
+            access_control = self._normalize_access_control(
+                config.get("access_control")
+            )
+            self.allow_local_checkbox.setChecked(
+                access_control.get("allow_local", True)
+            )
+            self.allow_remote_qq_checkbox.setChecked(
+                access_control.get("allow_remote_qq", True)
+            )
+            self.allow_qq_owner_checkbox.setChecked(
+                access_control.get("allow_qq_owner", True)
+            )
+            self.allow_qq_others_checkbox.setChecked(
+                access_control.get("allow_qq_others", False)
+            )
+            self.allow_group_without_at_checkbox.setChecked(
+                access_control.get("allow_group_without_at", False)
+            )
             self._sync_access_control_inputs()
 
             # 加载自定义配置
@@ -627,6 +794,10 @@ class PluginEditorDialog(QtWidgets.QDialog):
                 max_val = 10000
                 choices = []
 
+            validation_error = self._validate_setting_default(
+                key, setting_type, value, choices
+            )
+
             # 创建配置项组
             group = QtWidgets.QGroupBox(label)
             group_layout = QtWidgets.QVBoxLayout(group)
@@ -635,9 +806,29 @@ class PluginEditorDialog(QtWidgets.QDialog):
             # 添加说明文字
             if description:
                 desc_label = QtWidgets.QLabel(description)
-                desc_label.setStyleSheet("color: #6B7280; font-size: 11px; padding: 2px 0;")
+                desc_label.setStyleSheet(
+                    "color: #6B7280; font-size: 11px; padding: 2px 0;"
+                )
                 desc_label.setWordWrap(True)
                 group_layout.addWidget(desc_label)
+
+            if setting_type in {"secret", "password"}:
+                store_label = QtWidgets.QLabel(
+                    "敏感字段：真实值保存到本地 SQLite，插件 config.json 中默认值保持为空。"
+                )
+                store_label.setStyleSheet(
+                    "color: #2563EB; font-size: 11px; padding: 2px 0;"
+                )
+                store_label.setWordWrap(True)
+                group_layout.addWidget(store_label)
+
+            if validation_error:
+                warn_label = QtWidgets.QLabel(f"当前默认值格式提醒：{validation_error}")
+                warn_label.setStyleSheet(
+                    "color: #B45309; font-size: 11px; padding: 2px 0;"
+                )
+                warn_label.setWordWrap(True)
+                group_layout.addWidget(warn_label)
 
             # 根据类型创建对应的输入控件
             widget = self._create_setting_widget(
@@ -649,6 +840,40 @@ class PluginEditorDialog(QtWidgets.QDialog):
 
             self.settings_layout.insertWidget(self.settings_layout.count() - 1, group)
 
+    def _validate_setting_default(self, key, setting_type, value, choices):
+        key_lower = str(key or "").strip().lower()
+        text_value = str(value or "").strip() if value is not None else ""
+
+        if (
+            setting_type == "choice"
+            and choices
+            and text_value
+            and text_value not in choices
+        ):
+            return f"默认值 `{text_value}` 不在可选项中"
+
+        if any(token in key_lower for token in ("base_url", "endpoint", "url")):
+            if text_value and not (
+                text_value.startswith("http://")
+                or text_value.startswith("https://")
+                or text_value.startswith("/")
+            ):
+                return "URL/路径建议以 http://、https:// 或 / 开头"
+
+        if any(token in key_lower for token in ("time", "schedule")):
+            if text_value and key_lower.endswith("time"):
+                if not re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", text_value):
+                    return "时间建议使用 HH:MM 24小时制"
+
+        if "json" in key_lower:
+            if text_value:
+                try:
+                    json.loads(text_value)
+                except Exception:
+                    return "JSON 格式无效"
+
+        return ""
+
     def _infer_type(self, value):
         """推断值的类型"""
         if isinstance(value, list):
@@ -659,7 +884,11 @@ class PluginEditorDialog(QtWidgets.QDialog):
             return "number"
         elif isinstance(value, str):
             if ("\\" in value or "/" in value) and ("." in value):
-                return "path" if "." not in value.split("\\")[-1].split("/")[-1] else "file"
+                return (
+                    "path"
+                    if "." not in value.split("\\")[-1].split("/")[-1]
+                    else "file"
+                )
             return "string"
         return "string"
 
@@ -705,7 +934,9 @@ class PluginEditorDialog(QtWidgets.QDialog):
         """)
         delete_btn.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
         delete_btn.setFixedSize(40, 35)
-        delete_btn.clicked.connect(lambda: self._delete_path_item(layout, item_widget, path_input))
+        delete_btn.clicked.connect(
+            lambda: self._delete_path_item(layout, item_widget, path_input)
+        )
 
         item_layout.addWidget(path_input, 1)
         item_layout.addWidget(select_btn)
@@ -728,7 +959,7 @@ class PluginEditorDialog(QtWidgets.QDialog):
                         break
 
     def _create_app_list_item(self, layout, app_config, app_inputs):
-        """创建应用列表项（别名输入框 + 程序路径输入框 + 选择按钮 + 删除按钮）"""
+        """创建别名+路径项（可用于程序或目录）"""
         # 解析配置：格式为 "别名|路径"
         alias = ""
         path = ""
@@ -765,7 +996,7 @@ class PluginEditorDialog(QtWidgets.QDialog):
         # 路径输入框
         path_input = QtWidgets.QLineEdit()
         path_input.setText(path)
-        path_input.setPlaceholderText("程序路径")
+        path_input.setPlaceholderText("本地路径")
         path_input.setStyleSheet("""
             QLineEdit {
                 background-color: #F9FAFB;
@@ -780,11 +1011,17 @@ class PluginEditorDialog(QtWidgets.QDialog):
             }
         """)
 
-        # 选择程序按钮
-        select_btn = QtWidgets.QPushButton("选择...")
-        select_btn.setObjectName("path_btn")
-        select_btn.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
-        select_btn.clicked.connect(lambda: self._select_executable(path_input))
+        # 选择目录按钮
+        dir_btn = QtWidgets.QPushButton("目录...")
+        dir_btn.setObjectName("path_btn")
+        dir_btn.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
+        dir_btn.clicked.connect(lambda: self._select_directory(path_input))
+
+        # 选择文件按钮
+        file_btn = QtWidgets.QPushButton("文件...")
+        file_btn.setObjectName("path_btn")
+        file_btn.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
+        file_btn.clicked.connect(lambda: self._select_executable(path_input))
 
         # 删除按钮
         delete_btn = QtWidgets.QPushButton("✕")
@@ -797,11 +1034,14 @@ class PluginEditorDialog(QtWidgets.QDialog):
         """)
         delete_btn.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
         delete_btn.setFixedSize(40, 35)
-        delete_btn.clicked.connect(lambda: self._delete_app_list_item(layout, item_widget, app_inputs))
+        delete_btn.clicked.connect(
+            lambda: self._delete_app_list_item(layout, item_widget, app_inputs)
+        )
 
         item_layout.addWidget(alias_input)
         item_layout.addWidget(path_input, 1)
-        item_layout.addWidget(select_btn)
+        item_layout.addWidget(dir_btn)
+        item_layout.addWidget(file_btn)
         item_layout.addWidget(delete_btn)
 
         # 插入到布局中（在添加按钮之前）
@@ -822,7 +1062,10 @@ class PluginEditorDialog(QtWidgets.QDialog):
             if field_type == "app_list" and isinstance(widget, list):
                 # 找到对应的数据并移除（通过比较对象引用）
                 for i, app_input in enumerate(widget):
-                    if app_input["alias"] is alias_widget and app_input["path"] is path_widget:
+                    if (
+                        app_input["alias"] is alias_widget
+                        and app_input["path"] is path_widget
+                    ):
                         widget.pop(i)
                         break
                 break
@@ -830,23 +1073,63 @@ class PluginEditorDialog(QtWidgets.QDialog):
         # 删除UI组件
         item_widget.deleteLater()
 
-    def _create_setting_widget(self, key, setting_info, setting_type, value, min_val, max_val, choices):
+    def _create_setting_widget(
+        self, key, setting_info, setting_type, value, min_val, max_val, choices
+    ):
         """根据类型创建配置控件"""
         widget = None
+        key_lower = str(key or "").strip().lower()
+        is_sensitive = any(
+            token in key_lower
+            for token in ("api_key", "token", "secret", "password", "access_key")
+        )
 
-        if setting_type == "string" or setting_type == "text":
+        if setting_type in {"string", "text", "secret", "password"}:
             # 文本类型
             if isinstance(value, list):
                 text = "\n".join(str(v) for v in value)
             else:
                 text = str(value) if value is not None else ""
 
-            text_edit = QtWidgets.QTextEdit()
-            text_edit.setMaximumHeight(80)
-            text_edit.setPlaceholderText("请输入文本...")
-            text_edit.setPlainText(text)
-            self.config_fields[key] = ("text", text_edit)
-            widget = text_edit
+            if is_sensitive or setting_type in {"secret", "password"}:
+                secret_layout = QtWidgets.QHBoxLayout()
+                secret_layout.setContentsMargins(0, 0, 0, 0)
+                secret_layout.setSpacing(8)
+
+                line_edit = QtWidgets.QLineEdit()
+                line_edit.setText(text)
+                line_edit.setPlaceholderText("请输入敏感信息...")
+                line_edit.setEchoMode(QtWidgets.QLineEdit.EchoMode.Password)
+
+                toggle_btn = QtWidgets.QPushButton("显示")
+                toggle_btn.setObjectName("path_btn")
+                toggle_btn.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
+
+                def _toggle_secret_visibility(le=line_edit, btn=toggle_btn):
+                    hidden = le.echoMode() == QtWidgets.QLineEdit.EchoMode.Password
+                    le.setEchoMode(
+                        QtWidgets.QLineEdit.EchoMode.Normal
+                        if hidden
+                        else QtWidgets.QLineEdit.EchoMode.Password
+                    )
+                    btn.setText("隐藏" if hidden else "显示")
+
+                toggle_btn.clicked.connect(_toggle_secret_visibility)
+
+                secret_layout.addWidget(line_edit, 1)
+                secret_layout.addWidget(toggle_btn)
+
+                container = QtWidgets.QWidget()
+                container.setLayout(secret_layout)
+                self.config_fields[key] = ("secret", line_edit)
+                widget = container
+            else:
+                text_edit = QtWidgets.QTextEdit()
+                text_edit.setMaximumHeight(80)
+                text_edit.setPlaceholderText("请输入文本...")
+                text_edit.setPlainText(text)
+                self.config_fields[key] = ("text", text_edit)
+                widget = text_edit
 
         elif setting_type == "number":
             # 数字类型
@@ -890,7 +1173,9 @@ class PluginEditorDialog(QtWidgets.QDialog):
                 if isinstance(value, list):
                     for path in value:
                         if path:
-                            path_inputs.append(self._create_path_item(list_layout, path, path_inputs))
+                            path_inputs.append(
+                                self._create_path_item(list_layout, path, path_inputs)
+                            )
 
                 # 添加"添加路径"按钮
                 add_btn = QtWidgets.QPushButton("+ 添加路径")
@@ -902,9 +1187,11 @@ class PluginEditorDialog(QtWidgets.QDialog):
                     QPushButton:hover { background-color: #059669; }
                 """)
                 add_btn.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
-                add_btn.clicked.connect(lambda: path_inputs.append(
-                    self._create_path_item(list_layout, "", path_inputs)
-                ))
+                add_btn.clicked.connect(
+                    lambda: path_inputs.append(
+                        self._create_path_item(list_layout, "", path_inputs)
+                    )
+                )
                 list_layout.addWidget(add_btn)
 
                 scroll.setWidget(container)
@@ -941,7 +1228,11 @@ class PluginEditorDialog(QtWidgets.QDialog):
                 """)
                 add_btn.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
                 # 使用默认参数确保列表引用正确
-                add_btn.clicked.connect(lambda checked=False, inputs=app_inputs: self._create_app_list_item(list_layout, "", inputs))
+                add_btn.clicked.connect(
+                    lambda checked=False, inputs=app_inputs: self._create_app_list_item(
+                        list_layout, "", inputs
+                    )
+                )
                 list_layout.addWidget(add_btn)
 
                 scroll.setWidget(container)
@@ -971,7 +1262,9 @@ class PluginEditorDialog(QtWidgets.QDialog):
             path_btn = QtWidgets.QPushButton("选择...")
             path_btn.setObjectName("path_btn")
             path_btn.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
-            path_btn.clicked.connect(lambda checked, le=line_edit: self._select_directory(le))
+            path_btn.clicked.connect(
+                lambda checked, le=line_edit: self._select_directory(le)
+            )
 
             path_layout.addWidget(line_edit, 1)
             path_layout.addWidget(path_btn)
@@ -992,7 +1285,9 @@ class PluginEditorDialog(QtWidgets.QDialog):
             file_btn = QtWidgets.QPushButton("选择...")
             file_btn.setObjectName("path_btn")
             file_btn.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
-            file_btn.clicked.connect(lambda checked, le=line_edit: self._select_file(le))
+            file_btn.clicked.connect(
+                lambda checked, le=line_edit: self._select_file(le)
+            )
 
             file_layout.addWidget(line_edit, 1)
             file_layout.addWidget(file_btn)
@@ -1002,7 +1297,7 @@ class PluginEditorDialog(QtWidgets.QDialog):
             container.setLayout(file_layout)
             widget = container
 
-        elif setting_type == "choice":
+        elif setting_type in {"choice", "select"}:
             # 选择类型（下拉框）
             combo = QtWidgets.QComboBox()
             combo.addItems(choices)
@@ -1031,7 +1326,7 @@ class PluginEditorDialog(QtWidgets.QDialog):
             self,
             "选择可执行文件",
             "",
-            "可执行文件 (*.exe *.bat *.cmd *.sh);;所有文件 (*.*)"
+            "可执行文件 (*.exe *.bat *.cmd *.sh);;所有文件 (*.*)",
         )
         if path:
             line_edit.setText(path)
@@ -1048,9 +1343,11 @@ class PluginEditorDialog(QtWidgets.QDialog):
             return
 
         reply = QtWidgets.QMessageBox.question(
-            self, "确认重置",
+            self,
+            "确认重置",
             "确定要重置所有配置到原始值吗？",
-            QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No
+            QtWidgets.QMessageBox.StandardButton.Yes
+            | QtWidgets.QMessageBox.StandardButton.No,
         )
 
         if reply == QtWidgets.QMessageBox.StandardButton.Yes:
@@ -1062,21 +1359,28 @@ class PluginEditorDialog(QtWidgets.QDialog):
             return
 
         try:
+            original_config = (
+                self.original_config if isinstance(self.original_config, dict) else {}
+            )
             # 验证必填字段
             name = self.name_input.text().strip()
             trigger = self.trigger_input.text().strip()
             if not name or not trigger:
-                QtWidgets.QMessageBox.warning(self, "验证失败", "插件名称和触发词不能为空")
+                QtWidgets.QMessageBox.warning(
+                    self, "验证失败", "插件名称和触发词不能为空"
+                )
                 return
 
             # 构建新配置
-            new_config = self.original_config.copy()
+            new_config = dict(original_config)
             new_config["name"] = name
             new_config["trigger"] = trigger
             new_config["type"] = self.type_combo.currentText()
 
             aliases_text = self.aliases_input.toPlainText().strip()
-            aliases = [line.strip() for line in aliases_text.split("\n") if line.strip()]
+            aliases = [
+                line.strip() for line in aliases_text.split("\n") if line.strip()
+            ]
             new_config["aliases"] = aliases
 
             new_config["description"] = self.desc_input.toPlainText().strip()
@@ -1087,13 +1391,65 @@ class PluginEditorDialog(QtWidgets.QDialog):
                 "allow_remote_qq": self.allow_remote_qq_checkbox.isChecked(),
                 "allow_qq_owner": self.allow_qq_owner_checkbox.isChecked(),
                 "allow_qq_others": self.allow_qq_others_checkbox.isChecked(),
+                "allow_group_without_at": self.allow_group_without_at_checkbox.isChecked(),
             }
 
             # 保存自定义配置
             settings = {}
+            secret_values = {}
+
+            def _validate_before_store(setting_key, field_type, raw_value):
+                setting_meta = original_config.get("settings", {}).get(setting_key, {})
+                setting_type = field_type
+                if isinstance(setting_meta, dict):
+                    setting_type = (
+                        str(setting_meta.get("type") or field_type).strip().lower()
+                    )
+                    choices = setting_meta.get("choices", [])
+                else:
+                    choices = []
+
+                if setting_type in {"secret", "password"}:
+                    return ""
+
+                if (
+                    setting_type == "choice"
+                    and choices
+                    and raw_value
+                    and raw_value not in choices
+                ):
+                    return f"{setting_key} 取值不在可选项中"
+
+                raw_text = raw_value if isinstance(raw_value, str) else ""
+                key_lower = str(setting_key or "").strip().lower()
+
+                if "json" in key_lower and raw_text:
+                    try:
+                        json.loads(raw_text)
+                    except Exception:
+                        return f"{setting_key} 不是合法 JSON"
+
+                if (
+                    any(token in key_lower for token in ("base_url", "endpoint", "url"))
+                    and raw_text
+                ):
+                    if not (
+                        raw_text.startswith("http://")
+                        or raw_text.startswith("https://")
+                        or raw_text.startswith("/")
+                    ):
+                        return f"{setting_key} 应以 http://、https:// 或 / 开头"
+
+                if key_lower.endswith("time") and raw_text:
+                    if not re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", raw_text):
+                        return f"{setting_key} 应为 HH:MM 24小时制"
+
+                return ""
 
             def _store_setting_value(setting_key, raw_value):
-                original_setting = self.original_config.get("settings", {}).get(setting_key, {})
+                original_setting = original_config.get("settings", {}).get(
+                    setting_key, {}
+                )
                 if isinstance(original_setting, dict):
                     settings[setting_key] = {
                         **original_setting,
@@ -1104,9 +1460,17 @@ class PluginEditorDialog(QtWidgets.QDialog):
 
             for key, (field_type, widget) in self.config_fields.items():
                 if field_type == "list":
-                    value = [line.strip() for line in widget.toPlainText().split("\n") if line.strip()]
+                    value = [
+                        line.strip()
+                        for line in widget.toPlainText().split("\n")
+                        if line.strip()
+                    ]
+                    error = _validate_before_store(key, field_type, value)
+                    if error:
+                        QtWidgets.QMessageBox.warning(self, "验证失败", error)
+                        return
                     _store_setting_value(key, value)
-                elif field_type == "bool":
+                elif field_type in {"bool", "boolean"}:
                     value = widget.isChecked()
                     _store_setting_value(key, value)
                 elif field_type == "number":
@@ -1114,6 +1478,14 @@ class PluginEditorDialog(QtWidgets.QDialog):
                     _store_setting_value(key, value)
                 elif field_type == "choice":
                     value = widget.currentText().strip()
+                    error = _validate_before_store(key, field_type, value)
+                    if error:
+                        QtWidgets.QMessageBox.warning(self, "验证失败", error)
+                        return
+                    _store_setting_value(key, value)
+                elif field_type == "secret":
+                    value = widget.text().strip()
+                    secret_values[key] = value
                     _store_setting_value(key, value)
                 elif field_type == "path_list":
                     # path_list 类型：widget 是 line_edit 的列表
@@ -1137,14 +1509,20 @@ class PluginEditorDialog(QtWidgets.QDialog):
                     _store_setting_value(key, value)
                 else:
                     # text, path, file 等类型
-                    value = widget.text().strip()
+                    if isinstance(widget, QtWidgets.QTextEdit):
+                        value = widget.toPlainText().strip()
+                    else:
+                        value = widget.text().strip()
+                    error = _validate_before_store(key, field_type, value)
+                    if error:
+                        QtWidgets.QMessageBox.warning(self, "验证失败", error)
+                        return
                     _store_setting_value(key, value)
 
             new_config["settings"] = settings
 
-            # 打印调试信息
-            print(f"💾 保存配置 [{trigger}]:")
-            print(f"  - 自定义配置: {settings}")
+            if secret_values:
+                new_config["_secret_values"] = secret_values
 
             # 保存到文件
             if self.plugin_manager.save_plugin_config(self.trigger, new_config):
@@ -1155,6 +1533,35 @@ class PluginEditorDialog(QtWidgets.QDialog):
 
         except Exception as e:
             import traceback
+
             print(f"❌ 保存配置异常: {e}")
             traceback.print_exc()
             QtWidgets.QMessageBox.critical(self, "错误", f"保存配置失败: {str(e)}")
+
+    def _save_and_run_knowledge_ingest(self):
+        self._save_config()
+        plugin = self.plugin_manager.plugins.get(self.trigger)
+        if plugin is None or not hasattr(plugin, "gui_ingest_configured_dirs"):
+            QtWidgets.QMessageBox.information(
+                self, "提示", "当前插件不支持 GUI 一键学习。"
+            )
+            return
+        brain = getattr(getattr(self.parent(), "app", None), "brain", None)
+        if brain is None:
+            try:
+                import __main__
+
+                brain = getattr(__main__, "app_instance", None)
+                brain = getattr(brain, "brain", None)
+            except Exception:
+                brain = None
+        if brain is None:
+            QtWidgets.QMessageBox.warning(
+                self, "失败", "未找到 brain 实例，无法执行 GUI 学习。"
+            )
+            return
+        try:
+            result = asyncio.run(plugin.gui_ingest_configured_dirs({"brain": brain}))
+            QtWidgets.QMessageBox.information(self, "学习结果", str(result))
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(self, "错误", f"GUI 学习失败: {e}")

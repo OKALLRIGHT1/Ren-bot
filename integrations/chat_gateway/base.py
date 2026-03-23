@@ -29,6 +29,12 @@ class BaseChatAdapter:
     async def send_image(self, session_id: str, image_path: str, **kwargs: Any) -> Any:
         raise NotImplementedError
 
+    async def send_file(self, session_id: str, file_path: str, **kwargs: Any) -> Any:
+        raise NotImplementedError
+
+    async def send_share(self, session_id: str, url: str, **kwargs: Any) -> Any:
+        raise NotImplementedError
+
 
 class ChatGateway:
     def __init__(self):
@@ -69,3 +75,15 @@ class ChatGateway:
         if not adapter:
             raise KeyError(f"Unknown adapter: {adapter_name}")
         return await adapter.send_image(session_id, image_path, **kwargs)
+
+    async def send_file(self, adapter_name: str, session_id: str, file_path: str, **kwargs: Any) -> Any:
+        adapter = self.adapters.get(adapter_name)
+        if not adapter:
+            raise KeyError(f"Unknown adapter: {adapter_name}")
+        return await adapter.send_file(session_id, file_path, **kwargs)
+
+    async def send_share(self, adapter_name: str, session_id: str, url: str, **kwargs: Any) -> Any:
+        adapter = self.adapters.get(adapter_name)
+        if not adapter:
+            raise KeyError(f"Unknown adapter: {adapter_name}")
+        return await adapter.send_share(session_id, url, **kwargs)

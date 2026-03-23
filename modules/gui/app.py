@@ -10,11 +10,19 @@ from PySide6 import QtCore, QtGui, QtWidgets
 
 # 引入我们的新模块
 from modules.gui.config import QtGuiConfig, DEFAULT_BALL_CONFIG, OFFSET_X
-from modules.gui.styles import get_main_styles, get_panel_styles, get_ui_palette, get_settings_styles, get_tool_dialog_styles, get_memory_dialog_styles
+from modules.gui.styles import (
+    get_main_styles,
+    get_panel_styles,
+    get_ui_palette,
+    get_settings_styles,
+    get_tool_dialog_styles,
+    get_memory_dialog_styles,
+)
 from modules.gui.utils import resolve_icon, set_dot_status, classify_status
 from modules.gui.widgets.ball import DraggableBall
 from modules.gui.dialogs.plugin_manager import PluginManagerDialog
 from modules.gui.dialogs.settings import SettingsDialog
+from modules.gui.dialogs.knowledge_manager import KnowledgeManagerDialog
 from modules.gui.dialogs.codex_assistant import CodexAssistantDialog
 from modules.character_manager import character_manager
 
@@ -33,6 +41,10 @@ except ImportError:
 class _Bridge(QtCore.QObject):
     sig_append = QtCore.Signal(str, str)
     sig_status = QtCore.Signal(str)
+    sig_refresh_character = QtCore.Signal()
+    sig_apply_character_switch = QtCore.Signal(str, object, str, str)
+    sig_sync_active_character_visual = QtCore.Signal()
+    sig_trigger_costume_name = QtCore.Signal(str)
     sig_focus_input = QtCore.Signal()
     sig_set_wake = QtCore.Signal(bool)
     sig_set_tts = QtCore.Signal(bool)
@@ -42,19 +54,21 @@ class _Bridge(QtCore.QObject):
 
 class QtChatTrayApp(QtCore.QObject):
     def __init__(
-            self,
-            on_send_callback: Callable[..., None],
-            *,
-            on_tts_toggle_callback: Optional[Callable[[bool], None]] = None,
-            on_voice_toggle_callback: Optional[Callable[[bool], None]] = None,  # 🟢 新增语音回调
-            on_costume_callback: Optional[Callable[[str, dict], None]] = None,
-            on_preview_motion_callback: Optional[Callable[[str, int], None]] = None,
-            on_preview_expression_callback: Optional[Callable[[int], None]] = None,
-            on_quit_callback: Optional[Callable[[], None]] = None,
-            on_restart_callback: Optional[Callable[[], None]] = None,
-            on_apply_external_settings_callback: Optional[Callable[[dict], dict]] = None,
-            plugin_manager: Optional[Any] = None,
-            cfg: Optional[QtGuiConfig] = None,
+        self,
+        on_send_callback: Callable[..., None],
+        *,
+        on_tts_toggle_callback: Optional[Callable[[bool], None]] = None,
+        on_voice_toggle_callback: Optional[
+            Callable[[bool], None]
+        ] = None,  # 🟢 新增语音回调
+        on_costume_callback: Optional[Callable[[str, dict], None]] = None,
+        on_preview_motion_callback: Optional[Callable[[str, int], None]] = None,
+        on_preview_expression_callback: Optional[Callable[[int], None]] = None,
+        on_quit_callback: Optional[Callable[[], None]] = None,
+        on_restart_callback: Optional[Callable[[], None]] = None,
+        on_apply_external_settings_callback: Optional[Callable[[dict], dict]] = None,
+        plugin_manager: Optional[Any] = None,
+        cfg: Optional[QtGuiConfig] = None,
     ):
         super().__init__()
         self.cfg = cfg or QtGuiConfig()
@@ -83,7 +97,9 @@ class QtChatTrayApp(QtCore.QObject):
         self._is_wake_listening = False
 
         # --- Qt 初始化 ---
-        self._app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv)
+        self._app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(
+            sys.argv
+        )
         self._app.setQuitOnLastWindowClosed(False)
         self._app.applicationStateChanged.connect(self._on_app_state_changed)
         self._icon = resolve_icon(self.cfg.icon_path)
@@ -92,6 +108,12 @@ class QtChatTrayApp(QtCore.QObject):
         self._bridge = _Bridge()
         self._bridge.sig_append.connect(self._append_ui)
         self._bridge.sig_status.connect(self._set_status_ui)
+        self._bridge.sig_refresh_character.connect(self._refresh_character_status)
+        self._bridge.sig_apply_character_switch.connect(self._apply_character_switch)
+        self._bridge.sig_sync_active_character_visual.connect(
+            self._sync_active_character_visual
+        )
+        self._bridge.sig_trigger_costume_name.connect(self._on_costume_triggered)
         self._bridge.sig_toggle_gui.connect(self.toggle_show_hide)
         self._bridge.sig_send_text.connect(self._send_text_from_asr)
 
@@ -100,6 +122,7 @@ class QtChatTrayApp(QtCore.QObject):
         self._tray = self._build_tray()
 
         self._settings_dialog = None
+        self._knowledge_dialog = None
         self._plugin_dialog = None
         self._memory_dialog = None
         self._codex_dialog = None
@@ -139,19 +162,25 @@ class QtChatTrayApp(QtCore.QObject):
                 self._plugin_dialog.setStyleSheet(get_tool_dialog_styles())
         except Exception:
             pass
+
     def _build_window(self) -> QtWidgets.QWidget:
         w = QtWidgets.QWidget()
         w.setWindowTitle(self.cfg.title)
         w.setWindowIcon(self._icon)
         w.setWindowFlags(
-            QtCore.Qt.WindowType.WindowStaysOnTopHint | QtCore.Qt.WindowType.Tool | QtCore.Qt.WindowType.FramelessWindowHint)
+            QtCore.Qt.WindowType.WindowStaysOnTopHint
+            | QtCore.Qt.WindowType.Tool
+            | QtCore.Qt.WindowType.FramelessWindowHint
+        )
         w.setAttribute(QtCore.Qt.WidgetAttribute.WA_TranslucentBackground)
         w.setStyleSheet(get_panel_styles())
 
         self._stack = QtWidgets.QStackedLayout(w)
 
         self._ball_widget = QtWidgets.QWidget()
-        self._ball_widget.setAttribute(QtCore.Qt.WidgetAttribute.WA_TranslucentBackground)
+        self._ball_widget.setAttribute(
+            QtCore.Qt.WidgetAttribute.WA_TranslucentBackground
+        )
         self._ball_widget.setStyleSheet("background: transparent;")
 
         ball_layout = QtWidgets.QVBoxLayout(self._ball_widget)
@@ -162,8 +191,12 @@ class QtChatTrayApp(QtCore.QObject):
         s = BALL_CONFIG.get("size", 60)
         self._ball_btn.setFixedSize(s, s)
         self._ball_btn.clicked.connect(self._switch_to_panel)
-        self._ball_btn.setContextMenuPolicy(QtCore.Qt.ContextMenuPolicy.CustomContextMenu)
-        self._ball_btn.customContextMenuRequested.connect(self._show_costume_menu_from_ball)
+        self._ball_btn.setContextMenuPolicy(
+            QtCore.Qt.ContextMenuPolicy.CustomContextMenu
+        )
+        self._ball_btn.customContextMenuRequested.connect(
+            self._show_costume_menu_from_ball
+        )
 
         img_path = BALL_CONFIG.get("image_path", "")
         enable_image = BALL_CONFIG.get("enable_image", False)
@@ -290,17 +323,20 @@ class QtChatTrayApp(QtCore.QObject):
         self._btn_expand = mk_btn("⌄", self._toggle_full, "展开或收起对话记录")
 
         import config
-        init_tts_state = getattr(config, 'TTS_ENABLED', True)
+
+        init_tts_state = getattr(config, "TTS_ENABLED", True)
         tts_icon = "🔊" if init_tts_state else "🔈"
         tts_tip = "语音播报 (当前: 开启)" if init_tts_state else "语音播报 (当前: 关闭)"
         self._btn_tts = mk_btn(tts_icon, self._toggle_tts, tts_tip)
 
-        init_voice_state = getattr(config, 'VOICE_SENSOR_ENABLED', False)
+        init_voice_state = getattr(config, "VOICE_SENSOR_ENABLED", False)
         voice_icon = "🎙️" if init_voice_state else "🔇"
-        voice_tip = "语音唤醒 (当前: 开启)" if init_voice_state else "语音唤醒 (当前: 关闭)"
+        voice_tip = (
+            "语音唤醒 (当前: 开启)" if init_voice_state else "语音唤醒 (当前: 关闭)"
+        )
         self._btn_voice = mk_btn(voice_icon, self._toggle_voice, voice_tip)
 
-        init_dnd_state = getattr(config, 'DND_MODE', False)
+        init_dnd_state = getattr(config, "DND_MODE", False)
         dnd_icon = "🔕" if init_dnd_state else "🔔"
         dnd_tip = "免打扰 (当前: 开启)" if init_dnd_state else "免打扰 (当前: 关闭)"
         self._btn_dnd = mk_btn(dnd_icon, self._toggle_dnd, dnd_tip)
@@ -322,7 +358,9 @@ class QtChatTrayApp(QtCore.QObject):
         main_vbox.addLayout(tools_layout)
 
         self._size_grip = QtWidgets.QSizeGrip(self._container)
-        self._size_grip.setStyleSheet("background: transparent; width: 20px; height: 20px;")
+        self._size_grip.setStyleSheet(
+            "background: transparent; width: 20px; height: 20px;"
+        )
         self._stack.addWidget(self._panel_widget)
         self._enable_drag(w)
         self._refresh_companion_summary()
@@ -339,13 +377,17 @@ class QtChatTrayApp(QtCore.QObject):
         voice_enabled = bool(getattr(config, "VOICE_SENSOR_ENABLED", False))
         dnd_enabled = bool(getattr(config, "DND_MODE", False))
         mode_name = getattr(self, "_current_mode_name", "Companion")
-        status_value = status_text or (self._lbl_status.text() if hasattr(self, "_lbl_status") else "Ready")
+        status_value = status_text or (
+            self._lbl_status.text() if hasattr(self, "_lbl_status") else "Ready"
+        )
 
         if hasattr(self, "_pill_mode"):
             self._pill_mode.setText(f"模式 · {mode_name}")
             self._pill_tts.setText(f"播报 · {'开' if tts_enabled else '关'}")
             self._pill_voice.setText(f"唤醒 · {'开' if voice_enabled else '关'}")
-            self._pill_focus.setText("免打扰 · 开" if dnd_enabled else f"状态 · {status_value}")
+            self._pill_focus.setText(
+                "免打扰 · 开" if dnd_enabled else f"状态 · {status_value}"
+            )
 
         if hasattr(self, "_input"):
             if dnd_enabled:
@@ -361,15 +403,19 @@ class QtChatTrayApp(QtCore.QObject):
         menu.addAction("📊 模型监控").triggered.connect(self._on_monitor_clicked)
         menu.addSeparator()
         menu.addAction("🧩 插件管理").triggered.connect(self._on_plugin_clicked)
+        menu.addAction("📚 知识库管理").triggered.connect(self._on_knowledge_clicked)
         menu.addAction("🧠 记忆编辑").triggered.connect(self._on_memory_clicked)
         if self.on_restart_callback:
             menu.addSeparator()
             menu.addAction("🔄 重启程序").triggered.connect(self._handle_restart)
-        popup_pos = self._btn_more.mapToGlobal(QtCore.QPoint(0, self._btn_more.height()))
+        popup_pos = self._btn_more.mapToGlobal(
+            QtCore.QPoint(0, self._btn_more.height())
+        )
         menu.exec(popup_pos)
 
     def _toggle_tts(self):
         import config
+
         if not hasattr(config, "TTS_ENABLED"):
             config.TTS_ENABLED = True
 
@@ -394,6 +440,7 @@ class QtChatTrayApp(QtCore.QObject):
     # 🟢 新增：语音监听切换逻辑 (将此函数粘贴到 _toggle_dnd 函数的上方或下方)
     def _toggle_voice(self):
         import config
+
         if not hasattr(config, "VOICE_SENSOR_ENABLED"):
             config.VOICE_SENSOR_ENABLED = False
 
@@ -422,13 +469,18 @@ class QtChatTrayApp(QtCore.QObject):
         try:
             geo = self._app.primaryScreen().geometry()
             win = self._win.geometry()
-            self._win.move((geo.width() - win.width()) // 2, (geo.height() - win.height()) // 2)
+            self._win.move(
+                (geo.width() - win.width()) // 2, (geo.height() - win.height()) // 2
+            )
         except:
             pass
 
     def _ensure_on_screen(self):
         win = self._win.frameGeometry()
-        screen = QtGui.QGuiApplication.screenAt(QtGui.QCursor.pos()) or self._app.primaryScreen()
+        screen = (
+            QtGui.QGuiApplication.screenAt(QtGui.QCursor.pos())
+            or self._app.primaryScreen()
+        )
         if not screen:
             return
         avail = screen.availableGeometry()
@@ -438,7 +490,8 @@ class QtChatTrayApp(QtCore.QObject):
             self._win.move(x, y)
 
     def _switch_to_ball(self):
-        if self._is_ball_mode: return
+        if self._is_ball_mode:
+            return
         curr = self._win.geometry()
         self._is_ball_mode = True
         self._stack.setCurrentIndex(0)
@@ -448,7 +501,8 @@ class QtChatTrayApp(QtCore.QObject):
         self._ensure_on_screen()
 
     def _switch_to_panel(self):
-        if not self._is_ball_mode: return
+        if not self._is_ball_mode:
+            return
         curr = self._win.geometry()
         self._is_ball_mode = False
         self._stack.setCurrentIndex(1)
@@ -472,6 +526,7 @@ class QtChatTrayApp(QtCore.QObject):
     # 🟢 新增：免打扰切换逻辑
     def _toggle_dnd(self):
         import config
+
         # 如果 config 里没有定义 DND_MODE，赋个初值
         if not hasattr(config, "DND_MODE"):
             config.DND_MODE = False
@@ -483,7 +538,9 @@ class QtChatTrayApp(QtCore.QObject):
         if config.DND_MODE:
             self._btn_dnd.setText("🔕")
             self._btn_dnd.setToolTip("免打扰 (当前: 开启 - 静默观察不说话)")
-            self.append("system", "🔕 已开启手动免打扰：助手将只默默记录，不再主动发声打断。")
+            self.append(
+                "system", "🔕 已开启手动免打扰：助手将只默默记录，不再主动发声打断。"
+            )
         else:
             self._btn_dnd.setText("🔔")
             self._btn_dnd.setToolTip("免打扰 (当前: 关闭 - 允许主动吐槽)")
@@ -512,6 +569,18 @@ class QtChatTrayApp(QtCore.QObject):
         except Exception as e:
             self.append("system", f"❌ 记忆编辑器加载失败: {e}")
 
+    def _on_knowledge_clicked(self):
+        try:
+            if not self._knowledge_dialog:
+                self._knowledge_dialog = KnowledgeManagerDialog(
+                    parent=None, main_app=self
+                )
+            self._knowledge_dialog.show()
+            self._knowledge_dialog.raise_()
+            self._knowledge_dialog.activateWindow()
+        except Exception as e:
+            self.append("system", f"❌ 知识库管理器加载失败: {e}")
+
     def _on_costume_triggered(self, name, cfg=None):
         safe_cfg = cfg if isinstance(cfg, dict) else {}
         path = safe_cfg.get("path", "")
@@ -523,11 +592,17 @@ class QtChatTrayApp(QtCore.QObject):
                 costumes = active_char.get("costumes") or {}
                 costume_entry = costumes.get(name) or {}
 
-                manager_path = costume_entry.get("path", "") if isinstance(costume_entry, dict) else ""
+                manager_path = (
+                    costume_entry.get("path", "")
+                    if isinstance(costume_entry, dict)
+                    else ""
+                )
                 if manager_path:
                     path = manager_path
 
-                runtime_cfg = character_manager.get_costume_runtime_config(active_id, name)
+                runtime_cfg = character_manager.get_costume_runtime_config(
+                    active_id, name
+                )
                 if isinstance(runtime_cfg, dict) and runtime_cfg:
                     safe_cfg = runtime_cfg
 
@@ -581,7 +656,13 @@ class QtChatTrayApp(QtCore.QObject):
         self._lbl_character.setText(f"角色: {char_name} | 服装: {costume_name}")
         self._refresh_companion_summary()
 
-    def _apply_costume_change(self, path: str, cfg: Optional[dict] = None, *, costume_name: Optional[str] = None):
+    def _apply_costume_change(
+        self,
+        path: str,
+        cfg: Optional[dict] = None,
+        *,
+        costume_name: Optional[str] = None,
+    ):
         if not self._external_costume_callback:
             return
 
@@ -596,9 +677,9 @@ class QtChatTrayApp(QtCore.QObject):
         if self.on_preview_motion_callback:
             self.on_preview_motion_callback(motion_name, int(motion_type))
 
-    def preview_expression(self, exp_id: int):
+    def preview_expression(self, exp_id):
         if self.on_preview_expression_callback:
-            self.on_preview_expression_callback(int(exp_id))
+            self.on_preview_expression_callback(exp_id)
 
     def _build_quick_costume_menu(self, parent_widget) -> QtWidgets.QMenu:
         menu = QtWidgets.QMenu(parent_widget)
@@ -626,7 +707,8 @@ class QtChatTrayApp(QtCore.QObject):
                     prefix = "✅" if costume_name == current_name else "👕"
                     action = menu.addAction(f"{prefix} {costume_name}")
                     action.triggered.connect(
-                        lambda checked=False, n=costume_name: self._on_costume_triggered(n)
+                        lambda checked=False,
+                        n=costume_name: self._on_costume_triggered(n)
                     )
 
             menu.addSeparator()
@@ -642,14 +724,23 @@ class QtChatTrayApp(QtCore.QObject):
         menu.exec(self._ball_btn.mapToGlobal(pos))
 
     def _on_quick_costume_clicked(self):
-        anchor = getattr(self, "_btn_costume", None) or getattr(self, "_btn_more", None) or self._win
+        anchor = (
+            getattr(self, "_btn_costume", None)
+            or getattr(self, "_btn_more", None)
+            or self._win
+        )
         menu = self._build_quick_costume_menu(anchor)
-        popup_pos = anchor.mapToGlobal(QtCore.QPoint(0, anchor.height())) if hasattr(anchor, "mapToGlobal") else self._win.mapToGlobal(QtCore.QPoint(0, 0))
+        popup_pos = (
+            anchor.mapToGlobal(QtCore.QPoint(0, anchor.height()))
+            if hasattr(anchor, "mapToGlobal")
+            else self._win.mapToGlobal(QtCore.QPoint(0, 0))
+        )
         menu.exec(popup_pos)
 
     def _on_send_clicked(self):
         text = self._input.text().strip()
-        if not text: return
+        if not text:
+            return
         self._input.clear()
         self.append("user", text)
         self._dispatch_send(text)
@@ -665,7 +756,9 @@ class QtChatTrayApp(QtCore.QObject):
     def _on_codex_clicked(self):
         if not self._codex_dialog:
             # 独立窗口，避免受主窗口 Tool/隐藏状态影响
-            self._codex_dialog = CodexAssistantDialog(parent=None, on_submit=self._on_codex_submit)
+            self._codex_dialog = CodexAssistantDialog(
+                parent=None, on_submit=self._on_codex_submit
+            )
         self._codex_dialog.showNormal()
         self._codex_dialog.raise_()
         self._codex_dialog.activateWindow()
@@ -692,15 +785,25 @@ class QtChatTrayApp(QtCore.QObject):
 
     def _on_mode_menu_clicked(self):
         menu = QtWidgets.QMenu(self._btn_mode)
-        menu.addAction("Companion").triggered.connect(lambda: self._apply_mode_preset("companion"))
-        menu.addAction("Codex").triggered.connect(lambda: self._apply_mode_preset("codex"))
-        menu.addAction("Quiet").triggered.connect(lambda: self._apply_mode_preset("quiet"))
+        menu.addAction("Companion").triggered.connect(
+            lambda: self._apply_mode_preset("companion")
+        )
+        menu.addAction("Codex").triggered.connect(
+            lambda: self._apply_mode_preset("codex")
+        )
+        menu.addAction("Quiet").triggered.connect(
+            lambda: self._apply_mode_preset("quiet")
+        )
         menu.addAction("Eco").triggered.connect(lambda: self._apply_mode_preset("eco"))
         menu.addSeparator()
         menu.addAction("查看当前模式").triggered.connect(
-            lambda: self._send_react_command("[CMD: mode_preset | status]", "[MODE] 查看当前模式")
+            lambda: self._send_react_command(
+                "[CMD: mode_preset | status]", "[MODE] 查看当前模式"
+            )
         )
-        popup_pos = self._btn_mode.mapToGlobal(QtCore.QPoint(0, self._btn_mode.height()))
+        popup_pos = self._btn_mode.mapToGlobal(
+            QtCore.QPoint(0, self._btn_mode.height())
+        )
         menu.exec(popup_pos)
 
     def _on_codex_submit(self, text: str, payload: dict):
@@ -708,7 +811,6 @@ class QtChatTrayApp(QtCore.QObject):
         prefix = f"[CODEX:{path}] " if path else "[CODEX] "
         self.append("user", f"{prefix}{text}")
         self._dispatch_send(text, payload)
-
 
     def _append_history_message(self, role: str, text: str):
         if not hasattr(self, "_history"):
@@ -727,7 +829,7 @@ class QtChatTrayApp(QtCore.QObject):
         label = role_map.get(role_key, role_key.upper())
 
         html_block = (
-            "<div style='margin: 2px 0; font-family: \"Cascadia Mono\", \"Consolas\", \"JetBrains Mono\", monospace; "
+            '<div style=\'margin: 2px 0; font-family: "Cascadia Mono", "Consolas", "JetBrains Mono", monospace; '
             f"font-size: 12px; color: {fg};'>"
             f"<span style='color:{muted};'>[{timestamp}]</span> "
             f"<span style='color:{label_color}; font-weight:600;'>[{label}]</span> "
@@ -747,6 +849,62 @@ class QtChatTrayApp(QtCore.QObject):
 
     def set_status(self, text):
         self._bridge.sig_status.emit(text)
+
+    def refresh_character_status(self):
+        self._bridge.sig_refresh_character.emit()
+
+    def sync_active_character_visual(self):
+        self._bridge.sig_sync_active_character_visual.emit()
+
+    def trigger_costume_by_name(self, costume_name: str):
+        self._bridge.sig_trigger_costume_name.emit(str(costume_name or ""))
+
+    def apply_character_switch(
+        self,
+        model_path: str,
+        cfg: Optional[dict] = None,
+        *,
+        costume_name: Optional[str] = None,
+        character_name: Optional[str] = None,
+    ):
+        self._bridge.sig_apply_character_switch.emit(
+            str(model_path or ""),
+            cfg if isinstance(cfg, dict) else {},
+            str(costume_name or ""),
+            str(character_name or ""),
+        )
+
+    @QtCore.Slot(str, object, str, str)
+    def _apply_character_switch(
+        self, model_path: str, cfg: object, costume_name: str, character_name: str
+    ):
+        safe_cfg = cfg if isinstance(cfg, dict) else {}
+        if model_path:
+            self._apply_costume_change(
+                model_path,
+                safe_cfg,
+                costume_name=costume_name or None,
+            )
+        self._refresh_character_status()
+        if character_name:
+            self.set_status(f"角色已切换：{character_name}")
+            self.append("system", f"🎭 已通过 QQ 切换角色：{character_name}")
+
+    @QtCore.Slot()
+    def _sync_active_character_visual(self):
+        try:
+            active_id = character_manager.data.get("active_id")
+            if not active_id:
+                self._refresh_character_status()
+                return
+            costume_name = character_manager.get_current_costume_name(active_id)
+            if costume_name:
+                self.append("system", f"[角色同步] 触发服装：{costume_name}")
+                self._on_costume_triggered(costume_name)
+            else:
+                self._refresh_character_status()
+        except Exception:
+            self._refresh_character_status()
 
     def toggle_show_hide(self):
         if self._win.isVisible():
@@ -800,15 +958,20 @@ class QtChatTrayApp(QtCore.QObject):
 
     def _handle_restart(self):
         reply = QtWidgets.QMessageBox.question(
-            None, "重启确认", "确定要重启 Live2D Agent 吗？\n(可能会中断当前的对话)",
-            QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No
+            None,
+            "重启确认",
+            "确定要重启 Live2D Agent 吗？\n(可能会中断当前的对话)",
+            QtWidgets.QMessageBox.StandardButton.Yes
+            | QtWidgets.QMessageBox.StandardButton.No,
         )
         if reply == QtWidgets.QMessageBox.StandardButton.Yes:
-            if self.on_restart_callback: self.on_restart_callback()
+            if self.on_restart_callback:
+                self.on_restart_callback()
 
     def _quit(self):
         self._tray.hide()
-        if self.on_quit_callback: self.on_quit_callback()
+        if self.on_quit_callback:
+            self.on_quit_callback()
         self._app.quit()
 
     def _enable_drag(self, widget):
@@ -817,22 +980,25 @@ class QtChatTrayApp(QtCore.QObject):
                 event.ignore()
                 return
             if event.button() == QtCore.Qt.MouseButton.LeftButton:
-                widget._drag_pos = event.globalPosition().toPoint() - widget.frameGeometry().topLeft()
+                widget._drag_pos = (
+                    event.globalPosition().toPoint() - widget.frameGeometry().topLeft()
+                )
                 event.accept()
 
         def mouseMoveEvent(event):
             if self._is_ball_mode:
                 event.ignore()
                 return
-            if hasattr(widget, '_drag_pos') and (event.buttons() & QtCore.Qt.MouseButton.LeftButton):
+            if hasattr(widget, "_drag_pos") and (
+                event.buttons() & QtCore.Qt.MouseButton.LeftButton
+            ):
                 widget.move(event.globalPosition().toPoint() - widget._drag_pos)
                 event.accept()
 
         def mouseReleaseEvent(event):
-            if hasattr(widget, '_drag_pos'):
+            if hasattr(widget, "_drag_pos"):
                 del widget._drag_pos
 
         widget.mousePressEvent = mousePressEvent
         widget.mouseMoveEvent = mouseMoveEvent
         widget.mouseReleaseEvent = mouseReleaseEvent
-

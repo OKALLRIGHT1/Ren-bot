@@ -1,9 +1,87 @@
 {
-  "name": "联网搜索",
-  "trigger": "search_web",
-  "llm_command": "search",
-  "aliases": ["搜索", "查", "百度", "google", "搜", "找资料", "查询", "查一下", "联网", "网络", "在线", "web", "query"],
-  "type": "react",
-  "description": "当用户询问实时新闻、百科知识、今天发生了什么、或者你不知道的事情时使用。参数为搜索关键词。",
-  "example_arg": "今天北京天气"
+    "name": "联网搜索",
+    "trigger": "search_web",
+    "llm_command": "search",
+    "aliases": [
+        "搜索",
+        "查",
+        "百度",
+        "google",
+        "搜",
+        "找资料",
+        "查询",
+        "查一下",
+        "联网",
+        "网络",
+        "在线",
+        "web",
+        "query"
+    ],
+    "type": "react",
+    "description": "联网搜索（优先 Exa 反代，问题类可走 /answer，必要时回退 DDG）。",
+    "example_arg": "今天北京天气",
+    "timeout_sec": 15,
+    "settings": {
+        "base_url": {
+            "type": "text",
+            "label": "Exa 基础地址",
+            "description": "本地反代地址，例如 http://localhost:7860",
+            "default": "http://localhost:7860"
+        },
+        "api_key": {
+            "type": "secret",
+            "label": "Exa API Key",
+            "description": "可留空使用环境变量 EXA_API_KEY",
+            "default": ""
+        },
+        "num_results": {
+            "type": "number",
+            "label": "默认返回条数",
+            "description": "/search 的 numResults",
+            "default": 5,
+            "min": 1,
+            "max": 10
+        },
+        "use_answer": {
+            "type": "bool",
+            "label": "问题优先 /answer",
+            "description": "问题类请求优先 /answer；含“最新/新闻”等会回到 /search",
+            "default": true
+        },
+        "use_contents": {
+            "type": "bool",
+            "label": "自动拉取正文",
+            "description": "对前 N 条结果调用 /contents 补全文",
+            "default": true
+        },
+        "contents_max": {
+            "type": "number",
+            "label": "/contents 条数",
+            "description": "当开启自动拉取正文时使用",
+            "default": 3,
+            "min": 1,
+            "max": 10
+        },
+        "request_timeout_sec": {
+            "type": "number",
+            "label": "请求超时(秒)",
+            "description": "单次请求超时时间",
+            "default": 12,
+            "min": 3,
+            "max": 60
+        },
+        "fallback_ddg": {
+            "type": "bool",
+            "label": "Exa 失败回退 DDG",
+            "description": "Exa 不可用时回退 duckduckgo_search",
+            "default": true
+        }
+    },
+    "access_control": {
+        "allow_local": true,
+        "allow_remote_qq": true,
+        "allow_qq_owner": true,
+        "allow_qq_others": true,
+        "allow_group_without_at": false
+    }
 }
