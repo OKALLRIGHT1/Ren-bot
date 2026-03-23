@@ -1,0 +1,34 @@
+{
+    "name": "QQ功能帮助",
+    "trigger": "qq帮助",
+    "llm_command": "qq_help",
+    "type": "direct",
+    "aliases": [
+        "/帮助",
+        "/功能",
+        "/指令",
+        "你有什么功能",
+        "你会什么",
+        "有哪些功能",
+        "有什么指令"
+    ],
+    "description": "在 QQ 中查看当前可用功能、常用命令和插件说明。",
+    "example_arg": "/帮助",
+    "timeout_sec": 10,
+    "version": "1.0.0",
+    "access_control": {
+        "allow_local": false,
+        "allow_remote_qq": true,
+        "allow_qq_owner": true,
+        "allow_qq_others": true,
+        "allow_group_without_at": true
+    },
+    "settings": {
+        "show_disabled": {
+            "type": "bool",
+            "label": "显示已禁用插件",
+            "description": "开启后帮助列表里也会显示已禁用插件。",
+            "default": false
+        }
+    }
+}

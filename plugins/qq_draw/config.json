@@ -1,0 +1,83 @@
+{
+    "name": "QQ生图",
+    "trigger": "qq生图",
+    "llm_command": "qq_draw",
+    "type": "direct",
+    "aliases": [
+        "/画图",
+        "/画画"
+    ],
+    "description": "仅在 QQ 中用固定斜杠命令触发生图，支持 images 接口和 chat/completions 生图接口，并把结果回发到 QQ。",
+    "example_arg": "/画图 绘制一个丰川祥子在雨后的街道",
+    "timeout_sec": 190,
+    "version": "1.1.0",
+    "access_control": {
+        "allow_local": false,
+        "allow_remote_qq": true,
+        "allow_qq_owner": true,
+        "allow_qq_others": false,
+        "allow_group_without_at": true
+    },
+    "settings": {
+        "base_url": {
+            "type": "text",
+            "label": "API Base URL",
+            "description": "接口根地址，例如 https://wzw.pp.ua",
+            "default": "https://glk.jia4u.de"
+        },
+        "endpoint_path": {
+            "type": "text",
+            "label": "接口路径",
+            "description": "按所选模式填写，images 常见是 /v1/images/generations，chat 常见是 /v1/chat/completions。",
+            "default": "/v1/chat/completions"
+        },
+        "api_key": {
+            "type": "secret",
+            "label": "API Key",
+            "description": "建议在 GUI 里填写，或使用环境变量 GROK_API_KEY。",
+            "default": ""
+        },
+        "model_name": {
+            "type": "text",
+            "label": "模型名",
+            "description": "按你的服务要求填写，例如 grok-2-image。",
+            "default": "grok-imagine-1.0"
+        },
+        "size_value": {
+            "type": "text",
+            "label": "默认尺寸",
+            "description": "例如 1024x1024。",
+            "default": "1024x1024"
+        },
+        "quality": {
+            "type": "text",
+            "label": "质量",
+            "description": "可选，兼容 OpenAI 风格接口时可填 standard / hd；留空则不传。",
+            "default": ""
+        },
+        "style": {
+            "type": "text",
+            "label": "风格",
+            "description": "可选，兼容 OpenAI 风格接口时可填 vivid / natural；留空则不传。",
+            "default": ""
+        },
+        "negative_prompt": {
+            "type": "text",
+            "label": "默认负面提示词",
+            "description": "可选，部分兼容接口支持 negative_prompt。",
+            "default": ""
+        },
+        "extra_body_json": {
+            "type": "text",
+            "label": "额外请求体(JSON)",
+            "description": "会合并进最终请求体；chat 模式下适合补 stream、modalities 等字段。",
+            "default": "{}"
+        },
+        "caption_template": {
+            "type": "text",
+            "label": "回发说明模板",
+            "description": "{prompt} 会替换成这次的绘图提示词。",
+            "default": "已按你的要求画好了：{prompt}"
+        }
+    }
+}

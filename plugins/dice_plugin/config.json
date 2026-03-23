@@ -1,0 +1,28 @@
+{
+    "name": "骰子",
+    "trigger": "dice_roll",
+    "llm_command": "dice_roll",
+    "aliases": [
+        ".r",
+        ".ra",
+        ".rc",
+        ".sc",
+        "骰子",
+        "dice"
+    ],
+    "type": "direct",
+    "description": "掷骰指令（D&D/CoC/选项表）",
+    "example_arg": ".r 2d100",
+    "timeout_sec": 6,
+    "version": "1.0.0",
+    "access_control": {
+        "allow_local": true,
+        "allow_remote_qq": true,
+        "allow_qq_owner": true,
+        "allow_qq_others": true,
+        "allow_group_without_at": true
+    },
+    "settings": {}
+}
+
+

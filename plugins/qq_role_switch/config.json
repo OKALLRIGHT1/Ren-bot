@@ -1,0 +1,22 @@
+{
+    "name": "QQ角色切换",
+    "trigger": "qq角色",
+    "llm_command": "qq_role_switch",
+    "type": "direct",
+    "aliases": [
+        "/角色",
+        "/角色列表"
+    ],
+    "description": "在 QQ 中查看角色列表，并用斜杠命令快速切换角色。也支持直接用 `/角色名` 切换。",
+    "example_arg": "/角色 丰川祥子",
+    "timeout_sec": 10,
+    "version": "1.0.0",
+    "access_control": {
+        "allow_local": false,
+        "allow_remote_qq": true,
+        "allow_qq_owner": true,
+        "allow_qq_others": false,
+        "allow_group_without_at": true
+    },
+    "settings": {}
+}

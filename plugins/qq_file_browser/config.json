@@ -1,0 +1,44 @@
+{
+    "name": "QQ文件浏览",
+    "trigger": "qq文件",
+    "llm_command": "qq_file_browser",
+    "type": "direct",
+    "aliases": [
+        "/文件",
+        "/ls",
+        "/dir",
+        "/cd",
+        "/get",
+        "/pwd",
+        "/help",
+        "[文件]"
+    ],
+    "description": "在 QQ 中安全浏览 /bot 虚拟目录并发送文件（零拷贝）。",
+    "example_arg": "/文件 /ls",
+    "timeout_sec": 12,
+    "version": "1.0.0",
+    "access_control": {
+        "allow_local": false,
+        "allow_remote_qq": true,
+        "allow_qq_owner": true,
+        "allow_qq_others": false,
+        "allow_group_without_at": false
+    },
+    "settings": {
+        "extra_mounts": {
+            "type": "list",
+            "item_type": "app_list",
+            "label": "额外挂载目录",
+            "description": "格式为 别名|本地路径，例如 qqsave|D:\\QQDownloads。保存后可在 QQ 里用 /cd /qqsave 进入。",
+            "default": [
+                "113|D:/qq/record/1132824061/FileRecv"
+            ]
+        },
+        "inbox_mount": {
+            "type": "text",
+            "label": "接收文件目录",
+            "description": "QQ 发给机器人的文件会保存到这个虚拟目录，默认 /bot/inbox。",
+            "default": "/bot/inbox"
+        }
+    }
+}

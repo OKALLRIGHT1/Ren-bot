@@ -1,0 +1,46 @@
+{
+    "name": "QQ定时提醒",
+    "trigger": "qq提醒",
+    "llm_command": "qq_reminder",
+    "type": "direct",
+    "aliases": [
+        "/提醒",
+        "/提醒列表",
+        "/提醒删除",
+        "/提醒测试",
+        "提醒我"
+    ],
+    "description": "在 QQ 中创建仅发给自己的定时提醒，支持工作日、每天等周期提醒。",
+    "example_arg": "/提醒 每周1到周5 17:20 提醒我打卡",
+    "timeout_sec": 20,
+    "version": "1.0.0",
+    "access_control": {
+        "allow_local": false,
+        "allow_remote_qq": true,
+        "allow_qq_owner": true,
+        "allow_qq_others": false,
+        "allow_group_without_at": false
+    },
+    "settings": {
+        "storage_path": {
+            "type": "text",
+            "label": "提醒存储文件",
+            "description": "保存提醒任务的 JSON 文件路径。",
+            "default": "data/qq_reminders.json"
+        },
+        "scan_interval_sec": {
+            "type": "number",
+            "label": "轮询间隔(秒)",
+            "description": "后台检查提醒是否到点的间隔。",
+            "default": 20,
+            "min": 5,
+            "max": 300
+        },
+        "default_reminder_prefix": {
+            "type": "text",
+            "label": "提醒前缀",
+            "description": "发送到 QQ 的提醒消息前缀。",
+            "default": "⏰ 提醒时间到："
+        }
+    }
+}
