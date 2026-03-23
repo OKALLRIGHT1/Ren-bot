@@ -15,10 +15,23 @@ Live2D-LLM 是一个功能强大且高度可扩展的桌面 AI 助手。它结�
 * **高级记忆架构**：采用 SQLite（精确对话记录）与向量数据库（语义召回）双轨制。支持多会话隔离（本地桌面与 QQ 各群聊/私聊数据互不干扰），并能根据用户反馈自动调整长期记忆权重。
 * **多平台网关（NapCat QQ 接入）**：内置基于 OneBot 标准的 Chat Gateway。支持 QQ 私聊/群聊接入、主人身份鉴权、QQ 接收图片视觉识别、概率性语音回发以及 QQ 远程桌面截图。
 * **MCP 工具桥**：全面支持 Model Context Protocol。可通过可视化 GUI 直接配置 `stdio` 或 `streamable_http` 类型的本地/远程服务器，并通过自然语言无缝调用外部能力。
-* **现代化 Qt GUI**：提供精致的卡片式桌面控制面板。内置独立的设置中心、记忆编辑器、插件管理器以及控制台风格的专属“代码助手（Codex）”窗口，支持自定义 UI 调色板。
+* **现代化 Qt GUI**：提供精致的卡片式桌面控制面板。内置独立的设置中心、记忆编辑器、插件管理器以及控制台风格的专属“代码助手”窗口，支持自定义 UI 调色板。
 
 ---
+##前端界面
+#主体部分
+前端分为两个部分一个是live2d一个是控制面板悬浮球（蓝色的灵魂宝石）
+<img width="342" height="577" alt="image" src="https://github.com/user-attachments/assets/1e575a65-2147-4eea-a88e-1c7eeab01aae" />
+#控制面板
+控制面板拥有换装，开关tts、语音识别以及免打扰模式的功能，以及设置
+<img width="876" height="203" alt="image" src="https://github.com/user-attachments/assets/50f5745f-c661-4344-aa84-aba3b6113af2" />
+#设置界面
+该界面可以修改程序的核心参数以及添加插件
+<img width="1535" height="1161" alt="image" src="https://github.com/user-attachments/assets/a969db34-0f02-4c1e-a44a-26bcdae05e59" />
 
+
+
+---
 ## 🏗️ 架构概览
 
 项目主干架构清晰，分层明确：
