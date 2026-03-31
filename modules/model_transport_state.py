@@ -1,8 +1,13 @@
 import json
 import threading
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, Optional
+
+try:
+    from config import TASK_MODEL_TTL_HOURS
+except Exception:
+    TASK_MODEL_TTL_HOURS = 12
 
 
 STATE_PATH = Path("./data/model_transport_state.json")
@@ -49,6 +54,7 @@ def _ensure_model(data: Dict[str, Any], model_key: str) -> Dict[str, Any]:
     if not isinstance(item, dict):
         item = {}
     item.setdefault("preferred_transport", "")
+    item.setdefault("preferred_model_key", "")
     item.setdefault("updated_at", "")
     item.setdefault("success", {})
     item.setdefault("failure", {})
@@ -68,6 +74,29 @@ def get_preferred_transport(model_key: str) -> Optional[str]:
         if not isinstance(item, dict):
             return None
         preferred = _normalize_key(item.get("preferred_transport", ""))
+        return preferred or None
+
+
+def get_preferred_model(task_key: str) -> Optional[str]:
+    task_key = _normalize_key(task_key)
+    if not task_key:
+        return None
+    with _LOCK:
+        data = _load()
+        item = data.get("models", {}).get(task_key, {})
+        if not isinstance(item, dict):
+            return None
+        preferred = _normalize_key(item.get("preferred_model_key", ""))
+        updated_at = _normalize_key(item.get("updated_at", ""))
+        if preferred and updated_at:
+            try:
+                ts = datetime.fromisoformat(updated_at)
+                if datetime.now() - ts > timedelta(hours=TASK_MODEL_TTL_HOURS):
+                    item["preferred_model_key"] = ""
+                    _save(data)
+                    return None
+            except Exception:
+                pass
         return preferred or None
 
 
@@ -109,6 +138,19 @@ def record_success(model_key: str, transport: str) -> bool:
         item["consecutive_failures"] = cons
 
         item["preferred_transport"] = transport
+        item["updated_at"] = _now()
+        return _save(data)
+
+
+def record_task_model_success(task_key: str, model_key: str) -> bool:
+    task_key = _normalize_key(task_key)
+    model_key = _normalize_key(model_key)
+    if not task_key or not model_key:
+        return False
+    with _LOCK:
+        data = _load()
+        item = _ensure_model(data, task_key)
+        item["preferred_model_key"] = model_key
         item["updated_at"] = _now()
         return _save(data)
 

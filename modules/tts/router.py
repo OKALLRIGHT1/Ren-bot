@@ -163,6 +163,7 @@ class TTSRouter:
             flags=re.IGNORECASE,
         )
         self._cmd_re = re.compile(r"\[CMD:.*?\]", flags=re.DOTALL)
+        self.enabled = True
 
     def _ensure_gpt_instance(self):
         if self.gpt is not None or GPTSoVITSTTS is None:
@@ -268,6 +269,8 @@ Output:
     async def synthesize_once(
         self, text: str, emotion: Optional[str] = None
     ) -> tuple[Optional[str], float]:
+        if not self.enabled:
+            return None, 0.0
         clean = self._sanitize_tts_text(text)
         if not clean:
             return None, 0.0
@@ -353,6 +356,8 @@ Output:
         chunk_chars=None,
         show_bubble=True,
     ):
+        if not self.enabled:
+            return
         text = self._sanitize_tts_text(text)
         if not text:
             return
@@ -388,6 +393,16 @@ Output:
         while True:
             try:
                 item = await self._q.get()
+
+                if not self.enabled:
+                    self._q.task_done()
+                    while not self._audio_q.empty():
+                        try:
+                            self._audio_q.get_nowait()
+                            self._audio_q.task_done()
+                        except Exception:
+                            break
+                    continue
 
                 # 处理打断逻辑
                 if item.interrupt:

@@ -29,6 +29,7 @@ class PluginManager:
         self.plugin_dir = plugin_dir
         self.plugins: Dict[str, Any] = {}
         self.react_map: Dict[str, Any] = {}
+        self.delegate_map: Dict[str, Any] = {}
         self.direct_map: Dict[str, Any] = {}
         self.observe_map: Dict[str, Any] = {}
         self.disabled_plugins = set()  # 禁用的插件 trigger 列表
@@ -250,8 +251,7 @@ class PluginManager:
 
                 # 从配置中设置显示元数据，name 始终以 config 为准，保证 UI/列表使用中文名
                 inst.name = config.get("name", trigger)
-                if not hasattr(inst, "type"):
-                    inst.type = config.get("type", "react")
+                inst.type = config.get("type", getattr(inst, "type", "react"))
                 if not hasattr(inst, "description"):
                     inst.description = config.get("description", "")
                 if not hasattr(inst, "example_arg"):
@@ -299,6 +299,9 @@ class PluginManager:
                 if p_type == "direct":
                     for a in aliases:
                         self.direct_map[a] = inst
+                elif p_type == "delegate":
+                    for a in aliases:
+                        self.delegate_map[a] = inst
                 elif p_type == "observe":  # 🆕 新增处理分支
                     for a in aliases:
                         self.observe_map[a] = inst
@@ -479,16 +482,21 @@ class PluginManager:
         return None
 
     # -------------------- Tool Prompt --------------------
-    def _unique_react_plugins_by_keys(self, keys: Iterable[str]) -> List[Any]:
+    def _unique_plugins_by_keys(
+        self, keys: Iterable[str], *, allowed_types: Optional[set[str]] = None
+    ) -> List[Any]:
         seen = set()
         out = []
         for k in keys:
             p = self.react_map.get(k)
             if not p:
+                p = self.delegate_map.get(k)
+            if not p:
                 p = self.plugins.get(k)
             if not p:
                 continue
-            if getattr(p, "type", "react") != "react":
+            p_type = getattr(p, "type", "react")
+            if allowed_types and p_type not in allowed_types:
                 continue
             pid = id(p)
             if pid in seen:
@@ -496,6 +504,12 @@ class PluginManager:
             seen.add(pid)
             out.append(p)
         return out
+
+    def _unique_react_plugins_by_keys(self, keys: Iterable[str]) -> List[Any]:
+        return self._unique_plugins_by_keys(keys, allowed_types={"react"})
+
+    def _unique_delegate_plugins_by_keys(self, keys: Iterable[str]) -> List[Any]:
+        return self._unique_plugins_by_keys(keys, allowed_types={"delegate"})
 
     def get_tool_prompt_for_triggers(
         self, triggers: List[str], *, compact: bool = True, max_tools: int = 12
@@ -566,6 +580,43 @@ class PluginManager:
     def get_system_prompt_addition(self) -> str:
         all_triggers = list(self.plugins.keys())
         return self.get_tool_prompt_for_triggers(all_triggers, compact=False)
+
+    def get_delegate_prompt_for_triggers(
+        self, triggers: List[str], *, compact: bool = True, max_tools: int = 8
+    ) -> str:
+        plugins = self._unique_delegate_plugins_by_keys(triggers)
+        if not plugins:
+            return ""
+
+        if max_tools and len(plugins) > max_tools:
+            plugins = plugins[:max_tools]
+
+        lines = []
+        for p in plugins:
+            llm_cmd = getattr(p, "llm_command", "") or getattr(p, "trigger", "")
+            desc = (getattr(p, "description", "") or "").replace("\n", " ").strip()
+            if compact and len(desc) > 60:
+                desc = desc[:60] + "…"
+            lines.append(f"- {llm_cmd}: {desc or '委托副脑处理的复杂任务'}")
+
+        return (
+            "\n\n【可委托任务】\n"
+            + "\n".join(lines)
+            + "\n\n【委托格式】\n"
+            + "当任务复杂、需要多步执行或需要调用外部工具时，可单独输出一行：\n"
+            + "[CMD: 命令 | 需求说明]\n"
+            + "这里的命令会交给副脑处理；只输出必要的任务要求，不要把思考过程写进去。\n"
+        )
+
+    def get_delegate_trigger_set(self) -> set[str]:
+        triggers = set(self.delegate_map.keys())
+        for trigger, plugin in self.plugins.items():
+            if getattr(plugin, "type", "react") == "delegate":
+                triggers.add(trigger)
+        return triggers
+
+    def is_delegate_trigger(self, trigger: str) -> bool:
+        return str(trigger or "").strip() in self.get_delegate_trigger_set()
 
     # -------------------- Parse / Helpers --------------------
     def extract_commands(self, text: str) -> List[Tuple[str, str]]:
@@ -680,6 +731,9 @@ class PluginManager:
         if p_type == "direct":
             for a in aliases:
                 self.direct_map[a] = plugin
+        elif p_type == "delegate":
+            for a in aliases:
+                self.delegate_map[a] = plugin
         elif p_type == "observe":
             for a in aliases:
                 self.observe_map[a] = plugin
@@ -710,6 +764,9 @@ class PluginManager:
         if p_type == "direct":
             for a in aliases:
                 self.direct_map.pop(a, None)
+        elif p_type == "delegate":
+            for a in aliases:
+                self.delegate_map.pop(a, None)
         elif p_type == "observe":
             for a in aliases:
                 self.observe_map.pop(a, None)
@@ -785,7 +842,11 @@ class PluginManager:
         return False, None
 
     async def execute_commands(
-        self, text: str, context: dict, allow_tools: bool = True
+        self,
+        text: str,
+        context: dict,
+        allow_tools: bool = True,
+        allowed_types: Optional[set[str]] = None,
     ) -> Tuple[bool, str, List[str], List[str]]:
         """
         ReAct 工具执行：
@@ -816,7 +877,10 @@ class PluginManager:
             self._dbg("🔌 [ReAct] ========== 工具执行结束 ==========\n")
             return False, clean_text, [], []
 
-        self._dbg(f"🔌 [ReAct] 当前已注册的react插件: {list(self.react_map.keys())}")
+        allowed_types = set(allowed_types or {"react"})
+        self._dbg(
+            f"🔌 [ReAct] 当前允许的插件类型: {sorted(allowed_types)} | react={list(self.react_map.keys())} | delegate={list(self.delegate_map.keys())}"
+        )
 
         for idx, (llm_cmd, args) in enumerate(matches, 1):
             llm_cmd = (llm_cmd or "").strip()
@@ -833,7 +897,11 @@ class PluginManager:
                 self._dbg(f"🔌 [ReAct] LLM命令映射: {llm_cmd} -> {trigger}")
 
             triggered = True
-            plugin = self.react_map.get(trigger) or self.plugins.get(trigger)
+            plugin = (
+                self.react_map.get(trigger)
+                or self.delegate_map.get(trigger)
+                or self.plugins.get(trigger)
+            )
 
             if not plugin:
                 self._dbg(f"🔌 [ReAct] 未找到插件: {trigger}")
@@ -846,8 +914,8 @@ class PluginManager:
             plugin_type = getattr(plugin, "type", "react")
             self._dbg(f"🔌 [ReAct] 插件类型: {plugin_type}")
 
-            if plugin_type != "react":
-                self._dbg("🔌 [ReAct] 插件类型不是react，跳过")
+            if plugin_type not in allowed_types:
+                self._dbg(f"🔌 [ReAct] 插件类型 {plugin_type} 不在允许集合中，跳过")
                 continue
 
             plugin_name = getattr(plugin, "name", trigger)
@@ -957,8 +1025,7 @@ class PluginManager:
             )
 
             inst.name = config.get("name", trigger)
-            if not hasattr(inst, "type"):
-                inst.type = config.get("type", "react")
+            inst.type = config.get("type", getattr(inst, "type", "react"))
             if not hasattr(inst, "description"):
                 inst.description = config.get("description", "")
             if not hasattr(inst, "example_arg"):
@@ -988,6 +1055,7 @@ class PluginManager:
     def _rebuild_plugin_maps(self):
         """重建所有插件映射"""
         self.react_map.clear()
+        self.delegate_map.clear()
         self.direct_map.clear()
         self.observe_map.clear()
         self.llm_command_map.clear()
@@ -1018,6 +1086,9 @@ class PluginManager:
             if p_type == "direct":
                 for a in aliases:
                     self.direct_map[a] = inst
+            elif p_type == "delegate":
+                for a in aliases:
+                    self.delegate_map[a] = inst
             elif p_type == "observe":
                 for a in aliases:
                     self.observe_map[a] = inst
@@ -1026,5 +1097,5 @@ class PluginManager:
                     self.react_map[a] = inst
 
         print(
-            f"✅ 插件映射已重建: react={len(self.react_map)}, direct={len(self.direct_map)}, observe={len(self.observe_map)}"
+            f"✅ 插件映射已重建: react={len(self.react_map)}, delegate={len(self.delegate_map)}, direct={len(self.direct_map)}, observe={len(self.observe_map)}"
         )

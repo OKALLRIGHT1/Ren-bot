@@ -17,7 +17,7 @@
         "web",
         "query"
     ],
-    "type": "react",
+    "type": "delegate",
     "description": "联网搜索（优先 Exa 反代，问题类可走 /answer，必要时回退 DDG）。",
     "example_arg": "今天北京天气",
     "timeout_sec": 15,
@@ -26,7 +26,25 @@
             "type": "text",
             "label": "Exa 基础地址",
             "description": "本地反代地址，例如 http://localhost:7860",
-            "default": "http://localhost:7860"
+            "default": "https://exa.chengtx.vip"
+        },
+        "remote_base_url": {
+            "type": "text",
+            "label": "Exa 远程地址",
+            "description": "远程 Exa 接口地址，可作为第二搜索源。",
+            "default": "https://exa.chengtx.vip"
+        },
+        "local_base_url": {
+            "type": "text",
+            "label": "Exa 本地地址",
+            "description": "本地 Exa 反代地址，例如 http://localhost:7860，可优先尝试。",
+            "default": ""
+        },
+        "prefer_local_first": {
+            "type": "bool",
+            "label": "优先本地接口",
+            "description": "开启后先试本地接口，失败再试远程接口。",
+            "default": true
         },
         "api_key": {
             "type": "secret",

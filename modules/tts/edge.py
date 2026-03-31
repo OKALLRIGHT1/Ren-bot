@@ -2,6 +2,7 @@
 import asyncio
 import os
 import tempfile
+import shutil
 from typing import Callable, Awaitable, Optional, Tuple
 
 import edge_tts
@@ -21,18 +22,18 @@ os.makedirs(CACHE_DIR, exist_ok=True)
 
 class EdgeTTS:
     def __init__(
-            self,
-            voice: str,
-            rate: str = "+0%",
-            volume: str = "+0%",
-            enabled: bool = True,
-            max_chars: int = 250,
-            use_live2d_player: bool = True,
-            live2d_channel: int = 0,
-            live2d_volume: float = 1.0,
-            enable_lip_sync: bool = False,
-            rhubarb_path: str = "./tools/rhubarb/rhubarb.exe",
-            lip_sync_smooth_window: int = 3,
+        self,
+        voice: str,
+        rate: str = "+0%",
+        volume: str = "+0%",
+        enabled: bool = True,
+        max_chars: int = 250,
+        use_live2d_player: bool = True,
+        live2d_channel: int = 0,
+        live2d_volume: float = 1.0,
+        enable_lip_sync: bool = False,
+        rhubarb_path: str = "./tools/rhubarb/rhubarb.exe",
+        lip_sync_smooth_window: int = 3,
     ):
         self.voice = voice
         self.rate = rate
@@ -49,6 +50,7 @@ class EdgeTTS:
         if self.enable_lip_sync:
             try:
                 from modules.lip_sync import RhubarbLipSync
+
                 self.lip_sync_engine = RhubarbLipSync(rhubarb_path=rhubarb_path)
                 if not self.lip_sync_engine.is_available():
                     self.enable_lip_sync = False
@@ -59,7 +61,8 @@ class EdgeTTS:
 
     def _clip(self, text: str) -> str:
         t = (text or "").strip()
-        if not t: return ""
+        if not t:
+            return ""
         if len(t) > self.max_chars:
             t = t[: self.max_chars].rstrip()
         return t
@@ -67,8 +70,15 @@ class EdgeTTS:
     def _estimate_duration_sec(self, mp3_path: str, text: str) -> float:
         if miniaudio is not None:
             try:
-                decoded = miniaudio.decode_file(mp3_path, output_format=miniaudio.SampleFormat.FLOAT32)
-                dur = len(decoded.samples) / 4.0 / max(1, decoded.nchannels) / max(1, decoded.sample_rate)
+                decoded = miniaudio.decode_file(
+                    mp3_path, output_format=miniaudio.SampleFormat.FLOAT32
+                )
+                dur = (
+                    len(decoded.samples)
+                    / 4.0
+                    / max(1, decoded.nchannels)
+                    / max(1, decoded.sample_rate)
+                )
                 return float(max(0.3, min(60.0, dur)))
             except:
                 pass
@@ -76,9 +86,11 @@ class EdgeTTS:
 
     # 🟢 [新增] 纯生成
     async def synthesize(self, text: str) -> Tuple[Optional[str], float]:
-        if not self.enabled: return None, 0.0
+        if not self.enabled:
+            return None, 0.0
         text = self._clip(text)
-        if not text: return None, 0.0
+        if not text:
+            return None, 0.0
 
         async with self._lock:
             fd, mp3_path = tempfile.mkstemp(suffix=".mp3", dir=CACHE_DIR)
@@ -87,38 +99,56 @@ class EdgeTTS:
 
             try:
                 print(f"🔊 [Edge] 合成: {text!r}")
-                communicate = edge_tts.Communicate(text=text, voice=self.voice, rate=self.rate, volume=self.volume)
+                communicate = edge_tts.Communicate(
+                    text=text, voice=self.voice, rate=self.rate, volume=self.volume
+                )
                 await communicate.save(mp3_path)
                 dur = self._estimate_duration_sec(mp3_path, text)
                 return mp3_path, dur
             except Exception as e:
                 print(f"❌ [Edge] 失败: {e}")
-                if os.path.exists(mp3_path): os.remove(mp3_path)
+                if os.path.exists(mp3_path):
+                    os.remove(mp3_path)
                 return None, 0.0
 
     # 🟢  纯播放 (增加延迟清理)
-    async def play_audio_file(self, mp3_path: str, interrupt_event: asyncio.Event = None):
-        if not mp3_path or not os.path.exists(mp3_path): return
+    async def play_audio_file(
+        self, mp3_path: str, interrupt_event: asyncio.Event = None
+    ):
+        if not mp3_path or not os.path.exists(mp3_path):
+            return
 
         lip_sync_task = None
         if self.enable_lip_sync and self.lip_sync_engine:
             try:
-                lip_sync_task = asyncio.create_task(self.lip_sync_engine.analyze_audio(mp3_path))
+                rhubarb_input = mp3_path
+                if mp3_path.lower().endswith(".mp3"):
+                    ogg_path = mp3_path[:-4] + ".ogg"
+                    shutil.copyfile(mp3_path, ogg_path)
+                    rhubarb_input = ogg_path
+                lip_sync_task = asyncio.create_task(
+                    self.lip_sync_engine.analyze_audio(rhubarb_input)
+                )
             except:
                 pass
 
         if self.use_live2d_player:
             # 发送播放指令
-            await play_sound_file(mp3_path, channel=self.live2d_channel, volume=self.live2d_volume)
+            await play_sound_file(
+                mp3_path, channel=self.live2d_channel, volume=self.live2d_volume
+            )
 
             # 处理口型
             if lip_sync_task:
                 try:
                     lip_data = await lip_sync_task
                     if lip_data:
-                        lip_data = self.lip_sync_engine.smooth_lip_data(lip_data,
-                                                                        window_size=self.lip_sync_smooth_window)
-                        await send_lip_sync(self.lip_sync_engine.fade_lip_data(lip_data))
+                        lip_data = self.lip_sync_engine.smooth_lip_data(
+                            lip_data, window_size=self.lip_sync_smooth_window
+                        )
+                        await send_lip_sync(
+                            self.lip_sync_engine.fade_lip_data(lip_data)
+                        )
                 except:
                     pass
 
@@ -126,7 +156,8 @@ class EdgeTTS:
         async def delayed_remove(path: str):
             await asyncio.sleep(10)
             try:
-                if os.path.exists(path): os.remove(path)
+                if os.path.exists(path):
+                    os.remove(path)
             except:
                 pass
 

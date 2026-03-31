@@ -13,6 +13,15 @@ from pathlib import Path
 from typing import Optional, Any, Dict
 from datetime import datetime
 from datetime import timedelta
+
+try:
+    import psutil
+except Exception:
+    psutil = None
+try:
+    import paho.mqtt.client as mqtt
+except Exception:
+    mqtt = None
 from config import (
     TTS_ENABLED,
     TTS_MAX_CHARS,
@@ -41,11 +50,16 @@ from config import (
     NAPCAT_GROUP_REQUIRE_AT,
     NAPCAT_VOICE_REPLY_ENABLED,
     NAPCAT_VOICE_REPLY_PROBABILITY,
+    MQTT_DISPLAY_ENABLED,
+    MQTT_DISPLAY_HOST,
+    MQTT_DISPLAY_PORT,
+    MQTT_DISPLAY_TOPIC,
 )
 
 from modules.advanced_memory import AdvancedMemorySystem
 from modules.memory_sqlite import get_memory_store
 from modules.emotion_controller import EmotionController
+from modules.activity_sidecar import ActivitySidecarManager
 from modules.plugin_manager import PluginManager
 from modules.tool_router import ToolRouter
 from modules.tts import TTSRouter
@@ -127,6 +141,9 @@ class Live2DApplication:
         self.loop = None
         self.gui_ws_server = None
         self.gui_http_server = None
+        self.display_mqtt_client = None
+        self.display_state_config_path = Path("./data/display_state_config.json")
+        self.display_mqtt_last_error = "未初始化"
 
         # 日记状态标记，防止重复记录
         self.last_summary_date = None
@@ -175,6 +192,44 @@ class Live2DApplication:
         if isinstance(value, bool):
             return value
         return bool(TTS_ENABLED)
+
+    def _default_display_state_config(self) -> Dict[str, Any]:
+        return {
+            "metric_mode": "auto_ram",
+            "metric_text": "",
+            "default_icon_bits": "",
+            "default_icon_w": 0,
+            "default_icon_h": 0,
+            "emotion_icons": {},
+        }
+
+    def load_display_state_config(self) -> Dict[str, Any]:
+        path = self.display_state_config_path
+        default = self._default_display_state_config()
+        if not path.exists():
+            return default
+        try:
+            with path.open("r", encoding="utf-8") as f:
+                data = json.load(f)
+            if not isinstance(data, dict):
+                return default
+            cfg = dict(default)
+            cfg.update(data)
+            if not isinstance(cfg.get("emotion_icons"), dict):
+                cfg["emotion_icons"] = {}
+            return cfg
+        except Exception:
+            return default
+
+    def save_display_state_config(self, cfg: Dict[str, Any]):
+        path = self.display_state_config_path
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.open("w", encoding="utf-8") as f:
+                json.dump(cfg, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            if self.logger:
+                self.logger.warning(f"保存状态屏配置失败: {e}")
 
     def _load_external_runtime_settings(self) -> Dict[str, Any]:
         return self._normalize_external_runtime_settings(self._load_runtime_settings())
@@ -506,6 +561,7 @@ class Live2DApplication:
 
         self.tool_router = ToolRouter(
             react_map=self.plugin_manager.react_map,
+            delegate_map=self.plugin_manager.delegate_map,
             direct_map=self.plugin_manager.direct_map,
         )
 
@@ -599,6 +655,7 @@ class Live2DApplication:
             chat_gateway=self.chat_gateway,
             mcp_bridge=self.mcp_bridge,
         )
+        self._init_display_mqtt()
         self.chat_service.configure_gateway_voice_reply(
             enabled=initial_external_settings.get("napcat_voice_reply_enabled", False),
             probability=initial_external_settings.get(
@@ -610,6 +667,7 @@ class Live2DApplication:
         self.gui_ws_server = GuiWebSocketServer(logger=self.logger)
         self.gui_ws_server.set_message_handler(self._on_gui_ws_message)
         self.gui_http_server = GuiHttpServer(logger=self.logger, app_ref=self)
+        self.activity_sidecar = ActivitySidecarManager(logger=self.logger)
 
         if MusicSensor:
             self.music_sensor = MusicSensor(self.chat_service)
@@ -620,6 +678,10 @@ class Live2DApplication:
                 self.screen_sensor = ScreenSensor(self.chat_service)
                 self.chat_service.screen_sensor_ref = self.screen_sensor
                 self.logger.info("👀 ScreenSensor 屏幕感知模块已就绪")
+                if getattr(self, "activity_sidecar", None):
+                    self.logger.info(
+                        "🦀 ScreenSensor 当前优先使用 Rust activity events"
+                    )
             except Exception as e:
                 self.logger.error(f"❌ ScreenSensor 初始化失败: {e}")
         else:
@@ -1540,6 +1602,11 @@ class Live2DApplication:
                 self.gui_http_server.stop()
             except Exception as e:
                 print(f"GUI HTTP shutdown error: {e}")
+        if getattr(self, "activity_sidecar", None):
+            try:
+                self.activity_sidecar.stop()
+            except Exception as e:
+                print(f"Rust activity agent shutdown error: {e}")
 
         # 尝试最后一次保存（如果今天还没写日记）
         try:
@@ -1601,14 +1668,6 @@ class Live2DApplication:
             # 4. 启动定时调度器
             self.loop.create_task(self._scheduler_loop())
 
-            # 5. 启动屏幕感知
-            if self.screen_sensor:
-                try:
-                    self.logger.info("🚀 启动 ScreenSensor 监控线程...")
-                    self.screen_sensor.start(self.loop)
-                except Exception as e:
-                    self.logger.error(f"❌ ScreenSensor 启动失败: {e}")
-
             # 6. 启动音乐感知
             if self.music_sensor:
                 try:
@@ -1640,6 +1699,36 @@ class Live2DApplication:
                 except Exception as exc:
                     if self.logger:
                         self.logger.error(f"GUI HTTP start failed: {exc}")
+            try:
+                self.activity_sidecar.start()
+            except Exception as exc:
+                if self.logger:
+                    self.logger.warning(f"Rust activity agent start failed: {exc}")
+            if self.activity_sidecar and self.activity_sidecar.is_running():
+                self.logger.info("🦀 当前采集模式: Rust 优先")
+            else:
+                self.logger.info("🐍 当前采集模式: Python fallback")
+
+            # 5. 启动屏幕感知（Rust sidecar 运行时，关闭 Python 本地采集线程）
+            if self.screen_sensor:
+                try:
+                    if self.activity_sidecar and self.activity_sidecar.is_running():
+                        self.screen_sensor.use_rust_events_only = True
+                        self.logger.info(
+                            "🦀 Rust 优先采集已启用，关闭 Python 本地窗口轮询"
+                        )
+                        self.logger.info(
+                            "🦀 启动 ScreenSensor 监控线程（Rust 事件消费模式）"
+                        )
+                        self.screen_sensor.start(self.loop)
+                    else:
+                        self.screen_sensor.use_rust_events_only = False
+                        self.logger.info(
+                            "🚀 启动 ScreenSensor 监控线程（Python 本地采集模式）"
+                        )
+                        self.screen_sensor.start(self.loop)
+                except Exception as e:
+                    self.logger.error(f"❌ ScreenSensor 启动失败: {e}")
 
             self.loop.run_forever()
 
@@ -1836,6 +1925,8 @@ class Live2DApplication:
         """设置TTS开关"""
         enabled = bool(enabled)
         self.tts_enabled = enabled
+        if getattr(self, "tts", None):
+            self.tts.enabled = enabled
 
         # 保持 config 运行时状态与 UI 显示一致
         try:
@@ -1918,6 +2009,7 @@ class Live2DApplication:
             plugin_manager=self.plugin_manager,
             on_restart_callback=self.restart_app,
             on_apply_external_settings_callback=self.apply_external_settings,
+            on_display_state_callback=self.publish_display_state,
             cfg=QtGuiConfig(
                 title="Live2D Agent",
                 start_minimized_to_tray=False,
@@ -1927,6 +2019,10 @@ class Live2DApplication:
         self.qt_ui.tts = self.tts
         self.qt_ui.loop = self.loop
         self.qt_ui.chat_service = self.chat_service
+        self.qt_ui.app = self
+        self.qt_ui.load_display_state_config = self.load_display_state_config
+        self.qt_ui.save_display_state_config = self.save_display_state_config
+        self.qt_ui.publish_display_state = self.publish_display_state
         self.qt_ui.set_status("Idle")
         try:
             self.logger.info("[RoleSync] 启动时同步当前角色形象")
@@ -1936,7 +2032,110 @@ class Live2DApplication:
                 self.sync_active_character_live2d()
         except Exception:
             pass
+        try:
+            if hasattr(self.qt_ui, "publish_display_snapshot"):
+                self.qt_ui.publish_display_snapshot()
+        except Exception:
+            pass
         self.qt_ui.run()
+
+    def _init_display_mqtt(self):
+        if not MQTT_DISPLAY_ENABLED or mqtt is None:
+            self.display_mqtt_last_error = (
+                "未启用 MQTT_DISPLAY"
+                if not MQTT_DISPLAY_ENABLED
+                else "缺少 paho-mqtt 依赖"
+            )
+            return
+        try:
+            client = mqtt.Client(client_id="live2d-llm-display-pub")
+            client.connect(MQTT_DISPLAY_HOST, MQTT_DISPLAY_PORT, 30)
+            client.loop_start()
+            self.display_mqtt_client = client
+            self.display_mqtt_last_error = ""
+            if self.logger:
+                self.logger.info(
+                    f"Display MQTT connected: {MQTT_DISPLAY_HOST}:{MQTT_DISPLAY_PORT} -> {MQTT_DISPLAY_TOPIC}"
+                )
+        except Exception as e:
+            self.display_mqtt_client = None
+            self.display_mqtt_last_error = str(e)
+            if self.logger:
+                self.logger.warning(f"Display MQTT init failed: {e}")
+
+    def publish_display_state(self, payload: Dict[str, Any]):
+        if not self.display_mqtt_client:
+            return
+        try:
+            cfg = self.load_display_state_config()
+            role = str(payload.get("role") or "未激活角色")
+            status = str(payload.get("status") or "Ready")
+            emotion = str(payload.get("emotion") or "[idle]")
+            metric_mode = str(cfg.get("metric_mode") or "auto_ram").strip().lower()
+            metric = str(payload.get("metric") or "").strip()
+            if not metric:
+                if metric_mode == "custom":
+                    metric = str(cfg.get("metric_text") or "").strip() or "--"
+                elif metric_mode == "status_priority":
+                    status_lower = status.lower()
+                    if "speak" in status_lower:
+                        metric = "Speaking"
+                    elif "think" in status_lower:
+                        metric = "Thinking"
+                    elif "listen" in status_lower:
+                        metric = "Listening"
+                    elif psutil is not None:
+                        try:
+                            metric = f"RAM {int(psutil.virtual_memory().percent)}%"
+                        except Exception:
+                            metric = "RAM --"
+                else:
+                    metric = "RAM --"
+                    if psutil is not None:
+                        try:
+                            metric = f"RAM {int(psutil.virtual_memory().percent)}%"
+                        except Exception:
+                            pass
+            message = {
+                "role": role,
+                "emotion": emotion,
+                "status": status,
+                "metric": metric,
+            }
+            emotion_key = emotion.strip().strip("[]").lower()
+            emotion_icons = cfg.get("emotion_icons") or {}
+            icon_payload = emotion_icons.get(emotion_key) or {}
+            if not icon_payload:
+                icon_payload = {
+                    "icon_bits": cfg.get("default_icon_bits", ""),
+                    "icon_rgb565": cfg.get("default_icon_rgb565", ""),
+                    "icon_w": cfg.get("default_icon_w", 0),
+                    "icon_h": cfg.get("default_icon_h", 0),
+                }
+            for key in ("icon_bits", "icon_rgb565", "icon_w", "icon_h"):
+                if key in payload:
+                    message[key] = payload[key]
+                elif icon_payload.get(key):
+                    message[key] = icon_payload.get(key)
+            self.display_mqtt_client.publish(
+                MQTT_DISPLAY_TOPIC,
+                json.dumps(message, ensure_ascii=False),
+                qos=0,
+                retain=False,
+            )
+            if self.logger:
+                self.logger.debug(f"[DisplayMQTT] {message}")
+        except Exception as e:
+            if self.logger:
+                self.logger.debug(f"Display MQTT publish failed: {e}")
+
+    def is_display_mqtt_ready(self) -> bool:
+        return self.display_mqtt_client is not None
+
+    def get_display_mqtt_status_text(self) -> str:
+        if self.display_mqtt_client is not None:
+            return "已连接 Mosquitto，可推送"
+        return self.display_mqtt_last_error or "MQTT 未连接"
 
 
 class EventPresenter:

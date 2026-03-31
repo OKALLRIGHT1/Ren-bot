@@ -8,7 +8,7 @@
         "远程工具",
         "外部工具桥"
     ],
-    "type": "react",
+    "type": "delegate",
     "description": "调用已接入的本地/远程 MCP 工具。参数格式：action ||| tool_name ||| JSON参数；action 可用：help, list_tools, server_status, call_tool",
     "example_arg": "list_tools",
     "access_control": {

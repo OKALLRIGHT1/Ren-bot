@@ -5,13 +5,15 @@ from typing import Any, Dict, List
 
 class Plugin:
     name = "MCP 工具桥"
-    type = "react"
+    type = "delegate"
     description = (
         "调用已接入的本地/远程 MCP 工具。参数格式：action ||| tool_name ||| JSON参数。"
     )
     example_arg = "list_tools"
 
     async def run(self, args: str, ctx: Dict[str, Any]) -> str:
+        if not bool((ctx or {}).get("delegate_mode", False)):
+            return "mcp_tools 现在仅允许通过副脑委托执行。"
         action, parts = self._parse_args(args or "")
         if action in {"", "help"}:
             return self._help_text()

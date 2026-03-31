@@ -21,6 +21,8 @@ except ImportError:
     chat_with_ai_stream = None
 
 from modules.live2d import trigger_motion
+from modules.delegate_task_state import set_task_state as set_delegate_task_state
+from modules.delegate_session import add_event as delegate_add_event
 from modules.personality_system import get_personality_system
 from core.message_source import REMOTE_CHAT_SOURCES, build_output_profile
 
@@ -1289,6 +1291,13 @@ class ChatService:
         """移除所有命令标签"""
         return self._cmd_re.sub("", text or "")
 
+    def _strip_internal_tags(self, text: str) -> str:
+        raw = str(text or "")
+        raw = re.sub(r"\[tool_use\]\s*\[[^\]]*\]\s*", "", raw, flags=re.IGNORECASE)
+        raw = re.sub(r"\[tool_use\]\s*", "", raw, flags=re.IGNORECASE)
+        raw = re.sub(r"\[search_meta\][^\n]*\n?", "", raw, flags=re.IGNORECASE)
+        return raw.strip()
+
     def _compress_sensor_text(self, text: str, max_len: int = 800) -> str:
         compressed = str(text or "").replace("\r\n", "\n").strip()
         if not compressed:
@@ -1342,6 +1351,567 @@ class ChatService:
     def _contains_cmd(self, text: str) -> bool:
         """检查是否包含命令"""
         return "[CMD:" in (text or "")
+
+    def _set_delegate_task_state(
+        self,
+        ctx: Optional[Dict[str, Any]],
+        state: str,
+        *,
+        summary: str = "",
+        triggers: Optional[list[str]] = None,
+        meta: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        runtime = ctx or {}
+        task_id = str(runtime.get("delegate_task_id") or "").strip()
+        if not task_id:
+            task_id = uuid.uuid4().hex[:10]
+            runtime["delegate_task_id"] = task_id
+        set_delegate_task_state(
+            task_id,
+            state,
+            summary=summary,
+            source=str(runtime.get("source") or "").strip(),
+            triggers=list(triggers or []),
+            meta=meta or {},
+        )
+
+    def _add_delegate_session_event(
+        self,
+        event_type: str,
+        *,
+        ctx: Optional[Dict[str, Any]] = None,
+        user_text: str = "",
+        triggers: Optional[list[str]] = None,
+        text: str = "",
+        meta: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        runtime = ctx or {}
+        task_id = str(runtime.get("delegate_task_id") or "").strip()
+        delegate_add_event(
+            event_type,
+            task_id=task_id,
+            user_text=user_text,
+            triggers=list(triggers or []),
+            text=text,
+            meta=meta or {},
+        )
+
+    def _split_delegate_triggers(self, triggers) -> tuple[list[str], list[str]]:
+        normal_triggers = []
+        delegate_triggers = []
+        for trigger in triggers or []:
+            normalized = str(trigger or "").strip()
+            if not normalized:
+                continue
+            if getattr(
+                self.plugin_manager, "is_delegate_trigger", None
+            ) and self.plugin_manager.is_delegate_trigger(normalized):
+                delegate_triggers.append(normalized)
+            else:
+                normal_triggers.append(normalized)
+        return list(dict.fromkeys(normal_triggers)), list(
+            dict.fromkeys(delegate_triggers)
+        )
+
+    def _extract_workspace_read_path(self, text: str) -> str:
+        raw = str(text or "").strip()
+        if not raw:
+            return ""
+        m = re.search(
+            r"([A-Za-z0-9_./\\-]+\.(?:py|md|json|yaml|yml|txt|toml|ini|js|ts|tsx|jsx|css|html|xml|cpp|c|h|hpp|java|go|rs|sh|bat))",
+            raw,
+            flags=re.IGNORECASE,
+        )
+        return str(m.group(1)).strip() if m else ""
+
+    def _is_market_price_query(self, text: str) -> bool:
+        raw = str(text or "")
+        lower = raw.lower()
+        hints = [
+            "金价",
+            "银价",
+            "油价",
+            "汇率",
+            "指数",
+            "现价",
+            "实时价",
+            "实时价格",
+            "价格",
+            "行情",
+            "price",
+            "quote",
+            "rate",
+            "index",
+            "gold",
+            "usd",
+            "cny",
+            "rmb",
+        ]
+        return any(hint in lower or hint in raw for hint in hints)
+
+    def _has_explicit_market_numbers(self, text: str) -> bool:
+        raw = str(text or "")
+        patterns = [
+            r"\d+(?:\.\d+)?\s*(?:美元/盎司|美元/克|元/克|元/盎司)",
+            r"\d+(?:\.\d+)?\s*(?:USD|CNY|RMB)\b",
+            r"\d+(?:\.\d+)?\s*(?:%|点)\b",
+        ]
+        return any(re.search(pattern, raw, flags=re.IGNORECASE) for pattern in patterns)
+
+    def _is_search_delegate(self, delegate_triggers: list[str], raw_text: str) -> bool:
+        trigger_set = {
+            str(item or "").strip().lower() for item in (delegate_triggers or [])
+        }
+        if trigger_set & {"search", "search_web"}:
+            return True
+        text = str(raw_text or "")
+        return ("搜索结果" in text) or ("Exa@" in text) or ("DuckDuckGo" in text)
+
+    def _parse_search_meta(self, text: str) -> Dict[str, str]:
+        raw = str(text or "")
+        m = re.search(r"\[search_meta\]\s*([^\n]+)", raw, flags=re.IGNORECASE)
+        if not m:
+            return {}
+        line = str(m.group(1) or "").strip()
+        data: Dict[str, str] = {}
+        for part in line.split(";"):
+            if "=" not in part:
+                continue
+            key, value = part.split("=", 1)
+            key = str(key or "").strip().lower()
+            value = str(value or "").strip()
+            if key:
+                data[key] = value
+        return data
+
+    def _search_result_lacks_explicit_fact(self, text: str) -> bool:
+        raw = str(text or "")
+        meta = self._parse_search_meta(raw)
+        if not raw:
+            return True
+        if "未在摘要中发现具体数值" in raw:
+            return True
+        if meta:
+            if (
+                str(meta.get("need_numeric") or "0") == "1"
+                and str(meta.get("has_numbers") or "0") != "1"
+            ):
+                return True
+            if str(meta.get("has_numbers") or "0") == "1":
+                return False
+            if (
+                str(meta.get("has_links") or "0") == "1"
+                or str(meta.get("has_published") or "0") == "1"
+            ):
+                return False
+        if self._has_explicit_market_numbers(raw):
+            return False
+        explicit_markers = [
+            "链接：",
+            "关键数值：",
+            "发布时间",
+            "published",
+            "source:",
+        ]
+        if any(marker.lower() in raw.lower() for marker in explicit_markers):
+            return False
+        return True
+
+    def _should_use_background_delegate(
+        self,
+        *,
+        route_reason: str,
+        delegate_triggers: list[str],
+        ctx: Optional[Dict[str, Any]],
+    ) -> bool:
+        if not delegate_triggers:
+            return False
+        if str(route_reason or "") == "workspace_read_preferred":
+            return False
+        source = str((ctx or {}).get("source") or "").strip().lower()
+        return source in {"qq_gateway", "napcat_qq", "text_input"}
+
+    async def _emit_assistant_text(
+        self,
+        text: str,
+        *,
+        ctx: Dict[str, Any],
+        emotion: str = "neutral",
+        transcript_meta: Optional[Dict[str, Any]] = None,
+        chat_log_source: str = "chat",
+        output_profile: Optional[Dict[str, Any]] = None,
+        tool: bool = False,
+    ) -> None:
+        final_text = self._clean_text_for_tts(
+            self._strip_internal_tags(
+                self._strip_cmd_anywhere(self._strip_emo_tags_anywhere(text))
+            )
+        ).strip()
+        if not final_text:
+            return
+        transcript_meta = transcript_meta or {}
+        output_profile = output_profile or build_output_profile(
+            str((ctx or {}).get("source") or "text_input")
+        )
+        self._update_active_time()
+        self._add_codex_session_event(
+            "assistant_reply",
+            text=final_text,
+            ctx=ctx,
+            meta={"emotion": emotion, "tool": tool, "background": True},
+        )
+        assistant_log_meta = {
+            "tool": tool,
+            "emotion": emotion,
+            "source": chat_log_source,
+            **transcript_meta,
+        }
+        memory_session_id = self._get_memory_session_id(ctx)
+        if memory_session_id:
+            assistant_log_meta["session_id"] = memory_session_id
+        await self.event_bus.emit(
+            "chat.log",
+            role="assistant",
+            content=final_text,
+            meta=assistant_log_meta,
+        )
+        if output_profile.get("ui_append", True):
+            await self.event_bus.emit("ui.append", role="assistant", text=final_text)
+        await self.presenter.present(
+            final_text,
+            emotion,
+            speak=output_profile.get("speak", True),
+            show_bubble=output_profile.get("show_bubble", True),
+        )
+        await self._send_gateway_reply(final_text, ctx, emotion=emotion)
+
+    async def _polish_background_delegate_reply(
+        self,
+        *,
+        user_text: str,
+        ctx: Dict[str, Any],
+        delegate_triggers: list[str],
+        delegate_results: list[str],
+        delegate_clean: str,
+    ) -> tuple[str, str]:
+        raw_text = ""
+        if delegate_results:
+            raw_text = "\n".join(
+                str(item) for item in delegate_results if str(item).strip()
+            )
+        elif delegate_clean:
+            raw_text = str(delegate_clean).strip()
+        if not raw_text:
+            return "后台任务已处理完成。", "neutral"
+
+        prompt = (
+            "你现在是在任务完成后回到对话中汇报结果。"
+            "保持五十铃怜的语气，但只做轻度人格化整理。"
+            "要求：1) 只基于已给出的任务结果；"
+            "2) 不扩展诊断，不脑补未明确提供的信息；"
+            "3) 不展示工具调用过程；"
+            "4) 最多3句话，尽量简短；"
+            "5) 如果结果本身已经很清楚，就直接概述。"
+        )
+        is_market_query = self._is_market_price_query(user_text)
+        is_search_delegate = self._is_search_delegate(delegate_triggers, raw_text)
+        if is_market_query:
+            prompt += (
+                "6) 如果这是价格/行情/汇率/指数类请求，只有在任务结果里明确出现具体数值+单位时才可以引用；"
+                "7) 如果任务结果里没有明确数值，明确说未拿到可靠现价，不要自行补任何数字。"
+            )
+        if is_search_delegate:
+            prompt += (
+                "8) 如果这是联网搜索结果，只能转述结果里已经明确出现的事实；"
+                "9) 不要补充结果中未出现的人名、日期、价格、型号、结论；"
+                "10) 若搜索结果只有摘要或标题，明确说是基于摘要的概述。"
+            )
+        trigger_text = (
+            ", ".join(delegate_triggers[:4]) if delegate_triggers else "delegate"
+        )
+        messages = [
+            {"role": "system", "content": prompt},
+            {
+                "role": "user",
+                "content": (
+                    f"原始请求：{user_text}\n"
+                    f"任务类型：{trigger_text}\n"
+                    f"任务结果：\n{raw_text}\n\n"
+                    "请把它整理成一条自然、简短的回灌消息。"
+                ),
+            },
+        ]
+        try:
+            reply = await asyncio.to_thread(
+                chat_with_ai,
+                messages,
+                task_type="default",
+                caller="chat_delegate_finalize",
+            )
+            emo, clean = self._extract_emo_tag(reply or "")
+            polished = self._clean_text_for_tts(
+                self._strip_internal_tags(
+                    self._strip_cmd_anywhere(
+                        self._strip_emo_tags_anywhere(clean or reply or "")
+                    )
+                )
+            ).strip()
+            if polished:
+                if is_market_query and not self._has_explicit_market_numbers(raw_text):
+                    polished = re.sub(
+                        r"\d+(?:\.\d+)?\s*(?:美元/盎司|美元/克|元/克|元/盎司|USD|CNY|RMB|%|点)",
+                        "",
+                        polished,
+                        flags=re.IGNORECASE,
+                    ).strip(" ，,。；;:：")
+                    if not polished or self._has_explicit_market_numbers(polished):
+                        polished = "查到了相关新闻和摘要，但当前结果里没有可靠的现价数字，我不想乱报。"
+                elif is_search_delegate and self._search_result_lacks_explicit_fact(
+                    raw_text
+                ):
+                    polished = "我查到了相关搜索结果，不过当前拿到的主要是标题和摘要，所以我只能先做保守概述，不想把没写明的细节说死。"
+                return polished, (emo or "neutral")
+        except Exception:
+            pass
+        if is_market_query and not self._has_explicit_market_numbers(raw_text):
+            return (
+                "查到了相关新闻和摘要，但当前结果里没有可靠的现价数字，我不想乱报。",
+                "neutral",
+            )
+        if is_search_delegate and self._search_result_lacks_explicit_fact(raw_text):
+            return (
+                "我查到了相关搜索结果，不过当前拿到的主要是标题和摘要，所以我只能先做保守概述，不想把没写明的细节说死。",
+                "neutral",
+            )
+        return raw_text, "neutral"
+
+    async def _run_background_delegate_task(
+        self,
+        *,
+        user_text: str,
+        ctx: Dict[str, Any],
+        context_messages: list,
+        delegate_triggers: list[str],
+        task_reasoning: str,
+        transcript_meta: Dict[str, Any],
+        chat_log_source: str,
+        output_profile: Dict[str, Any],
+    ) -> None:
+        try:
+            self._set_delegate_task_state(
+                ctx,
+                "running",
+                summary=user_text[:200],
+                triggers=delegate_triggers,
+                meta={"background": True},
+            )
+            self._add_delegate_session_event(
+                "background_running",
+                ctx=ctx,
+                user_text=user_text,
+                triggers=delegate_triggers,
+                text=user_text,
+                meta={"background": True},
+            )
+            (
+                delegate_triggered,
+                delegate_clean,
+                delegate_results,
+                delegate_used,
+            ) = await self._run_delegate_round(
+                user_text=user_text,
+                ctx=ctx,
+                context_messages=context_messages,
+                delegate_triggers=delegate_triggers,
+                task_reasoning=task_reasoning,
+            )
+            summary = (
+                "\n".join(delegate_results)[:200]
+                if delegate_results
+                else (delegate_clean or user_text[:200])
+            )
+            self._set_delegate_task_state(
+                ctx,
+                "done" if delegate_results or delegate_used else "skipped",
+                summary=summary,
+                triggers=delegate_triggers,
+                meta={
+                    "background": True,
+                    "delegate_triggered": bool(delegate_triggered),
+                    "delegate_used": list(delegate_used or []),
+                },
+            )
+            self._add_delegate_session_event(
+                "background_completed"
+                if (delegate_results or delegate_used)
+                else "background_skipped",
+                ctx=ctx,
+                user_text=user_text,
+                triggers=delegate_triggers,
+                text=(
+                    "\n".join(delegate_results)[:600]
+                    if delegate_results
+                    else (delegate_clean or "")
+                ),
+                meta={
+                    "background": True,
+                    "delegate_used": list(delegate_used or []),
+                },
+            )
+            final_text = ""
+            if delegate_results:
+                final_text = "\n".join(
+                    str(item) for item in delegate_results if str(item).strip()
+                )
+            elif delegate_clean:
+                final_text = delegate_clean
+            if not final_text:
+                final_text = "后台任务已处理完成。"
+            final_text, final_emo = await self._polish_background_delegate_reply(
+                user_text=user_text,
+                ctx=ctx,
+                delegate_triggers=delegate_triggers,
+                delegate_results=delegate_results,
+                delegate_clean=delegate_clean,
+            )
+            await self._emit_assistant_text(
+                final_text,
+                ctx=ctx,
+                emotion=final_emo,
+                transcript_meta=transcript_meta,
+                chat_log_source=chat_log_source,
+                output_profile=output_profile,
+                tool=True,
+            )
+            self._add_delegate_session_event(
+                "background_reply",
+                ctx=ctx,
+                user_text=user_text,
+                triggers=delegate_triggers,
+                text=final_text,
+                meta={"emotion": final_emo, "background": True},
+            )
+        except Exception as e:
+            self._set_delegate_task_state(
+                ctx,
+                "failed",
+                summary=str(e)[:200],
+                triggers=delegate_triggers,
+                meta={"background": True},
+            )
+            self._add_delegate_session_event(
+                "background_failed",
+                ctx=ctx,
+                user_text=user_text,
+                triggers=delegate_triggers,
+                text=str(e),
+                meta={"background": True},
+            )
+            await self._emit_assistant_text(
+                f"刚才委托的后台任务失败了：{e}",
+                ctx=ctx,
+                emotion="neutral",
+                transcript_meta=transcript_meta,
+                chat_log_source=chat_log_source,
+                output_profile=output_profile,
+                tool=True,
+            )
+
+    async def _run_workspace_read_shortcut(
+        self, *, user_text: str, ctx: Dict[str, Any]
+    ) -> tuple[bool, str, list[str], list[str]]:
+        path = self._extract_workspace_read_path(user_text)
+        if not path:
+            return False, "", [], []
+        delegate_ctx = dict(ctx or {})
+        delegate_ctx["delegate_mode"] = True
+        delegate_ctx["allow_read"] = True
+        delegate_ctx["allow_write"] = False
+        delegate_ctx["allow_exec"] = False
+        command = f"[CMD: workspace_ops | read_file ||| {path}]"
+        return await self.plugin_manager.execute_commands(
+            command,
+            delegate_ctx,
+            allow_tools=True,
+            allowed_types={"delegate"},
+        )
+
+    async def _run_delegate_round(
+        self,
+        *,
+        user_text: str,
+        ctx: Dict[str, Any],
+        context_messages: list,
+        delegate_triggers: list[str],
+        task_reasoning: str,
+    ) -> tuple[bool, str, list[str], list[str]]:
+        if not delegate_triggers:
+            return False, "", [], []
+
+        delegate_prompt = self.plugin_manager.get_delegate_prompt_for_triggers(
+            list(delegate_triggers), compact=True
+        )
+        if not delegate_prompt:
+            return False, "", [], []
+
+        delegate_ctx = dict(ctx or {})
+        delegate_ctx["delegate_mode"] = True
+        delegate_ctx["allow_read"] = True
+        delegate_ctx["allow_write"] = bool(delegate_ctx.get("allow_write", False))
+        delegate_ctx["allow_exec"] = bool(delegate_ctx.get("allow_exec", False))
+
+        delegate_messages = list(context_messages)
+        delegate_messages.append(
+            {
+                "role": "system",
+                "content": (
+                    "【副脑模式】你当前是任务执行脑，只负责为复杂任务选择并调用委托型工具。"
+                    "不要维持人设聊天，不要安抚，不要寒暄，只输出必要的工具调用或极简任务结论。"
+                    + delegate_prompt
+                ),
+            }
+        )
+        delegate_messages.append(
+            {
+                "role": "user",
+                "content": (
+                    "请判断这条请求是否需要委托型工具。"
+                    "如果需要，严格输出对应的 [CMD: 命令 | 需求说明]；"
+                    "如果不需要，输出一句不超过20字的结论。\n\n"
+                    f"原始请求：{user_text}"
+                ),
+            }
+        )
+
+        try:
+            delegate_reply = await asyncio.to_thread(
+                chat_with_ai,
+                delegate_messages,
+                task_type=task_reasoning,
+                caller="chat_delegate_reasoning",
+            )
+        except Exception as e:
+            err = str(e or "").strip()
+            lowered = err.lower()
+            if "429" in lowered or "rate limit" in lowered:
+                return (
+                    True,
+                    "",
+                    ["副脑当前请求过多，暂时无法读取文件或执行复杂任务，请稍后再试。"],
+                    [],
+                )
+            return (
+                True,
+                "",
+                [f"副脑执行复杂任务时失败：{err or '未知错误'}"],
+                [],
+            )
+        return await self.plugin_manager.execute_commands(
+            delegate_reply,
+            delegate_ctx,
+            allow_tools=True,
+            allowed_types={"delegate"},
+        )
 
     def _update_active_time(self):
         """更新活跃时间戳"""
@@ -1666,8 +2236,10 @@ class ChatService:
         store = getattr(self.brain, "sqlite_store", None)
         if not store:
             return "", "", ""
-        today = datetime.now().date()
+        now_dt = datetime.now()
+        today = now_dt.date()
         yesterday = today - timedelta(days=1)
+        max_age = timedelta(hours=18)
         try:
             rows = store.list_transcript(limit=420, offset=0)
             for r in rows:
@@ -1676,10 +2248,24 @@ class ChatService:
                 ts = int(r.get("ts", 0) or 0)
                 if not ts:
                     continue
-                if datetime.fromtimestamp(ts).date() != yesterday:
+                msg_dt = datetime.fromtimestamp(ts)
+                if msg_dt.date() != yesterday:
+                    continue
+                if (now_dt - msg_dt) > max_age:
                     continue
                 content = str(r.get("content") or "").strip()
                 if not content:
+                    continue
+                meta = r.get("meta") or {}
+                path = str(meta.get("path") or "").strip().lower()
+                if path in {
+                    "direct",
+                    "tool_use",
+                    "proactive_followup",
+                    "task_followup",
+                }:
+                    continue
+                if content.startswith("/"):
                     continue
                 topic = self._match_followup_topic(content)
                 if not topic:
@@ -1729,6 +2315,10 @@ class ChatService:
 
             today_str = datetime.now().strftime("%Y-%m-%d")
             if self._last_proactive_followup_day == today_str:
+                return None
+
+            # 主动关心只在每天较早时段触发，避免把昨天的话题拖得太久。
+            if datetime.now().hour >= 12:
                 return None
 
             # 用户当前已经在主动聊这些话题，就不插入
@@ -1842,7 +2432,7 @@ class ChatService:
         if codex_mode and not str(ctx.get("codex_task_id", "")).strip():
             ctx["codex_task_id"] = uuid.uuid4().hex[:8]
         code_path = str(ctx.get("code_path", "") or "").strip()
-        # 代码助手权限统一受 codex_mode 约束，防止普通对话误触文件能力
+        # 代码助手权限默认仅在 codex_mode 下开放；delegate 只读权限会在副脑上下文单独注入
         ctx["allow_read"] = bool(ctx.get("allow_read", False)) and codex_mode
         ctx["allow_write"] = bool(ctx.get("allow_write", False)) and codex_mode
         ctx["allow_exec"] = bool(ctx.get("allow_exec", False)) and codex_mode
@@ -2109,6 +2699,25 @@ class ChatService:
         effective_triggers = list(route.tool_triggers or [])
         if codex_mode and "workspace_ops" not in effective_triggers:
             effective_triggers.append("workspace_ops")
+        normal_triggers, delegate_triggers = self._split_delegate_triggers(
+            effective_triggers
+        )
+        if delegate_triggers:
+            self._set_delegate_task_state(
+                ctx,
+                "planned",
+                summary=user_text[:200],
+                triggers=delegate_triggers,
+                meta={"route_reason": str(route.reason or "")},
+            )
+            self._add_delegate_session_event(
+                "planned",
+                ctx=ctx,
+                user_text=user_text,
+                triggers=delegate_triggers,
+                text=user_text,
+                meta={"route_reason": str(route.reason or "")},
+            )
         need_tools = bool(route.need_tools or (codex_mode and effective_triggers))
         if codex_mode and need_tools:
             self._set_codex_task_state(
@@ -2180,12 +2789,17 @@ class ChatService:
         tool_prompt = ""
         if need_tools:
             tool_prompt = self.plugin_manager.get_tool_prompt_for_triggers(
-                list(effective_triggers), compact=True
+                list(normal_triggers), compact=True
             )
         else:
             tool_prompt = self.plugin_manager.get_system_prompt_addition()
         if tool_prompt:
             system_text += "\n" + tool_prompt
+        delegate_prompt = self.plugin_manager.get_delegate_prompt_for_triggers(
+            list(delegate_triggers), compact=True
+        )
+        if delegate_prompt:
+            system_text += "\n" + delegate_prompt
         mcp_prompt = self._build_mcp_tool_prompt()
         if mcp_prompt:
             system_text += "\n" + mcp_prompt
@@ -2232,9 +2846,130 @@ class ChatService:
 
             allow_tools = bool(need_tools) or self._contains_cmd(reply1 or "")
             ret = await self.plugin_manager.execute_commands(
-                reply1, ctx, allow_tools=allow_tools
+                reply1,
+                ctx,
+                allow_tools=allow_tools,
+                allowed_types={"react"},
             )
             triggered, clean_thought, tool_results, used_triggers = ret
+            if delegate_triggers:
+                self._set_delegate_task_state(
+                    ctx,
+                    "running",
+                    summary=user_text[:200],
+                    triggers=delegate_triggers,
+                )
+                self._add_delegate_session_event(
+                    "running",
+                    ctx=ctx,
+                    user_text=user_text,
+                    triggers=delegate_triggers,
+                    text=user_text,
+                )
+                background_delegate = self._should_use_background_delegate(
+                    route_reason=str(route.reason or ""),
+                    delegate_triggers=delegate_triggers,
+                    ctx=ctx,
+                )
+                if str(route.reason or "") == "workspace_read_preferred":
+                    (
+                        delegate_triggered,
+                        delegate_clean,
+                        delegate_results,
+                        delegate_used,
+                    ) = await self._run_workspace_read_shortcut(
+                        user_text=user_text,
+                        ctx=ctx,
+                    )
+                elif background_delegate:
+                    delegate_triggered = True
+                    delegate_clean = ""
+                    delegate_results = ["我先在后台处理，完成后再回来告诉你结果。"]
+                    delegate_used = []
+                    self._set_delegate_task_state(
+                        ctx,
+                        "queued",
+                        summary=user_text[:200],
+                        triggers=delegate_triggers,
+                        meta={"background": True},
+                    )
+                    self._add_delegate_session_event(
+                        "queued",
+                        ctx=ctx,
+                        user_text=user_text,
+                        triggers=delegate_triggers,
+                        text="后台排队中",
+                        meta={"background": True},
+                    )
+                    asyncio.create_task(
+                        self._run_background_delegate_task(
+                            user_text=user_text,
+                            ctx=dict(ctx or {}),
+                            context_messages=list(context_messages),
+                            delegate_triggers=list(delegate_triggers),
+                            task_reasoning=task_reasoning,
+                            transcript_meta=dict(transcript_channel_meta or {}),
+                            chat_log_source=chat_log_source,
+                            output_profile=dict(output_profile or {}),
+                        )
+                    )
+                else:
+                    (
+                        delegate_triggered,
+                        delegate_clean,
+                        delegate_results,
+                        delegate_used,
+                    ) = await self._run_delegate_round(
+                        user_text=user_text,
+                        ctx=ctx,
+                        context_messages=context_messages,
+                        delegate_triggers=delegate_triggers,
+                        task_reasoning=task_reasoning,
+                    )
+                if delegate_clean and not clean_thought:
+                    clean_thought = delegate_clean
+                if delegate_triggered:
+                    triggered = True
+                if delegate_results:
+                    tool_results.extend(delegate_results)
+                if delegate_used:
+                    used_triggers.extend(delegate_used)
+                self._set_delegate_task_state(
+                    ctx,
+                    (
+                        "queued"
+                        if background_delegate
+                        else (
+                            "done" if delegate_results or delegate_used else "skipped"
+                        )
+                    ),
+                    summary=(
+                        "\n".join(delegate_results)[:200]
+                        if delegate_results
+                        else (delegate_clean or user_text[:200])
+                    ),
+                    triggers=delegate_triggers,
+                    meta={
+                        "background": bool(background_delegate),
+                        "delegate_triggered": bool(delegate_triggered),
+                        "delegate_used": list(delegate_used or []),
+                    },
+                )
+                self._add_delegate_session_event(
+                    "completed" if (delegate_results or delegate_used) else "skipped",
+                    ctx=ctx,
+                    user_text=user_text,
+                    triggers=delegate_triggers,
+                    text=(
+                        "\n".join(delegate_results)[:600]
+                        if delegate_results
+                        else (delegate_clean or "")
+                    ),
+                    meta={
+                        "background": bool(background_delegate),
+                        "delegate_used": list(delegate_used or []),
+                    },
+                )
             ctx["_tool_results"] = tool_results
             reasoning_text = self._clean_text_for_tts(
                 self._strip_cmd_anywhere(
@@ -2275,6 +3010,11 @@ class ChatService:
                     used_set = {str(t or "").strip().lower() for t in used_triggers}
                     if used_set & {"search", "search_web"}:
                         compact_hint = "\n请只输出关键信息（<=3条），不要表格，不要展示思考过程，不要输出完整链接。如是行情/价格/汇率/指数问题，尽量给出具体数值+单位+时间；找不到数值就直说未找到。"
+                    elif (
+                        used_set & {"workspace_ops"}
+                        and str(route.reason or "") == "workspace_read_preferred"
+                    ):
+                        compact_hint = "\n请仅基于文件内容回答：先说明这是什么文件、主要做什么；不要延伸诊断用户未明确提出的问题，不要推测故障原因，不要补充与文件内容无直接依据的建议。"
                 context_messages.append(
                     {
                         "role": "system",
@@ -2308,7 +3048,9 @@ class ChatService:
                         final_reply += f"\n\n{sharing}"
 
             final_reply = self._clean_text_for_tts(
-                self._strip_cmd_anywhere(self._strip_emo_tags_anywhere(final_reply))
+                self._strip_internal_tags(
+                    self._strip_cmd_anywhere(self._strip_emo_tags_anywhere(final_reply))
+                )
             )
             final_reply = self._merge_preface_texts(preface_text, final_reply)
 
@@ -2629,6 +3371,14 @@ class ChatService:
         if not clean_title.strip():
             clean_title = category
 
+        lowered_title = clean_title.lower()
+        if any(
+            bad in lowered_title
+            for bad in ["锁屏", "windows 默认锁屏界面", "live2d agent", "登录"]
+        ):
+            self.logger.info(f"🛑 [Sensor] 跳过系统/自身界面视觉吐槽 ({clean_title})")
+            return
+
         display_app = app_name or clean_title
 
         if time.time() - self._last_reply_time < self._sensor_min_reply_interval_sec:
@@ -2807,8 +3557,20 @@ class ChatService:
     """
                             reply = await asyncio.to_thread(
                                 chat_with_ai,
-                                [{"role": "system", "content": sys_prompt}],
-                                task_type="default",
+                                [
+                                    {
+                                        "role": "system",
+                                        "content": f"{base_prompt}\n{context_block}",
+                                    },
+                                    {
+                                        "role": "user",
+                                        "content": (
+                                            f"当前屏幕内容：\n{description}\n\n"
+                                            "请直接输出一句不超过20个字的吐槽或关心。"
+                                        ),
+                                    },
+                                ],
+                                task_type="sensor_vision_talk",
                                 caller="sensor_vision_talk",
                             )
 
@@ -2861,6 +3623,18 @@ class ChatService:
     ):
         """统一发送传感器回复"""
         extracted_emo, clean_text = self._extract_emo_tag(reply)
+
+        lowered = str(clean_text or "").lower()
+        bad_patterns = [
+            "we need to",
+            "your task",
+            "up to 20 characters",
+            "直接对他说话进行吐槽",
+            "结合用户屏幕上的主要内容",
+        ]
+        if any(p in lowered for p in bad_patterns):
+            self.logger.warning("⚠️ [Sensor] 视觉吐槽输出疑似复述提示词，已丢弃")
+            return
 
         if not clean_text or len(clean_text) < 2:
             return
@@ -3034,6 +3808,15 @@ class ChatService:
         owner_chat_history = await asyncio.to_thread(
             self._fetch_day_owner_chat_history, date_str
         )
+        owner_local_history = await asyncio.to_thread(
+            self._fetch_day_owner_chat_history, date_str, "local"
+        )
+        owner_qq_private_history = await asyncio.to_thread(
+            self._fetch_day_owner_chat_history, date_str, "qq_private"
+        )
+        owner_qq_group_history = await asyncio.to_thread(
+            self._fetch_day_owner_chat_history, date_str, "qq_group"
+        )
 
         if not report_text and not chat_history and not owner_chat_history:
             print(f"[Diary] Skip {date_str}: no data")
@@ -3073,14 +3856,26 @@ class ChatService:
 [数据源3：主人跨渠道聊天记录]
 {owner_chat_history if owner_chat_history else "(no owner local/QQ shared history today)"}
 
+[数据源3a：主人本地聊天]
+{owner_local_history if owner_local_history else "(none)"}
+
+[数据源3b：主人 QQ 私聊]
+{owner_qq_private_history if owner_qq_private_history else "(none)"}
+
+[数据源3c：主人 QQ 群聊]
+{owner_qq_group_history if owner_qq_group_history else "(none)"}
+
 [输出要求]
 1. 必须只使用简体中文，不要输出英文段落、日文句子或混合语言。
 2. 必须使用第一人称，并以“{active_char_name}”的视角来写。
 3. 要包含具体细节，例如使用过的软件、讨论过的话题、发生过的互动。
-4. 如果数据源3不为空，要明确写出和主人的本地聊天与 QQ 互动。
+4. 如果数据源3或3a/3b/3c不为空，要明确写出和主人的本地聊天、QQ私聊、QQ群聊互动，并尽量区分这些场景。
 5. 保持简洁，控制在 500 字以内。
 6. 不要输出标题，不要输出项目符号，直接给出自然的一段或几段日记正文。
-"""
+7. 数据源1里的屏幕内容只能当作“我在屏幕上看到/处理过什么”的线索，不能直接当作现实世界已经发生的事实。
+8. 如果看到天气、锁屏壁纸、宣传文案、网页标题、窗口文字、桌面组件文案，只能写成“屏幕上出现了……/我看到……”，不要写成“窗外正在……/现实里正在……”。
+9. 除非聊天记录里明确提到真实天气或真实环境，否则不要把屏幕里的天气文案改写成现实天气。
+ """
 
         try:
             diary_content = await asyncio.to_thread(
@@ -3244,11 +4039,47 @@ class ChatService:
         lines = [line for line in lines if line]
         return "\n".join(lines) if lines else "(no chat history)"
 
-    def _fetch_day_owner_chat_history(self, date_str: str) -> str:
+    def _fetch_day_owner_chat_history(self, date_str: str, mode: str = "all") -> str:
         rows = self._load_day_transcript_rows(date_str)
         if not rows:
             return ""
-        owner_rows = [row for row in rows if self._is_owner_shared_row(row)]
+        owner_rows = []
+        for row in rows:
+            if self._is_owner_shared_row(row):
+                source = str(row.get("source") or "").strip().lower()
+                session_id = str(row.get("session_id") or "").strip().lower()
+                if mode == "local" and source in QQ_REMOTE_SOURCES:
+                    continue
+                if mode == "qq_private" and not (
+                    source in QQ_REMOTE_SOURCES and session_id.startswith("private:")
+                ):
+                    continue
+                if mode == "qq_group" and not (
+                    source in QQ_REMOTE_SOURCES and session_id.startswith("group:")
+                ):
+                    continue
+                owner_rows.append(row)
+                continue
+            source = str(row.get("source") or "").strip().lower()
+            session_id = str(row.get("session_id") or "").strip().lower()
+            if source in QQ_REMOTE_SOURCES:
+                sender = (
+                    row.get("sender") if isinstance(row.get("sender"), dict) else {}
+                )
+                is_owner = (
+                    bool(sender.get("is_owner")) if isinstance(sender, dict) else False
+                )
+                if not is_owner:
+                    meta = row.get("meta") if isinstance(row.get("meta"), dict) else {}
+                    is_owner = bool(meta.get("is_owner"))
+                if is_owner:
+                    if mode == "local":
+                        continue
+                    if mode == "qq_private" and not session_id.startswith("private:"):
+                        continue
+                    if mode == "qq_group" and not session_id.startswith("group:"):
+                        continue
+                    owner_rows.append(row)
         if not owner_rows:
             return ""
         lines = [self._format_day_transcript_line(row) for row in owner_rows]

@@ -12,16 +12,24 @@ from config import LLM_ROUTER, MODELS, SENSOR_VISION_MODEL
 
 try:
     from modules.model_transport_state import (
+        get_preferred_model,
         get_preferred_transport,
         record_failure,
         record_success,
+        record_task_model_success,
     )
 except Exception:
     # Transport memory is best-effort and must not block LLM calls.
+    def get_preferred_model(task_key: str):
+        return None
+
     def get_preferred_transport(model_key: str):
         return None
 
     def record_success(model_key: str, transport: str):
+        return False
+
+    def record_task_model_success(task_key: str, model_key: str):
         return False
 
     def record_failure(model_key: str, transport: str, error: str = ""):
@@ -62,6 +70,12 @@ def _is_gemini_model(config: dict) -> bool:
     return "gemini" in model_name
 
 
+def _is_glm_model(config: dict) -> bool:
+    model_name = str((config or {}).get("model", "")).lower()
+    base_url = str((config or {}).get("base_url", "")).lower()
+    return "glm" in model_name or "bigmodel.cn" in base_url
+
+
 def _extract_text_content(raw_content) -> str:
     if isinstance(raw_content, str):
         return raw_content.strip()
@@ -79,7 +93,7 @@ def _extract_text_content(raw_content) -> str:
 
 def _messages_to_responses_input(messages_context) -> list:
     output = []
-    for msg in (messages_context or []):
+    for msg in messages_context or []:
         if not isinstance(msg, dict):
             continue
         role = str(msg.get("role", "user")).strip().lower() or "user"
@@ -93,7 +107,7 @@ def _messages_to_responses_input(messages_context) -> list:
 
 def _messages_to_text_block(messages_context) -> str:
     lines = []
-    for msg in (messages_context or []):
+    for msg in messages_context or []:
         if not isinstance(msg, dict):
             continue
         role = str(msg.get("role", "user")).strip().lower() or "user"
@@ -156,7 +170,9 @@ def _extract_responses_text(data: dict) -> str:
     return "\n".join(texts).strip()
 
 
-def _chat_with_openai_responses(messages_context, config: dict, timeout: int = 30) -> str:
+def _chat_with_openai_responses(
+    messages_context, config: dict, timeout: int = 30
+) -> str:
     model_name = str((config or {}).get("model", "")).strip()
     api_key = str((config or {}).get("api_key", "")).strip()
     base_url = str((config or {}).get("base_url", "")).strip()
@@ -179,9 +195,13 @@ def _chat_with_openai_responses(messages_context, config: dict, timeout: int = 3
             "model": model_name,
             "input": _messages_to_text_block(messages_context),
         }
-        fallback_resp = requests.post(url, headers=headers, json=fallback_payload, timeout=timeout)
+        fallback_resp = requests.post(
+            url, headers=headers, json=fallback_payload, timeout=timeout
+        )
         if fallback_resp.status_code >= 400:
-            raise RuntimeError(f"openai_responses HTTP {fallback_resp.status_code}: {fallback_resp.text[:280]}")
+            raise RuntimeError(
+                f"openai_responses HTTP {fallback_resp.status_code}: {fallback_resp.text[:280]}"
+            )
         resp = fallback_resp
     data = resp.json()
     text = _extract_responses_text(data)
@@ -190,7 +210,9 @@ def _chat_with_openai_responses(messages_context, config: dict, timeout: int = 3
     raise RuntimeError("openai_responses returned empty content")
 
 
-def _build_gemini_native_url(base_url: str, model_name: str, api_key: str) -> tuple[str, dict]:
+def _build_gemini_native_url(
+    base_url: str, model_name: str, api_key: str
+) -> tuple[str, dict]:
     base = str(base_url or "").strip().rstrip("/")
     if base.endswith("/v1"):
         base = base[:-3]
@@ -208,7 +230,7 @@ def _build_gemini_native_url(base_url: str, model_name: str, api_key: str) -> tu
 def _messages_to_gemini_contents(messages_context) -> list:
     contents = []
     system_chunks = []
-    for msg in (messages_context or []):
+    for msg in messages_context or []:
         if not isinstance(msg, dict):
             continue
         role = str(msg.get("role", "user")).strip().lower()
@@ -229,9 +251,16 @@ def _messages_to_gemini_contents(messages_context) -> list:
             parts = first.get("parts", [])
             if isinstance(parts, list) and parts and isinstance(parts[0], dict):
                 first_text = str(parts[0].get("text", ""))
-            first["parts"] = [{"text": f"[System Instruction]\n{sys_text}\n\n{first_text}"}]
+            first["parts"] = [
+                {"text": f"[System Instruction]\n{sys_text}\n\n{first_text}"}
+            ]
         else:
-            contents.append({"role": "user", "parts": [{"text": f"[System Instruction]\n{sys_text}"}]})
+            contents.append(
+                {
+                    "role": "user",
+                    "parts": [{"text": f"[System Instruction]\n{sys_text}"}],
+                }
+            )
 
     return contents or [{"role": "user", "parts": [{"text": "你好"}]}]
 
@@ -289,15 +318,35 @@ def _dedupe(items):
 def _build_attempt_order(config: dict, model_key: str = "") -> list[str]:
     style = _model_style(config)
     is_gemini = _is_gemini_model(config)
+    is_glm = _is_glm_model(config)
+
+    if is_glm:
+        attempts = ["openai"]
+        preferred = get_preferred_transport(model_key) if model_key else None
+        if preferred == "openai":
+            return attempts
+        return attempts
 
     if style in {"responses", "openai_responses"}:
-        base = ["openai_responses", "openai", "gemini_native"] if is_gemini else ["openai_responses", "openai"]
+        base = (
+            ["openai_responses", "openai", "gemini_native"]
+            if is_gemini
+            else ["openai_responses", "openai"]
+        )
     elif style in {"gemini_native", "google"}:
         base = ["gemini_native", "openai", "openai_responses"]
     elif style in {"openai", "gemini"}:
-        base = ["openai", "openai_responses", "gemini_native"] if is_gemini else ["openai", "openai_responses"]
+        base = (
+            ["openai", "openai_responses", "gemini_native"]
+            if is_gemini
+            else ["openai", "openai_responses"]
+        )
     else:
-        base = ["openai", "openai_responses", "gemini_native"] if is_gemini else ["openai", "openai_responses"]
+        base = (
+            ["openai", "openai_responses", "gemini_native"]
+            if is_gemini
+            else ["openai", "openai_responses"]
+        )
 
     attempts = _dedupe(base)
     preferred = get_preferred_transport(model_key) if model_key else None
@@ -327,7 +376,12 @@ async def analyze_image(
                     "role": "user",
                     "content": [
                         {"type": "text", "text": prompt},
-                        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image_base64}"}},
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:image/jpeg;base64,{image_base64}"
+                            },
+                        },
                     ],
                 }
             ],
@@ -343,13 +397,19 @@ async def analyze_image(
     return "（视觉识别返回为空）"
 
 
-async def chat_with_ai_stream(messages_context, task_type="default") -> AsyncGenerator[str, None]:
+async def chat_with_ai_stream(
+    messages_context, task_type="default"
+) -> AsyncGenerator[str, None]:
     model_keys = LLM_ROUTER.get(task_type, LLM_ROUTER.get("default", []))
     if isinstance(model_keys, str):
         model_keys = [model_keys]
     if not model_keys:
         yield "（配置错误：无可用模型）"
         return
+
+    preferred_model = get_preferred_model(task_type)
+    if preferred_model and preferred_model in model_keys:
+        model_keys = [preferred_model] + [m for m in model_keys if m != preferred_model]
 
     for idx, key in enumerate(model_keys, 1):
         config = MODELS.get(key)
@@ -361,12 +421,16 @@ async def chat_with_ai_stream(messages_context, task_type="default") -> AsyncGen
         t0 = time.time()
         attempts = _build_attempt_order(config, key)
         preferred = get_preferred_transport(key)
-        print(f"[LLM Stream] 传输顺序 model={key}: {attempts} preferred={preferred or '-'}")
+        print(
+            f"[LLM Stream] 传输顺序 model={key}: {attempts} preferred={preferred or '-'}"
+        )
 
         for method in attempts:
             try:
                 if method == "openai":
-                    client = AsyncOpenAI(api_key=config["api_key"], base_url=config["base_url"])
+                    client = AsyncOpenAI(
+                        api_key=config["api_key"], base_url=config["base_url"]
+                    )
                     response = await client.chat.completions.create(
                         model=config["model"],
                         messages=messages_context,
@@ -380,12 +444,16 @@ async def chat_with_ai_stream(messages_context, task_type="default") -> AsyncGen
                             yielded_any = True
                             yield content
                 elif method == "openai_responses":
-                    text = _chat_with_openai_responses(messages_context, config, timeout=20)
+                    text = _chat_with_openai_responses(
+                        messages_context, config, timeout=20
+                    )
                     if text:
                         yielded_any = True
                         yield text
                 elif method == "gemini_native":
-                    text = _chat_with_gemini_native(messages_context, config, timeout=20)
+                    text = _chat_with_gemini_native(
+                        messages_context, config, timeout=20
+                    )
                     if text:
                         yielded_any = True
                         yield text
@@ -393,6 +461,7 @@ async def chat_with_ai_stream(messages_context, task_type="default") -> AsyncGen
                     raise RuntimeError(f"unsupported transport: {method}")
 
                 record_success(key, method)
+                record_task_model_success(task_type, key)
                 _record_metric(
                     {
                         "ts": time.time(),
@@ -428,10 +497,14 @@ async def chat_with_ai_stream(messages_context, task_type="default") -> AsyncGen
     yield "（所有模型连接失败，请检查网络或 Key）"
 
 
-def chat_with_ai(messages_context, task_type="default", caller: str = "", request_id: str = ""):
+def chat_with_ai(
+    messages_context, task_type="default", caller: str = "", request_id: str = ""
+):
     request_id = request_id or uuid.uuid4().hex[:8]
     caller = caller or "unknown"
-    trace = f"task={task_type} caller={caller} req={request_id} tid={threading.get_ident()}"
+    trace = (
+        f"task={task_type} caller={caller} req={request_id} tid={threading.get_ident()}"
+    )
 
     msg_count = len(messages_context) if isinstance(messages_context, list) else 0
     msg_chars = 0
@@ -451,6 +524,10 @@ def chat_with_ai(messages_context, task_type="default", caller: str = "", reques
     if isinstance(model_keys, str):
         model_keys = [model_keys]
 
+    preferred_model = get_preferred_model(task_type)
+    if preferred_model and preferred_model in model_keys:
+        model_keys = [preferred_model] + [m for m in model_keys if m != preferred_model]
+
     for key_idx, key in enumerate(model_keys, 1):
         _trace_log(f"[LLM Sync] 尝试 #{key_idx}: {key} ({trace})")
         config = MODELS.get(key)
@@ -460,12 +537,16 @@ def chat_with_ai(messages_context, task_type="default", caller: str = "", reques
         t0 = time.time()
         attempts = _build_attempt_order(config, key)
         preferred = get_preferred_transport(key)
-        _trace_log(f"[LLM Sync] transport_order={attempts} preferred={preferred or '-'} ({trace})")
+        _trace_log(
+            f"[LLM Sync] transport_order={attempts} preferred={preferred or '-'} ({trace})"
+        )
 
         for method in attempts:
             try:
                 if method == "openai":
-                    client = OpenAI(api_key=config["api_key"], base_url=config["base_url"])
+                    client = OpenAI(
+                        api_key=config["api_key"], base_url=config["base_url"]
+                    )
                     response = client.chat.completions.create(
                         model=config["model"],
                         messages=messages_context,
@@ -474,9 +555,13 @@ def chat_with_ai(messages_context, task_type="default", caller: str = "", reques
                     raw_content = getattr(response.choices[0].message, "content", "")
                     content = _extract_text_content(raw_content)
                 elif method == "openai_responses":
-                    content = _chat_with_openai_responses(messages_context, config, timeout=30)
+                    content = _chat_with_openai_responses(
+                        messages_context, config, timeout=30
+                    )
                 elif method == "gemini_native":
-                    content = _chat_with_gemini_native(messages_context, config, timeout=30)
+                    content = _chat_with_gemini_native(
+                        messages_context, config, timeout=30
+                    )
                 else:
                     raise RuntimeError(f"unsupported transport: {method}")
 
@@ -484,6 +569,7 @@ def chat_with_ai(messages_context, task_type="default", caller: str = "", reques
                     raise RuntimeError(f"empty content from transport={method}")
 
                 record_success(key, method)
+                record_task_model_success(task_type, key)
                 _record_metric(
                     {
                         "ts": time.time(),
@@ -497,7 +583,9 @@ def chat_with_ai(messages_context, task_type="default", caller: str = "", reques
                         "error": "",
                     }
                 )
-                _trace_log(f"[LLM Sync] ✅ 成功({method}) (len={len(content)}) ({trace})")
+                _trace_log(
+                    f"[LLM Sync] ✅ 成功({method}) (len={len(content)}) ({trace})"
+                )
                 return str(content)
             except Exception as e:
                 record_failure(key, method, str(e))

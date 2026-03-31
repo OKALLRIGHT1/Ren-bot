@@ -23,6 +23,7 @@ from modules.gui.widgets.ball import DraggableBall
 from modules.gui.dialogs.plugin_manager import PluginManagerDialog
 from modules.gui.dialogs.settings import SettingsDialog
 from modules.gui.dialogs.knowledge_manager import KnowledgeManagerDialog
+from modules.gui.dialogs.status_screen_manager import StatusScreenManagerDialog
 from modules.gui.dialogs.codex_assistant import CodexAssistantDialog
 from modules.character_manager import character_manager
 
@@ -67,6 +68,7 @@ class QtChatTrayApp(QtCore.QObject):
         on_quit_callback: Optional[Callable[[], None]] = None,
         on_restart_callback: Optional[Callable[[], None]] = None,
         on_apply_external_settings_callback: Optional[Callable[[dict], dict]] = None,
+        on_display_state_callback: Optional[Callable[[dict], None]] = None,
         plugin_manager: Optional[Any] = None,
         cfg: Optional[QtGuiConfig] = None,
     ):
@@ -82,6 +84,7 @@ class QtChatTrayApp(QtCore.QObject):
         self.on_quit_callback = on_quit_callback
         self.on_restart_callback = on_restart_callback
         self.on_apply_external_settings_callback = on_apply_external_settings_callback
+        self.on_display_state_callback = on_display_state_callback
         self.plugin_manager = plugin_manager
 
         # --- 内部状态 ---
@@ -123,6 +126,7 @@ class QtChatTrayApp(QtCore.QObject):
 
         self._settings_dialog = None
         self._knowledge_dialog = None
+        self._status_screen_dialog = None
         self._plugin_dialog = None
         self._memory_dialog = None
         self._codex_dialog = None
@@ -404,6 +408,9 @@ class QtChatTrayApp(QtCore.QObject):
         menu.addSeparator()
         menu.addAction("🧩 插件管理").triggered.connect(self._on_plugin_clicked)
         menu.addAction("📚 知识库管理").triggered.connect(self._on_knowledge_clicked)
+        menu.addAction("📟 状态屏管理").triggered.connect(
+            self._on_status_screen_clicked
+        )
         menu.addAction("🧠 记忆编辑").triggered.connect(self._on_memory_clicked)
         if self.on_restart_callback:
             menu.addSeparator()
@@ -581,6 +588,18 @@ class QtChatTrayApp(QtCore.QObject):
         except Exception as e:
             self.append("system", f"❌ 知识库管理器加载失败: {e}")
 
+    def _on_status_screen_clicked(self):
+        try:
+            if not self._status_screen_dialog:
+                self._status_screen_dialog = StatusScreenManagerDialog(
+                    parent=None, main_app=self
+                )
+            self._status_screen_dialog.show()
+            self._status_screen_dialog.raise_()
+            self._status_screen_dialog.activateWindow()
+        except Exception as e:
+            self.append("system", f"❌ 状态屏管理器加载失败: {e}")
+
     def _on_costume_triggered(self, name, cfg=None):
         safe_cfg = cfg if isinstance(cfg, dict) else {}
         path = safe_cfg.get("path", "")
@@ -655,6 +674,7 @@ class QtChatTrayApp(QtCore.QObject):
         costume_name = self._current_costume_name or "未设定"
         self._lbl_character.setText(f"角色: {char_name} | 服装: {costume_name}")
         self._refresh_companion_summary()
+        self._publish_display_state()
 
     def _apply_costume_change(
         self,
@@ -856,6 +876,9 @@ class QtChatTrayApp(QtCore.QObject):
     def sync_active_character_visual(self):
         self._bridge.sig_sync_active_character_visual.emit()
 
+    def publish_display_snapshot(self):
+        self._publish_display_state()
+
     def trigger_costume_by_name(self, costume_name: str):
         self._bridge.sig_trigger_costume_name.emit(str(costume_name or ""))
 
@@ -929,6 +952,30 @@ class QtChatTrayApp(QtCore.QObject):
         self._lbl_status.setText(text)
         set_dot_status(self._dot, classify_status(text))
         self._refresh_companion_summary(text)
+        self._publish_display_state()
+
+    def _publish_display_state(self):
+        if not callable(self.on_display_state_callback):
+            return
+        try:
+            active = character_manager.get_active_character() or {}
+            emotion = "[idle]"
+            app_ref = getattr(self, "app", None)
+            emo_ctrl = getattr(app_ref, "emotion_controller", None)
+            current_emo = str(getattr(emo_ctrl, "current_emotion", "") or "").strip()
+            if current_emo:
+                emotion = f"[{current_emo}]"
+            payload = {
+                "role": str(active.get("name") or "未激活角色"),
+                "emotion": emotion,
+                "status": str(
+                    self._lbl_status.text() if hasattr(self, "_lbl_status") else "Ready"
+                ),
+            }
+            print(f"[DisplayState] {payload}")
+            self.on_display_state_callback(payload)
+        except Exception:
+            pass
 
     @QtCore.Slot(str)
     def _send_text_from_asr(self, text):

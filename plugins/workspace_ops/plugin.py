@@ -33,7 +33,7 @@ class Plugin:
     """
 
     name = "workspace_ops"
-    type = "react"
+    type = "delegate"
 
     MAX_READ_CHARS = 12000
     MAX_RESULTS = 200
@@ -44,9 +44,30 @@ class Plugin:
     ALLOWED_EXEC_PREFIX = {"python", "pytest", "ruff", "mypy", "uv"}
 
     TEXT_SUFFIXES = {
-        ".py", ".md", ".txt", ".json", ".yaml", ".yml", ".toml", ".ini",
-        ".js", ".ts", ".tsx", ".jsx", ".css", ".html", ".xml",
-        ".cpp", ".c", ".h", ".hpp", ".java", ".go", ".rs", ".sh", ".bat",
+        ".py",
+        ".md",
+        ".txt",
+        ".json",
+        ".yaml",
+        ".yml",
+        ".toml",
+        ".ini",
+        ".js",
+        ".ts",
+        ".tsx",
+        ".jsx",
+        ".css",
+        ".html",
+        ".xml",
+        ".cpp",
+        ".c",
+        ".h",
+        ".hpp",
+        ".java",
+        ".go",
+        ".rs",
+        ".sh",
+        ".bat",
     }
 
     def __init__(self):
@@ -60,6 +81,8 @@ class Plugin:
         self.session_changed_files: List[str] = []
 
     async def run(self, args: str, ctx: Dict[str, Any]) -> str:
+        if not bool((ctx or {}).get("delegate_mode", False)):
+            return "workspace_ops 现在仅允许通过副脑委托执行。"
         action, parts = self._parse_args(args or "")
         action = action.lower().strip()
 
@@ -156,7 +179,11 @@ class Plugin:
                 return self._session_events(limit)
 
             if action == "task_status":
-                task_id = parts[0].strip() if parts else str(ctx.get("codex_task_id", "")).strip()
+                task_id = (
+                    parts[0].strip()
+                    if parts
+                    else str(ctx.get("codex_task_id", "")).strip()
+                )
                 return self._task_status(task_id)
 
             if action == "task_list":
@@ -201,7 +228,9 @@ class Plugin:
         if len(parts) < n:
             raise ValueError(msg)
 
-    def _assert_permission(self, ctx: Dict[str, Any], *, need_read=False, need_write=False, need_exec=False):
+    def _assert_permission(
+        self, ctx: Dict[str, Any], *, need_read=False, need_write=False, need_exec=False
+    ):
         allow_read = bool(ctx.get("allow_read", False))
         allow_write = bool(ctx.get("allow_write", False))
         allow_exec = bool(ctx.get("allow_exec", False))
@@ -241,7 +270,9 @@ class Plugin:
             return candidate
         return base
 
-    def _resolve_target(self, path_str: str, ctx: Dict[str, Any], *, allow_create: bool = False) -> Path:
+    def _resolve_target(
+        self, path_str: str, ctx: Dict[str, Any], *, allow_create: bool = False
+    ) -> Path:
         path_str = (path_str or "").strip()
         if not path_str:
             raise ValueError("路径不能为空")
@@ -277,7 +308,9 @@ class Plugin:
         suffix = "\n...[truncated]" if len(text) > self.MAX_READ_CHARS else ""
         return f"# {rel}\n{truncated}{suffix}"
 
-    def _read_range(self, path_str: str, start_s: str, end_s: str, ctx: Dict[str, Any]) -> str:
+    def _read_range(
+        self, path_str: str, start_s: str, end_s: str, ctx: Dict[str, Any]
+    ) -> str:
         target = self._resolve_target(path_str, ctx, allow_create=False)
         start = int(start_s)
         end = int(end_s)
@@ -293,7 +326,9 @@ class Plugin:
             out.append(f"{i}: {lines[i - 1]}")
         return "\n".join(out)
 
-    def _search_code(self, pattern: str, subpath: str, glob: str, ctx: Dict[str, Any]) -> str:
+    def _search_code(
+        self, pattern: str, subpath: str, glob: str, ctx: Dict[str, Any]
+    ) -> str:
         root = self._resolve_target(subpath, ctx, allow_create=False)
         if not root.is_dir():
             raise NotADirectoryError(f"不是目录: {root}")
@@ -306,14 +341,22 @@ class Plugin:
             if not p.is_file() or p.suffix.lower() not in self.TEXT_SUFFIXES:
                 continue
             rel = p.relative_to(self.workspace_root).as_posix()
-            if glob and glob != "*" and not (fnmatch.fnmatch(rel, glob) or fnmatch.fnmatch(p.name, glob)):
+            if (
+                glob
+                and glob != "*"
+                and not (fnmatch.fnmatch(rel, glob) or fnmatch.fnmatch(p.name, glob))
+            ):
                 continue
             try:
                 lines = p.read_text(encoding="utf-8", errors="replace").splitlines()
             except Exception:
                 continue
             for idx, line in enumerate(lines, 1):
-                ok = bool(regex.search(line)) if regex else (pattern.lower() in line.lower())
+                ok = (
+                    bool(regex.search(line))
+                    if regex
+                    else (pattern.lower() in line.lower())
+                )
                 if not ok:
                     continue
                 hits.append(f"{rel}:{idx}: {line.strip()}")
@@ -342,7 +385,9 @@ class Plugin:
             lines = lines[: self.MAX_DIFF_LINES] + ["... (diff truncated)"]
         return "\n".join(lines) if lines else "(no changes)"
 
-    def _stage_write(self, path_str: str, content: str, ctx: Dict[str, Any], mode: str) -> str:
+    def _stage_write(
+        self, path_str: str, content: str, ctx: Dict[str, Any], mode: str
+    ) -> str:
         target = self._resolve_target(path_str, ctx, allow_create=True)
         old = ""
         if target.exists():
@@ -350,7 +395,9 @@ class Plugin:
         new = self._build_new_content(old, content, mode)
         return self._stage_change(target, old, new, ctx)
 
-    def _stage_replace(self, path_str: str, old_text: str, new_text: str, ctx: Dict[str, Any]) -> str:
+    def _stage_replace(
+        self, path_str: str, old_text: str, new_text: str, ctx: Dict[str, Any]
+    ) -> str:
         target = self._resolve_target(path_str, ctx, allow_create=False)
         old = target.read_text(encoding="utf-8", errors="replace")
         if old_text not in old:
@@ -358,7 +405,9 @@ class Plugin:
         new = old.replace(old_text, new_text, 1)
         return self._stage_change(target, old, new, ctx)
 
-    def _stage_change(self, target: Path, old: str, new: str, ctx: Dict[str, Any]) -> str:
+    def _stage_change(
+        self, target: Path, old: str, new: str, ctx: Dict[str, Any]
+    ) -> str:
         rel = target.relative_to(self.workspace_root).as_posix()
         change_id = uuid.uuid4().hex[:10]
         confirm_token = uuid.uuid4().hex[:8]
@@ -376,11 +425,17 @@ class Plugin:
         if task_id:
             try:
                 from modules.codex_task_state import set_task_state
+
                 set_task_state(
                     task_id,
                     "proposed_change",
                     summary=f"待确认变更: {rel}",
-                    meta={"change_id": change_id, "confirm_token": confirm_token, "file": rel, "preview": diff_text[:1500]},
+                    meta={
+                        "change_id": change_id,
+                        "confirm_token": confirm_token,
+                        "file": rel,
+                        "preview": diff_text[:1500],
+                    },
                 )
             except Exception:
                 pass
@@ -408,7 +463,7 @@ class Plugin:
             extra = f" | token={token}"
             if task_id:
                 extra += f" | task={task_id}"
-            out.append(f"- {cid} | {target} | {item.get('time','')}{extra}")
+            out.append(f"- {cid} | {target} | {item.get('time', '')}{extra}")
         return "\n".join(out)
 
     def _snapshot_before_write(self, target: Path):
@@ -422,11 +477,17 @@ class Plugin:
             backup = self.backup_root / f"{ts}__{safe_rel}"
             backup.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(target, backup)
-            self.session_backups[key] = {"mode": "file", "backup": str(backup), "rel": rel}
+            self.session_backups[key] = {
+                "mode": "file",
+                "backup": str(backup),
+                "rel": rel,
+            }
         else:
             self.session_backups[key] = {"mode": "created", "backup": "", "rel": rel}
 
-    def _apply_change(self, change_id: str, confirm_token: str, ctx: Dict[str, Any]) -> str:
+    def _apply_change(
+        self, change_id: str, confirm_token: str, ctx: Dict[str, Any]
+    ) -> str:
         item = self.pending_changes.get(change_id)
         if not item:
             return f"未找到变更: {change_id}"
@@ -434,7 +495,11 @@ class Plugin:
             user_confirmed = bool(ctx.get("codex_user_confirmed_apply", False))
             confirmed_change_id = str(ctx.get("codex_confirm_change_id", "")).strip()
             confirmed_token = str(ctx.get("codex_confirm_token", "")).strip()
-            if not user_confirmed or confirmed_change_id != change_id or confirmed_token != str(confirm_token).strip():
+            if (
+                not user_confirmed
+                or confirmed_change_id != change_id
+                or confirmed_token != str(confirm_token).strip()
+            ):
                 return "拒绝应用变更：需要用户在本轮消息中显式确认 change_id 与 confirm_token"
         expected = str(item.get("confirm_token", "")).strip()
         if not confirm_token or str(confirm_token).strip() != expected:
@@ -449,10 +514,14 @@ class Plugin:
         if rel not in self.session_changed_files:
             self.session_changed_files.append(rel)
         self.pending_changes.pop(change_id, None)
-        task_id = str(ctx.get("codex_task_id", "")).strip() or str(item.get("task_id", "")).strip()
+        task_id = (
+            str(ctx.get("codex_task_id", "")).strip()
+            or str(item.get("task_id", "")).strip()
+        )
         if task_id:
             try:
                 from modules.codex_task_state import set_task_state
+
                 set_task_state(
                     task_id,
                     "applied",
@@ -475,6 +544,7 @@ class Plugin:
 
         try:
             from modules.codex_session import add_event as codex_add_event
+
             codex_add_event(
                 "apply_change",
                 code_path=str(ctx.get("code_path", "")),
@@ -498,7 +568,9 @@ class Plugin:
     def _session_changes(self) -> str:
         if not self.session_changed_files:
             return "本会话暂无已应用文件变更"
-        return "本会话变更文件:\n" + "\n".join(f"- {x}" for x in self.session_changed_files)
+        return "本会话变更文件:\n" + "\n".join(
+            f"- {x}" for x in self.session_changed_files
+        )
 
     def _rollback_session(self) -> str:
         if not self.session_backups:
@@ -569,7 +641,10 @@ class Plugin:
                 pass
             files += 1
             details.append(f"- {f}: +{a} -{d}")
-        return f"git diff 摘要: files={files}, +{add_lines}, -{del_lines}\n" + "\n".join(details[:80])
+        return (
+            f"git diff 摘要: files={files}, +{add_lines}, -{del_lines}\n"
+            + "\n".join(details[:80])
+        )
 
     def _run_command_result(self, command: str) -> Dict[str, Any]:
         command = (command or "").strip()
@@ -630,7 +705,9 @@ class Plugin:
                 self.session_changed_files.remove(rel)
         return restored
 
-    def _autorun(self, ctx: Dict[str, Any], changed_paths: List[Path] | None = None) -> str:
+    def _autorun(
+        self, ctx: Dict[str, Any], changed_paths: List[Path] | None = None
+    ) -> str:
         self._assert_permission(ctx, need_exec=True)
         cmds = CODEX_AUTORUN_COMMANDS or []
         if not isinstance(cmds, list) or not cmds:
@@ -644,12 +721,20 @@ class Plugin:
             if not result.get("ok", False):
                 failed.append({"cmd": str(cmd), "code": result.get("code", -1)})
         if failed:
-            failed_line = ", ".join([f"{x['cmd']} (exit={x['code']})" for x in failed[:5]])
+            failed_line = ", ".join(
+                [f"{x['cmd']} (exit={x['code']})" for x in failed[:5]]
+            )
             reports.append(f"自动回归失败: {failed_line}")
             if task_id:
                 try:
                     from modules.codex_task_state import set_task_state
-                    set_task_state(task_id, "verify_failed", summary="自动回归失败", meta={"failed": failed[:5]})
+
+                    set_task_state(
+                        task_id,
+                        "verify_failed",
+                        summary="自动回归失败",
+                        meta={"failed": failed[:5]},
+                    )
                 except Exception:
                     pass
             if self.auto_rollback_on_fail and changed_paths:
@@ -659,17 +744,26 @@ class Plugin:
                     if task_id:
                         try:
                             from modules.codex_task_state import set_task_state
-                            set_task_state(task_id, "rollback_done", summary="自动回滚已执行", meta={"files": restored})
+
+                            set_task_state(
+                                task_id,
+                                "rollback_done",
+                                summary="自动回滚已执行",
+                                meta={"files": restored},
+                            )
                         except Exception:
                             pass
                 else:
                     reports.append("自动回滚已启用，但未找到可回滚快照")
             else:
-                reports.append("未自动回滚。可手动执行 [CMD: workspace_ops | rollback_session]")
+                reports.append(
+                    "未自动回滚。可手动执行 [CMD: workspace_ops | rollback_session]"
+                )
         else:
             if task_id:
                 try:
                     from modules.codex_task_state import set_task_state
+
                     set_task_state(task_id, "verify_passed", summary="自动回归通过")
                 except Exception:
                     pass
@@ -685,12 +779,17 @@ class Plugin:
             f"active_task_id={task_id}\n"
             f"pending_changes={pending}\n"
             f"session_changed_files={changed}\n"
-            + ("\n".join(f"- {x}" for x in self.session_changed_files) if self.session_changed_files else "")
+            + (
+                "\n".join(f"- {x}" for x in self.session_changed_files)
+                if self.session_changed_files
+                else ""
+            )
         )
 
     def _session_events(self, limit: int = 20) -> str:
         try:
             from modules.codex_session import get_recent as codex_get_recent
+
             items = codex_get_recent(max(1, min(100, int(limit))))
         except Exception as e:
             return f"读取 codex 会话事件失败: {e}"
@@ -725,6 +824,7 @@ class Plugin:
             return "请提供 task_id"
         try:
             from modules.codex_task_state import get_task
+
             task = get_task(task_id)
         except Exception as e:
             return f"读取任务状态失败: {e}"
@@ -745,6 +845,7 @@ class Plugin:
     def _task_list(self, limit: int = 20) -> str:
         try:
             from modules.codex_task_state import get_recent_tasks
+
             items = get_recent_tasks(max(1, min(100, int(limit))))
         except Exception as e:
             return f"读取任务列表失败: {e}"
@@ -753,6 +854,6 @@ class Plugin:
         out = [f"最近 {len(items)} 个任务："]
         for it in items:
             out.append(
-                f"- {it.get('task_id','')} | {it.get('state','')} | {it.get('updated_at','')} | {it.get('code_path','')}"
+                f"- {it.get('task_id', '')} | {it.get('state', '')} | {it.get('updated_at', '')} | {it.get('code_path', '')}"
             )
         return "\n".join(out)

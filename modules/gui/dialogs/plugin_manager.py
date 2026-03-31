@@ -450,6 +450,10 @@ class PluginEditorDialog(QtWidgets.QDialog):
             ingest_btn = QtWidgets.QPushButton("📚 保存并学习")
             ingest_btn.clicked.connect(self._save_and_run_knowledge_ingest)
             btn_layout.addWidget(ingest_btn)
+        elif str(self.trigger or "").strip() == "search_web":
+            check_btn = QtWidgets.QPushButton("🌐 检测搜索接口")
+            check_btn.clicked.connect(self._run_search_endpoint_check)
+            btn_layout.addWidget(check_btn)
 
         reset_btn = QtWidgets.QPushButton("🔄 重置")
         reset_btn.setObjectName("reset_btn")
@@ -1565,3 +1569,14 @@ class PluginEditorDialog(QtWidgets.QDialog):
             QtWidgets.QMessageBox.information(self, "学习结果", str(result))
         except Exception as e:
             QtWidgets.QMessageBox.critical(self, "错误", f"GUI 学习失败: {e}")
+
+    def _run_search_endpoint_check(self):
+        plugin = self.plugin_manager.plugins.get(self.trigger)
+        if plugin is None or not hasattr(plugin, "gui_check_endpoints"):
+            QtWidgets.QMessageBox.information(self, "提示", "当前插件不支持接口检测。")
+            return
+        try:
+            result = asyncio.run(plugin.gui_check_endpoints())
+            QtWidgets.QMessageBox.information(self, "接口检测结果", str(result))
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(self, "错误", f"接口检测失败: {e}")

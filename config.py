@@ -7,6 +7,8 @@ from dotenv import load_dotenv
 load_dotenv()
 # 图标
 QT_ICON_PATH = "assets/icon.ico"
+
+
 # ==================== 基础配置 ====================
 # 环境变量读取辅助函数
 def get_env_bool(key: str, default: str = "0") -> bool:
@@ -30,6 +32,7 @@ def get_env_json(key: str, default):
     except Exception:
         return default
 
+
 CHAT_DEBUG_PRINTS = get_env_bool("CHAT_DEBUG_PRINTS", "0")
 
 # ==================== MCP / 外部聊天网关 ====================
@@ -49,10 +52,18 @@ NAPCAT_ALLOW_GROUP = get_env_bool("NAPCAT_ALLOW_GROUP", "0")
 NAPCAT_GROUP_REQUIRE_AT = get_env_bool("NAPCAT_GROUP_REQUIRE_AT", "1")
 NAPCAT_VOICE_REPLY_ENABLED = get_env_bool("NAPCAT_VOICE_REPLY_ENABLED", "0")
 try:
-    NAPCAT_VOICE_REPLY_PROBABILITY = max(0, min(100, int(os.getenv("NAPCAT_VOICE_REPLY_PROBABILITY", "25"))))
+    NAPCAT_VOICE_REPLY_PROBABILITY = max(
+        0, min(100, int(os.getenv("NAPCAT_VOICE_REPLY_PROBABILITY", "25")))
+    )
 except Exception:
     NAPCAT_VOICE_REPLY_PROBABILITY = 25
 REMOTE_CHAT_UI_APPEND = get_env_bool("REMOTE_CHAT_UI_APPEND", "1")
+
+# ==================== MQTT / 外设状态屏 ====================
+MQTT_DISPLAY_ENABLED = get_env_bool("MQTT_DISPLAY_ENABLED", "0")
+MQTT_DISPLAY_HOST = os.getenv("MQTT_DISPLAY_HOST", "127.0.0.1")
+MQTT_DISPLAY_PORT = int(os.getenv("MQTT_DISPLAY_PORT", "1883"))
+MQTT_DISPLAY_TOPIC = os.getenv("MQTT_DISPLAY_TOPIC", "suzu/display/status")
 
 
 # ====== GUI 选择开关（你可以在这里手动切换）======
@@ -86,29 +97,49 @@ TTS_OUTPUT_DEVICE = None  # 音频输出设备索引，None为默认设备
 
 # ==================== 口型同步配置 ====================
 LIP_SYNC_ENABLED = get_env_bool("LIP_SYNC_ENABLED", "0")  # 是否启用口型同步
-RHUBARB_PATH = os.getenv("RHUBARB_PATH", "./tools/rhubarb/rhubarb.exe")  # Rhubarb 可执行文件路径
-LIP_SYNC_SMOOTH_WINDOW = int(os.getenv("LIP_SYNC_SMOOTH_WINDOW", "3"))  # 平滑窗口大小（奇数，建议3-5）
-RHUBARB_TIMEOUT_SEC = float(os.getenv("RHUBARB_TIMEOUT_SEC", "25"))  # Rhubarb 口型分析超时
+RHUBARB_PATH = os.getenv(
+    "RHUBARB_PATH", "./tools/rhubarb/rhubarb.exe"
+)  # Rhubarb 可执行文件路径
+LIP_SYNC_SMOOTH_WINDOW = int(
+    os.getenv("LIP_SYNC_SMOOTH_WINDOW", "3")
+)  # 平滑窗口大小（奇数，建议3-5）
+RHUBARB_TIMEOUT_SEC = float(
+    os.getenv("RHUBARB_TIMEOUT_SEC", "25")
+)  # Rhubarb 口型分析超时
 
 # ==================== 代码执行器配置 ====================
 CODE_EXECUTOR_ENABLED = get_env_bool("CODE_EXECUTOR_ENABLED", "0")  # 是否启用代码执行器
-CODE_EXECUTOR_MAX_TIME = int(os.getenv("CODE_EXECUTOR_MAX_TIME", "30"))  # 最大执行时间（秒）
-CODE_EXECUTOR_MAX_LENGTH = int(os.getenv("CODE_EXECUTOR_MAX_LENGTH", "5000"))  # 最大代码长度（字符）
-CODE_EXECUTOR_MAX_OUTPUT = int(os.getenv("CODE_EXECUTOR_MAX_OUTPUT", "100"))  # 最大输出行数
+CODE_EXECUTOR_MAX_TIME = int(
+    os.getenv("CODE_EXECUTOR_MAX_TIME", "30")
+)  # 最大执行时间（秒）
+CODE_EXECUTOR_MAX_LENGTH = int(
+    os.getenv("CODE_EXECUTOR_MAX_LENGTH", "5000")
+)  # 最大代码长度（字符）
+CODE_EXECUTOR_MAX_OUTPUT = int(
+    os.getenv("CODE_EXECUTOR_MAX_OUTPUT", "100")
+)  # 最大输出行数
 
 # ==================== 硬件监控配置 ====================
-SYSTEM_MONITOR_ENABLED = get_env_bool("SYSTEM_MONITOR_ENABLED", "0")  # 是否启用硬件监控后台检查
-SYSTEM_MONITOR_INTERVAL = int(os.getenv("SYSTEM_MONITOR_INTERVAL", "60"))  # 监控检查间隔（秒）
+SYSTEM_MONITOR_ENABLED = get_env_bool(
+    "SYSTEM_MONITOR_ENABLED", "0"
+)  # 是否启用硬件监控后台检查
+SYSTEM_MONITOR_INTERVAL = int(
+    os.getenv("SYSTEM_MONITOR_INTERVAL", "60")
+)  # 监控检查间隔（秒）
 
 # CPU监控阈值
 CPU_USAGE_THRESHOLD = int(os.getenv("CPU_USAGE_THRESHOLD", "80"))  # CPU使用率阈值（%）
 CPU_TEMP_THRESHOLD = int(os.getenv("CPU_TEMP_THRESHOLD", "75"))  # CPU温度阈值（摄氏度）
 
 # 内存监控阈值
-MEMORY_USAGE_THRESHOLD = int(os.getenv("MEMORY_USAGE_THRESHOLD", "85"))  # 内存使用率阈值（%）
+MEMORY_USAGE_THRESHOLD = int(
+    os.getenv("MEMORY_USAGE_THRESHOLD", "85")
+)  # 内存使用率阈值（%）
 
 # 磁盘监控阈值
-DISK_USAGE_THRESHOLD = int(os.getenv("DISK_USAGE_THRESHOLD", "90"))  # 磁盘使用率阈值（%）
+DISK_USAGE_THRESHOLD = int(
+    os.getenv("DISK_USAGE_THRESHOLD", "90")
+)  # 磁盘使用率阈值（%）
 
 # GPU监控阈值（需要nvidia-ml-py3库）
 GPU_USAGE_THRESHOLD = int(os.getenv("GPU_USAGE_THRESHOLD", "85"))  # GPU使用率阈值（%）
@@ -159,11 +190,12 @@ GATEKEEPER_PROMPT_TEMPLATE = """
 # ==================== 屏幕感知配置 ====================
 SCREEN_SENSOR_ENABLED = True
 SCREEN_SENSOR_INTERVAL = 10  # 检查间隔（秒）
+SCREEN_DEBUG_VERBOSE = False  # 是否输出详细的屏幕吐槽调试日志
 
 # 反应冷却时间（秒）：防止她频繁打断你
 # 比如你从 VSCode 切到 Chrome 查资料又切回来，不应该连续触发
 SCREEN_REACTION_COOLDOWN = 600  # 同一类事件 10 分钟内不重复评论
-SCREEN_GLOBAL_COOLDOWN = 120     # 任何主动发言至少间隔 2 分钟
+SCREEN_GLOBAL_COOLDOWN = 120  # 任何主动发言至少间隔 2 分钟
 
 # 久坐提醒配置
 SEDENTARY_REMINDER_MINUTES = 60  # 久坐提醒间隔（分钟）
@@ -181,33 +213,40 @@ WINDOW_CATEGORIES = {
     "video": ["Bilibili", "YouTube", "PotPlayer", "VLC", "爱奇艺"],
     "social": ["WeChat", "QQ", "Discord", "Telegram", "钉钉"],
     "work": ["Word", "Excel", "PowerPoint", "Feishu", "飞书"],
-    "browser": ["Chrome", "Edge", "Firefox"]
+    "browser": ["Chrome", "Edge", "Firefox"],
 }
 # 这些标题必须与你在 GUI 代码里设置的 setWindowTitle 一致
 SELF_WINDOW_TITLES = [
-    "Live2D Agent",       # 主窗口/悬浮球
-    "系统设置中心",       # 设置界面
+    "Live2D Agent",  # 主窗口/悬浮球
+    "系统设置中心",  # 设置界面
     "记忆与档案管理中心",  # 记忆编辑器
-    "插件管理",           # 插件界面
-    "L2D"                 # 悬浮球的文字模式
+    "插件管理",  # 插件界面
+    "L2D"  # 悬浮球的文字模式
     "🧠 记忆与档案管理中心",
 ]
 
 MUSIC_APP_WHITELIST = [
     "CloudMusic",  # 网易云音乐
-    "QQMusic",     # QQ音乐
-    "Spotify",     # Spotify
+    "QQMusic",  # QQ音乐
+    "Spotify",  # Spotify
     "foobar2000",  # Foobar
     "AppleMusic",  # Apple Music
-    "YesPlayMusic",# 第三方网易云
-    "Music"        # Windows自带Groove音乐
+    "YesPlayMusic",  # 第三方网易云
+    "Music",  # Windows自带Groove音乐
 ]
 
 # 忽略列表（不值得评论的窗口）
 WINDOW_IGNORE_TITLES = ["任务管理器", "设置", "Windows 输入体验", "Program Manager"]
 WINDOW_IGNORE_KEYWORDS = [
-    "任务管理器", "设置", "Windows 输入体验", "Program Manager",
-    "Wallpaper Engine", "Rainmeter", "OBS", "NVIDIA", "Live2D"
+    "任务管理器",
+    "设置",
+    "Windows 输入体验",
+    "Program Manager",
+    "Wallpaper Engine",
+    "Rainmeter",
+    "OBS",
+    "NVIDIA",
+    "Live2D",
 ]
 
 # [新增] 智能防刷屏机制
@@ -237,7 +276,6 @@ EMO_TO_LIVE2D = {
     "think": {"type": 0, "mtn": "Motion:motion_001", "exp": 0},  # 思考动作
     "idle": {"type": 0, "mtn": "Motion:motion_000", "exp": 0},
     "music": {"type": 0, "mtn": "Motion:motion_001", "exp": 1},
-
 }
 
 # ==================== LLM 模型配置 ====================
@@ -259,39 +297,36 @@ MODELS = {
         "api_key": os.getenv(""),
         "base_url": "",
         "model": "gemini-3-flash-preview",
-        "api_style": "openai"
+        "api_style": "openai",
     },
-
     # 性价比高的模型，适用于日常聊天
     "deepseek": {
         "api_key": os.getenv("DEEPSEEK_API_KEY"),
         "base_url": "https://api.deepseek.com",
-        "model": "deepseek-chat"
+        "model": "deepseek-chat",
     },
-
     # 优先级较低的模型，作为保底选项
     "or-dp": {
         "api_key": os.getenv("OR_API_KEY"),
         "base_url": "https://openrouter.ai/api/v1",
-        "model": "nex-agi/deepseek-v3.1-nex-n1:free"
+        "model": "nex-agi/deepseek-v3.1-nex-n1:free",
     },
     # 本地模型，用于断网情况
     "local": {
         "api_key": "sk-no-key-needed",
         "base_url": "http://localhost:11434/v1",
-        "model": "llama3"
+        "model": "llama3",
     },
     "glm-4-flash": {
         "api_key": os.getenv("BIGM_API_KEY"),
         "base_url": "https://open.bigmodel.cn/api/paas/v4",
-        "model": "glm-4-flash"
+        "model": "glm-4-flash",
     },
     "GLM-4V-Flash": {
         "api_key": os.getenv("BIGM_API_KEY"),
         "base_url": "https://open.bigmodel.cn/api/paas/v4",
-        "model": "GLM-4V-Flash"
+        "model": "GLM-4V-Flash",
     },
-
 }
 
 if CODEX_API_KEY:
@@ -307,21 +342,22 @@ if CODEX_MODEL_KEY in MODELS:
 CODEX_ROUTE_CHAIN += ["gemini-3-flash"]
 
 # 任务路由：根据不同场景选择模型
+TASK_MODEL_TTL_HOURS = 12  # 任务级成功模型粘性时长（小时）
+
 LLM_ROUTER = {
     # 默认闲聊场景
-    "default": [ "gemini-3-flash" "glm-4.7-flash"],
+    "default": ["gemini-3-flashglm-4.7-flash"],
     # 复杂推理场景
-    "tool_reasoning": [ "gemini-3-flash", "or-dp"],
+    "tool_reasoning": ["gemini-3-flash", "or-dp"],
     # 记忆总结场景
     "summary": ["glm-4-flash"],
-
     # ===>看门人路由，用于判断是否需要回复 <===
     "gatekeeper": ["glm-4-flash", "gemini-3-flash"],
     "translation": ["glm-4-flash", "gemini-3-flash"],
     "screen_classify": ["glm-4-flash", "gemini-3-flash"],
+    "sensor_vision_talk": ["glm-4-flash", "gemini-3-flash"],
     # 代码助手专用链路（优先走专用 API）
     "codex": CODEX_ROUTE_CHAIN,
-
 }
 
 SENSOR_VISION_MODEL = "GLM-4V-Flash"
@@ -331,7 +367,7 @@ VISION_MODEL_KEY = "GLM-4V-Flash"
 EMBEDDING_CONFIG = {
     "api_url": "https://api.siliconflow.cn/v1/embeddings",
     "api_key": os.getenv("SILICONFLOW_KEY"),  # 需要.env中配置
-    "model_name": "BAAI/bge-m3"
+    "model_name": "BAAI/bge-m3",
 }
 
 # ==================== 记忆系统配置 ====================
@@ -341,38 +377,38 @@ MEMORY_DB_PATH = "./memory_db"  # 记忆数据库路径
 MEMORY_SETTINGS = {
     # 短期记忆配置
     "max_short_term": 12,  # 短期记忆窗口大小（对话轮数）
-
     # 长期记忆配置
     "long_term_enabled": True,  # 是否启用长期记忆
-    "store_roles": ["user", "assistant", "summary"],  # 哪些角色的对话需要存储（summary=分段总结）
-
+    "store_roles": [
+        "user",
+        "assistant",
+        "summary",
+    ],  # 哪些角色的对话需要存储（summary=分段总结）
     # 记忆入库过滤
     "importance_mode": "rule",  # 过滤模式：rule/off
     "min_chars": 6,  # 最小字符数（防短消息污染）
-
     # 向量检索配置
     "memory_recall_candidates": 8,  # 初始召回数量
     "memory_recall_final": 3,  # 最终注入数量
     "memory_sim_threshold": 0.28,  # 相似度阈值
-    "recall_roles": get_env_list("RECALL_ROLES", "user,assistant,summary"),  # 从哪些角色召回记忆
-
+    "recall_roles": get_env_list(
+        "RECALL_ROLES", "user,assistant,summary"
+    ),  # 从哪些角色召回记忆
     # 时间衰减配置
     "memory_half_life_days": 30,  # 半衰期（天）
-
     # LLM辅助配置
     "use_llm_selector": False,  # 是否使用LLM筛选记忆
     "llm_selector_min_interval_sec": 20,  # LLM筛选最小间隔，避免高频调用
-
     # 用户档案配置
     "profile_enabled": True,  # 是否启用用户档案
     "profile_file": "profile.json",  # 档案文件路径
-
     # 图记忆配置
     "graph_edge_cap": 12,  # 边权最大值
     "graph_decay_per_day": 1.0,  # 每日衰减率
     "graph_expand_enabled": get_env_bool("GRAPH_EXPAND_ENABLED", "1"),  # 是否启用图扩展
-    "graph_expand_min_chars": int(os.getenv("GRAPH_EXPAND_MIN_CHARS", "14")),  # 图扩展最小字符数
-
+    "graph_expand_min_chars": int(
+        os.getenv("GRAPH_EXPAND_MIN_CHARS", "14")
+    ),  # 图扩展最小字符数
     # 调试配置
     "debug_prompt_injection": get_env_bool("DEBUG_PROMPT_INJECTION", "0"),  # 调试模式
     "recall_min_chars": int(os.getenv("RECALL_MIN_CHARS", "12")),  # 召回最小字符数
@@ -473,9 +509,9 @@ COSTUME_MAP = {
     # 适合：比较特殊的衣服，比如Q版变身，或者是带背景的大模型
     # "校服": {
     #     "path": "assets/models/suzu_school/suzu.model3.json",
-        # "scale": 1.2,
-        # "x": 0.1,
-        # "y": -0.6
+    # "scale": 1.2,
+    # "x": 0.1,
+    # "y": -0.6
     # },
     "魔法少女服": {
         "path": "assets/models/suzu/magical/model.model3.json",
@@ -483,21 +519,11 @@ COSTUME_MAP = {
         # "y": -4.71,
         # "scale": 0.60,
     },
-    "常服": {
-        "path": "assets/models/suzu/casual/model.model3.json"
-    },
-    "冬服": {
-        "path": "assets/models/suzu/winter/model.model3.json"
-    },
-    "泳装": {
-        "path": "assets/models/suzu/swimsuit/model.model3.json"
-    },
-    "圣诞服": {
-        "path": "assets/models/suzu/christmas/model.model3.json"
-    },
-    "校服": {
-        "path": "assets/models/suzu/uniform/model.model3.json"
-    }
+    "常服": {"path": "assets/models/suzu/casual/model.model3.json"},
+    "冬服": {"path": "assets/models/suzu/winter/model.model3.json"},
+    "泳装": {"path": "assets/models/suzu/swimsuit/model.model3.json"},
+    "圣诞服": {"path": "assets/models/suzu/christmas/model.model3.json"},
+    "校服": {"path": "assets/models/suzu/uniform/model.model3.json"},
     # "睡衣": {
     #     "path": "assets/models/suzu/pajama/model.model3.json"
     #     # 注释：睡衣模型文件不存在，已暂时禁用
@@ -508,12 +534,18 @@ COSTUME_MAP = {
 # ==================== 结构化输出协议（LLM → Live2D）====================
 STRUCTURED_PROTOCOL_ENABLED = get_env_bool("STRUCTURED_PROTOCOL_ENABLED", "1")
 STRUCTURED_PROTOCOL_NAME = os.getenv("STRUCTURED_PROTOCOL_NAME", "live2d-assistant.v1")
-STRUCTURED_PROTOCOL_DISABLE_STREAM = get_env_bool("STRUCTURED_PROTOCOL_DISABLE_STREAM", "1")
+STRUCTURED_PROTOCOL_DISABLE_STREAM = get_env_bool(
+    "STRUCTURED_PROTOCOL_DISABLE_STREAM", "1"
+)
 
 # ==================== 分段总结记忆（Episodic Memory）====================
 EPISODIC_SUMMARY_ENABLED = get_env_bool("EPISODIC_SUMMARY_ENABLED", "1")
-EPISODIC_SUMMARY_EVERY_TURNS = int(os.getenv("EPISODIC_SUMMARY_EVERY_TURNS", "8"))  # 每 N 轮（用户输入计）生成一次总结
-EPISODIC_SUMMARY_WINDOW_MESSAGES = int(os.getenv("EPISODIC_SUMMARY_WINDOW_MESSAGES", "16"))  # 总结时取最近多少条消息（user+assistant）
+EPISODIC_SUMMARY_EVERY_TURNS = int(
+    os.getenv("EPISODIC_SUMMARY_EVERY_TURNS", "8")
+)  # 每 N 轮（用户输入计）生成一次总结
+EPISODIC_SUMMARY_WINDOW_MESSAGES = int(
+    os.getenv("EPISODIC_SUMMARY_WINDOW_MESSAGES", "16")
+)  # 总结时取最近多少条消息（user+assistant）
 
 # ==================== 结构化 JSON 版角色设定 ====================
 PERSONA_PROMPT_JSON = r"""
@@ -537,11 +569,11 @@ PERSONA_PROMPT_JSON = r"""
 
 
 BALL_CONFIG = {
-    "enable_image": True,          # 开启图片模式
-    "image_path": "assets/avatar.png",    # 图片路径 (可以是相对路径或绝对路径)
-    "size": 55,                    # 悬浮球大小 (像素)
-    "bg_color": "transparent",     # 背景色 (如果你图片是透明底的，建议设为 transparent)
-    "text": ""                     # 图片模式下文字会自动隐藏
+    "enable_image": True,  # 开启图片模式
+    "image_path": "assets/avatar.png",  # 图片路径 (可以是相对路径或绝对路径)
+    "size": 55,  # 悬浮球大小 (像素)
+    "bg_color": "transparent",  # 背景色 (如果你图片是透明底的，建议设为 transparent)
+    "text": "",  # 图片模式下文字会自动隐藏
 }
 # ==================== 自动日记配置 ====================
 AUTO_DIARY_ENABLED = True
@@ -550,7 +582,7 @@ AUTO_DIARY_TIME = "23:30"  # 每天在这个时间点触发总结
 # 开启 TTS 自动翻译（中显日配）
 TTS_AUTO_TRANSLATE = True
 
-#如果换成direct会是视觉模型直接吐槽
+# 如果换成direct会是视觉模型直接吐槽
 VISION_MODE = "separate"
 
 # ==================== 免打扰模式 (DND) ====================
@@ -586,7 +618,7 @@ def load_custom_models(*, force: bool = False) -> bool:
     loaded_any = False
 
     try:
-        with open(CUSTOM_MODELS_PATH, 'r', encoding='utf-8') as f:
+        with open(CUSTOM_MODELS_PATH, "r", encoding="utf-8") as f:
             custom_data = json.load(f)
 
             models_data = custom_data.get("models", {})
@@ -625,5 +657,3 @@ def load_custom_models(*, force: bool = False) -> bool:
 
     _CUSTOM_MODELS_LOADED = True
     return loaded_any
-
-

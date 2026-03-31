@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 
-COMMAND_PREFIXES = ("/提醒", "/提醒列表", "/提醒删除", "/提醒测试")
+COMMAND_PREFIXES = ("/提醒列表", "/提醒删除", "/提醒测试", "/提醒")
 WEEKDAY_MAP = {
     "1": 0,
     "一": 0,
@@ -156,6 +156,9 @@ class Plugin:
                 continue
             if str(item.get("last_sent_date") or "") == today:
                 continue
+            print(
+                f"[QQReminder] 命中提醒 id={item.get('id')} session={item.get('target_session')} time={item.get('hour'):02d}:{item.get('minute'):02d} content={item.get('content', '')}"
+            )
             await self._send_reminder(item)
             item["last_sent_date"] = today
             changed = True
@@ -247,7 +250,7 @@ class Plugin:
         if "工作日" in raw:
             return [0, 1, 2, 3, 4]
         m = re.search(
-            r"(?:每周|周)([一二三四五六日天1-7])(?:到|至|-|~)([一二三四五六日天1-7])",
+            r"(?:每周|周)([一二三四五六日天1-7])(?:到|至|-|~)(?:周)?([一二三四五六日天1-7])",
             raw,
         )
         if m:
@@ -256,7 +259,7 @@ class Plugin:
             if start <= end:
                 return list(range(start, end + 1))
             return list(range(start, 7)) + list(range(0, end + 1))
-        hits = re.findall(r"周([一二三四五六日天1-7])", raw)
+        hits = re.findall(r"(?:每周|周)([一二三四五六日天1-7])", raw)
         if hits:
             return sorted({WEEKDAY_MAP[item] for item in hits})
         return [0, 1, 2, 3, 4]

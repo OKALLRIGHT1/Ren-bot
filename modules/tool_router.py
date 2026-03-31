@@ -12,6 +12,20 @@ class ToolRouteResult:
 class ToolRouter:
     """轻量级工具路由器（不依赖 LLM）。"""
 
+    _WORKSPACE_READ_HINTS = [
+        "读",
+        "读一下",
+        "读取",
+        "看看",
+        "查看",
+        "打开",
+        "搜",
+        "搜索",
+        "查文件",
+        "读代码",
+        "看代码",
+    ]
+
     _DEFAULT_MCP_DOMAIN_BRANDS = [
         "麦当劳",
         "mcd",
@@ -48,10 +62,12 @@ class ToolRouter:
         self,
         react_map: Dict[str, object],
         direct_map: Dict[str, object],
+        delegate_map: Optional[Dict[str, object]] = None,
         *,
         enable_intent_keywords: bool = True,
     ):
         self.react_map = react_map
+        self.delegate_map = delegate_map or {}
         self.direct_map = direct_map
         self.enable_intent_keywords = enable_intent_keywords
 
@@ -86,13 +102,18 @@ class ToolRouter:
             rows = [str(item).strip().lower() for item in value if str(item).strip()]
         elif isinstance(value, str):
             text = value.replace("，", ",").replace("、", ",").replace("|", ",")
-            rows = [item.strip().lower() for line in text.splitlines() for item in line.split(",") if item.strip()]
+            rows = [
+                item.strip().lower()
+                for line in text.splitlines()
+                for item in line.split(",")
+                if item.strip()
+            ]
         else:
             rows = []
         return list(dict.fromkeys(rows))
 
     def _get_mcp_domain_route_config(self) -> Optional[Dict[str, Any]]:
-        plugin = self.react_map.get("mcp_tools")
+        plugin = self.react_map.get("mcp_tools") or self.delegate_map.get("mcp_tools")
         if plugin is None:
             return None
 
@@ -104,10 +125,16 @@ class ToolRouter:
         enabled = bool(enabled_raw)
 
         brand_keywords = self._normalize_keywords(
-            self._read_setting_value(settings, "intent_route_brand_keywords", self._DEFAULT_MCP_DOMAIN_BRANDS)
+            self._read_setting_value(
+                settings, "intent_route_brand_keywords", self._DEFAULT_MCP_DOMAIN_BRANDS
+            )
         )
         action_keywords = self._normalize_keywords(
-            self._read_setting_value(settings, "intent_route_action_keywords", self._DEFAULT_MCP_DOMAIN_ACTIONS)
+            self._read_setting_value(
+                settings,
+                "intent_route_action_keywords",
+                self._DEFAULT_MCP_DOMAIN_ACTIONS,
+            )
         )
         web_search_keywords = self._normalize_keywords(
             self._read_setting_value(
@@ -141,10 +168,44 @@ class ToolRouter:
         wants_web_search = any(k in text for k in web_search_keywords)
         return has_brand and has_action and not wants_web_search
 
+    @staticmethod
+    def _looks_like_workspace_path(text: str) -> bool:
+        if not text:
+            return False
+        markers = [
+            "/",
+            "\\",
+            ".py",
+            ".md",
+            ".json",
+            ".yaml",
+            ".yml",
+            ".txt",
+            ".toml",
+            ".ini",
+            ".js",
+            ".ts",
+        ]
+        return any(marker in text for marker in markers)
+
+    def _should_route_to_workspace_read(self, text: str) -> bool:
+        if (
+            "workspace_ops" not in self.delegate_map
+            and "workspace_ops" not in self.react_map
+        ):
+            return False
+        if not self._looks_like_workspace_path(text):
+            return False
+        return any(hint in text for hint in self._WORKSPACE_READ_HINTS)
+
     def _build_intent_keywords_from_plugins(self) -> Dict[str, List[str]]:
         keywords: Dict[str, List[str]] = {}
 
-        for trigger, plugin in self.react_map.items():
+        combined_map: Dict[str, object] = {}
+        combined_map.update(self.react_map)
+        combined_map.update(self.delegate_map)
+
+        for trigger, plugin in combined_map.items():
             aliases = getattr(plugin, "aliases", [])
 
             if not aliases:
@@ -162,7 +223,18 @@ class ToolRouter:
             if not is_diary:
                 is_diary = any(("diary" in a or "history" in a) for a in kw_list)
             if is_diary:
-                kw_list.extend(["昨天", "前天", "总结", "回顾", "日记", "复盘", "干了什么", "做了什么"])
+                kw_list.extend(
+                    [
+                        "昨天",
+                        "前天",
+                        "总结",
+                        "回顾",
+                        "日记",
+                        "复盘",
+                        "干了什么",
+                        "做了什么",
+                    ]
+                )
 
             if "task" in trigger or "schedule" in trigger:
                 kw_list.extend(["任务", "待办", "日程"])
@@ -171,18 +243,28 @@ class ToolRouter:
 
         return keywords
 
-    def route(self, user_text: str, last_tool_triggers: Optional[List[str]] = None) -> ToolRouteResult:
+    def route(
+        self, user_text: str, last_tool_triggers: Optional[List[str]] = None
+    ) -> ToolRouteResult:
         if not user_text:
             return ToolRouteResult(False, [], "empty_input")
 
         text = user_text.strip().lower()
         matched: Set[str] = set()
+        combined_map: Dict[str, object] = {}
+        combined_map.update(self.react_map)
+        combined_map.update(self.delegate_map)
 
         if self._should_route_to_mcp_domain(text):
             return ToolRouteResult(True, ["mcp_tools"], "mcp_domain_preferred")
 
+        if self._should_route_to_workspace_read(text):
+            return ToolRouteResult(True, ["workspace_ops"], "workspace_read_preferred")
+
         if last_tool_triggers and any(k in text for k in self.followup_keywords):
-            return ToolRouteResult(True, list(dict.fromkeys(last_tool_triggers)), "followup_last_tool")
+            return ToolRouteResult(
+                True, list(dict.fromkeys(last_tool_triggers)), "followup_last_tool"
+            )
 
         for trigger in self.direct_map:
             if trigger.lower() in text:
@@ -190,7 +272,7 @@ class ToolRouter:
         if matched:
             return ToolRouteResult(True, sorted(matched), "direct_plugin_matched")
 
-        for trigger in self.react_map:
+        for trigger in combined_map:
             if trigger.lower() in text:
                 matched.add(trigger)
         if matched:
@@ -199,7 +281,7 @@ class ToolRouter:
         if self.enable_intent_keywords:
             for trigger, kws in self.intent_keywords.items():
                 for kw in kws:
-                    if kw.lower() in text and trigger in self.react_map:
+                    if kw.lower() in text and trigger in combined_map:
                         matched.add(trigger)
 
         if matched:

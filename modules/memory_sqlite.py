@@ -15,6 +15,7 @@ This module is intentionally lightweight and safe:
 - single process OK; multi-thread safe via per-call connections + a simple lock
 - provides FTS5 for fast search on transcript/memory_items/episodes
 """
+
 from __future__ import annotations
 
 import json
@@ -29,7 +30,9 @@ from typing import Any, Dict, List, Optional, Tuple
 
 
 DEFAULT_MEMORY_DIR = os.getenv("MEMORY_DIR", "./memory")
-DEFAULT_DB_PATH = os.getenv("MEMORY_SQLITE_PATH", os.path.join(DEFAULT_MEMORY_DIR, "memory.sqlite"))
+DEFAULT_DB_PATH = os.getenv(
+    "MEMORY_SQLITE_PATH", os.path.join(DEFAULT_MEMORY_DIR, "memory.sqlite")
+)
 
 LEGACY_PROFILE_JSON = os.getenv("LEGACY_PROFILE_JSON", "./memory_db/profile.json")
 LEGACY_EVENTS_DB = os.getenv("LEGACY_EVENTS_DB", "./data/events.sqlite")
@@ -82,8 +85,10 @@ class MemorySQLite:
 
     def _connect(self) -> sqlite3.Connection:
         """获取连接（线程本地复用，性能优化）"""
-        if not hasattr(self._local, 'conn'):
-            self._local.conn = sqlite3.connect(self.db_path, timeout=30, check_same_thread=False)
+        if not hasattr(self._local, "conn"):
+            self._local.conn = sqlite3.connect(
+                self.db_path, timeout=30, check_same_thread=False
+            )
             self._local.conn.row_factory = sqlite3.Row
             self._local.conn.execute("PRAGMA journal_mode=WAL;")
             self._local.conn.execute("PRAGMA synchronous=NORMAL;")
@@ -106,9 +111,15 @@ class MemorySQLite:
               meta_json TEXT
             )
             """)
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_transcript_ts ON transcript(ts)")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_transcript_role ON transcript(role)")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_transcript_session ON transcript(session_id)")
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_transcript_ts ON transcript(ts)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_transcript_role ON transcript(role)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_transcript_session ON transcript(session_id)"
+            )
 
             # memory items
             conn.execute("""
@@ -125,8 +136,12 @@ class MemorySQLite:
               updated_at TEXT NOT NULL
             )
             """)
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_items_status_pin_time ON memory_items(status, pin, updated_at)")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_items_type_status ON memory_items(type, status)")
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_items_status_pin_time ON memory_items(status, pin, updated_at)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_items_type_status ON memory_items(type, status)"
+            )
 
             # episodes
             conn.execute("""
@@ -143,7 +158,9 @@ class MemorySQLite:
               updated_at TEXT NOT NULL
             )
             """)
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_episodes_status_time ON episodes(status, updated_at)")
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_episodes_status_time ON episodes(status, updated_at)"
+            )
 
             # profile KV
             conn.execute("""
@@ -173,8 +190,12 @@ class MemorySQLite:
               updated_at TEXT NOT NULL
             )
             """)
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_qq_profiles_owner ON qq_user_profiles(is_owner, updated_at)")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_qq_profiles_scope ON qq_user_profiles(memory_scope, updated_at)")
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_qq_profiles_owner ON qq_user_profiles(is_owner, updated_at)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_qq_profiles_scope ON qq_user_profiles(memory_scope, updated_at)"
+            )
 
             # proposals
             conn.execute("""
@@ -188,7 +209,9 @@ class MemorySQLite:
               resolved_at TEXT
             )
             """)
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_proposals_status_time ON proposals(status, created_at)")
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_proposals_status_time ON proposals(status, created_at)"
+            )
 
             # audit log
             conn.execute("""
@@ -204,7 +227,9 @@ class MemorySQLite:
             )
             """)
             conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_ts ON audit_log(ts_iso)")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_entity ON audit_log(entity, entity_id)")
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_audit_entity ON audit_log(entity, entity_id)"
+            )
 
             # FTS (best-effort)
             try:
@@ -279,24 +304,73 @@ class MemorySQLite:
             except Exception:
                 pass
 
-                # 每日屏幕活动统计表
-                conn.execute("""
-                            CREATE TABLE IF NOT EXISTS daily_screen_stats (
-                                date TEXT PRIMARY KEY,  -- 日期 YYYY-MM-DD
-                                summary_json TEXT,      -- 统计数据的 JSON
-                                total_hours REAL,       -- 总时长
-                                updated_at TEXT
-                            )
-                        """)
+            # 每日屏幕活动统计表
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS daily_screen_stats (
+                    date TEXT PRIMARY KEY,
+                    summary_json TEXT,
+                    total_hours REAL,
+                    updated_at TEXT
+                )
+                """
+            )
+
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS activity_events (
+                    event_id TEXT PRIMARY KEY,
+                    ts_iso TEXT NOT NULL,
+                    kind TEXT NOT NULL,
+                    presence TEXT,
+                    app_id TEXT,
+                    app_name TEXT,
+                    pid INTEGER,
+                    window_title TEXT,
+                    browser_family TEXT,
+                    browser_name TEXT,
+                    page_title TEXT,
+                    url TEXT,
+                    domain TEXT,
+                    source TEXT,
+                    raw_json TEXT NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_activity_events_ts ON activity_events(ts_iso)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_activity_events_domain ON activity_events(domain, ts_iso)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_activity_events_app ON activity_events(app_name, ts_iso)"
+            )
             conn.commit()
 
     # ---------- audit ----------
-    def _audit(self, action: str, entity: str, entity_id: Optional[str], before: Any, after: Any, note: str = "") -> None:
+    def _audit(
+        self,
+        action: str,
+        entity: str,
+        entity_id: Optional[str],
+        before: Any,
+        after: Any,
+        note: str = "",
+    ) -> None:
         try:
             with self._connect() as conn:
                 conn.execute(
                     "INSERT INTO audit_log(ts_iso, action, entity, entity_id, before_json, after_json, note) VALUES(?,?,?,?,?,?,?)",
-                    (_now_iso(), action, entity, entity_id, _j(before) if before is not None else None, _j(after) if after is not None else None, note),
+                    (
+                        _now_iso(),
+                        action,
+                        entity,
+                        entity_id,
+                        _j(before) if before is not None else None,
+                        _j(after) if after is not None else None,
+                        note,
+                    ),
                 )
                 conn.commit()
         except Exception:
@@ -351,7 +425,14 @@ class MemorySQLite:
             return
 
     # ---------- transcript ----------
-    def add_transcript(self, role: str, content: str, meta: Optional[dict] = None, ts: Optional[int] = None, session_id: Optional[str] = None) -> None:
+    def add_transcript(
+        self,
+        role: str,
+        content: str,
+        meta: Optional[dict] = None,
+        ts: Optional[int] = None,
+        session_id: Optional[str] = None,
+    ) -> None:
         content = (content or "").strip()
         if not content:
             return
@@ -365,6 +446,82 @@ class MemorySQLite:
                     (ts_i, ts_iso, session_id, role, content, _j(meta or {})),
                 )
                 conn.commit()
+
+    def add_activity_event(self, event: Dict[str, Any]) -> None:
+        event_id = str(event.get("event_id") or uuid.uuid4().hex).strip()
+        ts_iso = str(event.get("ts") or _now_iso()).strip()
+        kind = str(event.get("kind") or "activity_sample").strip()
+        presence = str(event.get("presence") or "").strip()
+        app = event.get("app") if isinstance(event.get("app"), dict) else {}
+        browser = event.get("browser") if isinstance(event.get("browser"), dict) else {}
+        with self._lock:
+            with self._connect() as conn:
+                conn.execute(
+                    """
+                    INSERT OR REPLACE INTO activity_events(
+                      event_id, ts_iso, kind, presence, app_id, app_name, pid,
+                      window_title, browser_family, browser_name, page_title,
+                      url, domain, source, raw_json
+                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    """,
+                    (
+                        event_id,
+                        ts_iso,
+                        kind,
+                        presence,
+                        str(app.get("id") or ""),
+                        str(app.get("name") or ""),
+                        int(app.get("pid") or 0),
+                        str(event.get("window_title") or ""),
+                        str(browser.get("family") or ""),
+                        str(browser.get("name") or ""),
+                        str(browser.get("page_title") or ""),
+                        str(browser.get("url") or ""),
+                        str(browser.get("domain") or ""),
+                        str(event.get("source") or "rust-agent"),
+                        _j(event),
+                    ),
+                )
+                conn.commit()
+
+    def list_activity_events(
+        self, *, limit: int = 200, date_str: str = ""
+    ) -> List[Dict[str, Any]]:
+        limit = max(1, min(5000, int(limit)))
+        sql = "SELECT * FROM activity_events"
+        args: List[Any] = []
+        if date_str:
+            sql += " WHERE substr(ts_iso,1,10)=?"
+            args.append(str(date_str))
+        sql += " ORDER BY ts_iso DESC LIMIT ?"
+        args.append(limit)
+        with self._connect() as conn:
+            rows = conn.execute(sql, args).fetchall()
+        out: List[Dict[str, Any]] = []
+        for r in rows:
+            out.append(
+                {
+                    "event_id": r["event_id"],
+                    "ts": r["ts_iso"],
+                    "kind": r["kind"],
+                    "presence": r["presence"],
+                    "app": {
+                        "id": r["app_id"],
+                        "name": r["app_name"],
+                        "pid": r["pid"],
+                    },
+                    "window_title": r["window_title"],
+                    "browser": {
+                        "family": r["browser_family"],
+                        "name": r["browser_name"],
+                        "page_title": r["page_title"],
+                        "url": r["url"],
+                        "domain": r["domain"],
+                    },
+                    "source": r["source"],
+                }
+            )
+        return out
 
     def list_transcript(
         self,
@@ -437,15 +594,17 @@ class MemorySQLite:
 
         out = []
         for r in rows:
-            out.append({
-                "id": int(r["id"]),
-                "ts": int(r["ts"]),
-                "ts_iso": r["ts_iso"],
-                "session_id": r["session_id"],
-                "role": r["role"],
-                "content": r["content"],
-                "meta": _pj(r["meta_json"], {}),
-            })
+            out.append(
+                {
+                    "id": int(r["id"]),
+                    "ts": int(r["ts"]),
+                    "ts_iso": r["ts_iso"],
+                    "session_id": r["session_id"],
+                    "role": r["role"],
+                    "content": r["content"],
+                    "meta": _pj(r["meta_json"], {}),
+                }
+            )
         return out
 
     def delete_transcript(self, transcript_id: int) -> bool:
@@ -454,7 +613,9 @@ class MemorySQLite:
             before = None
             try:
                 with self._connect() as conn:
-                    r = conn.execute("SELECT * FROM transcript WHERE id=?", (transcript_id,)).fetchone()
+                    r = conn.execute(
+                        "SELECT * FROM transcript WHERE id=?", (transcript_id,)
+                    ).fetchone()
                     if r:
                         before = {
                             "id": int(r["id"]),
@@ -464,9 +625,18 @@ class MemorySQLite:
                             "content": r["content"],
                             "meta": _pj(r["meta_json"], {}),
                         }
-                        conn.execute("DELETE FROM transcript WHERE id=?", (transcript_id,))
+                        conn.execute(
+                            "DELETE FROM transcript WHERE id=?", (transcript_id,)
+                        )
                         conn.commit()
-                        self._audit("delete", "transcript", str(transcript_id), before, None, note="delete transcript")
+                        self._audit(
+                            "delete",
+                            "transcript",
+                            str(transcript_id),
+                            before,
+                            None,
+                            note="delete transcript",
+                        )
                         return True
             except Exception as e:
                 print(f"[MemorySQLite] 删除 transcript 失败: {e}")
@@ -483,7 +653,9 @@ class MemorySQLite:
             out[k] = _pj(r["value_json"], None)
         # normalize
         out["likes"] = out.get("likes") if isinstance(out.get("likes"), list) else []
-        out["dislikes"] = out.get("dislikes") if isinstance(out.get("dislikes"), list) else []
+        out["dislikes"] = (
+            out.get("dislikes") if isinstance(out.get("dislikes"), list) else []
+        )
         out["notes"] = out.get("notes") if isinstance(out.get("notes"), list) else []
         return out
 
@@ -504,7 +676,9 @@ class MemorySQLite:
                     (key, _j(value), _now_iso()),
                 )
                 conn.commit()
-            self._audit("set_profile", "profile", key, before, value, note="profile update")
+            self._audit(
+                "set_profile", "profile", key, before, value, note="profile update"
+            )
 
     # ---------- qq user profiles ----------
     def get_qq_user_profile(self, user_id: str) -> Optional[Dict[str, Any]]:
@@ -512,7 +686,9 @@ class MemorySQLite:
         if not user_key:
             return None
         with self._connect() as conn:
-            row = conn.execute("SELECT * FROM qq_user_profiles WHERE user_id=?", (user_key,)).fetchone()
+            row = conn.execute(
+                "SELECT * FROM qq_user_profiles WHERE user_id=?", (user_key,)
+            ).fetchone()
         if not row:
             return None
         return {
@@ -532,7 +708,9 @@ class MemorySQLite:
             "updated_at": row["updated_at"],
         }
 
-    def upsert_qq_user_profile(self, profile: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    def upsert_qq_user_profile(
+        self, profile: Dict[str, Any]
+    ) -> Optional[Dict[str, Any]]:
         if not isinstance(profile, dict):
             return None
         user_key = str(profile.get("user_id") or "").strip()
@@ -574,11 +752,17 @@ class MemorySQLite:
 
         if "voice_reply_probability" in profile:
             try:
-                merged["voice_reply_probability"] = max(0, min(100, int(profile.get("voice_reply_probability") or 0)))
+                merged["voice_reply_probability"] = max(
+                    0, min(100, int(profile.get("voice_reply_probability") or 0))
+                )
             except Exception:
-                merged["voice_reply_probability"] = int(merged.get("voice_reply_probability") or 0)
+                merged["voice_reply_probability"] = int(
+                    merged.get("voice_reply_probability") or 0
+                )
         else:
-            merged["voice_reply_probability"] = int(merged.get("voice_reply_probability") or 0)
+            merged["voice_reply_probability"] = int(
+                merged.get("voice_reply_probability") or 0
+            )
 
         if "is_owner" in profile:
             merged["is_owner"] = bool(profile.get("is_owner"))
@@ -630,10 +814,19 @@ class MemorySQLite:
                 )
                 conn.commit()
         after = self.get_qq_user_profile(user_key)
-        self._audit("upsert", "qq_user_profiles", user_key, before, after, note="upsert qq user profile")
+        self._audit(
+            "upsert",
+            "qq_user_profiles",
+            user_key,
+            before,
+            after,
+            note="upsert qq user profile",
+        )
         return after
 
-    def list_qq_user_profiles(self, *, query: str = "", limit: int = 100, owner_only: bool = False) -> List[Dict[str, Any]]:
+    def list_qq_user_profiles(
+        self, *, query: str = "", limit: int = 100, owner_only: bool = False
+    ) -> List[Dict[str, Any]]:
         limit = max(1, min(500, int(limit)))
         query = str(query or "").strip()
         with self._connect() as conn:
@@ -665,9 +858,18 @@ class MemorySQLite:
                 return False
             try:
                 with self._connect() as conn:
-                    conn.execute("DELETE FROM qq_user_profiles WHERE user_id=?", (user_key,))
+                    conn.execute(
+                        "DELETE FROM qq_user_profiles WHERE user_id=?", (user_key,)
+                    )
                     conn.commit()
-                self._audit("delete", "qq_user_profiles", user_key, before, None, note="delete qq user profile")
+                self._audit(
+                    "delete",
+                    "qq_user_profiles",
+                    user_key,
+                    before,
+                    None,
+                    note="delete qq user profile",
+                )
                 return True
             except Exception as e:
                 print(f"[MemorySQLite] 删除 qq_user_profiles 失败: {e}")
@@ -703,10 +905,38 @@ class MemorySQLite:
                     "ON CONFLICT(id) DO UPDATE SET "
                     "type=excluded.type,status=excluded.status,pin=excluded.pin,confidence=excluded.confidence,"
                     "tags_json=excluded.tags_json,text=excluded.text,source=excluded.source,updated_at=excluded.updated_at",
-                    (_id, tp, st, pin, conf, _j(tags), text, source, now if before is None else (before.get("created_at") or now), now),
+                    (
+                        _id,
+                        tp,
+                        st,
+                        pin,
+                        conf,
+                        _j(tags),
+                        text,
+                        source,
+                        now if before is None else (before.get("created_at") or now),
+                        now,
+                    ),
                 )
                 conn.commit()
-            self._audit("upsert", "memory_items", _id, before, {"id": _id, "type": tp, "status": st, "pin": pin, "confidence": conf, "tags": tags, "text": text, "source": source, "updated_at": now}, note="upsert memory item")
+            self._audit(
+                "upsert",
+                "memory_items",
+                _id,
+                before,
+                {
+                    "id": _id,
+                    "type": tp,
+                    "status": st,
+                    "pin": pin,
+                    "confidence": conf,
+                    "tags": tags,
+                    "text": text,
+                    "source": source,
+                    "updated_at": now,
+                },
+                note="upsert memory item",
+            )
         return _id
 
     def get_item(self, item_id: str) -> Optional[Dict[str, Any]]:
@@ -714,7 +944,9 @@ class MemorySQLite:
         if not item_id:
             return None
         with self._connect() as conn:
-            r = conn.execute("SELECT * FROM memory_items WHERE id=?", (item_id,)).fetchone()
+            r = conn.execute(
+                "SELECT * FROM memory_items WHERE id=?", (item_id,)
+            ).fetchone()
         if not r:
             return None
         return {
@@ -730,7 +962,15 @@ class MemorySQLite:
             "updated_at": r["updated_at"],
         }
 
-    def list_items(self, *, status: str = "active", type_: str = "", query: str = "", limit: int = 200, offset: int = 0) -> List[Dict[str, Any]]:
+    def list_items(
+        self,
+        *,
+        status: str = "active",
+        type_: str = "",
+        query: str = "",
+        limit: int = 200,
+        offset: int = 0,
+    ) -> List[Dict[str, Any]]:
         status = (status or "").strip().lower()
         type_ = (type_ or "").strip()
         query = (query or "").strip()
@@ -776,20 +1016,22 @@ class MemorySQLite:
                 sql += " ORDER BY pin DESC, updated_at DESC LIMIT ? OFFSET ?"
                 rows = conn.execute(sql, args + [limit, offset]).fetchall()
 
-        out=[]
+        out = []
         for r in rows:
-            out.append({
-                "id": r["id"],
-                "type": r["type"],
-                "status": r["status"],
-                "pin": int(r["pin"]),
-                "confidence": float(r["confidence"]),
-                "tags": _pj(r["tags_json"], []),
-                "text": r["text"],
-                "source": r["source"],
-                "created_at": r["created_at"],
-                "updated_at": r["updated_at"],
-            })
+            out.append(
+                {
+                    "id": r["id"],
+                    "type": r["type"],
+                    "status": r["status"],
+                    "pin": int(r["pin"]),
+                    "confidence": float(r["confidence"]),
+                    "tags": _pj(r["tags_json"], []),
+                    "text": r["text"],
+                    "source": r["source"],
+                    "created_at": r["created_at"],
+                    "updated_at": r["updated_at"],
+                }
+            )
         return out
 
     def set_item_status(self, item_id: str, status: str) -> None:
@@ -800,9 +1042,19 @@ class MemorySQLite:
         before = self.get_item(item_id)
         with self._lock:
             with self._connect() as conn:
-                conn.execute("UPDATE memory_items SET status=?, updated_at=? WHERE id=?", (status, _now_iso(), item_id))
+                conn.execute(
+                    "UPDATE memory_items SET status=?, updated_at=? WHERE id=?",
+                    (status, _now_iso(), item_id),
+                )
                 conn.commit()
-        self._audit("set_status", "memory_items", item_id, before, {"status": status}, note="status change")
+        self._audit(
+            "set_status",
+            "memory_items",
+            item_id,
+            before,
+            {"status": status},
+            note="status change",
+        )
 
     # ---------- episodes ----------
     def upsert_episode(self, ep: Dict[str, Any]) -> str:
@@ -812,17 +1064,21 @@ class MemorySQLite:
         summary = (ep.get("summary") or "").strip()
         tags = ep.get("tags") if isinstance(ep.get("tags"), list) else []
         tags = [str(t).strip() for t in tags if str(t).strip()]
-        said = ep.get("assistant_said") if isinstance(ep.get("assistant_said"), list) else []
+        said = (
+            ep.get("assistant_said")
+            if isinstance(ep.get("assistant_said"), list)
+            else []
+        )
         # normalize assistant_said items to dicts
-        norm_said=[]
+        norm_said = []
         for s in said:
             if isinstance(s, dict):
-                t=(s.get("text") or "").strip()
+                t = (s.get("text") or "").strip()
                 if t:
                     norm_said.append({"type": s.get("type") or "commitment", "text": t})
             elif isinstance(s, str) and s.strip():
-                norm_said.append({"type":"commitment","text":s.strip()})
-        now=_now_iso()
+                norm_said.append({"type": "commitment", "text": s.strip()})
+        now = _now_iso()
         before = self.get_episode(_id)
         with self._lock:
             with self._connect() as conn:
@@ -831,10 +1087,35 @@ class MemorySQLite:
                     "VALUES(?,?,?,?,?,?,?,?,?,?) "
                     "ON CONFLICT(id) DO UPDATE SET status=excluded.status,title=excluded.title,summary=excluded.summary,"
                     "tags_json=excluded.tags_json,assistant_said_json=excluded.assistant_said_json,range_start=excluded.range_start,range_end=excluded.range_end,updated_at=excluded.updated_at",
-                    (_id, st, title, summary, _j(tags), _j(norm_said), ep.get("range_start"), ep.get("range_end"), now if before is None else (before.get("created_at") or now), now),
+                    (
+                        _id,
+                        st,
+                        title,
+                        summary,
+                        _j(tags),
+                        _j(norm_said),
+                        ep.get("range_start"),
+                        ep.get("range_end"),
+                        now if before is None else (before.get("created_at") or now),
+                        now,
+                    ),
                 )
                 conn.commit()
-        self._audit("upsert", "episodes", _id, before, {"id": _id, "status": st, "title": title, "summary": summary, "tags": tags, "assistant_said": norm_said}, note="upsert episode")
+        self._audit(
+            "upsert",
+            "episodes",
+            _id,
+            before,
+            {
+                "id": _id,
+                "status": st,
+                "title": title,
+                "summary": summary,
+                "tags": tags,
+                "assistant_said": norm_said,
+            },
+            note="upsert episode",
+        )
         return _id
 
     def get_episode(self, ep_id: str) -> Optional[Dict[str, Any]]:
@@ -858,7 +1139,14 @@ class MemorySQLite:
             "updated_at": r["updated_at"],
         }
 
-    def list_episodes(self, *, status: str = "active", query: str = "", limit: int = 50, offset: int = 0) -> List[Dict[str, Any]]:
+    def list_episodes(
+        self,
+        *,
+        status: str = "active",
+        query: str = "",
+        limit: int = 50,
+        offset: int = 0,
+    ) -> List[Dict[str, Any]]:
         status = (status or "").strip().lower()
         query = (query or "").strip()
         limit = max(1, min(500, int(limit)))
@@ -867,7 +1155,7 @@ class MemorySQLite:
             if query:
                 try:
                     sql = "SELECT e.* FROM episodes_fts f JOIN episodes e ON e.rowid=f.rowid WHERE episodes_fts MATCH ?"
-                    args=[query]
+                    args = [query]
                     if status:
                         sql += " AND e.status=?"
                         args.append(status)
@@ -875,37 +1163,41 @@ class MemorySQLite:
                     args += [limit, offset]
                     rows = conn.execute(sql, args).fetchall()
                 except Exception:
-                    like=f"%{query}%"
-                    sql="SELECT * FROM episodes WHERE (title LIKE ? OR summary LIKE ?)"
-                    args=[like, like]
+                    like = f"%{query}%"
+                    sql = (
+                        "SELECT * FROM episodes WHERE (title LIKE ? OR summary LIKE ?)"
+                    )
+                    args = [like, like]
                     if status:
                         sql += " AND status=?"
                         args.append(status)
                     sql += " ORDER BY updated_at DESC LIMIT ? OFFSET ?"
                     args += [limit, offset]
-                    rows=conn.execute(sql, args).fetchall()
+                    rows = conn.execute(sql, args).fetchall()
             else:
-                sql="SELECT * FROM episodes"
-                args=[]
+                sql = "SELECT * FROM episodes"
+                args = []
                 if status:
                     sql += " WHERE status=?"
                     args.append(status)
                 sql += " ORDER BY updated_at DESC LIMIT ? OFFSET ?"
                 args += [limit, offset]
-                rows=conn.execute(sql, args).fetchall()
+                rows = conn.execute(sql, args).fetchall()
 
-        out=[]
+        out = []
         for r in rows:
-            out.append({
-                "id": r["id"],
-                "status": r["status"],
-                "title": r["title"] or "",
-                "summary": r["summary"] or "",
-                "tags": _pj(r["tags_json"], []),
-                "assistant_said": _pj(r["assistant_said_json"], []),
-                "created_at": r["created_at"],
-                "updated_at": r["updated_at"],
-            })
+            out.append(
+                {
+                    "id": r["id"],
+                    "status": r["status"],
+                    "title": r["title"] or "",
+                    "summary": r["summary"] or "",
+                    "tags": _pj(r["tags_json"], []),
+                    "assistant_said": _pj(r["assistant_said_json"], []),
+                    "created_at": r["created_at"],
+                    "updated_at": r["updated_at"],
+                }
+            )
         return out
 
     # ============================================================
@@ -930,14 +1222,17 @@ class MemorySQLite:
 
         with self._connect() as conn:
             # 使用 UPSERT 语法：如果日期已存在则更新，不存在则插入
-            conn.execute("""
+            conn.execute(
+                """
                 INSERT INTO daily_screen_stats (date, summary_json, total_hours, updated_at)
                 VALUES (?, ?, ?, ?)
                 ON CONFLICT(date) DO UPDATE SET
                     summary_json = excluded.summary_json,
                     total_hours = excluded.total_hours,
                     updated_at = excluded.updated_at
-            """, (date_str, json_str, total_hours, updated_at))
+            """,
+                (date_str, json_str, total_hours, updated_at),
+            )
             conn.commit()
 
     def get_daily_screen_stats(self, date_str: str) -> dict:
@@ -945,10 +1240,11 @@ class MemorySQLite:
         获取某天的屏幕统计数据 (返回字典)
         """
         import json
+
         with self._connect() as conn:
             row = conn.execute(
                 "SELECT summary_json FROM daily_screen_stats WHERE date = ?",
-                (date_str,)
+                (date_str,),
             ).fetchone()
 
             if row and row[0]:
@@ -974,11 +1270,14 @@ class MemorySQLite:
 
         # 如果没有文本报告，尝试把原始数据转成字符串
         import json
+
         return json.dumps(stats, ensure_ascii=False, indent=2)
+
 
 # -------- module-level singleton --------
 _STORE: Optional[MemorySQLite] = None
 _STORE_LOCK = threading.Lock()
+
 
 def get_memory_store() -> MemorySQLite:
     global _STORE
@@ -996,7 +1295,7 @@ def format_profile_for_prompt(store: MemorySQLite) -> str:
     dislikes = p.get("dislikes") if isinstance(p.get("dislikes"), list) else []
     notes = p.get("notes") if isinstance(p.get("notes"), list) else []
 
-    lines=[]
+    lines = []
     if name:
         lines.append(f"· 称呼/名字：{name}")
     if likes:
@@ -1014,9 +1313,9 @@ def format_profile_for_prompt(store: MemorySQLite) -> str:
 def format_notes_for_prompt(store: MemorySQLite, max_items: int = 24) -> str:
     # 这里调用的是 store.list_items，不需要 list_only_notes
     items = store.list_items(status="active", limit=max(1, int(max_items)), offset=0)
-    lines=[]
+    lines = []
     for it in items:
-        tp = it.get("type","other")
+        tp = it.get("type", "other")
         text = (it.get("text") or "").strip()
         # 过滤掉档案类型的 item，避免重复
         if tp in ["agent_profile", "user_profile"]:
@@ -1027,13 +1326,25 @@ def format_notes_for_prompt(store: MemorySQLite, max_items: int = 24) -> str:
 
 
 def format_active_tasks_for_prompt(store: MemorySQLite, limit: int = 6) -> str:
-    items = store.list_items(status="active", type_="todo", limit=max(1, int(limit)), offset=0)
+    items = store.list_items(
+        status="active", type_="todo", limit=max(1, int(limit)), offset=0
+    )
     lines = []
+    cutoff = datetime.now() - timedelta(days=3)
     for it in items:
         text = str(it.get("text") or "").strip()
         if not text:
             continue
         updated_at = str(it.get("updated_at") or "").strip()
+        try:
+            if updated_at:
+                dt = datetime.fromisoformat(updated_at.replace("Z", "+00:00"))
+                if dt.tzinfo is not None:
+                    dt = dt.astimezone().replace(tzinfo=None)
+                if dt < cutoff:
+                    continue
+        except Exception:
+            pass
         short_time = updated_at[5:16].replace("T", " ") if len(updated_at) >= 16 else ""
         if short_time:
             lines.append(f"- {text}（更新:{short_time}）")
@@ -1043,11 +1354,25 @@ def format_active_tasks_for_prompt(store: MemorySQLite, limit: int = 6) -> str:
 
 
 def format_recent_episodes_for_prompt(store: MemorySQLite, limit: int = 3) -> str:
-    eps = store.list_episodes(status="active", limit=max(1,int(limit)), offset=0)
-    lines=[]
+    eps = store.list_episodes(status="active", limit=max(1, int(limit)), offset=0)
+    lines = []
+    cutoff = datetime.now() - timedelta(days=2)
     for ep in eps:
         title = (ep.get("title") or "").strip() or "对话总结"
         summ = (ep.get("summary") or "").strip()
+        updated_at = str(ep.get("updated_at") or ep.get("created_at") or "").strip()
+        try:
+            if updated_at:
+                dt = datetime.fromisoformat(updated_at.replace("Z", "+00:00"))
+                if dt.tzinfo is not None:
+                    dt = dt.astimezone().replace(tzinfo=None)
+                if dt < cutoff:
+                    continue
+        except Exception:
+            pass
         if summ:
             lines.append(f"- {title}: {summ}")
     return "\n".join(lines).strip()
+
+
+from datetime import datetime, timedelta
