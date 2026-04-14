@@ -346,7 +346,7 @@ TASK_MODEL_TTL_HOURS = 12  # 任务级成功模型粘性时长（小时）
 
 LLM_ROUTER = {
     # 默认闲聊场景
-    "default": ["gemini-3-flashglm-4.7-flash"],
+    "default": ["gemini-3-flash, glm-4.7-flash"],
     # 复杂推理场景
     "tool_reasoning": ["gemini-3-flash", "or-dp"],
     # 记忆总结场景

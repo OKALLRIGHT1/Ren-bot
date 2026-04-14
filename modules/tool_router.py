@@ -1,3 +1,4 @@
+import re
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Set
 
@@ -24,6 +25,28 @@ class ToolRouter:
         "查文件",
         "读代码",
         "看代码",
+    ]
+    _WEB_READ_HINTS = [
+        "解析链接",
+        "读网页",
+        "网页内容",
+        "打开链接",
+        "看看链接",
+        "总结网页",
+        "解析网页",
+    ]
+    _MOEGIRL_HINTS = [
+        "萌百",
+        "萌娘百科",
+        "moegirl",
+        "角色",
+        "作品",
+        "设定",
+        "什么梗",
+        "哪个作品",
+        "哪部作品",
+        "是谁",
+        "是什么",
     ]
 
     _DEFAULT_MCP_DOMAIN_BRANDS = [
@@ -198,6 +221,34 @@ class ToolRouter:
             return False
         return any(hint in text for hint in self._WORKSPACE_READ_HINTS)
 
+    def _should_route_to_web_reader(self, text: str) -> bool:
+        if "web_reader" not in self.delegate_map and "web_reader" not in self.react_map:
+            return False
+        has_url = bool(re.search(r"https?://[^\s]+", text, flags=re.IGNORECASE))
+        if not has_url:
+            return False
+        return any(hint in text for hint in self._WEB_READ_HINTS)
+
+    def _should_route_to_moegirl(self, text: str) -> bool:
+        if (
+            "moegirl_wiki" not in self.delegate_map
+            and "moegirl_wiki" not in self.react_map
+        ):
+            return False
+        has_explicit_hint = any(
+            hint in text for hint in ["萌百", "萌娘百科", "moegirl", "查萌百"]
+        )
+        if has_explicit_hint:
+            return True
+        has_question_form = any(
+            hint in text
+            for hint in ["是谁", "是什么", "什么梗", "哪个作品", "哪部作品"]
+        )
+        has_acg_context = any(
+            hint in text for hint in ["角色", "作品", "设定", "萌娘", "动漫", "二次元"]
+        )
+        return has_question_form and has_acg_context
+
     def _build_intent_keywords_from_plugins(self) -> Dict[str, List[str]]:
         keywords: Dict[str, List[str]] = {}
 
@@ -257,6 +308,12 @@ class ToolRouter:
 
         if self._should_route_to_mcp_domain(text):
             return ToolRouteResult(True, ["mcp_tools"], "mcp_domain_preferred")
+
+        if self._should_route_to_moegirl(text):
+            return ToolRouteResult(True, ["moegirl_wiki"], "moegirl_preferred")
+
+        if self._should_route_to_web_reader(text):
+            return ToolRouteResult(True, ["web_reader"], "web_reader_preferred")
 
         if self._should_route_to_workspace_read(text):
             return ToolRouteResult(True, ["workspace_ops"], "workspace_read_preferred")

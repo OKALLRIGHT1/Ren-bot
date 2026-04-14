@@ -23,13 +23,13 @@
             "type": "text",
             "label": "API Base URL",
             "description": "接口根地址，例如 https://wzw.pp.ua",
-            "default": "https://glk.jia4u.de"
+            "default": "https://ai.huan666.de"
         },
         "endpoint_path": {
             "type": "text",
             "label": "接口路径",
             "description": "按所选模式填写，images 常见是 /v1/images/generations，chat 常见是 /v1/chat/completions。",
-            "default": "/v1/chat/completions"
+            "default": "/v1/images/generations"
         },
         "api_key": {
             "type": "secret",
@@ -41,7 +41,7 @@
             "type": "text",
             "label": "模型名",
             "description": "按你的服务要求填写，例如 grok-2-image。",
-            "default": "grok-imagine-1.0"
+            "default": "grok-imagine-image"
         },
         "size_value": {
             "type": "text",

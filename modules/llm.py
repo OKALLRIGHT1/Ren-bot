@@ -76,6 +76,27 @@ def _is_glm_model(config: dict) -> bool:
     return "glm" in model_name or "bigmodel.cn" in base_url
 
 
+def _prefers_openai_only(config: dict) -> bool:
+    base_url = str((config or {}).get("base_url", "")).lower()
+    style = _model_style(config)
+    if style in {"openai"}:
+        return True
+    return any(
+        host in base_url
+        for host in [
+            "open.bigmodel.cn",
+            "openrouter.ai",
+            "integrate.api.nvidia.com",
+            "api.deepseek.com",
+            "x666.me",
+            "api.nih.cc",
+            "jiuuij.de5.net",
+            "ai.qaq.al",
+            "localhost:8317",
+        ]
+    )
+
+
 def _extract_text_content(raw_content) -> str:
     if isinstance(raw_content, str):
         return raw_content.strip()
@@ -321,6 +342,13 @@ def _build_attempt_order(config: dict, model_key: str = "") -> list[str]:
     is_glm = _is_glm_model(config)
 
     if is_glm:
+        attempts = ["openai"]
+        preferred = get_preferred_transport(model_key) if model_key else None
+        if preferred == "openai":
+            return attempts
+        return attempts
+
+    if _prefers_openai_only(config):
         attempts = ["openai"]
         preferred = get_preferred_transport(model_key) if model_key else None
         if preferred == "openai":

@@ -576,6 +576,49 @@ class ChatService:
             self.logger.error(f"Gateway file reply failed: {e}")
             return False
 
+    async def _send_gateway_voice_reply(
+        self, voice_path: str, ctx: Optional[Dict[str, Any]] = None
+    ) -> bool:
+        path_text = str(voice_path or "").strip()
+        if not path_text or not self.chat_gateway or not isinstance(ctx, dict):
+            return False
+        source = str(ctx.get("source") or "").strip().lower()
+        if source not in {"qq_gateway", "napcat_qq"}:
+            return False
+        channel_meta = ctx.get("channel_meta") or {}
+        adapter_name = (
+            str(channel_meta.get("adapter") or "napcat_qq").strip() or "napcat_qq"
+        )
+        session_id = str(channel_meta.get("session_id") or "").strip()
+        if not session_id:
+            self.logger.warning("Gateway voice reply skipped: missing session_id")
+            return False
+        sender_name = str(
+            channel_meta.get("sender_name") or channel_meta.get("user_id") or ""
+        ).strip()
+        session_label = self._qq_session_label(session_id)
+        self.logger.info(
+            f"[QQ-OUT-VOICE][{session_label}][{session_id}][to={sender_name or 'unknown'}] voice={path_text}"
+        )
+        try:
+            result = await self.chat_gateway.send_voice(
+                adapter_name,
+                session_id,
+                path_text,
+                metadata=channel_meta,
+                source=source,
+            )
+            if isinstance(result, dict) and result.get("ok"):
+                self.logger.info(
+                    f"[QQ-OUT-VOICE-OK][{session_label}][{session_id}] voice_sent"
+                )
+                return True
+            self.logger.warning(f"Gateway voice reply failed: {result}")
+            return False
+        except Exception as e:
+            self.logger.error(f"Gateway voice reply failed: {e}")
+            return False
+
     async def _emit_idle_status(
         self, output_profile: Optional[Dict[str, Any]], reason: str
     ) -> None:
@@ -839,6 +882,7 @@ class ChatService:
             channel_meta.get("image_prompt")
             or "请客观详细描述这张QQ图片的内容，并提取其中可用于回复的关键信息。"
         )
+        prompt += "\n【自我识别】如果你在图片边缘，尤其是右下角，看到一个二次元/动漫风格的女孩、桌宠、Live2D 角色或悬浮球，请识别为“这是AI助手(你)的桌面形象”。"
         image_summaries = []
         for index, image_meta in enumerate(images[:3], 1):
             try:
@@ -882,6 +926,42 @@ class ChatService:
         if m2:
             return True, m2.group(1), m2.group(2)
         return False, "", ""
+
+    def _build_live2d_self_awareness_hint(
+        self, ctx: Optional[Dict[str, Any]] = None
+    ) -> str:
+        source = str((ctx or {}).get("source") or "").strip().lower()
+        if source in {"qq_gateway", "napcat_qq", "text_input", "unknown", "desktop"}:
+            return (
+                "【自我识别】如果你在截图、屏幕描述或桌面画面边缘，尤其是右下角，看到一个二次元/动漫风格的女孩、桌宠、Live2D 角色或悬浮球，"
+                "那通常就是你自己的桌面形象（你的实体投影），不是别人。描述屏幕或图片时要知道那是你自己。"
+            )
+        return ""
+
+    def _build_sensor_persona_prompt(
+        self,
+        *,
+        ctx: Optional[Dict[str, Any]] = None,
+        extra_context: str = "",
+    ) -> str:
+        base_prompt = DEFAULT_PERSONA
+        try:
+            from modules.character_manager import character_manager
+
+            active_char = character_manager.get_active_character()
+            if active_char:
+                base_prompt = active_char.get("prompt", DEFAULT_PERSONA)
+        except Exception:
+            pass
+
+        current_time = datetime.now().strftime("%Y-%m-%d %H:%M")
+        parts = [f"【当前时间】{current_time}", str(base_prompt or "").strip()]
+        self_awareness_hint = self._build_live2d_self_awareness_hint(ctx)
+        if self_awareness_hint:
+            parts.append(self_awareness_hint)
+        if str(extra_context or "").strip():
+            parts.append(str(extra_context or "").strip())
+        return "\n\n".join(part for part in parts if part)
 
     def _set_codex_task_state(
         self,
@@ -1136,6 +1216,56 @@ class ChatService:
             return "你之前提到的那件事，今天推进得怎么样了？如果卡住了，我们可以一起拆一下。"
         return f"你之前说要{task}，今天推进得怎么样了？如果卡住了，我们可以一起拆一下。"
 
+    def _is_short_life_task_text(self, text: str) -> bool:
+        raw = str(text or "").strip().lower()
+        if not raw:
+            return False
+        hints = [
+            "睡觉",
+            "睡一觉",
+            "去睡",
+            "休息",
+            "吃饭",
+            "吃个饭",
+            "洗澡",
+            "洗个澡",
+            "出门",
+            "回家",
+            "喝水",
+            "上厕所",
+            "午睡",
+            "躺会儿",
+        ]
+        return any(hint in raw for hint in hints)
+
+    def _should_suppress_followup_preface(self, user_text: str) -> bool:
+        raw = str(user_text or "").strip().lower()
+        if not raw:
+            return False
+        high_priority_hints = [
+            "摔",
+            "摔倒",
+            "受伤",
+            "流血",
+            "疼",
+            "疼死",
+            "崩溃",
+            "难受",
+            "不舒服",
+            "发烧",
+            "生病",
+            "住院",
+            "急",
+            "出事",
+            "救命",
+            "害怕",
+            "想哭",
+            "焦虑",
+            "头晕",
+            "吐了",
+        ]
+        return any(hint in raw for hint in high_priority_hints)
+
     def _has_today_task_followup(self) -> bool:
         store = self._get_memory_store()
         if not store:
@@ -1154,6 +1284,25 @@ class ChatService:
             return False
         return False
 
+    def _has_task_followup_for_item(self, item_id: str) -> bool:
+        target = str(item_id or "").strip()
+        if not target:
+            return False
+        store = self._get_memory_store()
+        if not store:
+            return False
+        try:
+            rows = store.list_transcript(role="assistant", limit=420, offset=0)
+            for r in rows:
+                meta = r.get("meta") or {}
+                if str(meta.get("path") or "").strip() != "task_followup":
+                    continue
+                if str(meta.get("item_id") or "").strip() == target:
+                    return True
+        except Exception:
+            return False
+        return False
+
     def _find_task_followup_candidate(self) -> Optional[Dict[str, Any]]:
         store = self._get_memory_store()
         if not store:
@@ -1166,15 +1315,24 @@ class ChatService:
             return None
         today = datetime.now().date()
         yesterday = today - timedelta(days=1)
+        oldest_allowed = today - timedelta(days=2)
         fallback = None
         for item in items:
             updated_at = str(item.get("updated_at") or "").strip()
+            item_text = str(item.get("text") or "").strip()
+            item_id = str(item.get("id") or "").strip()
+            if self._is_short_life_task_text(item_text):
+                continue
+            if item_id and self._has_task_followup_for_item(item_id):
+                continue
             try:
                 updated_date = datetime.fromisoformat(
                     updated_at.replace("Z", "+00:00")
                 ).date()
             except Exception:
                 updated_date = None
+            if updated_date and updated_date < oldest_allowed:
+                continue
             if updated_date == yesterday:
                 return item
             if updated_date and updated_date < today and fallback is None:
@@ -1192,6 +1350,8 @@ class ChatService:
                 return None
             today_str = datetime.now().strftime("%Y-%m-%d")
             if self._last_task_followup_day == today_str:
+                return None
+            if self._should_suppress_followup_preface(user_text or ""):
                 return None
             if self._is_task_related_message(user_text or ""):
                 return None
@@ -1296,6 +1456,8 @@ class ChatService:
         raw = re.sub(r"\[tool_use\]\s*\[[^\]]*\]\s*", "", raw, flags=re.IGNORECASE)
         raw = re.sub(r"\[tool_use\]\s*", "", raw, flags=re.IGNORECASE)
         raw = re.sub(r"\[search_meta\][^\n]*\n?", "", raw, flags=re.IGNORECASE)
+        raw = re.sub(r"\[web_meta\][^\n]*\n?", "", raw, flags=re.IGNORECASE)
+        raw = re.sub(r"\[moegirl_meta\][^\n]*\n?", "", raw, flags=re.IGNORECASE)
         return raw.strip()
 
     def _compress_sensor_text(self, text: str, max_len: int = 800) -> str:
@@ -1484,6 +1646,40 @@ class ChatService:
                 data[key] = value
         return data
 
+    def _parse_web_meta(self, text: str) -> Dict[str, str]:
+        raw = str(text or "")
+        m = re.search(r"\[web_meta\]\s*([^\n]+)", raw, flags=re.IGNORECASE)
+        if not m:
+            return {}
+        line = str(m.group(1) or "").strip()
+        data: Dict[str, str] = {}
+        for part in line.split(";"):
+            if "=" not in part:
+                continue
+            key, value = part.split("=", 1)
+            key = str(key or "").strip().lower()
+            value = str(value or "").strip()
+            if key:
+                data[key] = value
+        return data
+
+    def _parse_moegirl_meta(self, text: str) -> Dict[str, str]:
+        raw = str(text or "")
+        m = re.search(r"\[moegirl_meta\]\s*([^\n]+)", raw, flags=re.IGNORECASE)
+        if not m:
+            return {}
+        line = str(m.group(1) or "").strip()
+        data: Dict[str, str] = {}
+        for part in line.split(";"):
+            if "=" not in part:
+                continue
+            key, value = part.split("=", 1)
+            key = str(key or "").strip().lower()
+            value = str(value or "").strip()
+            if key:
+                data[key] = value
+        return data
+
     def _search_result_lacks_explicit_fact(self, text: str) -> bool:
         raw = str(text or "")
         meta = self._parse_search_meta(raw)
@@ -1516,6 +1712,43 @@ class ChatService:
         if any(marker.lower() in raw.lower() for marker in explicit_markers):
             return False
         return True
+
+    def _web_result_lacks_body(self, text: str) -> bool:
+        meta = self._parse_web_meta(text)
+        if not meta:
+            return False
+        return str(meta.get("has_body") or "0") != "1"
+
+    def _should_fallback_from_moegirl(self, results: list[str]) -> bool:
+        if not results:
+            return True
+        combined = "\n".join(str(item) for item in results if str(item).strip())
+        meta = self._parse_moegirl_meta(combined)
+        status = str(meta.get("status") or "").strip().lower()
+        if status == "not_found":
+            return True
+        if status == "ambiguous" and str(meta.get("has_page") or "0") != "1":
+            return True
+        return False
+
+    async def _run_search_fallback_for_moegirl(
+        self, *, user_text: str, ctx: Dict[str, Any]
+    ) -> tuple[list[str], list[str]]:
+        fallback_ctx = dict(ctx or {})
+        fallback_ctx["delegate_mode"] = True
+        fallback_ctx["allow_read"] = False
+        fallback_ctx["allow_write"] = False
+        fallback_ctx["allow_exec"] = False
+        command = f"[CMD: search | {user_text}]"
+        triggered, _clean, results, used = await self.plugin_manager.execute_commands(
+            command,
+            fallback_ctx,
+            allow_tools=True,
+            allowed_types={"delegate"},
+        )
+        if not triggered:
+            return [], []
+        return results, used
 
     def _should_use_background_delegate(
         self,
@@ -1615,6 +1848,7 @@ class ChatService:
         )
         is_market_query = self._is_market_price_query(user_text)
         is_search_delegate = self._is_search_delegate(delegate_triggers, raw_text)
+        web_meta = self._parse_web_meta(raw_text)
         if is_market_query:
             prompt += (
                 "6) 如果这是价格/行情/汇率/指数类请求，只有在任务结果里明确出现具体数值+单位时才可以引用；"
@@ -1625,6 +1859,11 @@ class ChatService:
                 "8) 如果这是联网搜索结果，只能转述结果里已经明确出现的事实；"
                 "9) 不要补充结果中未出现的人名、日期、价格、型号、结论；"
                 "10) 若搜索结果只有摘要或标题，明确说是基于摘要的概述。"
+            )
+        if web_meta:
+            prompt += (
+                "11) 如果这是网页解析结果，优先依据网页标题和正文摘要来概述；"
+                "12) 如果没有提取到可靠正文，就明确说明只拿到了标题或少量页面信息，不要把标题扩写成完整正文。"
             )
         trigger_text = (
             ", ".join(delegate_triggers[:4]) if delegate_triggers else "delegate"
@@ -1670,6 +1909,8 @@ class ChatService:
                     raw_text
                 ):
                     polished = "我查到了相关搜索结果，不过当前拿到的主要是标题和摘要，所以我只能先做保守概述，不想把没写明的细节说死。"
+                elif web_meta and self._web_result_lacks_body(raw_text):
+                    polished = "我打开了这个链接，不过目前只稳定拿到了标题或少量页面信息，正文没有可靠提取出来，所以我先不把内容说得太满。"
                 return polished, (emo or "neutral")
         except Exception:
             pass
@@ -1681,6 +1922,11 @@ class ChatService:
         if is_search_delegate and self._search_result_lacks_explicit_fact(raw_text):
             return (
                 "我查到了相关搜索结果，不过当前拿到的主要是标题和摘要，所以我只能先做保守概述，不想把没写明的细节说死。",
+                "neutral",
+            )
+        if web_meta and self._web_result_lacks_body(raw_text):
+            return (
+                "我打开了这个链接，不过目前只稳定拿到了标题或少量页面信息，正文没有可靠提取出来，所以我先不把内容说得太满。",
                 "neutral",
             )
         return raw_text, "neutral"
@@ -1725,6 +1971,28 @@ class ChatService:
                 delegate_triggers=delegate_triggers,
                 task_reasoning=task_reasoning,
             )
+            if "moegirl_wiki" in set(delegate_used or delegate_triggers):
+                if self._should_fallback_from_moegirl(delegate_results):
+                    (
+                        fallback_results,
+                        fallback_used,
+                    ) = await self._run_search_fallback_for_moegirl(
+                        user_text=user_text,
+                        ctx=ctx,
+                    )
+                    if fallback_results:
+                        merged_results = list(delegate_results or [])
+                        merged_results.append(
+                            "\n【萌百未给出明确主词条，以下是联网补充】"
+                        )
+                        merged_results.extend(fallback_results)
+                        delegate_results = merged_results
+                    if fallback_used:
+                        delegate_used = list(
+                            dict.fromkeys(
+                                list(delegate_used or []) + list(fallback_used)
+                            )
+                        )
             summary = (
                 "\n".join(delegate_results)[:200]
                 if delegate_results
@@ -2316,6 +2584,8 @@ class ChatService:
             today_str = datetime.now().strftime("%Y-%m-%d")
             if self._last_proactive_followup_day == today_str:
                 return None
+            if self._should_suppress_followup_preface(user_text or ""):
+                return None
 
             # 主动关心只在每天较早时段触发，避免把昨天的话题拖得太久。
             if datetime.now().hour >= 12:
@@ -2477,8 +2747,24 @@ class ChatService:
             if memory_session_id:
                 direct_meta["session_id"] = memory_session_id
             direct_reply_text = str(direct_result) if direct_result is not None else ""
+            handled_gateway_voice = False
             handled_gateway_image = False
             handled_gateway_file = False
+            if (
+                isinstance(direct_result, dict)
+                and str(direct_result.get("__type__") or "").strip() == "gateway_voice"
+            ):
+                voice_path = str(direct_result.get("voice_path") or "").strip()
+                success_text = str(
+                    direct_result.get("success_text") or "🔊 已把语音发给你了。"
+                )
+                fallback_text = str(
+                    direct_result.get("fallback_text")
+                    or "⚠️ 语音已准备好，但回发失败了。"
+                )
+                voice_ok = await self._send_gateway_voice_reply(voice_path, ctx)
+                direct_reply_text = success_text if voice_ok else fallback_text
+                handled_gateway_voice = voice_ok
             if (
                 isinstance(direct_result, dict)
                 and str(direct_result.get("__type__") or "").strip() == "gateway_file"
@@ -2542,7 +2828,11 @@ class ChatService:
                     speak=output_profile.get("speak", True),
                     show_bubble=output_profile.get("show_bubble", True),
                 )
-                if not handled_gateway_image and not handled_gateway_file:
+                if (
+                    not handled_gateway_voice
+                    and not handled_gateway_image
+                    and not handled_gateway_file
+                ):
                     await self._send_gateway_reply(
                         direct_reply_text, ctx, emotion="neutral"
                     )
@@ -2770,7 +3060,10 @@ class ChatService:
         except:
             PERSONA_PROMPT = ""
 
+        self_awareness_hint = self._build_live2d_self_awareness_hint(ctx)
         system_text = f"【当前时间】{current_time}\n{PERSONA_PROMPT}\n{special_context}"
+        if self_awareness_hint:
+            system_text += f"\n{self_awareness_hint}"
         if codex_mode:
             codex_hint = (
                 "【代码助手模式】你正在处理代码任务。\n"
@@ -3052,7 +3345,10 @@ class ChatService:
                     self._strip_cmd_anywhere(self._strip_emo_tags_anywhere(final_reply))
                 )
             )
-            final_reply = self._merge_preface_texts(preface_text, final_reply)
+            if self._should_suppress_followup_preface(user_text or ""):
+                final_reply = final_reply or preface_text
+            else:
+                final_reply = self._merge_preface_texts(preface_text, final_reply)
 
             if self.learning:
                 self.learning.record_interaction(
@@ -3387,17 +3683,6 @@ class ChatService:
         print(
             f"🤖 [Sensor] 观察: {clean_title} ({category}) | App: {display_app} | Count: {count}"
         )
-        # 获取人设
-        base_prompt = DEFAULT_PERSONA
-        try:
-            from modules.character_manager import character_manager
-
-            c = character_manager.get_active_character()
-            if c:
-                base_prompt = c.get("prompt", DEFAULT_PERSONA)
-        except:
-            pass
-
         # ================= [分支 A] 自我意识 =================
         recent_context = ""
         try:
@@ -3410,6 +3695,9 @@ class ChatService:
             recent_context = ""
 
         context_block = f"\n【近期观察】\n{recent_context}\n" if recent_context else ""
+        sensor_persona_prompt = self._build_sensor_persona_prompt(
+            ctx={"source": "desktop"}, extra_context=context_block
+        )
 
         def record_observation(content: str, source: str):
             sensor_ref = getattr(self, "screen_sensor_ref", None)
@@ -3441,11 +3729,10 @@ class ChatService:
             if count > 1 and random.random() > 0.7:
                 return
 
-            sys_prompt = f"""{base_prompt}
-{context_block}
-    用户正在盯着【你的】程序窗口({clean_title})看。
-    请打破第四面墙，对他简短说一句话。
-    【警告】绝不能超过 15 个字！"""
+            sys_prompt = f"""{sensor_persona_prompt}
+     用户正在盯着【你的】程序窗口({clean_title})看。
+     请打破第四面墙，对他简短说一句话。
+     【警告】绝不能超过 15 个字！"""
 
             try:
                 reply = await asyncio.to_thread(
@@ -3516,7 +3803,7 @@ class ChatService:
                 if img_b64:
                     # ===== 模式 1：视觉直接吐槽 =====
                     if VISION_MODE == "direct":
-                        v_prompt = f"""{base_prompt}
+                        v_prompt = f"""{sensor_persona_prompt}
 你正看着用户的屏幕(当前活跃窗口: [{clean_title}])。
 【空间自我意识】如果你在画面边缘（如右下角）看到一个动漫女孩、桌宠或悬浮球，那就是你自己（你的实体投影）！切记不要把她当成别人。
 请主要结合用户屏幕上的工作/娱乐内容进行吐槽。
@@ -3543,8 +3830,7 @@ class ChatService:
                                 description, max_len=800
                             )
                             record_observation(description, "vision")
-                            sys_prompt = f"""{base_prompt}
-{context_block}
+                            sys_prompt = f"""{sensor_persona_prompt}
 
     【场景】用户当前屏幕内容如下：
     {description}
@@ -3552,7 +3838,7 @@ class ChatService:
     【重要设定】描述中提到的“AI助手的形象”、“动漫女孩”就是你自己。你正隔着屏幕陪伴用户。
 
     【任务】
-    结合用户屏幕上的主要内容（忽略你自己，关注用户在干嘛）进行一次毒舌或关心的吐槽。
+    结合用户屏幕上的主要内容（忽略你自己，关注用户在干嘛）进行一次简短的吐槽。
     【字数限制】绝对不能超过 20 个字！用最精简的一句话表达，绝对不要像机器人一样罗列画面内容。
     """
                             reply = await asyncio.to_thread(
@@ -3560,7 +3846,7 @@ class ChatService:
                                 [
                                     {
                                         "role": "system",
-                                        "content": f"{base_prompt}\n{context_block}",
+                                        "content": sensor_persona_prompt,
                                     },
                                     {
                                         "role": "user",
@@ -3584,8 +3870,7 @@ class ChatService:
                 self.logger.warning(f"Vision failed: {e}")
 
         # ================= [分支 C] 文本模式 =================
-        sys_prompt = f"""{base_prompt}
-{context_block}
+        sys_prompt = f"""{sensor_persona_prompt}
 
     用户刚切换到窗口: [{clean_title}] ({category})，这是今天第 {count} 次。
 

@@ -52,7 +52,7 @@ class Plugin:
             "negative_prompt": self._read_setting(settings, "negative_prompt", ""),
             "extra_body_json": self._read_setting(settings, "extra_body_json", "{}"),
             "caption_template": self._read_setting(
-                settings, "caption_template", "已按你的要求画好了：{prompt}"
+                settings, "caption_template", "🖼️ 已按你的要求画好了。"
             ),
             "debug_logging": bool(self._read_setting(settings, "debug_logging", False)),
         }
@@ -81,16 +81,18 @@ class Plugin:
         return source in {"qq_gateway", "napcat_qq"}
 
     def _build_request_body(self, prompt: str) -> Dict[str, Any]:
-        api_mode = str(self._settings.get("api_mode") or "images").strip().lower()
-        if api_mode == "chat":
-            return self._build_chat_body(prompt)
-        return self._build_images_body(prompt)
-
-    def _build_images_body(self, prompt: str) -> Dict[str, Any]:
+        # 1. 【核心兼容】：同时带上 prompt（画图用）和 messages（聊天用）
         body: Dict[str, Any] = {
             "prompt": prompt,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": prompt,
+                }
+            ]
         }
 
+        # 2. 注入所有通用与画图参数
         model_value = str(self._settings.get("model_name") or "").strip()
         if model_value:
             body["model"] = model_value
@@ -111,37 +113,16 @@ class Plugin:
         if negative_value:
             body["negative_prompt"] = negative_value
 
+        # 3. 合并自定义额外参数
         extra_args_raw = (
-            str(self._settings.get("extra_body_json") or "{}").strip() or "{}"
+                str(self._settings.get("extra_body_json") or "{}").strip() or "{}"
         )
         extra_args = json.loads(extra_args_raw)
         if not isinstance(extra_args, dict):
             raise ValueError("extra_body_json 必须是 JSON 对象")
         body.update(extra_args)
+
         self._normalize_request_body(body)
-        return body
-
-    def _build_chat_body(self, prompt: str) -> Dict[str, Any]:
-        body: Dict[str, Any] = {
-            "messages": [
-                {
-                    "role": "user",
-                    "content": prompt,
-                }
-            ]
-        }
-
-        model_value = str(self._settings.get("model_name") or "").strip()
-        if model_value:
-            body["model"] = model_value
-
-        extra_args_raw = (
-            str(self._settings.get("extra_body_json") or "{}").strip() or "{}"
-        )
-        extra_args = json.loads(extra_args_raw)
-        if not isinstance(extra_args, dict):
-            raise ValueError("extra_body_json 必须是 JSON 对象")
-        body.update(extra_args)
         return body
 
     def _normalize_request_body(self, body: Dict[str, Any]) -> None:
@@ -514,8 +495,9 @@ class Plugin:
             return f"图片生成成功，但保存临时图片失败：{exc}"
 
         caption_tpl = str(
-            self._settings.get("caption_template") or "已按你的要求画好了：{prompt}"
+            self._settings.get("caption_template") or "🖼️ 已按你的要求画好了。"
         )
+        # 这里保留 replace 逻辑作为底层防御，以防你未来在 config 里又加回了 {prompt}
         caption = caption_tpl.replace("{prompt}", prompt)
         return {
             "__type__": "gateway_image",
