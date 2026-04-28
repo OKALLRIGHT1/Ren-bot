@@ -1,35 +1,97 @@
+import json
 from pathlib import Path
 
-
-UI_PALETTE = {
-    "accent": "#6366F1",
-    "accent_hover": "#4F46E5",
-    "accent_soft": "#EEF2FF",
-    "bg_app": "#F5F7FB",
-    "bg_card": "#FFFFFF",
-    "bg_soft": "#F3F4F6",
-    "bg_console": "#111827",
-    "border": "#E5E7EB",
-    "border_strong": "#D1D5DB",
-    "text_primary": "#111827",
-    "text_secondary": "#6B7280",
-    "text_muted": "#9CA3AF",
-    "success": "#10B981",
-    "success_soft": "#D1FAE5",
-    "warning": "#F59E0B",
-    "danger": "#EF4444",
+# 定义内置的主题字典
+THEMES = {
+    "Indigo (靛蓝)": {
+        "accent": "#6366F1",
+        "accent_hover": "#4F46E5",
+        "accent_soft": "#EEF2FF",
+        "bg_app": "#F5F7FB",
+        "bg_card": "#FFFFFF",
+        "bg_soft": "#F3F4F6",
+        "border": "#E5E7EB",
+        "border_strong": "#D1D5DB",
+        "text_primary": "#111827",
+        "text_secondary": "#6B7280",
+        "text_muted": "#9CA3AF",
+        "success": "#10B981",
+        "success_soft": "#D1FAE5",
+        "warning": "#F59E0B",
+        "danger": "#EF4444",
+        "console_bg": "#0B1220",
+        "console_fg": "#E5E7EB",
+        "console_border": "#1F2937",
+        "console_selection_bg": "#1E293B",
+        "console_selection_fg": "#E5E7EB",
+    },
+    "Sakura (樱花)": {
+        "accent": "#F472B6",
+        "accent_hover": "#EC4899",
+        "accent_soft": "#FFF1F2",
+        "bg_app": "#FDF2F8",
+        "bg_card": "#FFFFFF",
+        "bg_soft": "#FCE7F3",
+        "border": "#FBCFE8",
+        "border_strong": "#F9A8D4",
+        "text_primary": "#4C1D95",
+        "text_secondary": "#831843",
+        "text_muted": "#9D174D",
+        "success": "#10B981",
+        "success_soft": "#D1FAE5",
+        "warning": "#F59E0B",
+        "danger": "#EF4444",
+        "console_bg": "#1C1917",
+        "console_fg": "#F9A8D4",
+        "console_border": "#3F3F46",
+        "console_selection_bg": "#831843",
+        "console_selection_fg": "#FBCFE8",
+    },
+    "Emerald (极光)": {
+        "accent": "#10B981",
+        "accent_hover": "#059669",
+        "accent_soft": "#ECFDF5",
+        "bg_app": "#F0FDF4",
+        "bg_card": "#FFFFFF",
+        "bg_soft": "#D1FAE5",
+        "border": "#A7F3D0",
+        "border_strong": "#6EE7B7",
+        "text_primary": "#064E3B",
+        "text_secondary": "#065F46",
+        "text_muted": "#047857",
+        "success": "#10B981",
+        "success_soft": "#D1FAE5",
+        "warning": "#F59E0B",
+        "danger": "#EF4444",
+        "console_bg": "#022C22",
+        "console_fg": "#A7F3D0",
+        "console_border": "#064E3B",
+        "console_selection_bg": "#065F46",
+        "console_selection_fg": "#ECFDF5",
+    },
+    "Cyberpunk (赛博)": {
+        "accent": "#06B6D4",
+        "accent_hover": "#0891B2",
+        "accent_soft": "#164E63",
+        "bg_app": "#09090B",
+        "bg_card": "#18181B",
+        "bg_soft": "#27272A",
+        "border": "#3F3F46",
+        "border_strong": "#52525B",
+        "text_primary": "#F4F4F5",
+        "text_secondary": "#A1A1AA",
+        "text_muted": "#71717A",
+        "success": "#10B981",
+        "success_soft": "#064E3B",
+        "warning": "#F59E0B",
+        "danger": "#EF4444",
+        "console_bg": "#000000",
+        "console_fg": "#22D3EE",
+        "console_border": "#27272A",
+        "console_selection_bg": "#164E63",
+        "console_selection_fg": "#CFFAFE",
+    }
 }
-
-DEFAULT_CONSOLE = {
-    "bg": "#0B1220",
-    "fg": "#E5E7EB",
-    "border": "#1F2937",
-    "selection_bg": "#1E293B",
-    "selection_fg": "#E5E7EB",
-    "muted": "#94A3B8",
-    "label": "#CBD5E1",
-}
-
 
 def _merge_palette(base: dict, override: dict) -> dict:
     if not isinstance(override, dict):
@@ -39,14 +101,34 @@ def _merge_palette(base: dict, override: dict) -> dict:
             base[k] = v
     return base
 
-
-def get_ui_palette() -> dict:
-    p = dict(UI_PALETTE)
-    p["console_main"] = dict(DEFAULT_CONSOLE)
-    p["console_codex"] = dict(DEFAULT_CONSOLE)
+def get_current_theme_name() -> str:
     try:
         from modules.runtime_settings import load_runtime_settings
+        runtime = load_runtime_settings()
+        return runtime.get("theme_name", "Indigo (靛蓝)")
+    except Exception:
+        return "Indigo (靛蓝)"
 
+def get_ui_palette() -> dict:
+    theme_name = get_current_theme_name()
+    if theme_name not in THEMES:
+        theme_name = "Indigo (靛蓝)"
+    
+    base = dict(THEMES[theme_name])
+    
+    p = dict(base)
+    p["console_main"] = {
+        "bg": base["console_bg"],
+        "fg": base["console_fg"],
+        "border": base["console_border"],
+        "selection_bg": base["console_selection_bg"],
+        "selection_fg": base["console_selection_fg"],
+    }
+    p["console_codex"] = p["console_main"]
+    
+    # Allow overrides
+    try:
+        from modules.runtime_settings import load_runtime_settings
         runtime = load_runtime_settings()
         ui = runtime.get("ui_palette") if isinstance(runtime, dict) else None
         if isinstance(ui, dict):
@@ -61,6 +143,100 @@ def get_ui_palette() -> dict:
         pass
     return p
 
+# 各种基础控件风格（滚动条、提示框、输入框焦点等）
+def get_common_qss(p: dict) -> str:
+    return f"""
+        /* 针对所有的 QScrollBar 进行深度美化 */
+        QScrollBar:vertical {{
+            background: transparent;
+            width: 8px;
+            margin: 0px 0px 0px 0px;
+        }}
+        QScrollBar::handle:vertical {{
+            background: {p["border_strong"]};
+            min-height: 20px;
+            border-radius: 4px;
+        }}
+        QScrollBar::handle:vertical:hover {{
+            background: {p["accent"]};
+        }}
+        QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
+            height: 0px;
+        }}
+        QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{
+            background: transparent;
+        }}
+        
+        QScrollBar:horizontal {{
+            background: transparent;
+            height: 8px;
+            margin: 0px 0px 0px 0px;
+        }}
+        QScrollBar::handle:horizontal {{
+            background: {p["border_strong"]};
+            min-width: 20px;
+            border-radius: 4px;
+        }}
+        QScrollBar::handle:horizontal:hover {{
+            background: {p["accent"]};
+        }}
+        QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{
+            width: 0px;
+        }}
+        QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal {{
+            background: transparent;
+        }}
+
+        /* QToolTip 风格美化 */
+        QToolTip {{
+            background-color: {p["console_bg"]};
+            color: #FFFFFF;
+            border: 1px solid {p["accent"]};
+            border-radius: 4px;
+            padding: 4px;
+            font-family: 'Segoe UI', 'Microsoft YaHei';
+        }}
+
+        /* 输入框的 focus 状态环 */
+        QLineEdit:focus, QTextEdit:focus, QPlainTextEdit:focus, QComboBox:focus {{
+            border: 2px solid {p["accent"]};
+            outline: none;
+        }}
+
+        /* 隐藏掉系统难看的 Focus 虚线框 */
+        * {{
+            outline: none;
+        }}
+        
+        /* 美化 QComboBox 下拉栏 */
+        QComboBox {{
+            padding: 4px 10px;
+            border-radius: 8px;
+        }}
+        QComboBox::drop-down {{
+            border: none;
+            width: 24px;
+        }}
+        QComboBox::down-arrow {{
+            image: none; /* remove default arrow */
+            border-left: 5px solid transparent;
+            border-right: 5px solid transparent;
+            border-top: 5px solid {p["text_secondary"]};
+            margin-right: 8px;
+            margin-top: 2px;
+        }}
+        QComboBox QAbstractItemView {{
+            background-color: {p["bg_card"]};
+            border: 1px solid {p["border"]};
+            border-radius: 8px;
+            selection-background-color: {p["accent_soft"]};
+            selection-color: {p["accent_hover"]};
+            outline: none;
+        }}
+        QComboBox QAbstractItemView::item {{
+            padding: 8px;
+        }}
+    """
 
 def get_main_styles(ball_config: dict) -> str:
     bg_color = ball_config.get("bg_color", "#3B82F6")
@@ -89,10 +265,10 @@ def get_main_styles(ball_config: dict) -> str:
         }}
     """
 
-
 def get_panel_styles() -> str:
     p = get_ui_palette()
-    return f"""
+    common = get_common_qss(p)
+    return common + f"""
         QWidget {{
             font-family: 'Segoe UI', 'Microsoft YaHei';
             color: {p["text_primary"]};
@@ -127,8 +303,8 @@ def get_panel_styles() -> str:
         }}
         QFrame#heroCard {{
             background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
-                stop:0 {p["accent_soft"]}, stop:1 #F8FAFC);
-            border: 1px solid #DDE6FF;
+                stop:0 {p["accent_soft"]}, stop:1 {p["bg_app"]});
+            border: 1px solid {p["border"]};
             border-radius: 16px;
         }}
         QLabel#heroTitle {{
@@ -144,13 +320,13 @@ def get_panel_styles() -> str:
         QLabel#pillLabel {{
             background: {p["bg_card"]};
             color: {p["text_secondary"]};
-            border: 1px solid #DCE4F7;
+            border: 1px solid {p["border"]};
             border-radius: 11px;
             padding: 4px 10px;
             font-size: 11px;
             font-weight: 600;
         }}
-                QTextEdit#historyView {{
+        QTextEdit#historyView {{
             background-color: {p["console_main"]["bg"]};
             border: 1px solid {p["console_main"]["border"]};
             border-radius: 12px;
@@ -171,7 +347,7 @@ def get_panel_styles() -> str:
         }}
         QFrame#inputShell:hover {{
             background-color: {p["bg_card"]};
-            border-color: {p["border"]};
+            border-color: {p["accent"]};
         }}
         QLineEdit#chatInput {{
             background: transparent;
@@ -179,6 +355,9 @@ def get_panel_styles() -> str:
             color: {p["text_primary"]};
             font-size: 14px;
             padding-left: 6px;
+        }}
+        QLineEdit#chatInput:focus {{
+            border: none;
         }}
         QPushButton#sendButton {{
             background-color: {p["accent"]};
@@ -215,34 +394,35 @@ def get_panel_styles() -> str:
         QMenu::item {{
             padding: 7px 14px;
             border-radius: 8px;
+            color: {p["text_primary"]};
         }}
         QMenu::item:selected {{
-            background: {p["accent_soft"]};
-            color: {p["accent_hover"]};
+            background: {p["accent"]};
+            color: white;
         }}
     """
 
-
 def get_settings_styles() -> str:
     p = get_ui_palette()
-    return f"""
+    common = get_common_qss(p)
+    return common + f"""
         QDialog {{
-            background-color: #EEF2F7;
+            background-color: {p["bg_app"]};
             font-family: 'Segoe UI', 'Microsoft YaHei';
         }}
         QFrame#settingsNavCard, QFrame#settingsContentCard {{
-            background: rgba(255, 255, 255, 0.92);
-            border: 1px solid rgba(255, 255, 255, 0.72);
+            background: {p["bg_card"]};
+            border: 1px solid {p["border"]};
             border-radius: 18px;
         }}
         QFrame#settingsHeaderCard, QFrame#launchCard {{
-            background: rgba(255, 255, 255, 0.84);
-            border: 1px solid rgba(255, 255, 255, 0.68);
+            background: {p["bg_card"]};
+            border: 1px solid {p["border"]};
             border-radius: 14px;
         }}
         QFrame#settingsActionBar {{
-            background: rgba(255, 255, 255, 0.88);
-            border: 1px solid rgba(255, 255, 255, 0.62);
+            background: {p["bg_soft"]};
+            border: 1px solid {p["border"]};
             border-radius: 16px;
         }}
         QLabel#settingsNavTitle {{
@@ -272,18 +452,19 @@ def get_settings_styles() -> str:
             color: {p["text_secondary"]};
         }}
         QListWidget#settingsNav::item:selected {{
-            background: {p["accent_soft"]};
-            color: {p["accent_hover"]};
+            background: {p["accent"]};
+            color: white;
             font-weight: 700;
         }}
         QTableWidget {{
-            background: rgba(255, 255, 255, 0.96);
-            border: 1px solid rgba(255, 255, 255, 0.72);
+            background: {p["bg_card"]};
+            border: 1px solid {p["border"]};
             border-radius: 12px;
             gridline-color: {p["border"]};
+            color: {p["text_primary"]};
         }}
         QHeaderView::section {{
-            background: rgba(248, 250, 252, 0.96);
+            background: {p["bg_soft"]};
             color: {p["text_secondary"]};
             font-weight: 600;
             padding: 8px;
@@ -291,9 +472,9 @@ def get_settings_styles() -> str:
             border-bottom: 1px solid {p["border"]};
         }}
         QPushButton {{
-            background: rgba(255, 255, 255, 0.9);
+            background: {p["bg_card"]};
             color: {p["text_primary"]};
-            border: 1px solid rgba(255, 255, 255, 0.6);
+            border: 1px solid {p["border_strong"]};
             border-radius: 10px;
             padding: 8px 14px;
             font-weight: 600;
@@ -313,8 +494,9 @@ def get_settings_styles() -> str:
         }}
         QLineEdit, QTextEdit, QPlainTextEdit, QComboBox, QSpinBox, QListWidget, QTabWidget::pane {{
             border-radius: 10px;
-            background: rgba(255, 255, 255, 0.94);
-            border: 1px solid rgba(255, 255, 255, 0.72);
+            background: {p["bg_card"]};
+            border: 1px solid {p["border"]};
+            color: {p["text_primary"]};
         }}
         QPushButton#tableActionBtn {{
             min-width: 64px;
@@ -322,7 +504,7 @@ def get_settings_styles() -> str:
             font-size: 13px;
             font-weight: 600;
         }}
-                QTextBrowser#consoleView {{
+        QTextBrowser#consoleView {{
             background-color: {p["console_codex"]["bg"]};
             border: 1px solid {p["console_codex"]["border"]};
             border-radius: 12px;
@@ -337,14 +519,13 @@ def get_settings_styles() -> str:
             padding: 6px 12px;
             font-size: 13px;
             font-weight: 700;
-            color: #DC2626;
-            background: #FEF2F2;
-            border: 1px solid #FECACA;
+            color: {p["danger"]};
+            background: transparent;
+            border: 1px solid {p["danger"]};
         }}
         QPushButton#tableDangerBtn:hover {{
-            color: #B91C1C;
-            background: #FEE2E2;
-            border-color: #FCA5A5;
+            background: {p["danger"]};
+            color: white;
         }}
         QPushButton#routerConfigBtn {{
             min-width: 58px;
@@ -354,10 +535,10 @@ def get_settings_styles() -> str:
         }}
     """
 
-
 def get_tool_dialog_styles() -> str:
     p = get_ui_palette()
-    return f"""
+    common = get_common_qss(p)
+    return common + f"""
         QDialog {{
             background-color: {p["bg_app"]};
             font-family: 'Segoe UI', 'Microsoft YaHei';
@@ -385,6 +566,7 @@ def get_tool_dialog_styles() -> str:
             background: {p["bg_card"]};
             border: 1px solid {p["border"]};
             border-radius: 12px;
+            color: {p["text_primary"]};
         }}
         QTextBrowser#consoleView {{
             background-color: {p["console_codex"]["bg"]};
@@ -397,7 +579,7 @@ def get_tool_dialog_styles() -> str:
             selection-color: {p["console_codex"]["selection_fg"]};
         }}
         QHeaderView::section {{
-            background: {p["bg_card"]};
+            background: {p["bg_soft"]};
             color: {p["text_secondary"]};
             font-weight: 600;
             padding: 8px;
@@ -435,10 +617,10 @@ def get_tool_dialog_styles() -> str:
         }}
     """
 
-
 def get_memory_dialog_styles() -> str:
     p = get_ui_palette()
-    return f"""
+    common = get_common_qss(p)
+    return common + f"""
         QDialog {{
             background-color: {p["bg_app"]};
             font-family: 'Segoe UI', 'Microsoft YaHei';
@@ -458,14 +640,15 @@ def get_memory_dialog_styles() -> str:
             margin-right: 4px;
         }}
         QTabBar::tab:selected {{
-            background: {p["accent_soft"]};
-            color: {p["accent_hover"]};
+            background: {p["accent"]};
+            color: white;
             font-weight: 700;
         }}
         QTableWidget, QTextEdit, QPlainTextEdit, QListWidget, QLineEdit, QComboBox {{
             background: {p["bg_card"]};
             border: 1px solid {p["border"]};
             border-radius: 10px;
+            color: {p["text_primary"]};
         }}
         QPushButton {{
             border-radius: 10px;
@@ -475,10 +658,10 @@ def get_memory_dialog_styles() -> str:
         }}
     """
 
-
 def get_character_editor_styles() -> str:
     p = get_ui_palette()
-    return f"""
+    common = get_common_qss(p)
+    return common + f"""
         QWidget {{
             font-family: 'Segoe UI', 'Microsoft YaHei';
         }}
@@ -500,15 +683,17 @@ def get_character_editor_styles() -> str:
             background: {p["bg_card"]};
             border: 1px solid {p["border"]};
             border-radius: 10px;
+            color: {p["text_primary"]};
         }}
         QListWidget::item {{
             padding: 8px 10px;
             border-radius: 8px;
             margin: 2px 0;
+            color: {p["text_secondary"]};
         }}
         QListWidget::item:selected {{
-            background: {p["accent_soft"]};
-            color: {p["accent_hover"]};
+            background: {p["accent"]};
+            color: white;
             font-weight: 700;
         }}
         QTabWidget::pane {{
@@ -525,8 +710,8 @@ def get_character_editor_styles() -> str:
             margin-right: 4px;
         }}
         QTabBar::tab:selected {{
-            background: {p["accent_soft"]};
-            color: {p["accent_hover"]};
+            background: {p["accent"]};
+            color: white;
             font-weight: 700;
         }}
         QPushButton {{
@@ -551,16 +736,16 @@ def get_character_editor_styles() -> str:
             color: white;
         }}
         QPushButton#charDanger {{
-            background: #FEF2F2;
-            color: #DC2626;
-            border: 1px solid #FECACA;
+            background: transparent;
+            color: {p["danger"]};
+            border: 1px solid {p["danger"]};
         }}
         QPushButton#charDanger:hover {{
-            background: #FEE2E2;
-            color: #B91C1C;
-            border-color: #FCA5A5;
+            background: {p["danger"]};
+            color: white;
         }}
-            background: {p["bg_card"]};
+        QHeaderView::section {{
+            background: {p["bg_soft"]};
             color: {p["text_secondary"]};
             font-weight: 600;
             padding: 8px;

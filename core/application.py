@@ -1506,28 +1506,28 @@ class Live2DApplication:
 
                 # ================= 场景 A: 准点触发 (23:30) =================
                 if AUTO_DIARY_ENABLED and current_time_str == AUTO_DIARY_TIME:
+                    if self.memory_store:
+                        today_stats = (
+                            self.memory_store.get_daily_screen_stats(current_date_str)
+                            or {}
+                        )
+                        if today_stats.get("diary_done") is True:
+                            self.last_summary_date = current_date_str
                     if self.last_summary_date != current_date_str:
                         self.logger.info(f"✨ 触发每日总结 (准点)...")
                         if self.screen_sensor and self.chat_service:
                             report = self.screen_sensor.get_formatted_report()
                             if len(report) > 10:
-                                await self.chat_service.summarize_day(report, auto=True)
-                                self.last_summary_date = current_date_str
-
-                                # 准点记录后，标记数据库
-                                if self.memory_store:
-                                    stats = (
-                                        self.memory_store.get_daily_screen_stats(
-                                            current_date_str
-                                        )
-                                        or {}
+                                diary_text = await self.chat_service.summarize_day(
+                                    report, auto=True
+                                )
+                                if diary_text:
+                                    self.last_summary_date = current_date_str
+                                    self.logger.info("✅ 今日日记已归档")
+                                else:
+                                    self.logger.warning(
+                                        f"⚠️ 今日日记生成失败，未写入归档标记: {current_date_str}"
                                     )
-                                    stats["diary_done"] = True
-                                    self.memory_store.save_daily_screen_stats(
-                                        current_date_str, stats
-                                    )
-
-                                self.logger.info("✅ 今日日记已归档")
 
                 # ================= 场景 B: 补录昨天 (全天候检查) =================
                 # 🟢 [修改] 去掉了 and now.hour < 12
@@ -1536,41 +1536,7 @@ class Live2DApplication:
                     _last_makeup_check_date = (
                         current_date_str  # 标记：今天已经检查过了，别再查了
                     )
-
-                    yesterday_str = (now - timedelta(days=1)).strftime("%Y-%m-%d")
-
-                    if self.memory_store:
-                        # 查数据库：昨天到底做没做？
-                        stats = self.memory_store.get_daily_screen_stats(yesterday_str)
-
-                        # 1. 如果已经做过，跳过
-                        if stats and stats.get("diary_done") is True:
-                            self.logger.info(
-                                f"👀 昨日({yesterday_str}) 日记已存在，跳过补录。"
-                            )
-
-                        # 2. 如果没做过，且有数据，补录！
-                        elif (
-                            stats
-                            and stats.get("summary_text")
-                            and len(stats["summary_text"]) > 10
-                        ):
-                            self.logger.info(f"✨ 发现昨日数据未归档，正在补录日记...")
-
-                            await self.chat_service.summarize_day(
-                                stats["summary_text"], auto=True
-                            )
-
-                            # 补录完立刻标记
-                            stats["diary_done"] = True
-                            self.memory_store.save_daily_screen_stats(
-                                yesterday_str, stats
-                            )
-
-                            self.logger.info(f"✅ 昨日({yesterday_str})日记补录完成。")
-                        else:
-                            # 没数据，或者数据太少，忽略
-                            self.logger.debug(f"👀 昨日无有效活动数据，无需补录。")
+                    await self._run_diary_backfill(now.date())
 
                 await asyncio.sleep(30)
             except Exception as e:
@@ -1624,6 +1590,63 @@ class Live2DApplication:
                     self.logger.info(f"【退出存档】今日未归档数据:\n{report}")
         except Exception as e:
             print(f"退出清理出错: {e}")
+
+    def _has_daily_log_for_date(self, date_str: str) -> bool:
+        if not self.memory_store:
+            return False
+        try:
+            episodes = self.memory_store.list_episodes(status="active", limit=500, offset=0)
+        except Exception:
+            return False
+        target_tag = f"date:{date_str}"
+        for episode in episodes:
+            tags = episode.get("tags") or []
+            if target_tag in tags and "daily_log" in tags:
+                return True
+        return False
+
+    async def _run_diary_backfill(self, today_date: datetime.date, lookback_days: int = 7):
+        if not self.memory_store or not self.chat_service:
+            return
+        max_days = max(1, int(lookback_days))
+        for delta_days in range(1, max_days + 1):
+            target_date = today_date - timedelta(days=delta_days)
+            target_str = target_date.strftime("%Y-%m-%d")
+            if self._has_daily_log_for_date(target_str):
+                self.logger.info(f"👀 {target_str} 日记已存在，跳过补录。")
+                continue
+
+            stats = self.memory_store.get_daily_screen_stats(target_str) or {}
+            if stats.get("diary_done") is True:
+                self.logger.info(f"👀 {target_str} 已标记 diary_done，跳过补录。")
+                continue
+
+            summary_text = str(stats.get("summary_text") or "").strip()
+            if len(summary_text) <= 10:
+                self.logger.debug(f"👀 {target_str} 无有效活动数据，无需补录。")
+                continue
+
+            if delta_days == 1:
+                self.logger.info(f"✨ 发现昨日数据未归档，正在补录日记...")
+            else:
+                self.logger.info(f"✨ 发现 {target_str} 数据未归档，正在补录日记...")
+
+            diary_text = await self.chat_service.summarize_day(
+                summary_text,
+                raw_stats=stats,
+                auto=True,
+                target_date=target_date,
+            )
+            if diary_text:
+                if delta_days == 1:
+                    self.logger.info(f"✅ 昨日({target_str})日记补录完成。")
+                else:
+                    self.logger.info(f"✅ {target_str} 日记补录完成。")
+            else:
+                if delta_days == 1:
+                    self.logger.warning(f"⚠️ 昨日({target_str})日记补录失败，保留未归档状态。")
+                else:
+                    self.logger.warning(f"⚠️ {target_str} 日记补录失败，保留未归档状态。")
 
     # 动态切换语音监听的方法
     def set_voice_sensor_enabled(self, enabled: bool):

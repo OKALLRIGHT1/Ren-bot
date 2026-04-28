@@ -1987,3 +1987,7 @@ profile.json
 /rust-activity-agent/target/CACHEDIR.TAG
 /rust-activity-agent/Cargo.lock
 /rust-activity-agent/Cargo.toml
+/plugins/what_to_eat/
+/scripts/
+/plugins/Isuzu_news/
+/rust-activity-agent/

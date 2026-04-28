@@ -15,7 +15,7 @@
         "allow_local": false,
         "allow_remote_qq": true,
         "allow_qq_owner": true,
-        "allow_qq_others": false,
+        "allow_qq_others": true,
         "allow_group_without_at": true
     },
     "settings": {

@@ -90,7 +90,7 @@ class ScreenSensor:
         # 用来存时长 (单位: 秒)
         self.daily_durations: Dict[str, float] = {}
         self.app_cache: Dict[str, List[str]] = {}
-        self.current_day = datetime.now().day
+        self.current_day = self._today_key()
 
         self.app_category_map: Dict[str, str] = {}
         self.observation_entries: List[Dict[str, Any]] = []
@@ -111,11 +111,45 @@ class ScreenSensor:
         self._last_rust_event_id = ""
         self._last_rust_debug_key = ""
         self._last_rust_debug_at = 0.0
+        self._last_rust_sample_ts = 0.0
         self.debug_verbose = bool(SCREEN_DEBUG_VERBOSE)
 
     def _debug_log(self, message: str):
         if self.debug_verbose:
             self.logger.info(message)
+
+    def _today_key(self) -> str:
+        return datetime.now().strftime("%Y-%m-%d")
+
+    def _stats_date_key(self) -> str:
+        current = str(getattr(self, "current_day", "") or "").strip()
+        return current or self._today_key()
+
+    def _parse_rust_event_ts(self, item: Dict[str, Any]) -> float:
+        raw_ts = str(item.get("ts") or "").strip()
+        if not raw_ts:
+            return 0.0
+        normalized = raw_ts.replace("Z", "+00:00")
+        try:
+            return datetime.fromisoformat(normalized).timestamp()
+        except ValueError:
+            pass
+        for fmt in ("%Y-%m-%d %H:%M:%S.%f", "%Y-%m-%d %H:%M:%S"):
+            try:
+                return datetime.strptime(raw_ts, fmt).timestamp()
+            except ValueError:
+                continue
+        return 0.0
+
+    def _rust_sample_seconds(self, sample_ts: float, now_ts: float) -> float:
+        effective_ts = sample_ts if sample_ts > 0 else now_ts
+        if self._last_rust_sample_ts <= 0:
+            self._last_rust_sample_ts = effective_ts
+            return 0.0
+        delta = max(0.0, effective_ts - self._last_rust_sample_ts)
+        self._last_rust_sample_ts = effective_ts
+        max_sample_gap = max(5.0, float(SCREEN_SENSOR_INTERVAL) * 3.0)
+        return min(delta, max_sample_gap)
 
     def start(self, loop):
         if not SCREEN_SENSOR_ENABLED:
@@ -201,8 +235,7 @@ class ScreenSensor:
             store = get_memory_store()
             if not store:
                 return []
-            today_str = datetime.now().strftime("%Y-%m-%d")
-            return store.list_activity_events(limit=limit, date_str=today_str)
+            return store.list_activity_events(limit=limit, date_str=self._stats_date_key())
         except Exception:
             return []
 
@@ -240,27 +273,13 @@ class ScreenSensor:
                 break
         pending.reverse()
 
-        last_switch_event = None
-        sample_events = []
-        for item in pending:
-            kind = str(item.get("kind") or "").strip().lower()
-            if kind == "foreground_changed":
-                last_switch_event = item
-            elif kind == "activity_sample":
-                sample_events.append(item)
-
-        filtered_pending = []
-        if last_switch_event is not None:
-            filtered_pending.append(last_switch_event)
-        if sample_events:
-            filtered_pending.append(sample_events[-1])
-
-        for latest in filtered_pending:
+        for latest in pending:
             event_id = str(latest.get("event_id") or "").strip()
             kind = str(latest.get("kind") or "").strip().lower()
             app = (
                 str(((latest.get("app") or {}).get("name") or "")).strip() or "unknown"
             )
+            event_ts = self._parse_rust_event_ts(latest) or now_ts
             title = str(latest.get("window_title") or "").strip()
             domain = str((((latest.get("browser") or {}).get("domain")) or "")).strip()
             full_title = domain or title or app
@@ -278,15 +297,16 @@ class ScreenSensor:
                     self._last_rust_debug_key = debug_key
                     self._last_rust_debug_at = now_ts
 
-            self.daily_counts[app_name] = self.daily_counts.get(app_name, 0) + 1
-            self.daily_durations[app_name] = self.daily_durations.get(
-                app_name, 0.0
-            ) + float(max(5, min(12, SCREEN_SENSOR_INTERVAL)))
-
             if kind == "foreground_changed":
-                self.current_window_start_time = now_ts
-                self.next_duration_trigger_time = now_ts + (20 * 60)
-                self.next_sedentary_alert_time = now_ts + self.sedentary_interval_sec
+                self.daily_counts[app_name] = self.daily_counts.get(app_name, 0) + 1
+                self.last_window_title = full_title
+                self.last_app_name = app_name
+                self.last_category = cat
+                self.current_window_start_time = event_ts
+                self.next_duration_trigger_time = event_ts + (20 * 60)
+                self.next_sedentary_alert_time = event_ts + self.sedentary_interval_sec
+                self._last_rust_sample_ts = event_ts
+                self._last_alert_app = None
                 self._debug_log("🦀 [Screen] Rust 事件按切屏逻辑尝试触发吐槽")
                 self._try_trigger_reaction(
                     full_title,
@@ -296,9 +316,16 @@ class ScreenSensor:
                     reason="switch",
                 )
             elif kind == "activity_sample":
-                stay_minutes = int((now_ts - self.current_window_start_time) / 60)
-                if now_ts >= self.next_duration_trigger_time:
-                    self.next_duration_trigger_time = now_ts + (20 * 60)
+                sample_seconds = self._rust_sample_seconds(event_ts, now_ts)
+                if sample_seconds > 0:
+                    self.daily_durations[app_name] = self.daily_durations.get(
+                        app_name, 0.0
+                    ) + sample_seconds
+                stay_minutes = max(
+                    0, int((event_ts - self.current_window_start_time) / 60)
+                )
+                if event_ts >= self.next_duration_trigger_time:
+                    self.next_duration_trigger_time = event_ts + (20 * 60)
                     self._debug_log(
                         f"🦀 [Screen] Rust 事件按停留逻辑尝试触发吐槽: stay={stay_minutes}min"
                     )
@@ -311,21 +338,21 @@ class ScreenSensor:
                     )
                 if (
                     self.sedentary_interval_sec > 0
-                    and now_ts >= self.next_sedentary_alert_time
+                    and event_ts >= self.next_sedentary_alert_time
                     and self._last_alert_app != app_name
                 ):
                     self._debug_log(
                         f"🦀 [Screen] Rust 事件命中久坐提醒: app={app_name} stay={stay_minutes}min"
                     )
                     self._last_alert_app = app_name
-                    self._last_alert_time = now_ts
+                    self._last_alert_time = event_ts
                     if self._loop:
                         asyncio.run_coroutine_threadsafe(
                             self.chat_service.send_active_alert(app_name, stay_minutes),
                             self._loop,
                         )
                     self.next_sedentary_alert_time = (
-                        now_ts + self.sedentary_cooldown_sec
+                        event_ts + self.sedentary_cooldown_sec
                     )
 
             self._last_rust_event_id = event_id
@@ -615,6 +642,7 @@ class ScreenSensor:
 
     def get_stats_data(self) -> Dict[str, Any]:
         return {
+            "date": self._stats_date_key(),
             "summary_text": self.get_formatted_report(),
             "counts": self.daily_counts,
             "durations": self.daily_durations,
@@ -634,12 +662,23 @@ class ScreenSensor:
                 data = json.load(f)
             self.app_cache = data.get("cache", {}) or {}
             self.app_category_map = data.get("app_categories", {}) or {}
-            if data.get("day") == datetime.now().day:
+            stored_date = str(data.get("date") or "").strip()
+            if not stored_date:
+                updated_at = str(data.get("updated_at") or "").strip()
+                if re.match(r"^\d{4}-\d{2}-\d{2}", updated_at):
+                    stored_date = updated_at[:10]
+            if stored_date == self._today_key():
+                self.current_day = stored_date
                 self.daily_counts = data.get("counts", {}) or {}
                 self.daily_durations = data.get("durations", {}) or {}
                 self.observation_entries = data.get("observations", []) or []
                 self.activity_segments = data.get("segments", []) or []
             else:
+                if not stored_date:
+                    self.logger.warning(
+                        "⚠️ [ScreenSensor] 发现缺少 date 的旧版统计缓存，已忽略其每日数据以避免串天。"
+                    )
+                self.current_day = self._today_key()
                 self.daily_counts = {}
                 self.daily_durations = {}
                 self.observation_entries = []
@@ -663,8 +702,10 @@ class ScreenSensor:
                 ]
             if len(self.activity_segments) > self.max_segments:
                 self.activity_segments = self.activity_segments[-self.max_segments :]
+            stats_date = self._stats_date_key()
             data = {
-                "day": self.current_day,
+                "date": stats_date,
+                "day": int(stats_date[-2:]) if len(stats_date) >= 10 else datetime.now().day,
                 "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 "counts": self.daily_counts,
                 "durations": self.daily_durations,
@@ -688,13 +729,14 @@ class ScreenSensor:
         try:
             store = get_memory_store()
             if store:
-                today_str = datetime.now().strftime("%Y-%m-%d")
+                stats_date = self._stats_date_key()
 
                 # 计算总时长 (小时)
                 total_seconds = sum(self.daily_durations.values())
                 total_hours = total_seconds / 3600.0
 
                 data_to_save = {
+                    "date": stats_date,
                     "summary_text": self.get_formatted_report(),
                     "counts": self.daily_counts,
                     "durations": self.daily_durations,
@@ -707,7 +749,7 @@ class ScreenSensor:
                     "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 }
 
-                store.save_daily_screen_stats(today_str, data_to_save)
+                store.save_daily_screen_stats(stats_date, data_to_save)
         except Exception as e:
             self.logger.error(f"❌ 屏幕数据同步 DB 失败: {e}")
 
@@ -878,22 +920,38 @@ class ScreenSensor:
         return "other", title
 
     def _check_daily_reset(self):
-        today = datetime.now().day
+        today = self._today_key()
         if today != self.current_day:
             self.logger.info("📅 新的一天，开始结算昨日数据...")
 
-            if self.daily_counts and self._loop:
-                raw_data = self.get_formatted_report()
+            previous_day = self._stats_date_key()
+            has_activity = bool(
+                self.daily_counts
+                or self.daily_durations
+                or self.observation_entries
+                or self.activity_segments
+            )
+            diary_done = False
 
-                async def _do_summary(data_str):
-                    await self.chat_service.summarize_day(data_str, auto=True)
+            if has_activity and get_memory_store:
+                try:
+                    store = get_memory_store()
+                    if store:
+                        previous_stats = store.get_daily_screen_stats(previous_day) or {}
+                        diary_done = previous_stats.get("diary_done") is True
+                except Exception:
+                    diary_done = False
 
-                asyncio.run_coroutine_threadsafe(_do_summary(raw_data), self._loop)
+            if has_activity and not diary_done:
+                self.logger.info(
+                    f"📦 [Screen] 跨天切日，昨日({previous_day})统计已保留，等待统一补录器归档日记。"
+                )
 
             self.daily_counts.clear()
             self.daily_durations.clear()
             self.observation_entries = []
             self.activity_segments = []
+            self._last_rust_sample_ts = 0.0
             self.current_day = today
             self._save_stats()
 
@@ -908,8 +966,8 @@ class ScreenSensor:
             while self.running:
                 try:
                     time.sleep(2)
-                    self._process_rust_events_for_reaction(time.time())
                     self._check_daily_reset()
+                    self._process_rust_events_for_reaction(time.time())
                     self._save_stats()
                 except Exception as e:
                     self.logger.error(f"🦀 [Screen] Rust 模式循环异常: {e}")

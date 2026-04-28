@@ -15,10 +15,10 @@ from modules.gui.dialogs.plugin_manager import PluginManagerDialog
 from modules.gui.dialogs.memory_editor import MemoryEditorDialog
 
 from modules.gui.styles import (
-    DEFAULT_CONSOLE,
-    UI_PALETTE,
+    THEMES,
     get_settings_styles,
     get_ui_palette,
+    get_current_theme_name,
 )
 
 
@@ -1577,6 +1577,8 @@ class SettingsDialog(QtWidgets.QDialog):
 
         self.prov_table.verticalHeader().setVisible(False)
 
+        self.prov_table.verticalHeader().setDefaultSectionSize(44)
+
         layout.addWidget(self.prov_table)
 
         self.stack.addWidget(page)
@@ -2383,6 +2385,25 @@ class SettingsDialog(QtWidgets.QDialog):
         scroll.setWidget(body)
         layout.addWidget(scroll, 1)
 
+        theme_action_card = QtWidgets.QGroupBox("快速主题选择")
+        theme_action_layout = QtWidgets.QHBoxLayout(theme_action_card)
+        self.combo_theme = QtWidgets.QComboBox()
+        try:
+            from modules.gui.styles import THEMES, get_current_theme_name
+            for t in THEMES.keys():
+                self.combo_theme.addItem(t)
+            self.combo_theme.setCurrentText(get_current_theme_name())
+        except Exception:
+            pass
+        btn_apply_theme = QtWidgets.QPushButton("使用此主题覆盖所有自定义配色")
+        btn_apply_theme.setObjectName("primaryAction")
+        btn_apply_theme.clicked.connect(self._on_theme_apply_clicked)
+        theme_action_layout.addWidget(QtWidgets.QLabel("预设风格:"))
+        theme_action_layout.addWidget(self.combo_theme, 1)
+        theme_action_layout.addWidget(btn_apply_theme)
+        layout.addWidget(theme_action_card)
+        layout.addSpacing(8)
+
         footer = QtWidgets.QHBoxLayout()
         footer.addStretch()
         btn_reset = QtWidgets.QPushButton("恢复默认")
@@ -2397,11 +2418,34 @@ class SettingsDialog(QtWidgets.QDialog):
         self.stack.addWidget(page)
         self._refresh_color_inputs()
 
+    def _on_theme_apply_clicked(self):
+        theme_name = self.combo_theme.currentText()
+        update_runtime_settings({
+            "theme_name": theme_name,
+            "ui_palette": None  # clear custom overrides to use pure theme dict
+        })
+        self._refresh_color_inputs()
+        self._apply_palette_now()
+
     def _default_ui_palette(self):
-        palette = dict(UI_PALETTE)
-        palette["console_main"] = dict(DEFAULT_CONSOLE)
-        palette["console_codex"] = dict(DEFAULT_CONSOLE)
-        return palette
+        try:
+            from modules.gui.styles import THEMES, get_current_theme_name
+            theme_name = get_current_theme_name()
+            if theme_name not in THEMES:
+                theme_name = list(THEMES.keys())[0]
+            base = dict(THEMES[theme_name])
+            palette = dict(base)
+            palette["console_main"] = {
+                "bg": base.get("console_bg", ""),
+                "fg": base.get("console_fg", ""),
+                "border": base.get("console_border", ""),
+                "selection_bg": base.get("console_selection_bg", ""),
+                "selection_fg": base.get("console_selection_fg", ""),
+            }
+            palette["console_codex"] = dict(palette["console_main"])
+            return palette
+        except Exception:
+            return {}
 
     def _refresh_color_inputs(self):
         palette = get_ui_palette()
@@ -2483,8 +2527,8 @@ class SettingsDialog(QtWidgets.QDialog):
         self._apply_palette_now()
 
     def _reset_color_settings(self):
-        palette = self._default_ui_palette()
-        update_runtime_settings({"ui_palette": palette})
+        # Clear custom overrides to use theme's default settings
+        update_runtime_settings({"ui_palette": None})
         self._refresh_color_inputs()
         self._apply_palette_now()
 
@@ -4275,6 +4319,8 @@ class SettingsDialog(QtWidgets.QDialog):
 
         self.gateway_mcp_table.verticalHeader().setVisible(False)
 
+        self.gateway_mcp_table.verticalHeader().setDefaultSectionSize(44)
+
         self.gateway_mcp_table.setAlternatingRowColors(True)
 
         self.gateway_mcp_table.setMinimumHeight(190)
@@ -4933,6 +4979,8 @@ class SettingsDialog(QtWidgets.QDialog):
         )
 
         self.gateway_qq_profile_table.verticalHeader().setVisible(False)
+
+        self.gateway_qq_profile_table.verticalHeader().setDefaultSectionSize(44)
 
         self.gateway_qq_profile_table.setAlternatingRowColors(True)
 
