@@ -1,0 +1,25 @@
+# Python 3.10 is the documented baseline for this project.
+#
+# Core runtime
+aiohttp
+chromadb
+edge-tts
+numpy
+openai
+opencv-python
+paho-mqtt
+pillow
+psutil
+PyAutoGUI
+PySide6
+python-dotenv
+requests
+sounddevice
+websockets
+
+# Optional plugins / Windows integrations
+comtypes
+dateparser
+ddgs
+pycaw
+screen-brightness-control
