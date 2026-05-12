@@ -19,6 +19,12 @@ DEFAULT_EMOTION_KEYS = [
     "music",
 ]
 
+DEFAULT_CATCHPHRASE_CONFIG = {
+    "enabled": False,
+    "text": "",
+    "probability": 0,
+}
+
 
 class CharacterManager:
     def __init__(self):
@@ -122,8 +128,44 @@ class CharacterManager:
                 char_data["tts_config"] = normalized_tts
                 changed = True
 
+            catchphrase_cfg = char_data.get("catchphrase")
+            if catchphrase_cfg is None and str(char_data.get("name") or "") == "五十铃怜":
+                catchphrase_cfg = {
+                    "enabled": True,
+                    "text": "……はい。",
+                    "probability": 18,
+                }
+                changed = True
+            normalized_catchphrase = self._normalize_catchphrase_config(catchphrase_cfg)
+            if char_data.get("catchphrase") != normalized_catchphrase:
+                char_data["catchphrase"] = normalized_catchphrase
+                changed = True
+
         if changed:
             self.save()
+
+    def _normalize_catchphrase_config(self, cfg) -> dict:
+        if isinstance(cfg, str):
+            text = cfg.strip()
+            return {
+                "enabled": bool(text),
+                "text": text,
+                "probability": 18 if text else 0,
+            }
+        if not isinstance(cfg, dict):
+            return deepcopy(DEFAULT_CATCHPHRASE_CONFIG)
+
+        text = str(cfg.get("text", "") or "").strip()
+        try:
+            probability = int(cfg.get("probability", 0))
+        except Exception:
+            probability = 0
+        probability = max(0, min(100, probability))
+        return {
+            "enabled": bool(cfg.get("enabled", False)) and bool(text) and probability > 0,
+            "text": text,
+            "probability": probability,
+        }
 
     # --- CRUD ---
     def get_all_characters(self) -> Dict:
@@ -141,6 +183,7 @@ class CharacterManager:
         self.data["characters"][char_id] = {
             "name": name,
             "prompt": prompt,
+            "catchphrase": deepcopy(DEFAULT_CATCHPHRASE_CONFIG),
             "costumes": {},
             "tts_config": {
                 "enabled": False,
@@ -337,6 +380,20 @@ class CharacterManager:
             return {}
         cfg = char.get("tts_config") or {}
         return cfg if isinstance(cfg, dict) else {}
+
+    def get_catchphrase_config(self, char_id: Optional[str] = None) -> dict:
+        if not char_id:
+            char_id = self.data.get("active_id")
+        if not char_id:
+            return deepcopy(DEFAULT_CATCHPHRASE_CONFIG)
+        char = self.get_character(char_id)
+        if not char:
+            return deepcopy(DEFAULT_CATCHPHRASE_CONFIG)
+        cfg = self._normalize_catchphrase_config(char.get("catchphrase"))
+        if char.get("catchphrase") != cfg:
+            char["catchphrase"] = cfg
+            self.save()
+        return cfg
 
     def get_active_character(self):
         aid = self.data.get("active_id")

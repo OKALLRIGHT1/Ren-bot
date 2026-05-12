@@ -9,7 +9,34 @@ logger = get_logger()
 
 
 class Plugin:
-    _FULLWIDTH_TRANS = str.maketrans("０１２３４５６７８９ｄＤ＋－", "0123456789dD+-")
+    _FULLWIDTH_TRANS = str.maketrans(
+        "０１２３４５６７８９ｄＤ＋－",
+        "0123456789dD+-",
+    )
+
+    def should_handle_direct(
+        self, user_text: str, context: dict, matched_alias: str
+    ) -> bool:
+        text = str(user_text or "").strip()
+        if not text:
+            return False
+
+        normalized = text.translate(self._FULLWIDTH_TRANS).lower().replace("。", ".").strip()
+        alias = str(matched_alias or "").strip().lower()
+
+        # QQ 表情消息不应触发骰子插件，尤其是骰子表情。
+        if normalized in {"[表情]", "[emoji]", "[face]"}:
+            return False
+        if normalized.startswith("[cq:face"):
+            return False
+
+        if alias in {".r", ".ra", ".rc", ".sc"}:
+            return normalized.startswith(alias)
+
+        if alias in {"骰子", "dice"}:
+            return normalized.startswith(alias)
+
+        return False
 
     @handle_plugin_errors("骰子")
     async def run(self, args, ctx):
@@ -17,7 +44,9 @@ class Plugin:
         if not raw_message:
             return self._help_text()
 
-        clean_msg = raw_message.translate(self._FULLWIDTH_TRANS).lower().replace("。", ".")
+        clean_msg = (
+            raw_message.translate(self._FULLWIDTH_TRANS).lower().replace("。", ".")
+        )
 
         try:
             if self._wants_help(clean_msg):
@@ -28,8 +57,15 @@ class Plugin:
                 target_match = re.search(r"(\d+)\s*$", clean_msg)
                 if target_match:
                     target_val = int(target_match.group(1))
-                    temp_text = re.sub(r"(?:^|\s)\.(?:ra|rc|sc)\b", "", raw_message, flags=re.IGNORECASE)
-                    skill_name = temp_text.replace(str(target_val), "").strip() or "属性"
+                    temp_text = re.sub(
+                        r"(?:^|\s)\.(?:ra|rc|sc)\b",
+                        "",
+                        raw_message,
+                        flags=re.IGNORECASE,
+                    )
+                    skill_name = (
+                        temp_text.replace(str(target_val), "").strip() or "未命名技能"
+                    )
                     return self._coc_check(target_val, skill_name)
                 return self._general_roll(1, 100, None, "1d100", rule_mode="coc")
 
@@ -65,17 +101,20 @@ class Plugin:
 
         except Exception:
             import traceback
+
             logger.error(f"骰子异常: {traceback.format_exc()}")
             return "骰子炸了：发生异常，请重试。"
 
     def _help_text(self) -> str:
-        return "\n".join([
-            "🎲 骰子用法示例：",
-            "- .r 1d20 / .r 2d100+3",
-            "- .ra 80（CoC 判定）",
-            "- 2d6（搭配 .r 前缀更稳）",
-            "- 选项表：前面给编号列表，再写 1dN",
-        ])
+        return "\n".join(
+            [
+                "🎲 骰子用法示例：",
+                "- .r 1d20 / .r 2d100+3",
+                "- .ra 80（CoC 判定）",
+                "- 2d6（搭配 .r 前缀更稳）",
+                "- 选项表：前面给编号列表，再写 1dN",
+            ]
+        )
 
     def _wants_help(self, text: str) -> bool:
         low = str(text or "").strip().lower()
@@ -83,12 +122,13 @@ class Plugin:
             return True
         compact = re.sub(r"\s+", "", low)
         return ("骰子用法" in compact) or ("骰子帮助" in compact)
+
     def _parse_options(self, text: str) -> Tuple[Dict[int, str], bool]:
         options: Dict[int, str] = {}
         found = False
         try:
             lines = text.split("\n")
-            line_pattern = re.compile(r"^\s*(\d+)(?:\s*[-~]\s*(\d+))?[\s\.:、]+(.*)$")
+            line_pattern = re.compile(r"^\s*(\d+)(?:\s*[-~]\s*(\d+))?[\s\.:、]+\s*(.*)$")
             for line in lines:
                 line = line.strip()
                 if not line:
@@ -122,21 +162,28 @@ class Plugin:
                 is_fumble = True
 
         if roll == 1:
-            status_text = "【大成功! Critical】"
+            status_text = "[大成功! Critical]"
         elif is_fumble:
-            status_text = "【大失败! Fumble】"
+            status_text = "[大失败! Fumble]"
         elif roll <= target_val // 5:
-            status_text = "【极难成功 / Extreme】"
+            status_text = "[极难成功 / Extreme]"
         elif roll <= target_val // 2:
-            status_text = "【困难成功 / Hard】"
+            status_text = "[困难成功 / Hard]"
         elif roll <= target_val:
-            status_text = "【成功 / Success】"
+            status_text = "[成功 / Success]"
         else:
-            status_text = "【失败 / Failure】"
+            status_text = "[失败 / Failure]"
 
         return f"🎲 CoC检定({skill_name}) {target_val} -> 1d100={roll} {status_text}"
 
-    def _general_roll(self, num_dice: int, num_faces: int, modifier_str: str, expression: str, rule_mode: str) -> str:
+    def _general_roll(
+        self,
+        num_dice: int,
+        num_faces: int,
+        modifier_str: str,
+        expression: str,
+        rule_mode: str,
+    ) -> str:
         rolls = [random.randint(1, num_faces) for _ in range(num_dice)]
         total_raw = sum(rolls)
         modifier = int(modifier_str) if modifier_str else 0
@@ -149,26 +196,32 @@ class Plugin:
             if rule_mode == "dnd":
                 if num_faces == 20:
                     if total_raw == 20:
-                        status_text = "【大成功 / Nat 20】"
+                        status_text = "[大成功 / Nat 20]"
                     elif total_raw == 1:
-                        status_text = "【大失败 / Nat 1】"
+                        status_text = "[大失败 / Nat 1]"
                 elif num_faces == 100:
                     if final_total > 95:
-                        status_text = "【大成功 (Excellent)】"
+                        status_text = "[大成功 (Excellent)]"
                     elif final_total <= 5:
-                        status_text = "【大失败 (Fumble)】"
+                        status_text = "[大失败 (Fumble)]"
             elif rule_mode == "coc":
                 if num_faces == 100:
                     if final_total == 1:
-                        status_text = "【大成功! Critical】"
+                        status_text = "[大成功! Critical]"
                     elif final_total >= 96:
-                        status_text = "【大失败! Fumble】"
+                        status_text = "[大失败! Fumble]"
                     elif final_total <= 5:
-                        status_text = "【极佳 (Extreme)】"
+                        status_text = "[极佳 (Extreme)]"
 
         return f"🎲 {expression}={final_total}{details_str} {status_text}".strip()
 
-    def _option_roll(self, num_dice: int, num_faces: int, modifier_str: str, option_map: Dict[int, str]) -> str:
+    def _option_roll(
+        self,
+        num_dice: int,
+        num_faces: int,
+        modifier_str: str,
+        option_map: Dict[int, str],
+    ) -> str:
         rolls = [random.randint(1, num_faces) for _ in range(num_dice)]
         final_total = sum(rolls) + (int(modifier_str) if modifier_str else 0)
 
@@ -183,10 +236,13 @@ class Plugin:
                 sub_roll = random.randint(1, len(choices))
                 selected_choice = choices[sub_roll - 1]
                 final_outcome = selected_choice
-                header_text += f" -> 命中: 【{initial_result}】\n👉 自动判定 1d{len(choices)}={sub_roll} -> 结果: 【{selected_choice}】"
+                header_text += (
+                    f" -> 命中: 「{initial_result}」\n"
+                    f"👉 自动判定 1d{len(choices)}={sub_roll} -> 结果: 「{selected_choice}」"
+                )
             else:
-                header_text += f" -> 【{initial_result}】"
+                header_text += f" -> 「{initial_result}」"
         else:
-            header_text += f" -> 【{initial_result}】"
+            header_text += f" -> 「{initial_result}」"
 
         return f"{header_text}\n结果：{final_outcome}".strip()

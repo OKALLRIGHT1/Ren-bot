@@ -255,6 +255,34 @@ class CharacterEditorWidget(QtWidgets.QWidget):
         self.edit_prompt.textChanged.connect(self._save_current_char)
         layout.addWidget(self.edit_prompt)
 
+        catchphrase_group = QtWidgets.QGroupBox("固定口癖")
+        catchphrase_layout = QtWidgets.QFormLayout(catchphrase_group)
+        self.catchphrase_enabled = QtWidgets.QCheckBox(
+            "启用发送层概率追加（不会交给大模型自由发挥）"
+        )
+        self.catchphrase_enabled.stateChanged.connect(self._save_current_char)
+        catchphrase_layout.addRow("开关:", self.catchphrase_enabled)
+
+        self.catchphrase_text = QtWidgets.QLineEdit()
+        self.catchphrase_text.setPlaceholderText("例如：……はい。")
+        self.catchphrase_text.textChanged.connect(self._save_current_char)
+        catchphrase_layout.addRow("文本:", self.catchphrase_text)
+
+        self.catchphrase_probability = QtWidgets.QSpinBox()
+        self.catchphrase_probability.setRange(0, 100)
+        self.catchphrase_probability.setSuffix("%")
+        self.catchphrase_probability.setSingleStep(1)
+        self.catchphrase_probability.valueChanged.connect(self._save_current_char)
+        catchphrase_layout.addRow("出现概率:", self.catchphrase_probability)
+
+        catchphrase_hint = QtWidgets.QLabel(
+            "角色没有配置口癖时不会追加；启用后会贴到最后一句末尾，不会单独分行。"
+        )
+        catchphrase_hint.setObjectName("charHint")
+        catchphrase_hint.setWordWrap(True)
+        catchphrase_layout.addRow("", catchphrase_hint)
+        layout.addWidget(catchphrase_group)
+
         self.btn_activate = QtWidgets.QPushButton("🚀 切换为此角色")
         self.btn_activate.setObjectName("charPrimary")
         self.btn_activate.clicked.connect(self._activate_character)
@@ -474,9 +502,20 @@ class CharacterEditorWidget(QtWidgets.QWidget):
 
         self.edit_name.blockSignals(True)
         self.edit_prompt.blockSignals(True)
+        self.catchphrase_enabled.blockSignals(True)
+        self.catchphrase_text.blockSignals(True)
+        self.catchphrase_probability.blockSignals(True)
 
         self.edit_name.setText(data.get("name", ""))
         self.edit_prompt.setPlainText(data.get("prompt", ""))
+        catchphrase_cfg = data.get("catchphrase") or {}
+        self.catchphrase_enabled.setChecked(bool(catchphrase_cfg.get("enabled", False)))
+        self.catchphrase_text.setText(str(catchphrase_cfg.get("text", "") or ""))
+        try:
+            catchphrase_probability = int(catchphrase_cfg.get("probability", 0))
+        except Exception:
+            catchphrase_probability = 0
+        self.catchphrase_probability.setValue(max(0, min(100, catchphrase_probability)))
         tts_cfg = data.get("tts_config") or {}
         self.tts_enabled.blockSignals(True)
         self.tts_gpt_w.blockSignals(True)
@@ -494,6 +533,9 @@ class CharacterEditorWidget(QtWidgets.QWidget):
 
         self.edit_name.blockSignals(False)
         self.edit_prompt.blockSignals(False)
+        self.catchphrase_enabled.blockSignals(False)
+        self.catchphrase_text.blockSignals(False)
+        self.catchphrase_probability.blockSignals(False)
         self.tts_enabled.blockSignals(False)
         self.tts_gpt_w.blockSignals(False)
         self.tts_sov_w.blockSignals(False)
@@ -531,6 +573,11 @@ class CharacterEditorWidget(QtWidgets.QWidget):
         data = self.mgr.get_character(self.current_char_id)
         data["name"] = self.edit_name.text()
         data["prompt"] = self.edit_prompt.toPlainText()
+        data["catchphrase"] = {
+            "enabled": bool(self.catchphrase_enabled.isChecked()),
+            "text": self.catchphrase_text.text().strip(),
+            "probability": int(self.catchphrase_probability.value()),
+        }
         data["tts_config"] = {
             "enabled": bool(self.tts_enabled.isChecked()),
             "gpt_w": self.tts_gpt_w.text().strip(),

@@ -9,7 +9,7 @@
     ],
     "description": "仅在 QQ 中用固定斜杠命令触发生图，支持 images 接口和 chat/completions 生图接口，并把结果回发到 QQ。",
     "example_arg": "/画图 绘制一个丰川祥子在雨后的街道",
-    "timeout_sec": 190,
+    "timeout_sec": 300,
     "version": "1.1.0",
     "access_control": {
         "allow_local": false,
@@ -23,13 +23,19 @@
             "type": "text",
             "label": "API Base URL",
             "description": "接口根地址，例如 https://wzw.pp.ua",
-            "default": "https://ai.huan666.de"
+            "default": "http://20.214.141.16:3000"
         },
         "endpoint_path": {
             "type": "text",
             "label": "接口路径",
-            "description": "按所选模式填写，images 常见是 /v1/images/generations，chat 常见是 /v1/chat/completions。",
+            "description": "按所选模式填写：文生图常见是 /v1/images/generations，图生图编辑常见是 /v1/images/edits，chat 模式常见是 /v1/chat/completions。",
             "default": "/v1/images/generations"
+        },
+        "edit_endpoint_path": {
+            "type": "text",
+            "label": "图生图接口路径",
+            "description": "当 QQ 消息里带图或引用图时自动走这里，常见填写 /v1/images/edits。",
+            "default": "/v1/images/edits"
         },
         "api_key": {
             "type": "secret",
@@ -41,7 +47,7 @@
             "type": "text",
             "label": "模型名",
             "description": "按你的服务要求填写，例如 grok-2-image。",
-            "default": "grok-imagine-image"
+            "default": "gpt-image-2"
         },
         "size_value": {
             "type": "text",
@@ -73,11 +79,47 @@
             "description": "会合并进最终请求体；chat 模式下适合补 stream、modalities 等字段。",
             "default": "{}"
         },
+        "request_timeout_sec": {
+            "type": "number",
+            "label": "璇锋眰瓒呮椂(绉?)",
+            "description": "QQ 鐢熷浘鎻掍欢绛夊緟鍚庣杩斿洖鐨?HTTP 瓒呮椂銆傚鏋滄湇鍔″櫒宸茬粡鐢熸垚鎴愬姛浣嗚繖杈圭獊鐒舵姤瓒呮椂锛屽彲浠ユ妸杩欓噷璋冨ぇ鍒?180 鎴?240銆?",
+            "default": 180
+        },
         "caption_template": {
             "type": "text",
             "label": "回发说明模板",
             "description": "{prompt} 会替换成这次的绘图提示词。",
             "default": "已按你的要求画好了：{prompt}"
+        },
+        "image_to_image_enabled": {
+            "type": "bool",
+            "label": "启用图生图",
+            "description": "当 QQ 消息里同时带图片时，把第一张图作为输入图一起传给后端。",
+            "default": true
+        },
+        "input_image_field": {
+            "type": "text",
+            "label": "输入图字段名",
+            "description": "JSON 生图接口里放输入图的字段名，常见可尝试 image、image_base64、init_image。",
+            "default": "image"
+        },
+        "input_image_format": {
+            "type": "text",
+            "label": "输入图格式",
+            "description": "可填 data_url 或 base64；大多数兼容 chat/multimodal 的接口更适合 data_url。",
+            "default": "data_url"
+        },
+        "include_chat_image_part": {
+            "type": "bool",
+            "label": "附带聊天图片片段",
+            "description": "会把输入图同时放进 messages[].content 里，适合多模态 chat/completions 风格接口。",
+            "default": true
+        },
+        "debug_logging": {
+            "type": "bool",
+            "label": "调试日志",
+            "description": "开启后会在日志里记录是否识别到附件图/引用图、请求地址以及返回摘要，方便排查图生图失败。",
+            "default": false
         }
     }
 }

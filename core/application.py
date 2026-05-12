@@ -50,6 +50,12 @@ from config import (
     NAPCAT_GROUP_REQUIRE_AT,
     NAPCAT_VOICE_REPLY_ENABLED,
     NAPCAT_VOICE_REPLY_PROBABILITY,
+    GUI_WS_HOST,
+    GUI_WS_PORT,
+    GUI_WS_PATH,
+    GUI_HTTP_HOST,
+    GUI_HTTP_PORT,
+    GUI_HTTP_PREFIX,
     MQTT_DISPLAY_ENABLED,
     MQTT_DISPLAY_HOST,
     MQTT_DISPLAY_PORT,
@@ -61,6 +67,7 @@ from modules.memory_sqlite import get_memory_store
 from modules.emotion_controller import EmotionController
 from modules.activity_sidecar import ActivitySidecarManager
 from modules.plugin_manager import PluginManager
+from modules.skill_manager import SkillManager
 from modules.tool_router import ToolRouter
 from modules.tts import TTSRouter
 from modules.state_machine import AgentStateMachine, AgentState
@@ -124,6 +131,7 @@ class Live2DApplication:
         self.memory_store = None
         self.emotion_controller = None
         self.plugin_manager = None
+        self.skill_manager = None
         self.tool_router = None
         self.tts = None
         self.presenter = None
@@ -250,12 +258,27 @@ class Live2DApplication:
                 return [str(item).strip() for item in value if str(item).strip()]
             return []
 
+        def _parse_text_list(value):
+            if isinstance(value, str):
+                return [
+                    item.strip()
+                    for item in re.split(r"[,，;\n]+", value)
+                    if item.strip()
+                ]
+            if isinstance(value, list):
+                return [str(item).strip() for item in value if str(item).strip()]
+            return []
+
         owner_ids_raw = settings.get("napcat_owner_user_ids", [])
         owner_ids = _parse_id_list(owner_ids_raw)
         user_whitelist = _parse_id_list(settings.get("napcat_user_whitelist", []))
         user_blacklist = _parse_id_list(settings.get("napcat_user_blacklist", []))
         group_whitelist = _parse_id_list(settings.get("napcat_group_whitelist", []))
         group_blacklist = _parse_id_list(settings.get("napcat_group_blacklist", []))
+        skill_search_paths = _parse_text_list(
+            settings.get("skill_search_paths", ["./skills", "~/.codex/skills"])
+        )
+        active_skills = _parse_text_list(settings.get("active_skills", []))
         image_prompt = str(settings.get("napcat_image_prompt", "") or "").strip()
         voice_probability_raw = settings.get(
             "napcat_voice_reply_probability", NAPCAT_VOICE_REPLY_PROBABILITY
@@ -321,10 +344,26 @@ class Live2DApplication:
             )
             .strip()
             .lower(),
+            "skill_enabled": bool(settings.get("skill_enabled", True)),
+            "skill_search_paths": skill_search_paths
+            or ["./skills", "~/.codex/skills"],
+            "active_skills": active_skills,
             "napcat_user_whitelist": user_whitelist,
             "napcat_user_blacklist": user_blacklist,
             "napcat_group_whitelist": group_whitelist,
             "napcat_group_blacklist": group_blacklist,
+            "gui_ws_host": str(settings.get("gui_ws_host", GUI_WS_HOST) or GUI_WS_HOST),
+            "gui_ws_port": int(settings.get("gui_ws_port", GUI_WS_PORT) or GUI_WS_PORT),
+            "gui_ws_path": str(settings.get("gui_ws_path", GUI_WS_PATH) or GUI_WS_PATH),
+            "gui_http_host": str(
+                settings.get("gui_http_host", GUI_HTTP_HOST) or GUI_HTTP_HOST
+            ),
+            "gui_http_port": int(
+                settings.get("gui_http_port", GUI_HTTP_PORT) or GUI_HTTP_PORT
+            ),
+            "gui_http_prefix": str(
+                settings.get("gui_http_prefix", GUI_HTTP_PREFIX) or GUI_HTTP_PREFIX
+            ),
         }
 
     async def render_gateway_voice_reply(
@@ -432,12 +471,26 @@ class Live2DApplication:
         result = {
             "mcp_enabled": bool(external_settings["mcp_enabled"]),
             "napcat_enabled": bool(external_settings["napcat_enabled"]),
+            "skill_enabled": bool(external_settings["skill_enabled"]),
             "mcp_live_applied": False,
             "napcat_live_applied": False,
+            "skill_live_applied": False,
             "napcat_server_running": False,
             "mcp_servers": [],
             "mcp_tools": [],
+            "skill_count": 0,
+            "active_skills": [],
         }
+
+        if self.skill_manager is not None:
+            self.skill_manager.configure(
+                enabled=external_settings.get("skill_enabled", True),
+                search_paths=external_settings.get("skill_search_paths") or None,
+                active_skills=external_settings.get("active_skills") or [],
+            )
+            result["skill_live_applied"] = True
+            result["skill_count"] = len(self.skill_manager.skills)
+            result["active_skills"] = list(self.skill_manager.active_skills)
 
         if self.mcp_bridge is not None:
             if external_settings["mcp_enabled"]:
@@ -516,6 +569,7 @@ class Live2DApplication:
         if self.logger:
             self.logger.info(
                 "External settings applied: "
+                f"skills={external_settings['skill_enabled']} active={len(result['active_skills'])} loaded={result['skill_count']}, "
                 f"mcp={external_settings['mcp_enabled']} tools={len(result['mcp_tools'])} servers={len(result['mcp_servers'])}, "
                 f"napcat={external_settings['napcat_enabled']} server_running={result['napcat_server_running']}"
             )
@@ -548,6 +602,7 @@ class Live2DApplication:
 
         # 2. 初始化事件日志
         self.event_logger = EventLogger("./data/events.sqlite")
+        self.skill_manager = SkillManager(logger=self.logger)
 
         # 3. 初始化核心组件
         self.brain = AdvancedMemorySystem()
@@ -655,6 +710,8 @@ class Live2DApplication:
             chat_gateway=self.chat_gateway,
             mcp_bridge=self.mcp_bridge,
         )
+        self.chat_service.skill_manager = self.skill_manager
+        self.chat_service.app = self
         self._init_display_mqtt()
         self.chat_service.configure_gateway_voice_reply(
             enabled=initial_external_settings.get("napcat_voice_reply_enabled", False),
@@ -664,9 +721,20 @@ class Live2DApplication:
             renderer=self.render_gateway_voice_reply,
         )
 
-        self.gui_ws_server = GuiWebSocketServer(logger=self.logger)
+        self.gui_ws_server = GuiWebSocketServer(
+            host=initial_external_settings.get("gui_ws_host", GUI_WS_HOST),
+            port=initial_external_settings.get("gui_ws_port", GUI_WS_PORT),
+            path=initial_external_settings.get("gui_ws_path", GUI_WS_PATH),
+            logger=self.logger,
+        )
         self.gui_ws_server.set_message_handler(self._on_gui_ws_message)
-        self.gui_http_server = GuiHttpServer(logger=self.logger, app_ref=self)
+        self.gui_http_server = GuiHttpServer(
+            host=initial_external_settings.get("gui_http_host", GUI_HTTP_HOST),
+            port=initial_external_settings.get("gui_http_port", GUI_HTTP_PORT),
+            path_prefix=initial_external_settings.get("gui_http_prefix", GUI_HTTP_PREFIX),
+            logger=self.logger,
+            app_ref=self,
+        )
         self.activity_sidecar = ActivitySidecarManager(logger=self.logger)
 
         if MusicSensor:
@@ -755,6 +823,14 @@ class Live2DApplication:
 
     async def _on_ui_bubble(self, payload: Dict[str, Any]):
         """处理UI气泡事件"""
+        self._emit_gui_ws(
+            {
+                "type": "bubble",
+                "text": payload.get("text", ""),
+                "emotion": payload.get("emotion"),
+                "duration_ms": payload.get("duration_ms"),
+            }
+        )
         await send_bubble(
             payload.get("text", ""), payload.get("emotion"), payload.get("duration_ms")
         )
@@ -1203,6 +1279,16 @@ class Live2DApplication:
             return
 
         try:
+            self._emit_gui_ws(
+                {
+                    "type": "live2d",
+                    "action": "emotion",
+                    "emotion": emo,
+                    "intensity": intensity,
+                    "prefer_motion": prefer_motion,
+                    "reason": reason,
+                }
+            )
             self.logger.debug(
                 f"🎭 [Emotion] 收到情绪请求: {emo} (prefer_motion={prefer_motion})"
             )
@@ -1229,12 +1315,20 @@ class Live2DApplication:
         if not m:
             return
         try:
+            self._emit_gui_ws(
+                {
+                    "type": "live2d",
+                    "action": "motion",
+                    "motion": m,
+                }
+            )
             await trigger_motion(m)
         except Exception:
             pass
 
     async def _on_live2d_go_idle(self, payload: Dict[str, Any]):
         """处理Live2D进入空闲事件"""
+        self._emit_gui_ws({"type": "live2d", "action": "idle"})
         if self.emotion_controller:
             try:
                 await self.emotion_controller.maybe_enter_idle()

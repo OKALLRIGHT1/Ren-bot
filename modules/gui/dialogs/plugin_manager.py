@@ -74,6 +74,13 @@ class PluginManagerDialog(QtWidgets.QDialog):
         header_card.setLayout(header_block)
         container_layout.addWidget(header_card)
 
+        # --- 搜索区域 ---
+        self.search_input = QtWidgets.QLineEdit()
+        self.search_input.setPlaceholderText("🔍 搜索插件名称、触发词或类型...")
+        self.search_input.textChanged.connect(self._filter_plugins)
+        self.search_input.setStyleSheet("padding: 8px; font-size: 13px;")
+        container_layout.addWidget(self.search_input)
+
         # --- 表格区域 ---
         self.table = QtWidgets.QTableWidget()
         self.table.setColumnCount(4)
@@ -241,6 +248,25 @@ class PluginManagerDialog(QtWidgets.QDialog):
             btn_layout.addWidget(edit_btn)
             self.table.setCellWidget(row, 3, btn_widget)
 
+        if hasattr(self, "search_input") and self.search_input.text():
+            self._filter_plugins(self.search_input.text())
+
+    def _filter_plugins(self, text):
+        text = text.lower()
+        for row in range(self.table.rowCount()):
+            match = False
+            name_widget = self.table.cellWidget(row, 0)
+            if name_widget:
+                for label in name_widget.findChildren(QtWidgets.QLabel):
+                    if text in label.text().lower():
+                        match = True
+                        break
+            if not match:
+                type_item = self.table.item(row, 1)
+                if type_item and text in type_item.text().lower():
+                    match = True
+            self.table.setRowHidden(row, not match)
+
     def _toggle_plugin(self, trigger: str):
         if not self.plugin_manager:
             return
@@ -323,6 +349,8 @@ class PluginEditorDialog(QtWidgets.QDialog):
         self.trigger = trigger
         self.original_config = None
         self.config_fields = {}
+        self.config_schema = {}
+        self.config_schema_fields = {}
         self._initial_geometry_applied = False
         self._restored_geometry = False
 
@@ -719,6 +747,18 @@ class PluginEditorDialog(QtWidgets.QDialog):
                 return
 
             self.original_config = config.copy()
+            self.config_schema = {}
+            self.config_schema_fields = {}
+            if hasattr(self.plugin_manager, "get_plugin_config_schema"):
+                schema = self.plugin_manager.get_plugin_config_schema(self.trigger)
+                if isinstance(schema, dict):
+                    self.config_schema = schema
+                    fields = schema.get("fields") or []
+                    self.config_schema_fields = {
+                        str(item.get("name") or ""): item
+                        for item in fields
+                        if isinstance(item, dict) and str(item.get("name") or "")
+                    }
 
             # 加载基本信息
             self.name_input.setText(config.get("name", ""))
@@ -778,6 +818,7 @@ class PluginEditorDialog(QtWidgets.QDialog):
             # 支持两种格式：
             # 1. 简单格式: {"key": value}
             # 2. 增强格式: {"key": {"type": "...", "default": ..., "label": "...", "description": "..."}}
+            schema_field = self.config_schema_fields.get(str(key), {})
 
             if isinstance(setting_info, dict) and "type" in setting_info:
                 # 增强格式
@@ -787,7 +828,7 @@ class PluginEditorDialog(QtWidgets.QDialog):
                 value = setting_info.get("default")
                 min_val = setting_info.get("min", 0)
                 max_val = setting_info.get("max", 10000)
-                choices = setting_info.get("choices", [])
+                choices = setting_info.get("choices") or setting_info.get("options") or []
             else:
                 # 简单格式（向后兼容）
                 setting_type = self._infer_type(setting_info)
@@ -797,6 +838,13 @@ class PluginEditorDialog(QtWidgets.QDialog):
                 min_val = 0
                 max_val = 10000
                 choices = []
+
+            if schema_field:
+                setting_type = self._setting_type_from_schema(schema_field, setting_type)
+                description = description or str(schema_field.get("description") or "")
+                choices = choices or schema_field.get("choices") or []
+                if not isinstance(setting_info, dict):
+                    value = schema_field.get("default", value)
 
             validation_error = self._validate_setting_default(
                 key, setting_type, value, choices
@@ -895,6 +943,26 @@ class PluginEditorDialog(QtWidgets.QDialog):
                 )
             return "string"
         return "string"
+
+    def _setting_type_from_schema(self, schema_field, fallback):
+        """把自动 schema 的通用 UI 类型映射到现有编辑器控件类型。"""
+        ui_type = str(schema_field.get("ui_type") or "").strip().lower()
+        value_type = str(schema_field.get("type") or "").strip().lower()
+        if bool(schema_field.get("secret")) or ui_type == "password":
+            return "secret"
+        if ui_type in {"switch", "checkbox"} or value_type in {"bool", "boolean"}:
+            return "boolean"
+        if ui_type == "select" or schema_field.get("choices"):
+            return "choice"
+        if ui_type == "json" or value_type in {"object", "dict"}:
+            return "text"
+        if value_type in {"array", "list"}:
+            return "list"
+        if value_type in {"integer", "int", "number", "float"}:
+            return "number"
+        if ui_type in {"path", "file"}:
+            return ui_type
+        return fallback or "string"
 
     def _create_path_item(self, layout, path_value, path_inputs):
         """创建路径列表项（输入框 + 选择按钮 + 删除按钮）"""
@@ -1404,14 +1472,18 @@ class PluginEditorDialog(QtWidgets.QDialog):
 
             def _validate_before_store(setting_key, field_type, raw_value):
                 setting_meta = original_config.get("settings", {}).get(setting_key, {})
+                schema_field = self.config_schema_fields.get(str(setting_key), {})
                 setting_type = field_type
                 if isinstance(setting_meta, dict):
                     setting_type = (
                         str(setting_meta.get("type") or field_type).strip().lower()
                     )
-                    choices = setting_meta.get("choices", [])
+                    choices = setting_meta.get("choices") or setting_meta.get("options") or []
                 else:
                     choices = []
+                choices = choices or schema_field.get("choices") or []
+                if schema_field:
+                    setting_type = self._setting_type_from_schema(schema_field, setting_type)
 
                 if setting_type in {"secret", "password"}:
                     return ""

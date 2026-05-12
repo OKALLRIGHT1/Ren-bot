@@ -49,6 +49,7 @@ except Exception:
     )
 
 from .base import BaseChatAdapter, ChatMessageEvent
+from .components import component, components_to_dicts
 
 
 class NapCatOneBotAdapter(BaseChatAdapter):
@@ -229,6 +230,50 @@ class NapCatOneBotAdapter(BaseChatAdapter):
             if value not in (None, "", [])
         }
 
+    def _extract_reply_segment(self, seg: Dict[str, Any]) -> Dict[str, Any]:
+        data = seg.get("data") or {}
+        reply_payload = {
+            "message_id": str(
+                data.get("id") or data.get("message_id") or data.get("msg_id") or ""
+            ).strip(),
+            "user_id": str(data.get("user_id") or "").strip(),
+            "text": str(data.get("text") or "").strip(),
+        }
+        return {
+            key: value
+            for key, value in reply_payload.items()
+            if value not in (None, "", [])
+        }
+
+    def _extract_reply_from_raw_message(self, raw_text: str) -> Dict[str, Any]:
+        text = str(raw_text or "")
+        if not text:
+            return {}
+        match = re.search(r"\[CQ:reply,([^\]]+)\]", text, flags=re.IGNORECASE)
+        if not match:
+            return {}
+        attrs_text = match.group(1)
+        attrs: Dict[str, str] = {}
+        for part in attrs_text.split(","):
+            if "=" not in part:
+                continue
+            key, value = part.split("=", 1)
+            key = str(key or "").strip().lower()
+            value = str(value or "").strip()
+            if key:
+                attrs[key] = value
+        reply_payload = {
+            "message_id": str(
+                attrs.get("id") or attrs.get("message_id") or attrs.get("msg_id") or ""
+            ).strip(),
+            "user_id": str(attrs.get("user_id") or "").strip(),
+        }
+        return {
+            key: value
+            for key, value in reply_payload.items()
+            if value not in (None, "", [])
+        }
+
     def _segment_to_text(self, seg: Dict[str, Any], self_id: str) -> str:
         seg_type = str(seg.get("type") or "").strip().lower()
         data = seg.get("data") or {}
@@ -253,14 +298,51 @@ class NapCatOneBotAdapter(BaseChatAdapter):
         }
         return placeholders.get(seg_type, "")
 
+    def _extract_message_components(
+        self, payload: Dict[str, Any], self_id: str
+    ) -> List[Dict[str, Any]]:
+        message = payload.get("message")
+        items = []
+        if isinstance(message, list):
+            for seg in message:
+                if not isinstance(seg, dict):
+                    continue
+                seg_type = str(seg.get("type") or "").strip().lower() or "unknown"
+                data = seg.get("data") if isinstance(seg.get("data"), dict) else {}
+                text = self._segment_to_text(seg, self_id)
+                if seg_type == "image":
+                    img = self._extract_image_segment(seg)
+                    items.append(component("image", text or "[图片]", img or data))
+                elif seg_type == "file":
+                    file_payload = self._extract_file_segment(seg)
+                    items.append(component("file", text or "[文件]", file_payload or data))
+                elif seg_type == "reply":
+                    reply_payload = self._extract_reply_segment(seg)
+                    items.append(component("reply", "", reply_payload or data))
+                elif seg_type == "at":
+                    items.append(component("at", text, data))
+                elif seg_type == "text":
+                    items.append(component("text", text, data))
+                else:
+                    items.append(component(seg_type, text, data))
+        else:
+            raw_text = str(payload.get("raw_message") or payload.get("message") or "")
+            if raw_text:
+                items.append(component("text", raw_text, {}))
+            reply_payload = self._extract_reply_from_raw_message(raw_text)
+            if reply_payload:
+                items.append(component("reply", "", reply_payload))
+        return components_to_dicts(items)
+
     def _extract_message_payload(
         self,
         payload: Dict[str, Any],
         self_id: str,
-    ) -> Tuple[str, List[Dict[str, Any]], List[Dict[str, Any]]]:
+    ) -> Tuple[str, List[Dict[str, Any]], List[Dict[str, Any]], Dict[str, Any]]:
         message = payload.get("message")
         images: List[Dict[str, Any]] = []
         files: List[Dict[str, Any]] = []
+        reply_meta: Dict[str, Any] = {}
         if isinstance(message, list):
             parts: List[str] = []
             for seg in message:
@@ -275,13 +357,19 @@ class NapCatOneBotAdapter(BaseChatAdapter):
                     file_payload = self._extract_file_segment(seg)
                     if file_payload:
                         files.append(file_payload)
+                elif seg_type == "reply":
+                    reply_payload = self._extract_reply_segment(seg)
+                    if reply_payload:
+                        reply_meta = reply_payload
                 text = self._segment_to_text(seg, self_id)
                 if text:
                     parts.append(text)
             if parts or images or files:
-                return " ".join(" ".join(parts).split()), images, files
+                return " ".join(" ".join(parts).split()), images, files, reply_meta
         raw_text = str(payload.get("raw_message") or payload.get("message") or "")
-        return " ".join(raw_text.split()), images, files
+        if not reply_meta:
+            reply_meta = self._extract_reply_from_raw_message(raw_text)
+        return " ".join(raw_text.split()), images, files, reply_meta
 
     def _parse_session(self, session_id: str) -> Tuple[str, str]:
         session_text = str(session_id or "").strip()
@@ -330,6 +418,7 @@ class NapCatOneBotAdapter(BaseChatAdapter):
         self, session_id: str, action: str, payload: Dict[str, Any], **kwargs: Any
     ) -> Any:
         timeout = float(kwargs.get("timeout") or 8)
+        skip_http_fallback = bool(kwargs.get("skip_http_fallback"))
         ws_result = None
 
         if self.ws_action_sender is not None:
@@ -347,6 +436,16 @@ class NapCatOneBotAdapter(BaseChatAdapter):
                 ws_result.setdefault("transport", "websocket")
             if isinstance(ws_result, dict) and ws_result.get("ok"):
                 return ws_result
+            if skip_http_fallback and isinstance(ws_result, dict):
+                return ws_result
+
+        if skip_http_fallback:
+            return {
+                "ok": False,
+                "reason": "ws_unavailable",
+                "transport": "websocket",
+                "session_id": session_id,
+            }
 
         if not self.api_base:
             if isinstance(ws_result, dict):
@@ -412,7 +511,10 @@ class NapCatOneBotAdapter(BaseChatAdapter):
         post_type = str(payload.get("post_type") or "")
         message_type = str(payload.get("message_type") or "")
         self_id = str(payload.get("self_id") or "")
-        raw_message, images, files = self._extract_message_payload(payload, self_id)
+        raw_message, images, files, reply_meta = self._extract_message_payload(
+            payload, self_id
+        )
+        components = self._extract_message_components(payload, self_id)
         if post_type != "message" or not raw_message:
             return None
 
@@ -467,11 +569,43 @@ class NapCatOneBotAdapter(BaseChatAdapter):
                 "files": files,
                 "has_file": bool(files),
                 "file_count": len(files),
+                "reply": reply_meta,
+                "components": components,
                 "image_vision_enabled": self.image_vision_enabled,
                 "image_prompt": self.image_prompt,
                 "filter_mode": self.filter_mode,
             },
         )
+
+    async def fetch_message_by_id(self, session_id: str, message_id: str, **kwargs: Any) -> Any:
+        msg_id = str(message_id or "").strip()
+        if not msg_id:
+            return {
+                "ok": False,
+                "reason": "empty_message_id",
+                "session_id": session_id,
+            }
+        payload: Dict[str, Any]
+        if msg_id.isdigit():
+            payload = {"message_id": int(msg_id)}
+        else:
+            payload = {"message_id": msg_id}
+        result = await self._send_action(
+            session_id,
+            "get_msg",
+            payload,
+            timeout=float(kwargs.get("timeout") or 10),
+        )
+        if not isinstance(result, dict) or not result.get("ok"):
+            return result
+        response = result.get("response")
+        raw_item = response.get("data") if isinstance(response, dict) else response
+        if not isinstance(raw_item, dict):
+            result["item"] = None
+            return result
+        normalized = self._normalize_history_item(session_id, raw_item)
+        result["item"] = normalized
+        return result
 
     async def send_text(self, session_id: str, text: str, **kwargs: Any) -> Any:
         text = str(text or "").strip()
@@ -494,6 +628,147 @@ class NapCatOneBotAdapter(BaseChatAdapter):
         if isinstance(result, dict):
             result.setdefault("text", text)
         return result
+
+    def _extract_history_items(self, response: Any) -> List[Dict[str, Any]]:
+        if isinstance(response, list):
+            return [item for item in response if isinstance(item, dict)]
+        if isinstance(response, dict):
+            for key in ("messages", "records", "data", "list"):
+                value = response.get(key)
+                if isinstance(value, list):
+                    return [item for item in value if isinstance(item, dict)]
+                if isinstance(value, dict):
+                    nested = self._extract_history_items(value)
+                    if nested:
+                        return nested
+        return []
+
+    def _normalize_history_item(
+        self, session_id: str, item: Dict[str, Any]
+    ) -> Optional[Dict[str, Any]]:
+        if not isinstance(item, dict):
+            return None
+        chat_type, peer_id = self._parse_session(session_id)
+        self_id = str(item.get("self_id") or "").strip()
+        text, images, files, reply_meta = self._extract_message_payload(item, self_id)
+        components = self._extract_message_components(item, self_id)
+        text = str(text or "").strip()
+        if not text:
+            return None
+
+        sender = item.get("sender") or {}
+        user_id = str(
+            item.get("user_id")
+            or sender.get("user_id")
+            or sender.get("uin")
+            or peer_id
+            or ""
+        ).strip()
+        sender_name = str(
+            sender.get("card") or sender.get("nickname") or user_id or peer_id
+        ).strip()
+        is_owner = bool(user_id and user_id in self.owner_user_ids)
+        is_self = bool(self_id and user_id and self_id == user_id)
+        ts_value = item.get("time")
+        try:
+            ts = int(float(ts_value))
+        except Exception:
+            ts = 0
+
+        return {
+            "ts": ts,
+            "session_id": session_id,
+            "role": "assistant" if is_self else "user",
+            "content": text,
+            "meta": {
+                "adapter": "napcat_qq",
+                "source": "qq_gateway",
+                "message_type": "group" if chat_type == "group" else "private",
+                "group_id": int(peer_id) if chat_type == "group" and peer_id.isdigit() else peer_id,
+                "user_id": user_id,
+                "sender_name": sender_name,
+                "sender": sender,
+                "is_owner": is_owner,
+                "owner_label": self.owner_label,
+                "sender_role": "owner" if is_owner else "contact",
+                "message_id": item.get("message_id"),
+                "images": images,
+                "has_image": bool(images),
+                "image_count": len(images),
+                "files": files,
+                "has_file": bool(files),
+                "file_count": len(files),
+                "reply": reply_meta,
+                "components": components,
+                "history_imported": True,
+            },
+        }
+
+    async def fetch_recent_history(self, session_id: str, **kwargs: Any) -> Any:
+        limit = max(1, min(200, int(kwargs.get("limit") or 80)))
+        chat_type, peer_id = self._parse_session(session_id)
+        timeout = float(kwargs.get("timeout") or 10)
+
+        candidate_actions: List[Tuple[str, Dict[str, Any]]] = []
+        if chat_type == "group":
+            group_id: Any = int(peer_id) if peer_id.isdigit() else peer_id
+            candidate_actions.extend(
+                [
+                    ("get_group_msg_history", {"group_id": group_id, "count": limit}),
+                    ("get_group_msg_history", {"group_id": group_id, "limit": limit}),
+                ]
+            )
+        elif chat_type == "private":
+            user_id: Any = int(peer_id) if peer_id.isdigit() else peer_id
+            candidate_actions.extend(
+                [
+                    ("get_friend_msg_history", {"user_id": user_id, "count": limit}),
+                    ("get_private_msg_history", {"user_id": user_id, "count": limit}),
+                    ("get_friend_msg_history", {"user_id": user_id, "limit": limit}),
+                ]
+            )
+        else:
+            return {
+                "ok": False,
+                "reason": f"unsupported_session_type:{chat_type}",
+                "session_id": session_id,
+                "items": [],
+            }
+
+        last_failure: Dict[str, Any] = {
+            "ok": False,
+            "reason": "history_fetch_failed",
+            "session_id": session_id,
+            "items": [],
+        }
+        for action, payload in candidate_actions:
+            result = await self._send_action(
+                session_id, action, payload, timeout=timeout
+            )
+            if not isinstance(result, dict) or not result.get("ok"):
+                last_failure = (
+                    result
+                    if isinstance(result, dict)
+                    else {
+                        "ok": False,
+                        "reason": "invalid_history_response",
+                        "session_id": session_id,
+                        "items": [],
+                    }
+                )
+                continue
+            response = result.get("response")
+            items = self._extract_history_items(response)
+            normalized = []
+            for item in items:
+                row = self._normalize_history_item(session_id, item)
+                if row:
+                    normalized.append(row)
+            result["items"] = normalized
+            result["history_action"] = action
+            return result
+        last_failure.setdefault("items", [])
+        return last_failure
 
     async def send_voice(self, session_id: str, voice_path: str, **kwargs: Any) -> Any:
         path_text = str(voice_path or "").strip()
@@ -520,24 +795,105 @@ class NapCatOneBotAdapter(BaseChatAdapter):
                 "voice_path": str(voice_file),
             }
 
-        message = [
-            {
-                "type": "record",
-                "data": {
-                    "file": voice_file.as_uri(),
-                },
-            }
-        ]
-        action_info = self._build_send_action(session_id, message)
+        variants = self._build_voice_message_variants(voice_file)
+        ws_timeout = float(kwargs.get("timeout") or 8)
+        quick_timeout = min(ws_timeout, 3.0)
+        last_result: Any = None
+
+        for variant_name, message in variants:
+            action_info = self._build_send_action(session_id, message)
+            if not action_info.get("ok"):
+                action_info.setdefault("voice_path", str(voice_file))
+                action_info.setdefault("voice_variant", variant_name)
+                last_result = action_info
+                continue
+            result = await self._send_action(
+                session_id,
+                action_info["action"],
+                action_info["payload"],
+                timeout=quick_timeout,
+                skip_http_fallback=True,
+                **kwargs,
+            )
+            if isinstance(result, dict):
+                result.setdefault("voice_path", str(voice_file))
+                result.setdefault("voice_variant", variant_name)
+            if isinstance(result, dict) and result.get("ok"):
+                return result
+            if self._is_probable_ws_voice_delivery(result):
+                return {
+                    "ok": True,
+                    "transport": "websocket_assumed",
+                    "session_id": session_id,
+                    "voice_path": str(voice_file),
+                    "voice_variant": variant_name,
+                    "response": result,
+                    "assumed_success": True,
+                }
+            last_result = result
+
+        primary_name, primary_message = variants[0]
+        action_info = self._build_send_action(session_id, primary_message)
         if not action_info.get("ok"):
             action_info.setdefault("voice_path", str(voice_file))
+            action_info.setdefault("voice_variant", primary_name)
             return action_info
         result = await self._send_action(
             session_id, action_info["action"], action_info["payload"], **kwargs
         )
         if isinstance(result, dict):
             result.setdefault("voice_path", str(voice_file))
+            result.setdefault("voice_variant", primary_name)
+            if last_result is not None:
+                result.setdefault("voice_ws_attempt", last_result)
+            if self._is_probable_ws_voice_delivery(last_result):
+                return {
+                    "ok": True,
+                    "transport": "websocket_assumed",
+                    "session_id": session_id,
+                    "voice_path": str(voice_file),
+                    "voice_variant": primary_name,
+                    "response": result,
+                    "voice_ws_attempt": last_result,
+                    "assumed_success": True,
+                }
         return result
+
+    def _build_voice_message_variants(self, voice_file: Path) -> List[Tuple[str, Any]]:
+        absolute_path = str(voice_file)
+        posix_path = voice_file.as_posix()
+        file_uri = voice_file.as_uri()
+        cq_uri = f"[CQ:record,file={file_uri}]"
+        cq_path = f"[CQ:record,file={absolute_path}]"
+        cq_posix = f"[CQ:record,file={posix_path}]"
+        return [
+            (
+                "record_file_uri",
+                [{"type": "record", "data": {"file": file_uri}}],
+            ),
+            (
+                "record_absolute_path",
+                [{"type": "record", "data": {"file": absolute_path}}],
+            ),
+            (
+                "record_posix_path",
+                [{"type": "record", "data": {"file": posix_path}}],
+            ),
+            ("cq_record_file_uri", cq_uri),
+            ("cq_record_absolute_path", cq_path),
+            ("cq_record_posix_path", cq_posix),
+        ]
+
+    def _is_probable_ws_voice_delivery(self, result: Any) -> bool:
+        if not isinstance(result, dict):
+            return False
+        if result.get("ok"):
+            return False
+        transport = str(result.get("transport") or "").strip().lower()
+        if transport != "websocket":
+            return False
+        reason = str(result.get("reason") or "").strip().lower()
+        return reason in {"", "timeout"}
 
     async def send_image(self, session_id: str, image_path: str, **kwargs: Any) -> Any:
         path_text = str(image_path or "").strip()

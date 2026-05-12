@@ -9,6 +9,11 @@ from pathlib import Path
 from modules.plugin_secret_store import PluginSecretStore
 
 try:
+    from modules.config_schema import build_plugin_config_schema
+except Exception:
+    build_plugin_config_schema = None
+
+try:
     from config import CHAT_DEBUG_PRINTS
 except Exception:
     CHAT_DEBUG_PRINTS = False
@@ -39,6 +44,7 @@ class PluginManager:
             str, str
         ] = {}  # ✅ 新增：存储 llm_command -> trigger 的映射
         self.secret_store = PluginSecretStore()
+        self.deferred_tool_stats: Dict[str, Dict[str, int]] = {}
 
         if not os.path.exists(plugin_dir):
             os.makedirs(plugin_dir)
@@ -578,8 +584,112 @@ class PluginManager:
         )
 
     def get_system_prompt_addition(self) -> str:
-        all_triggers = list(self.plugins.keys())
-        return self.get_tool_prompt_for_triggers(all_triggers, compact=False)
+        return self.get_deferred_tool_prompt()
+
+    def get_deferred_tool_prompt(self, max_tools: int = 18) -> str:
+        rows = []
+        seen = set()
+        for trigger, plugin in self.plugins.items():
+            p_type = str(getattr(plugin, "type", "react") or "react")
+            if p_type not in {"react", "delegate"}:
+                continue
+            pid = id(plugin)
+            if pid in seen:
+                continue
+            seen.add(pid)
+            name = str(getattr(plugin, "name", trigger) or trigger).strip()
+            desc = str(getattr(plugin, "description", "") or "").replace("\n", " ").strip()
+            if len(desc) > 42:
+                desc = desc[:42] + "…"
+            rows.append(f"- {name}({trigger}): {desc or p_type}")
+            if len(rows) >= max_tools:
+                break
+        if not rows:
+            return ""
+        return (
+            "\n\n【可延迟发现的工具】\n"
+            + "当前不直接暴露完整工具参数。若你判断必须用工具，但本轮没有列出具体命令，先单独输出：\n"
+            + "[CMD: tool_search | 你需要的能力或关键词]\n"
+            + "系统会返回匹配工具，再继续执行真实工具。不要在闲聊时使用。\n"
+            + "可发现能力摘要：\n"
+            + "\n".join(rows)
+        )
+
+    def should_use_deferred_tool_flow(self, user_text: str) -> bool:
+        text = str(user_text or "").strip().lower()
+        if not text:
+            return False
+        keywords = (
+            "查", "搜", "搜索", "联网", "新闻", "金价", "天气", "汇率",
+            "生成", "画", "生图", "图生图", "点歌", "播放", "语音",
+            "打开", "读取", "总结", "链接", "下载", "翻译", "计算", "wiki",
+        )
+        return any(word in text for word in keywords)
+
+    def search_tools(self, query: str, limit: int = 8) -> List[Dict[str, Any]]:
+        q = str(query or "").strip().lower()
+        terms = [part for part in re.split(r"\s+", q) if part]
+        scored = []
+        for trigger, plugin in self.plugins.items():
+            p_type = str(getattr(plugin, "type", "react") or "react")
+            if p_type not in {"react", "delegate"}:
+                continue
+            aliases = getattr(plugin, "aliases", []) or []
+            if not isinstance(aliases, list):
+                aliases = [str(aliases)]
+            llm_cmd = str(getattr(plugin, "llm_command", "") or trigger)
+            haystack = " ".join(
+                [
+                    trigger,
+                    llm_cmd,
+                    str(getattr(plugin, "name", "") or ""),
+                    str(getattr(plugin, "description", "") or ""),
+                    " ".join(str(a) for a in aliases),
+                ]
+            ).lower()
+            score = 0
+            for term in terms or [q]:
+                if term and term in haystack:
+                    score += 3 if term in {trigger.lower(), llm_cmd.lower()} else 1
+            if q and q in haystack:
+                score += 2
+            usage = self.deferred_tool_stats.get(trigger, {})
+            score += min(3, int(usage.get("executed", 0) or 0))
+            if score <= 0:
+                continue
+            scored.append((score, trigger, plugin, llm_cmd))
+        scored.sort(key=lambda item: item[0], reverse=True)
+        rows = []
+        for _score, trigger, plugin, llm_cmd in scored[: max(1, int(limit or 8))]:
+            rows.append(
+                {
+                    "trigger": trigger,
+                    "command": llm_cmd,
+                    "name": str(getattr(plugin, "name", trigger) or trigger),
+                    "type": str(getattr(plugin, "type", "react") or "react"),
+                    "description": str(getattr(plugin, "description", "") or ""),
+                    "example_arg": str(getattr(plugin, "example_arg", "") or ""),
+                }
+            )
+        return rows
+
+    def _record_deferred_tool_stat(self, trigger: str, event: str) -> None:
+        key = str(trigger or "").strip()
+        name = str(event or "").strip()
+        if not key or not name:
+            return
+        row = self.deferred_tool_stats.setdefault(key, {})
+        row[name] = int(row.get(name, 0) or 0) + 1
+
+    def get_deferred_tool_stats(self) -> Dict[str, Dict[str, int]]:
+        return {key: dict(value) for key, value in self.deferred_tool_stats.items()}
+
+    def get_plugin_config_schema(self, trigger: str) -> Dict[str, Any]:
+        key = str(trigger or "").strip()
+        config = self.plugin_configs.get(key, {})
+        if build_plugin_config_schema is None:
+            return {"trigger": key, "fields": []}
+        return build_plugin_config_schema(key, config)
 
     def get_delegate_prompt_for_triggers(
         self, triggers: List[str], *, compact: bool = True, max_tools: int = 8
@@ -633,7 +743,10 @@ class PluginManager:
     # -------------------- Execute --------------------
     async def _run_with_timeout(self, plugin, args: str, context: dict):
         timeout = getattr(plugin, "timeout_sec", None) or self.default_timeout_sec
-        task = asyncio.create_task(plugin.run(args, context))
+        runtime_context = context
+        if getattr(plugin, "type", "react") == "delegate":
+            runtime_context = self._build_delegate_runtime_context(context)
+        task = asyncio.create_task(plugin.run(args, runtime_context))
 
         try:
             return await asyncio.wait_for(asyncio.shield(task), timeout=timeout)
@@ -644,6 +757,14 @@ class PluginManager:
             except asyncio.CancelledError:
                 pass
             return f"⚠️ 工具超时（>{timeout}s）"
+
+    def _build_delegate_runtime_context(self, context: dict) -> dict:
+        runtime = dict(context or {})
+        runtime["delegate_mode"] = True
+        runtime.setdefault("allow_read", True)
+        runtime.setdefault("allow_write", False)
+        runtime.setdefault("allow_exec", False)
+        return runtime
 
     async def execute_direct_commands(
         self, user_text: str, context: dict
@@ -891,6 +1012,37 @@ class PluginManager:
 
             self._dbg(f"\n🔌 [ReAct] ----- 处理命令#{idx}: {llm_cmd} | {args} -----")
 
+            if llm_cmd == "tool_search":
+                triggered = True
+                matches_rows = [
+                    row
+                    for row in self.search_tools(args)
+                    if str(row.get("type") or "react") in allowed_types
+                ]
+                if not matches_rows:
+                    tool_outputs.append(f"【tool_search 结果】没有找到和“{args}”匹配的工具。")
+                    used_triggers.append("tool_search")
+                    self._record_deferred_tool_stat("tool_search", "empty")
+                    continue
+                lines = []
+                for row in matches_rows:
+                    example = row.get("example_arg") or "参数"
+                    desc = str(row.get("description") or "").replace("\n", " ").strip()
+                    if len(desc) > 80:
+                        desc = desc[:80] + "…"
+                    lines.append(
+                        f"- {row.get('name')}：命令 [CMD: {row.get('command')} | {example}]；类型={row.get('type')}；{desc}"
+                    )
+                tool_outputs.append(
+                    "【tool_search 结果】匹配到这些工具。若需要执行，请下一步只输出其中一个真实工具命令：\n"
+                    + "\n".join(lines)
+                )
+                used_triggers.append("tool_search")
+                self._record_deferred_tool_stat("tool_search", "matched")
+                for row in matches_rows:
+                    self._record_deferred_tool_stat(str(row.get("trigger") or ""), "suggested")
+                continue
+
             # 首先尝试通过LLM命令映射找到实际的trigger
             trigger = self.llm_command_map.get(llm_cmd, llm_cmd)
             if trigger != llm_cmd:
@@ -929,11 +1081,18 @@ class PluginManager:
                 continue
 
             used_triggers.append(trigger)
+            self._record_deferred_tool_stat(trigger, "executed")
             self._dbg(f"🔌 [ReAct] 找到插件: {plugin_name}")
             self._dbg(f"🔌 [ReAct] 开始执行插件: {plugin_name}")
 
             try:
-                result = await self._run_with_timeout(plugin, args, context)
+                runtime_context = context
+                if plugin_type == "delegate":
+                    runtime_context = self._build_delegate_runtime_context(context)
+                    self._dbg(
+                        "🔌 [ReAct] delegate 插件自动注入 delegate_mode=True"
+                    )
+                result = await self._run_with_timeout(plugin, args, runtime_context)
                 self._dbg(f"🔌 [ReAct] 插件执行完成，结果: {result}")
                 if result:
                     tool_outputs.append(result)

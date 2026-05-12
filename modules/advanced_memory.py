@@ -268,9 +268,8 @@ Example: {{"likes": {{"music": ["MyGO"], "games": ["Minecraft"]}}, "status": ["b
             )
 
             # 5. 解析结果
-            m = re.search(r"\{.*\}", response, flags=re.DOTALL)
-            if m:
-                data = json.loads(m.group(0))
+            data = self._parse_profile_json(response)
+            if data:
                 if not data:
                     return
 
@@ -373,6 +372,38 @@ Example: {{"likes": {{"music": ["MyGO"], "games": ["Minecraft"]}}, "status": ["b
 
         except Exception as e:
             print(f"⚠️ [Profile] 提取失败: {e}")
+
+    def _parse_profile_json(self, response: str):
+        text = str(response or "").strip()
+        if not text:
+            return None
+
+        text = re.sub(r"^```(?:json)?\s*", "", text, flags=re.IGNORECASE)
+        text = re.sub(r"\s*```$", "", text)
+
+        match = re.search(r"\{.*\}", text, flags=re.DOTALL)
+        if not match:
+            return None
+        raw = match.group(0)
+
+        candidates = [raw]
+        candidates.append(re.sub(r",\s*([}\]])", r"\1", raw))
+        candidates.append(re.sub(r"\n\s*//.*", "", raw))
+        candidates.append(re.sub(r"\n\s*#.*", "", raw))
+
+        for candidate in candidates:
+            try:
+                data = json.loads(candidate)
+                if isinstance(data, dict):
+                    return data
+            except Exception:
+                continue
+
+        fixed = re.sub(r",\s*([}\]])", r"\1", raw)
+        fixed = re.sub(r"\n\s*//.*", "", fixed)
+        fixed = re.sub(r"\n\s*#.*", "", fixed)
+        data = json.loads(fixed)
+        return data if isinstance(data, dict) else None
 
     def format_for_prompt(self) -> str:
         out = []
@@ -793,7 +824,7 @@ class AdvancedMemorySystem:
 
     # ================= 核心：添加记忆 (异步优化版) =================
 
-    def add_memory(self, role, content, session_id: str = None):
+    def add_memory(self, role, content, session_id: str = None, meta: dict = None):
         """
         主线程只做最快的内存操作(RAM)，慢速 IO 操作(SQLite/Chroma/LLM提取)扔到后台线程池。
         这样可以显著减少 UI 卡顿。
@@ -803,16 +834,23 @@ class AdvancedMemorySystem:
             self._append_short_term_memory(role, content, session_id=session_id)
 
         # 2. 提交慢速任务到后台 (SQLite, Chroma, Graph, Profile提取)
-        self._executor.submit(self._background_save_memory, role, content, session_id)
+        self._executor.submit(
+            self._background_save_memory, role, content, session_id, meta
+        )
 
-    def _background_save_memory(self, role, content, session_id: str = None):
+    def _background_save_memory(
+        self, role, content, session_id: str = None, meta: dict = None
+    ):
         """后台慢速任务：处理磁盘 IO、向量计算、LLM 提取等耗时操作"""
         try:
+            safe_meta = dict(meta or {})
+            if session_id:
+                safe_meta.setdefault("session_id", str(session_id))
             # A. 写入 SQLite (全量日志)
             if self.sqlite_store:
                 try:
                     self.sqlite_store.add_transcript(
-                        role, content, session_id=session_id
+                        role, content, meta=safe_meta, session_id=session_id
                     )
                 except Exception as e:
                     print(f"❌ [Memory] SQLite 写入失败: {e}")
@@ -821,7 +859,8 @@ class AdvancedMemorySystem:
             # 如果开启了 Profile 且角色符合 (user/agent)，尝试提取
             if self.profile_enabled and self.profile:
                 try:
-                    profile_meta = {"session_id": str(session_id or "")}
+                    profile_meta = dict(safe_meta)
+                    profile_meta.setdefault("session_id", str(session_id or ""))
                     self.profile.extract_and_update(role, content, meta=profile_meta)
                 except Exception as e:
                     print(f"⚠️ [Profile] 后台提取失败: {e}")
@@ -833,6 +872,8 @@ class AdvancedMemorySystem:
                     "ts": datetime.now(timezone.utc).isoformat(),
                     "kind": "chat",
                 }
+                meta.update(safe_meta)
+                meta["role"] = role
                 if session_id:
                     meta["session_id"] = str(session_id)
                 meta = build_memory_metadata(
@@ -1548,6 +1589,30 @@ Output ONLY "YES" or "NO".
 
         return stats
 
+    def _extract_runtime_system_additions(
+        self, system_persona: str, time_header: str, core_persona: str
+    ) -> str:
+        """保留 ChatService 在运行时追加的上下文，例如来源、历史片段和 Skills。"""
+        extra = str(system_persona or "")
+        for block in (time_header, core_persona, DEFAULT_PERSONA, SYSTEM_RULES_PROMPT):
+            block_text = str(block or "").strip()
+            if block_text:
+                extra = extra.replace(block_text, "")
+        extra = extra.strip()
+        if not extra:
+            return ""
+        tool_markers = [
+            "【可用工具能力】",
+            "【工具】",
+            "【可委托任务】",
+            "【远程MCP工具】",
+        ]
+        cut_positions = [extra.find(marker) for marker in tool_markers]
+        cut_positions = [pos for pos in cut_positions if pos >= 0]
+        if cut_positions:
+            extra = extra[: min(cut_positions)]
+        return re.sub(r"\n{3,}", "\n\n", extra).strip()
+
     # ---------- 构建 Prompt ----------
     # ---------- 工具使用记录（用于 ToolRouter/工具轮上下文） ----------
     def record_tool_use(self, triggers, tool_feedback: str = "", user_text: str = ""):
@@ -1640,6 +1705,12 @@ Output ONLY "YES" or "NO".
 
         # 🟢 拼装：时间 + 性格 + 通用规则
         final_system = f"{time_header}\n\n{core_persona}\n\n{SYSTEM_RULES_PROMPT}"
+
+        runtime_additions = self._extract_runtime_system_additions(
+            system_persona, time_header, core_persona
+        )
+        if runtime_additions:
+            final_system += "\n\n" + runtime_additions
 
         # 2. 补全工具说明
         tool_desc = ""

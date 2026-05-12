@@ -189,11 +189,11 @@ def get_common_qss(p: dict) -> str:
 
         /* QToolTip 风格美化 */
         QToolTip {{
-            background-color: {p["console_bg"]};
-            color: #FFFFFF;
-            border: 1px solid {p["accent"]};
-            border-radius: 4px;
-            padding: 4px;
+            background-color: {p["bg_card"]};
+            color: {p["text_primary"]};
+            border: 1px solid {p["border_strong"]};
+            border-radius: 6px;
+            padding: 4px 8px;
             font-family: 'Segoe UI', 'Microsoft YaHei';
         }}
 

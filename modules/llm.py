@@ -526,7 +526,11 @@ async def chat_with_ai_stream(
 
 
 def chat_with_ai(
-    messages_context, task_type="default", caller: str = "", request_id: str = ""
+    messages_context,
+    task_type="default",
+    caller: str = "",
+    request_id: str = "",
+    timeout_sec: float = 30,
 ):
     request_id = request_id or uuid.uuid4().hex[:8]
     caller = caller or "unknown"
@@ -578,17 +582,17 @@ def chat_with_ai(
                     response = client.chat.completions.create(
                         model=config["model"],
                         messages=messages_context,
-                        timeout=30,
+                        timeout=float(timeout_sec),
                     )
                     raw_content = getattr(response.choices[0].message, "content", "")
                     content = _extract_text_content(raw_content)
                 elif method == "openai_responses":
                     content = _chat_with_openai_responses(
-                        messages_context, config, timeout=30
+                        messages_context, config, timeout=float(timeout_sec)
                     )
                 elif method == "gemini_native":
                     content = _chat_with_gemini_native(
-                        messages_context, config, timeout=30
+                        messages_context, config, timeout=float(timeout_sec)
                     )
                 else:
                     raise RuntimeError(f"unsupported transport: {method}")

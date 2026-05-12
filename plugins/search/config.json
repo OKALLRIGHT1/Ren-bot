@@ -14,68 +14,108 @@
         "联网",
         "网络",
         "在线",
+        "提供链接",
+        "来源链接",
+        "给我提供链接",
+        "给我链接",
         "web",
         "query"
     ],
     "type": "delegate",
-    "description": "联网搜索（优先 Exa 反代，问题类可走 /answer，必要时回退 DDG）。",
+    "description": "联网搜索插件，优先使用 Grok 代理做提示式联网检索；也兼容 Exa，并可在失败时回退到 DDG。",
     "example_arg": "今天北京天气",
-    "timeout_sec": 15,
+    "timeout_sec": 20,
     "settings": {
+        "provider": {
+            "type": "text",
+            "label": "搜索源",
+            "description": "填写 grok 或 exa。默认 grok。",
+            "default": "grok"
+        },
+        "grok_base_url": {
+            "type": "text",
+            "label": "Grok Base URL",
+            "description": "OpenAI 兼容根地址，例如 grok2api 的 http://host:port/v1",
+            "default": "http://20.214.141.16:8000/v1"
+        },
+        "grok_api_key": {
+            "type": "secret",
+            "label": "Grok API Key",
+            "description": "可留空改用环境变量 XAI_API_KEY 或 GROK_API_KEY",
+            "default": ""
+        },
+        "grok_model": {
+            "type": "text",
+            "label": "Grok 模型",
+            "description": "用于联网搜索的模型名。建议先用 grok-4.20-0309-non-reasoning 或 fast 类模型。",
+            "default": "grok-4.20-0309-non-reasoning"
+        },
+        "grok_use_active_character": {
+            "type": "bool",
+            "label": "自动使用当前角色人设",
+            "description": "开启后，在搜索到信息后会按当前激活角色的人设语气组织回答，但事实准确性优先。",
+            "default": true
+        },
+        "grok_force_web_hint": {
+            "type": "bool",
+            "label": "强制提示联网",
+            "description": "开启后会明确要求 Grok 使用当前可访问的最新网络信息，而不是仅凭已有知识回答。",
+            "default": true
+        },
         "base_url": {
             "type": "text",
             "label": "Exa 基础地址",
-            "description": "本地反代地址，例如 http://localhost:7860",
+            "description": "兼容旧配置；当 provider=exa 时使用。",
             "default": "https://exa.chengtx.vip"
         },
         "remote_base_url": {
             "type": "text",
             "label": "Exa 远程地址",
-            "description": "远程 Exa 接口地址，可作为第二搜索源。",
+            "description": "兼容旧配置；当 provider=exa 时使用。",
             "default": "https://exa.chengtx.vip"
         },
         "local_base_url": {
             "type": "text",
             "label": "Exa 本地地址",
-            "description": "本地 Exa 反代地址，例如 http://localhost:7860，可优先尝试。",
+            "description": "兼容旧配置；当 provider=exa 时使用。",
             "default": ""
         },
         "prefer_local_first": {
             "type": "bool",
-            "label": "优先本地接口",
-            "description": "开启后先试本地接口，失败再试远程接口。",
+            "label": "Exa 优先本地",
+            "description": "仅在 provider=exa 时生效。",
             "default": true
         },
         "api_key": {
             "type": "secret",
             "label": "Exa API Key",
-            "description": "可留空使用环境变量 EXA_API_KEY",
+            "description": "仅在 provider=exa 时使用；可留空改用 EXA_API_KEY",
             "default": ""
         },
         "num_results": {
             "type": "number",
             "label": "默认返回条数",
-            "description": "/search 的 numResults",
+            "description": "Exa / DDG 默认返回条数。",
             "default": 5,
             "min": 1,
             "max": 10
         },
         "use_answer": {
             "type": "bool",
-            "label": "问题优先 /answer",
-            "description": "问题类请求优先 /answer；含“最新/新闻”等会回到 /search",
+            "label": "Exa 问题优先 /answer",
+            "description": "仅在 provider=exa 时生效。",
             "default": true
         },
         "use_contents": {
             "type": "bool",
-            "label": "自动拉取正文",
-            "description": "对前 N 条结果调用 /contents 补全文",
+            "label": "Exa 自动拉正文",
+            "description": "仅在 provider=exa 时生效。",
             "default": true
         },
         "contents_max": {
             "type": "number",
-            "label": "/contents 条数",
-            "description": "当开启自动拉取正文时使用",
+            "label": "Exa /contents 条数",
+            "description": "仅在 provider=exa 且开启自动拉正文时生效。",
             "default": 3,
             "min": 1,
             "max": 10
@@ -83,15 +123,15 @@
         "request_timeout_sec": {
             "type": "number",
             "label": "请求超时(秒)",
-            "description": "单次请求超时时间",
-            "default": 12,
+            "description": "单次 HTTP 请求超时时间。",
+            "default": 20,
             "min": 3,
             "max": 60
         },
         "fallback_ddg": {
             "type": "bool",
-            "label": "Exa 失败回退 DDG",
-            "description": "Exa 不可用时回退 duckduckgo_search",
+            "label": "失败回退 DDG",
+            "description": "当 Grok 或 Exa 失败时自动回退到 DuckDuckGo。",
             "default": true
         }
     },

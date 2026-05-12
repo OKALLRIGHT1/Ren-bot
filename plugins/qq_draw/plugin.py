@@ -6,7 +6,7 @@ import os
 import tempfile
 import uuid
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 try:
     import aiohttp
@@ -44,6 +44,9 @@ class Plugin:
             "endpoint_path": self._read_setting(
                 settings, "endpoint_path", "/v1/chat/completions"
             ),
+            "edit_endpoint_path": self._read_setting(
+                settings, "edit_endpoint_path", "/v1/images/edits"
+            ),
             "api_key": self._read_setting(settings, "api_key", ""),
             "model_name": self._read_setting(settings, "model_name", "grok-2-image"),
             "size_value": self._read_setting(settings, "size_value", "1024x1024"),
@@ -51,8 +54,23 @@ class Plugin:
             "style": self._read_setting(settings, "style", ""),
             "negative_prompt": self._read_setting(settings, "negative_prompt", ""),
             "extra_body_json": self._read_setting(settings, "extra_body_json", "{}"),
+            "request_timeout_sec": self._read_setting(
+                settings, "request_timeout_sec", 180
+            ),
             "caption_template": self._read_setting(
                 settings, "caption_template", "🖼️ 已按你的要求画好了。"
+            ),
+            "image_to_image_enabled": bool(
+                self._read_setting(settings, "image_to_image_enabled", True)
+            ),
+            "input_image_field": self._read_setting(
+                settings, "input_image_field", "image"
+            ),
+            "input_image_format": self._read_setting(
+                settings, "input_image_format", "data_url"
+            ),
+            "include_chat_image_part": bool(
+                self._read_setting(settings, "include_chat_image_part", True)
             ),
             "debug_logging": bool(self._read_setting(settings, "debug_logging", False)),
         }
@@ -80,14 +98,47 @@ class Plugin:
         source = str((context or {}).get("source") or "").strip().lower()
         return source in {"qq_gateway", "napcat_qq"}
 
-    def _build_request_body(self, prompt: str) -> Dict[str, Any]:
+    def _format_input_image_payload(self, image_base64: str) -> str:
+        raw = str(image_base64 or "").strip()
+        if not raw:
+            return ""
+        image_format = str(self._settings.get("input_image_format") or "data_url").strip().lower()
+        if image_format == "base64":
+            return raw
+        return f"data:image/png;base64,{raw}"
+
+    def _build_request_body(
+        self, prompt: str, image_base64: str = ""
+    ) -> Dict[str, Any]:
+        input_image_payload = self._format_input_image_payload(image_base64)
+        use_chat_image_part = bool(
+            input_image_payload
+            and self._settings.get("include_chat_image_part", True)
+        )
+        message_content: Any
+        if use_chat_image_part:
+            message_content = [
+                {
+                    "type": "text",
+                    "text": prompt,
+                },
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": input_image_payload,
+                    },
+                },
+            ]
+        else:
+            message_content = prompt
+
         # 1. 【核心兼容】：同时带上 prompt（画图用）和 messages（聊天用）
         body: Dict[str, Any] = {
             "prompt": prompt,
             "messages": [
                 {
                     "role": "user",
-                    "content": prompt,
+                    "content": message_content,
                 }
             ]
         }
@@ -113,6 +164,13 @@ class Plugin:
         if negative_value:
             body["negative_prompt"] = negative_value
 
+        if input_image_payload and bool(
+            self._settings.get("image_to_image_enabled", True)
+        ):
+            field_name = str(self._settings.get("input_image_field") or "image").strip()
+            if field_name:
+                body[field_name] = input_image_payload
+
         # 3. 合并自定义额外参数
         extra_args_raw = (
                 str(self._settings.get("extra_body_json") or "{}").strip() or "{}"
@@ -124,6 +182,47 @@ class Plugin:
 
         self._normalize_request_body(body)
         return body
+
+    def _is_image_edit_endpoint(self, image_base64: str = "") -> bool:
+        endpoint_path = (
+            str(
+                self._settings.get("edit_endpoint_path")
+                or self._settings.get("endpoint_path")
+                or ""
+            ).strip().lower()
+            if image_base64
+            else str(self._settings.get("endpoint_path") or "").strip().lower()
+        )
+        return endpoint_path.endswith("/images/edits")
+
+    def _decode_base64_image(self, image_base64: str) -> bytes:
+        raw = str(image_base64 or "").strip()
+        if not raw:
+            return b""
+        try:
+            return base64.b64decode(raw, validate=False)
+        except Exception:
+            return b""
+
+    def _build_edit_form_fields(
+        self, prompt: str, image_base64: str
+    ) -> Tuple[Dict[str, Any], bytes]:
+        body = self._build_request_body(prompt, image_base64="")
+        image_bytes = self._decode_base64_image(image_base64)
+        if not image_bytes:
+            raise RuntimeError("图生图输入图片解码失败")
+
+        fields: Dict[str, Any] = {}
+        for key, value in body.items():
+            if key in {"messages", "image", "image_base64", "init_image", "input_image"}:
+                continue
+            if value in (None, "", [], {}):
+                continue
+            if isinstance(value, (dict, list)):
+                fields[key] = json.dumps(value, ensure_ascii=False)
+            else:
+                fields[key] = str(value)
+        return fields, image_bytes
 
     def _normalize_request_body(self, body: Dict[str, Any]) -> None:
         response_format = body.get("response_format")
@@ -147,9 +246,27 @@ class Plugin:
         if self._debug_enabled():
             logger.info(f"[qq_draw] {message}")
 
-    def _build_request_url(self) -> str:
+    def _resolve_request_timeout_sec(self) -> float:
+        raw = self._settings.get("request_timeout_sec", 180)
+        try:
+            value = float(raw)
+        except Exception:
+            value = 180.0
+        if value <= 0:
+            value = 180.0
+        return value
+
+    def _build_request_url(self, image_base64: str = "") -> str:
         base_url = str(self._settings.get("base_url") or "").strip().rstrip("/")
-        endpoint_path = str(self._settings.get("endpoint_path") or "").strip()
+        endpoint_path = (
+            str(
+                self._settings.get("edit_endpoint_path")
+                or self._settings.get("endpoint_path")
+                or ""
+            ).strip()
+            if image_base64
+            else str(self._settings.get("endpoint_path") or "").strip()
+        )
         if not base_url:
             raise ValueError("未配置 base_url")
         if not endpoint_path:
@@ -346,7 +463,7 @@ class Plugin:
     async def _download_image_bytes(self, url: str, headers: Dict[str, str]) -> bytes:
         if aiohttp is None:
             raise RuntimeError("aiohttp 未安装，无法下载图片 URL")
-        timeout = aiohttp.ClientTimeout(total=90)
+        timeout = aiohttp.ClientTimeout(total=self._resolve_request_timeout_sec())
         async with aiohttp.ClientSession(timeout=timeout) as session:
             async with session.get(url, headers=headers or None) as resp:
                 if resp.status >= 400:
@@ -354,7 +471,7 @@ class Plugin:
                     raise RuntimeError(f"下载图片失败: HTTP {resp.status} {text[:200]}")
                 return await resp.read()
 
-    async def _call_image_api(self, prompt: str) -> Any:
+    async def _call_image_api(self, prompt: str, image_base64: str = "") -> Any:
         if aiohttp is None:
             raise RuntimeError("aiohttp 未安装，无法调用生图接口")
 
@@ -364,22 +481,52 @@ class Plugin:
                 "未配置 API Key，请在 QQ生图 插件设置里填写，或设置环境变量 GROK_API_KEY"
             )
 
-        url = self._build_request_url()
-        body = self._build_request_body(prompt)
+        url = self._build_request_url(image_base64=image_base64)
+        body = self._build_request_body(prompt, image_base64=image_base64)
         api_mode = str(self._settings.get("api_mode") or "chat").strip().lower()
         headers = {
             "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
         }
-        debug_body = dict(body)
-        if "messages" in debug_body:
-            debug_body["messages"] = "<messages omitted>"
-        self._debug(
-            f"mode={api_mode} model={body.get('model', '')} url={url} body={json.dumps(debug_body, ensure_ascii=False)[:500]}"
-        )
 
-        timeout = aiohttp.ClientTimeout(total=90)
+        timeout = aiohttp.ClientTimeout(total=self._resolve_request_timeout_sec())
         async with aiohttp.ClientSession(timeout=timeout) as session:
+            if image_base64 and self._is_image_edit_endpoint(image_base64=image_base64):
+                form = aiohttp.FormData()
+                fields, image_bytes = self._build_edit_form_fields(prompt, image_base64)
+                for key, value in fields.items():
+                    form.add_field(key, value)
+                form.add_field(
+                    "image",
+                    image_bytes,
+                    filename="input.png",
+                    content_type="image/png",
+                )
+                debug_body = dict(fields)
+                debug_body["image"] = "<binary image omitted>"
+                self._debug(
+                    f"mode={api_mode} model={fields.get('model', '')} url={url} multipart={json.dumps(debug_body, ensure_ascii=False)[:500]}"
+                )
+                async with session.post(url, headers=headers, data=form) as resp:
+                    text = await resp.text()
+                    self._debug(f"raw_status={resp.status} raw_response={text[:1000]}")
+                    if resp.status >= 400:
+                        raise RuntimeError(self._format_api_error(resp.status, text))
+                    try:
+                        parsed = json.loads(text)
+                        self._debug(
+                            f"parsed_json={json.dumps(parsed, ensure_ascii=False)[:500]}"
+                        )
+                        return parsed
+                    except Exception:
+                        raise RuntimeError(f"接口返回不是合法 JSON: {text[:500]}")
+
+            headers["Content-Type"] = "application/json"
+            debug_body = dict(body)
+            if "messages" in debug_body:
+                debug_body["messages"] = "<messages omitted>"
+            self._debug(
+                f"mode={api_mode} model={body.get('model', '')} url={url} body={json.dumps(debug_body, ensure_ascii=False)[:500]}"
+            )
             async with session.post(url, headers=headers, json=body) as resp:
                 text = await resp.text()
                 self._debug(f"raw_status={resp.status} raw_response={text[:1000]}")
@@ -411,6 +558,84 @@ class Plugin:
                     return parsed
                 except Exception:
                     raise RuntimeError(f"接口返回不是合法 JSON: {text[:500]}")
+
+    async def _load_first_context_image_base64(self, context: dict) -> str:
+        if not self._is_qq_context(context):
+            return ""
+        if not bool(self._settings.get("image_to_image_enabled", True)):
+            return ""
+        channel_meta = (context or {}).get("channel_meta") or {}
+        images = channel_meta.get("images") or []
+        if not isinstance(images, list) or not images:
+            return ""
+        try:
+            from integrations.chat_gateway.media_utils import load_image_base64
+        except Exception as exc:
+            self._debug(f"load_image_base64 unavailable: {exc}")
+            return ""
+        try:
+            return str(
+                await asyncio.to_thread(load_image_base64, images[0])
+            ).strip()
+        except Exception as exc:
+            self._debug(f"load first QQ image failed: {exc}")
+            return ""
+
+    async def _load_reply_image_base64(self, context: dict) -> str:
+        if not self._is_qq_context(context):
+            return ""
+        if not bool(self._settings.get("image_to_image_enabled", True)):
+            return ""
+        channel_meta = (context or {}).get("channel_meta") or {}
+        reply_meta = channel_meta.get("reply") or {}
+        if not isinstance(reply_meta, dict):
+            return ""
+        reply_message_id = str(reply_meta.get("message_id") or "").strip()
+        if not reply_message_id:
+            return ""
+
+        chat_service = (context or {}).get("chat_service")
+        gateway = getattr(chat_service, "chat_gateway", None)
+        if gateway is None:
+            return ""
+        adapter = getattr(gateway, "adapters", {}).get("napcat_qq")
+        if adapter is None or not hasattr(adapter, "fetch_message_by_id"):
+            return ""
+
+        session_id = str(channel_meta.get("session_id") or "").strip()
+        if not session_id:
+            return ""
+
+        try:
+            from integrations.chat_gateway.media_utils import load_image_base64
+        except Exception as exc:
+            self._debug(f"reply load_image_base64 unavailable: {exc}")
+            return ""
+
+        try:
+            result = await adapter.fetch_message_by_id(
+                session_id, reply_message_id, timeout=10
+            )
+        except Exception as exc:
+            self._debug(f"fetch reply message failed: {exc}")
+            return ""
+        if not isinstance(result, dict) or not result.get("ok"):
+            self._debug(f"fetch reply message not ok: {result}")
+            return ""
+        item = result.get("item")
+        if not isinstance(item, dict):
+            return ""
+        meta = item.get("meta") if isinstance(item.get("meta"), dict) else {}
+        images = meta.get("images") or []
+        if not isinstance(images, list) or not images:
+            return ""
+        try:
+            return str(
+                await asyncio.to_thread(load_image_base64, images[0])
+            ).strip()
+        except Exception as exc:
+            self._debug(f"load reply image failed: {exc}")
+            return ""
 
     def _format_api_error(self, status: int, text: str) -> str:
         raw = (text or "").strip()
@@ -456,12 +681,28 @@ class Plugin:
         text = str(args or "").strip()
         prompt = self._extract_prompt(text)
         if not prompt:
-            return "用法：/画图 你的提示词 或 /画画 你的提示词，例如 /画图 绘制一个丰川祥子在雨后的街道。"
+            return "用法：/画图 你的提示词 或 /画画 你的提示词；如果同时带一张 QQ 图片，就会优先按图生图处理。"
+
+        input_image_base64 = await self._load_first_context_image_base64(context)
+        input_image_source = ""
+        if input_image_base64:
+            input_image_source = "attachment"
+        else:
+            input_image_base64 = await self._load_reply_image_base64(context)
+            if input_image_base64:
+                input_image_source = "reply"
+        if input_image_base64:
+            self._debug(
+                f"image_to_image input detected from QQ {input_image_source}"
+            )
 
         try:
-            result = await self._call_image_api(prompt)
+            result = await self._call_image_api(
+                prompt, image_base64=input_image_base64
+            )
         except Exception as exc:
-            return f"调用生图接口失败：{exc}"
+            error_text = str(exc).strip() or repr(exc)
+            return f"调用生图接口失败：{error_text}"
 
         image_bytes = self._pick_image_bytes_from_result(result)
         if not image_bytes:

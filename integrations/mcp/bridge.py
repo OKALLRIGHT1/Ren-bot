@@ -231,7 +231,7 @@ class MCPToolBridge:
                 status.tool_names = [spec.name for spec in self.list_tools(provider=cfg.name)]
             except asyncio.CancelledError as exc:
                 status.connected = False
-                status.error = f"????????: {exc}"
+                status.error = f"MCP discovery cancelled: {exc}"
             except Exception as exc:
                 status.connected = False
                 status.error = str(exc)
@@ -319,7 +319,7 @@ class MCPToolBridge:
             result = await asyncio.wait_for(session.list_tools(), timeout=cfg.timeout_sec)
             return list(getattr(result, "tools", []) or [])
         except asyncio.CancelledError as exc:
-            raise TimeoutError(f"MCP server '{cfg.name}' list_tools ???????") from exc
+            raise TimeoutError(f"MCP server '{cfg.name}' list_tools timed out") from exc
         finally:
             await self._close_remote_session(client_ctx, session)
 
@@ -334,7 +334,7 @@ class MCPToolBridge:
             )
             return _json_safe(result)
         except asyncio.CancelledError as exc:
-            raise TimeoutError(f"MCP server '{cfg.name}' call_tool ???????") from exc
+            raise TimeoutError(f"MCP server '{cfg.name}' call_tool timed out") from exc
         finally:
             await self._close_remote_session(client_ctx, session)
 

@@ -341,15 +341,20 @@ body {
 }
 
 .anime-text {
-  height: 38px;
-  overflow: hidden;
+  /* 移除原本的 height: 38px; 改由行数来控制高度 */
   margin: 7px auto 0;
   color: var(--text-main);
   font-family: var(--font-body);
   font-weight: 400;
   font-size: 12px;
   line-height: 1.35;
-  word-break: break-word;
+  word-break: break-all; /* 优化中日文长标题的换行逻辑 */
+
+  /* 新增：多行文本超出显示省略号的魔法 */
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2; /* 限制最多显示 2 行，你可以根据需要改成 3 */
+  overflow: hidden;
 }
 
 .news-panel {
