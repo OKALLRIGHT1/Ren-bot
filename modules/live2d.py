@@ -34,6 +34,12 @@ def _get_logger():
     return get_logger()
 
 
+def estimate_bubble_display_ms(text: str, *, minimum: int = 3200, maximum: int = 12000) -> int:
+    clean = str(text or "").strip()
+    read_ms = 2600 + len(clean) * 160
+    return max(int(minimum), min(int(read_ms), int(maximum)))
+
+
 async def go_idle():
     if not TTS_RETURN_IDLE:
         return
@@ -308,14 +314,39 @@ async def change_costume(model_path: str, config: dict = None):
         if isinstance(safe_cfg.get("emotion_map", {}), dict)
         else {}
     )
-
-    _get_logger().info(f"切换服装: {abs_path} | Config: {safe_cfg}")
+    derived_keys = safe_cfg.get("derived_emotion_keys")
+    if derived_keys:
+        _get_logger().info(
+            f"切换服装: {abs_path} | 自动补齐情绪动作: {derived_keys}"
+        )
+    else:
+        _get_logger().info(f"切换服装: {abs_path} | Config: {safe_cfg}")
 
     await _send_to_models(
         msg=12000,
         msg_id=10,
         data_builder=lambda mid: {"id": mid, "path": abs_path, "config": safe_cfg},
     )
+
+    async def _settle_to_idle():
+        await asyncio.sleep(0.6)
+        cfg = resolve_emotion_config("idle", EMO_TO_LIVE2D)
+        if not cfg:
+            cfg = resolve_emotion_config("neutral", EMO_TO_LIVE2D)
+        if not cfg:
+            return
+        exp = cfg.get("exp")
+        mtn = cfg.get("mtn")
+        if exp is not None:
+            await set_expression(int(exp))
+        if mtn:
+            await play_motion(str(mtn), motion_type=int(cfg.get("type", 0) or 0))
+
+    if not safe_cfg.get("suppress_auto_idle"):
+        try:
+            asyncio.create_task(_settle_to_idle())
+        except Exception:
+            pass
 
 
 def resolve_emotion_config(emotion: str, default_mapping: Optional[dict] = None):
@@ -351,12 +382,26 @@ async def trigger_emotion(emotion: Optional[str]) -> bool:
     if not emotion:
         return False
     emo = emotion.strip().lower()
+    source = "current_costume" if isinstance(_CURRENT_COSTUME_EMOTION_MAP, dict) and emo in _CURRENT_COSTUME_EMOTION_MAP else "global"
     cfg = resolve_emotion_config(emo, EMO_TO_LIVE2D)
+    if not cfg and emo == "music":
+        source = "fallback:happy"
+        cfg = resolve_emotion_config("happy", EMO_TO_LIVE2D)
     if not cfg:
+        source = "fallback:neutral"
+        cfg = resolve_emotion_config("neutral", EMO_TO_LIVE2D)
+    if not cfg:
+        source = "fallback:idle"
+        cfg = resolve_emotion_config("idle", EMO_TO_LIVE2D)
+    if not cfg:
+        _get_logger().warning(f"[Live2D Emotion] 未找到情绪配置: emotion={emo}")
         return False
     exp = cfg.get("exp", None)
     mtn = cfg.get("mtn", None)
     mtype = int(cfg.get("type", 0) or 0)
+    _get_logger().info(
+        f"[Live2D Emotion] emotion={emo} source={source} exp={exp} mtn={mtn} type={mtype}"
+    )
     if exp is not None:
         await set_expression(int(exp))
     if mtn:
@@ -401,11 +446,12 @@ async def send_bubble(
     except Exception as e:
         _get_logger().warning(f"动作/表情触发失败: {e}")
 
-    min_ms = 3000 + len(text) * 200
+    # 语音时长经常比阅读速度短；气泡显示按阅读下限对齐。
+    read_ms = estimate_bubble_display_ms(text)
     if duration_ms is None or duration_ms <= 0:
-        duration_ms = min_ms
+        duration_ms = read_ms
     else:
-        duration_ms = max(int(duration_ms), int(min_ms))
+        duration_ms = max(int(duration_ms), int(read_ms))
     duration_ms += 80
 
     await _send_to_models(

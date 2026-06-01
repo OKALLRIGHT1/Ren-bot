@@ -147,6 +147,35 @@ def get_character_editor_styles_v2() -> str:
             padding: 0 6px;
             color: {p["text_secondary"]};
         }}
+        QScrollArea {{
+            border: none;
+            background: transparent;
+        }}
+        QScrollArea > QWidget > QWidget {{
+            background: transparent;
+        }}
+        QScrollBar:vertical {{
+            border: none;
+            background: transparent;
+            width: 8px;
+            margin: 0px;
+        }}
+        QScrollBar::handle:vertical {{
+            background: {p["border_strong"]};
+            min-height: 20px;
+            border-radius: 4px;
+        }}
+        QScrollBar::handle:vertical:hover {{
+            background: {p["accent"]};
+        }}
+        QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
+            border: none;
+            background: none;
+            height: 0px;
+        }}
+        QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{
+            background: none;
+        }}
     """
 
 
@@ -242,7 +271,25 @@ class CharacterEditorWidget(QtWidgets.QWidget):
         layout.addWidget(splitter)
 
     def _init_tab_persona(self):
-        layout = QtWidgets.QVBoxLayout(self.tab_persona)
+        # 创建主容器布局
+        main_layout = QtWidgets.QVBoxLayout(self.tab_persona)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.setSpacing(0)
+
+        # 创建滚动区域
+        scroll = QtWidgets.QScrollArea(self.tab_persona)
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
+        
+        # 创建滚动区域的容器 widget
+        scroll_widget = QtWidgets.QWidget()
+        scroll_widget.setObjectName("personaScrollWidget")
+        
+        # 将原 layout 绑定到 scroll_widget 上
+        layout = QtWidgets.QVBoxLayout(scroll_widget)
+        layout.setContentsMargins(14, 14, 14, 14)
+        layout.setSpacing(12)
 
         form = QtWidgets.QFormLayout()
         self.edit_name = QtWidgets.QLineEdit()
@@ -252,6 +299,7 @@ class CharacterEditorWidget(QtWidgets.QWidget):
 
         layout.addWidget(QtWidgets.QLabel("人设提示词 (System Prompt):"))
         self.edit_prompt = QtWidgets.QTextEdit()
+        self.edit_prompt.setMinimumHeight(150)  # 保证输入框有合适高度
         self.edit_prompt.textChanged.connect(self._save_current_char)
         layout.addWidget(self.edit_prompt)
 
@@ -283,6 +331,41 @@ class CharacterEditorWidget(QtWidgets.QWidget):
         catchphrase_layout.addRow("", catchphrase_hint)
         layout.addWidget(catchphrase_group)
 
+        qq_group = QtWidgets.QGroupBox("QQ 资料同步")
+        qq_layout = QtWidgets.QFormLayout(qq_group)
+        self.qq_profile_enabled = QtWidgets.QCheckBox(
+            "切换到此角色时同步 QQ 昵称/头像"
+        )
+        self.qq_profile_enabled.stateChanged.connect(self._save_current_char)
+        qq_layout.addRow("开关:", self.qq_profile_enabled)
+
+        self.qq_profile_nickname = QtWidgets.QLineEdit()
+        self.qq_profile_nickname.setPlaceholderText("例如：五十铃")
+        self.qq_profile_nickname.textChanged.connect(self._save_current_char)
+        qq_layout.addRow("QQ 昵称:", self.qq_profile_nickname)
+
+        self.qq_profile_avatar = QtWidgets.QLineEdit()
+        self.qq_profile_avatar.setPlaceholderText(
+            "本地头像路径或 URL，例如 assets/avatars/isuzu.png"
+        )
+        self.qq_profile_avatar.textChanged.connect(self._save_current_char)
+        avatar_row = QtWidgets.QHBoxLayout()
+        avatar_row.addWidget(self.qq_profile_avatar, 1)
+        btn_pick_avatar = QtWidgets.QPushButton("选择头像")
+        btn_pick_avatar.clicked.connect(self._pick_qq_avatar_file)
+        avatar_row.addWidget(btn_pick_avatar)
+        avatar_wrap = QtWidgets.QWidget()
+        avatar_wrap.setLayout(avatar_row)
+        qq_layout.addRow("QQ 头像:", avatar_wrap)
+
+        qq_hint = QtWidgets.QLabel(
+            "保存后，激活该角色会先检查当前 QQ 昵称；昵称相同则跳过修改。头像仅在填写时同步。"
+        )
+        qq_hint.setObjectName("charHint")
+        qq_hint.setWordWrap(True)
+        qq_layout.addRow("", qq_hint)
+        layout.addWidget(qq_group)
+
         self.btn_activate = QtWidgets.QPushButton("🚀 切换为此角色")
         self.btn_activate.setObjectName("charPrimary")
         self.btn_activate.clicked.connect(self._activate_character)
@@ -293,8 +376,31 @@ class CharacterEditorWidget(QtWidgets.QWidget):
         btn_del.clicked.connect(self._delete_current_char)
         layout.addWidget(btn_del, alignment=QtCore.Qt.AlignmentFlag.AlignRight)
 
+        # 关联滚动部件
+        scroll.setWidget(scroll_widget)
+        main_layout.addWidget(scroll)
+
     def _init_tab_tts(self):
-        layout = QtWidgets.QVBoxLayout(self.tab_tts)
+        # 创建主容器布局
+        main_layout = QtWidgets.QVBoxLayout(self.tab_tts)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.setSpacing(0)
+
+        # 创建滚动区域
+        scroll = QtWidgets.QScrollArea(self.tab_tts)
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
+        
+        # 创建滚动区域的容器 widget
+        scroll_widget = QtWidgets.QWidget()
+        scroll_widget.setObjectName("ttsScrollWidget")
+        
+        # 将原 layout 绑定到 scroll_widget 上
+        layout = QtWidgets.QVBoxLayout(scroll_widget)
+        layout.setContentsMargins(14, 14, 14, 14)
+        layout.setSpacing(12)
+
         form = QtWidgets.QFormLayout()
         self.tts_enabled = QtWidgets.QCheckBox("启用角色专属 GPT-SoVITS")
         self.tts_enabled.stateChanged.connect(self._save_current_char)
@@ -303,6 +409,7 @@ class CharacterEditorWidget(QtWidgets.QWidget):
         base_hint = QtWidgets.QLabel(
             "GPTSOVITS_BASE 使用全局配置；这里仅设置角色自己的 GPT/SoVITS 权重、参考音频和提示词。"
         )
+        base_hint.setObjectName("charHint")
         base_hint.setWordWrap(True)
         layout.addWidget(base_hint)
 
@@ -362,6 +469,7 @@ class CharacterEditorWidget(QtWidgets.QWidget):
         form.addRow("PROMPT_LANG:", self.tts_prompt_lang)
 
         self.tts_prompt_text = QtWidgets.QTextEdit()
+        self.tts_prompt_text.setMinimumHeight(80)
         self.tts_prompt_text.textChanged.connect(self._save_current_char)
         form.addRow("PROMPT_TEXT:", self.tts_prompt_text)
         layout.addLayout(form)
@@ -386,67 +494,51 @@ class CharacterEditorWidget(QtWidgets.QWidget):
         test_row.addWidget(btn_test_tts)
         layout.addLayout(test_row)
 
+        # 关联滚动部件
+        scroll.setWidget(scroll_widget)
+        main_layout.addWidget(scroll)
+
     def _init_tab_costume(self):
-        layout = QtWidgets.QVBoxLayout(self.tab_costume)
+        # Costume Management Tab is redesigned as a side-by-side layout
+        # Left Panel: Costume list and basic controls
+        left_group = QtWidgets.QGroupBox("服装模型")
+        left_layout = QtWidgets.QVBoxLayout(left_group)
+        left_layout.setContentsMargins(10, 10, 10, 10)
+        left_layout.setSpacing(8)
 
         self.costume_list = QtWidgets.QListWidget()
         self.costume_list.itemDoubleClicked.connect(self._wear_selected_costume)
         self.costume_list.currentItemChanged.connect(self._on_costume_changed)
-        layout.addWidget(self.costume_list)
+        left_layout.addWidget(self.costume_list, 1)
 
-        btn_layout = QtWidgets.QHBoxLayout()
-        btn_import = QtWidgets.QPushButton("📂 导入模型 (.model3.json / model.json)")
-        btn_import.clicked.connect(self._import_costume)
         btn_wear = QtWidgets.QPushButton("👕 立即换穿")
         btn_wear.setObjectName("charPrimary")
         btn_wear.clicked.connect(self._wear_selected_costume)
-        btn_del_cos = QtWidgets.QPushButton("✕ 删除")
+        left_layout.addWidget(btn_wear)
+
+        btn_action_row = QtWidgets.QHBoxLayout()
+        btn_import = QtWidgets.QPushButton("📂 导入模型")
+        btn_import.clicked.connect(self._import_costume)
+        btn_import.setToolTip("选择 .model3.json 或 model.json 模型文件")
+        btn_del_cos = QtWidgets.QPushButton("🗑️ 删除")
         btn_del_cos.setObjectName("charDanger")
         btn_del_cos.clicked.connect(self._delete_costume)
+        btn_action_row.addWidget(btn_import, 1)
+        btn_action_row.addWidget(btn_del_cos, 1)
+        left_layout.addLayout(btn_action_row)
 
-        btn_layout.addWidget(btn_import)
-        btn_layout.addWidget(btn_wear)
-        btn_layout.addWidget(btn_del_cos)
-        layout.addLayout(btn_layout)
+        self.lbl_costume_summary = QtWidgets.QLabel("未加载模型")
+        self.lbl_costume_summary.setObjectName("charHint")
+        self.lbl_costume_summary.setWordWrap(True)
+        left_layout.addWidget(self.lbl_costume_summary)
 
-        self.lbl_motion_summary = QtWidgets.QLabel("动作: -")
-        self.lbl_expr_summary = QtWidgets.QLabel("表情: -")
-        self.lbl_motion_summary.setObjectName("charHint")
-        self.lbl_expr_summary.setObjectName("charHint")
-        layout.addWidget(self.lbl_motion_summary)
-        layout.addWidget(self.lbl_expr_summary)
-
-        preview_group = QtWidgets.QGroupBox("动作/表情预览与映射")
-        preview_layout = QtWidgets.QGridLayout(preview_group)
-
-        self.combo_motion = QtWidgets.QComboBox()
-        self.combo_motion_type = QtWidgets.QComboBox()
-        self.combo_motion_type.addItem("动作类型 0", 0)
-        self.combo_motion_type.addItem("动作类型 1", 1)
-
-        self.combo_expression = QtWidgets.QComboBox()
-
-        btn_preview_motion = QtWidgets.QPushButton("▶ 预览动作")
-        btn_preview_motion.clicked.connect(self._preview_selected_motion)
-        btn_preview_expr = QtWidgets.QPushButton("▶ 预览表情")
-        btn_preview_expr.clicked.connect(self._preview_selected_expression)
-        btn_apply_selected = QtWidgets.QPushButton("✅ 应用下拉到选中情绪")
-        btn_apply_selected.clicked.connect(self._apply_dropdown_to_selected_emotion)
-
-        preview_layout.addWidget(QtWidgets.QLabel("动作"), 0, 0)
-        preview_layout.addWidget(self.combo_motion, 0, 1)
-        preview_layout.addWidget(self.combo_motion_type, 0, 2)
-        preview_layout.addWidget(btn_preview_motion, 0, 3)
-
-        preview_layout.addWidget(QtWidgets.QLabel("表情"), 1, 0)
-        preview_layout.addWidget(self.combo_expression, 1, 1, 1, 2)
-        preview_layout.addWidget(btn_preview_expr, 1, 3)
-
-        preview_layout.addWidget(btn_apply_selected, 2, 0, 1, 4)
-        layout.addWidget(preview_group)
+        # Right Panel: Emotion mapping table and edit details form
+        right_group = QtWidgets.QGroupBox("情绪与动作映射")
+        right_layout = QtWidgets.QVBoxLayout(right_group)
+        right_layout.setContentsMargins(10, 10, 10, 10)
+        right_layout.setSpacing(8)
 
         self.emo_table = QtWidgets.QTableWidget()
-        self.emo_table.setMinimumHeight(100)
         self.emo_table.setColumnCount(4)
         self.emo_table.setHorizontalHeaderLabels(
             ["情绪", "动作(mtn)", "表情(exp)", "来源"]
@@ -459,18 +551,68 @@ class CharacterEditorWidget(QtWidgets.QWidget):
         self.emo_table.setSelectionBehavior(
             QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows
         )
-        layout.addWidget(self.emo_table, 1)
+        self.emo_table.itemSelectionChanged.connect(self._on_emotion_selection_changed)
+        right_layout.addWidget(self.emo_table, 1)
 
-        emo_btn_layout = QtWidgets.QHBoxLayout()
-        btn_set = QtWidgets.QPushButton("✏️ 设置当前情绪映射")
-        btn_set.setObjectName("charPrimary")
-        btn_set.clicked.connect(self._edit_selected_emotion_override)
-        btn_clear = QtWidgets.QPushButton("🧹 清除当前情绪映射")
-        btn_clear.setObjectName("charDanger")
-        btn_clear.clicked.connect(self._clear_selected_emotion_override)
-        emo_btn_layout.addWidget(btn_set)
-        emo_btn_layout.addWidget(btn_clear)
-        layout.addLayout(emo_btn_layout)
+        self.edit_mapping_group = QtWidgets.QGroupBox("编辑选中情绪映射")
+        edit_layout = QtWidgets.QVBoxLayout(self.edit_mapping_group)
+        edit_layout.setContentsMargins(10, 10, 10, 10)
+        edit_layout.setSpacing(8)
+
+        self.lbl_selected_emo = QtWidgets.QLabel("请在上方列表中选择一个情绪")
+        self.lbl_selected_emo.setStyleSheet("font-weight: bold; color: #4F46E5;")
+        edit_layout.addWidget(self.lbl_selected_emo)
+
+        form_grid = QtWidgets.QGridLayout()
+        form_grid.setSpacing(6)
+
+        form_grid.addWidget(QtWidgets.QLabel("动作 (Motion):"), 0, 0)
+        self.combo_motion = QtWidgets.QComboBox()
+        form_grid.addWidget(self.combo_motion, 0, 1)
+
+        btn_preview_motion = QtWidgets.QPushButton("▶ 预览")
+        btn_preview_motion.clicked.connect(self._preview_selected_motion)
+        btn_preview_motion.setFixedWidth(64)
+        form_grid.addWidget(btn_preview_motion, 0, 2)
+
+        form_grid.addWidget(QtWidgets.QLabel("动作类型:"), 1, 0)
+        self.combo_motion_type = QtWidgets.QComboBox()
+        self.combo_motion_type.addItem("普通 (0)", 0)
+        self.combo_motion_type.addItem("闲置 (1)", 1)
+        form_grid.addWidget(self.combo_motion_type, 1, 1, 1, 2)
+
+        form_grid.addWidget(QtWidgets.QLabel("表情 (Expr):"), 2, 0)
+        self.combo_expression = QtWidgets.QComboBox()
+        form_grid.addWidget(self.combo_expression, 2, 1)
+
+        btn_preview_expr = QtWidgets.QPushButton("▶ 预览")
+        btn_preview_expr.clicked.connect(self._preview_selected_expression)
+        btn_preview_expr.setFixedWidth(64)
+        form_grid.addWidget(btn_preview_expr, 2, 2)
+
+        edit_layout.addLayout(form_grid)
+
+        btn_save_row = QtWidgets.QHBoxLayout()
+        self.btn_save_map = QtWidgets.QPushButton("✅ 保存映射")
+        self.btn_save_map.setObjectName("charPrimary")
+        self.btn_save_map.clicked.connect(self._apply_dropdown_to_selected_emotion)
+
+        self.btn_clear_map = QtWidgets.QPushButton("🧹 清除映射")
+        self.btn_clear_map.setObjectName("charDanger")
+        self.btn_clear_map.clicked.connect(self._clear_selected_emotion_override)
+
+        btn_save_row.addWidget(self.btn_save_map, 1)
+        btn_save_row.addWidget(self.btn_clear_map, 1)
+        edit_layout.addLayout(btn_save_row)
+
+        right_layout.addWidget(self.edit_mapping_group)
+
+        # Assemble layout
+        main_costume_layout = QtWidgets.QHBoxLayout(self.tab_costume)
+        main_costume_layout.setContentsMargins(6, 6, 6, 6)
+        main_costume_layout.setSpacing(10)
+        main_costume_layout.addWidget(left_group, 2)
+        main_costume_layout.addWidget(right_group, 3)
 
     # --- 逻辑 ---
 
@@ -505,6 +647,9 @@ class CharacterEditorWidget(QtWidgets.QWidget):
         self.catchphrase_enabled.blockSignals(True)
         self.catchphrase_text.blockSignals(True)
         self.catchphrase_probability.blockSignals(True)
+        self.qq_profile_enabled.blockSignals(True)
+        self.qq_profile_nickname.blockSignals(True)
+        self.qq_profile_avatar.blockSignals(True)
 
         self.edit_name.setText(data.get("name", ""))
         self.edit_prompt.setPlainText(data.get("prompt", ""))
@@ -516,6 +661,18 @@ class CharacterEditorWidget(QtWidgets.QWidget):
         except Exception:
             catchphrase_probability = 0
         self.catchphrase_probability.setValue(max(0, min(100, catchphrase_probability)))
+        qq_profile = data.get("qq_profile") or {}
+        self.qq_profile_enabled.setChecked(bool(qq_profile.get("enabled", False)))
+        self.qq_profile_nickname.setText(str(qq_profile.get("nickname", "") or ""))
+        self.qq_profile_avatar.setText(
+            str(
+                qq_profile.get("avatar_path")
+                or qq_profile.get("avatar")
+                or qq_profile.get("avatar_url")
+                or qq_profile.get("avatar_file")
+                or ""
+            )
+        )
         tts_cfg = data.get("tts_config") or {}
         self.tts_enabled.blockSignals(True)
         self.tts_gpt_w.blockSignals(True)
@@ -536,6 +693,9 @@ class CharacterEditorWidget(QtWidgets.QWidget):
         self.catchphrase_enabled.blockSignals(False)
         self.catchphrase_text.blockSignals(False)
         self.catchphrase_probability.blockSignals(False)
+        self.qq_profile_enabled.blockSignals(False)
+        self.qq_profile_nickname.blockSignals(False)
+        self.qq_profile_avatar.blockSignals(False)
         self.tts_enabled.blockSignals(False)
         self.tts_gpt_w.blockSignals(False)
         self.tts_sov_w.blockSignals(False)
@@ -578,6 +738,11 @@ class CharacterEditorWidget(QtWidgets.QWidget):
             "text": self.catchphrase_text.text().strip(),
             "probability": int(self.catchphrase_probability.value()),
         }
+        data["qq_profile"] = {
+            "enabled": bool(self.qq_profile_enabled.isChecked()),
+            "nickname": self.qq_profile_nickname.text().strip(),
+            "avatar_path": self.qq_profile_avatar.text().strip(),
+        }
         data["tts_config"] = {
             "enabled": bool(self.tts_enabled.isChecked()),
             "gpt_w": self.tts_gpt_w.text().strip(),
@@ -595,6 +760,16 @@ class CharacterEditorWidget(QtWidgets.QWidget):
         path, _ = QtWidgets.QFileDialog.getOpenFileName(self, title, "", file_filter)
         if path:
             line_edit.setText(path.replace("\\", "/"))
+
+    def _pick_qq_avatar_file(self):
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self,
+            "选择 QQ 头像",
+            "",
+            "图片文件 (*.png *.jpg *.jpeg *.webp *.bmp);;所有文件 (*.*)",
+        )
+        if path:
+            self.qq_profile_avatar.setText(path.replace("\\", "/"))
 
     def _test_current_tts(self):
         if not self.current_char_id:
@@ -726,6 +901,20 @@ class CharacterEditorWidget(QtWidgets.QWidget):
             return name
         return f"Motion:{name}"
 
+    def _motion_name_from_file(self, file_name: str):
+        raw = str(file_name or "").replace("\\", "/").strip()
+        if not raw:
+            return ""
+        name = raw.rsplit("/", 1)[-1]
+        name = re.sub(r"\.motion3\.json$", "", name, flags=re.IGNORECASE)
+        name = re.sub(r"\.mtn$", "", name, flags=re.IGNORECASE)
+        name = re.sub(r"\.[a-z0-9]+$", "", name, flags=re.IGNORECASE)
+        return name.strip()
+
+    def _is_generic_motion_group(self, group_name: str):
+        group = str(group_name or "").strip().lower()
+        return group in {"", "motion", "motions", "idle", "tapbody"}
+
     def _iter_motion_groups(self, raw_motion_refs):
         if isinstance(raw_motion_refs, dict):
             for group_name, items in raw_motion_refs.items():
@@ -753,12 +942,12 @@ class CharacterEditorWidget(QtWidgets.QWidget):
                 for idx, item in enumerate(motion_items):
                     if not isinstance(item, dict):
                         continue
+                    file_name = str(item.get("File") or item.get("file") or "").strip()
                     raw_name = (
                         item.get("Name")
                         or item.get("name")
                         or item.get("mtn")
-                        or item.get("File")
-                        or item.get("file")
+                        or self._motion_name_from_file(file_name)
                     )
                     motion_name = (
                         str(raw_name).strip() if raw_name else f"{group_name}:{idx}"
@@ -802,26 +991,28 @@ class CharacterEditorWidget(QtWidgets.QWidget):
                 ):
                     for idx, item in enumerate(motion_items):
                         if isinstance(item, dict):
-                            raw_name = (
-                                item.get("name")
-                                or item.get("Name")
-                                or item.get("file")
-                                or item.get("File")
-                                or item.get("mtn")
-                            )
+                            file_name = str(item.get("file") or item.get("File") or "").strip()
+                            raw_name = item.get("name") or item.get("Name") or item.get("mtn")
+                            if not raw_name and not self._is_generic_motion_group(group_name):
+                                raw_name = group_name
+                            if not raw_name:
+                                raw_name = self._motion_name_from_file(file_name)
                         else:
-                            raw_name = str(item)
+                            raw_name = (
+                                group_name
+                                if not self._is_generic_motion_group(group_name)
+                                else self._motion_name_from_file(str(item)) or str(item)
+                            )
                         motion_name = (
                             str(raw_name).strip() if raw_name else f"{group_name}:{idx}"
                         )
-                        motion_name = self._normalize_motion_name(motion_name)
                         motions.append(
                             {
                                 "name": motion_name,
                                 "raw_name": str(raw_name).strip()
                                 if raw_name
                                 else motion_name,
-                                "preview_mtn": str(group_name).strip() or motion_name,
+                                "preview_mtn": motion_name,
                                 "group": group_name,
                                 "index": int(idx),
                             }
@@ -906,12 +1097,14 @@ class CharacterEditorWidget(QtWidgets.QWidget):
 
     def _refresh_costume_detail_ui(self):
         if not self.current_char_id or not self.current_costume_name:
-            self.lbl_motion_summary.setText("动作: -")
-            self.lbl_expr_summary.setText("表情: -")
+            self.lbl_costume_summary.setText("未加载模型")
             self.emo_table.setRowCount(0)
             self._refresh_preview_options([], [])
+            self.edit_mapping_group.setEnabled(False)
+            self.lbl_selected_emo.setText("无可用服装")
             return
 
+        self.edit_mapping_group.setEnabled(True)
         char = self.mgr.get_character(self.current_char_id) or {}
         costume = (char.get("costumes") or {}).get(self.current_costume_name) or {}
         model_path = costume.get("path", "")
@@ -928,11 +1121,11 @@ class CharacterEditorWidget(QtWidgets.QWidget):
         expr_labels = [
             str(item.get("label", "")) for item in expressions if isinstance(item, dict)
         ]
-        self.lbl_motion_summary.setText(
-            f"动作: {', '.join([x for x in motion_names if x]) if motion_names else '(未解析到)'}"
-        )
-        self.lbl_expr_summary.setText(
-            f"表情: {', '.join([x for x in expr_labels if x]) if expr_labels else '(未解析到)'}"
+
+        self.lbl_costume_summary.setText(
+            f"已载入服装模型配置:\n"
+            f"• 动作数量: {len(motion_names)} 个\n"
+            f"• 表情数量: {len(expr_labels)} 个"
         )
         self._refresh_preview_options(motions, expressions)
 
@@ -944,6 +1137,15 @@ class CharacterEditorWidget(QtWidgets.QWidget):
             self.emo_table.setItem(row, 1, QtWidgets.QTableWidgetItem(mtn))
             self.emo_table.setItem(row, 2, QtWidgets.QTableWidgetItem(exp))
             self.emo_table.setItem(row, 3, QtWidgets.QTableWidgetItem(source))
+
+        # Restore row selection or default to first row (neutral)
+        current_row = self.emo_table.currentRow()
+        if current_row >= 0 and current_row < len(rows):
+            self.emo_table.setCurrentCell(current_row, 0)
+        elif len(rows) > 0:
+            self.emo_table.setCurrentCell(0, 0)
+        else:
+            self._on_emotion_selection_changed()
 
     def _on_costume_changed(self, current, previous):
         if not current:
@@ -960,6 +1162,74 @@ class CharacterEditorWidget(QtWidgets.QWidget):
                 self.main_app._refresh_character_status()
         self._refresh_costume_detail_ui()
 
+    def _on_emotion_selection_changed(self):
+        emo = self._selected_emotion()
+        if not emo:
+            self.lbl_selected_emo.setText("请在上方列表中选择一个情绪")
+            self.btn_save_map.setEnabled(False)
+            self.btn_clear_map.setEnabled(False)
+            return
+
+        self.btn_save_map.setEnabled(True)
+        self.btn_clear_map.setEnabled(True)
+        self.lbl_selected_emo.setText(f"当前选中情绪: {emo.upper()}")
+
+        row = self.emo_table.currentRow()
+        if row < 0:
+            return
+
+        mtn_cell = self.emo_table.item(row, 1)
+        exp_cell = self.emo_table.item(row, 2)
+
+        mtn_str = mtn_cell.text().strip() if mtn_cell else ""
+        exp_str = exp_cell.text().strip() if exp_cell else ""
+
+        # Update motion selection
+        if mtn_str:
+            idx = -1
+            for i in range(self.combo_motion.count()):
+                if self.combo_motion.itemData(i) == mtn_str:
+                    idx = i
+                    break
+            if idx < 0:
+                idx = self.combo_motion.findText(mtn_str)
+            if idx >= 0:
+                self.combo_motion.setCurrentIndex(idx)
+        else:
+            self.combo_motion.setCurrentIndex(0)
+
+        # Update motion type selection from database override
+        if self.current_char_id and self.current_costume_name:
+            char = self.mgr.get_character(self.current_char_id) or {}
+            costume = (char.get("costumes") or {}).get(self.current_costume_name) or {}
+            overrides = costume.get("emotion_map", {})
+            type_val = overrides.get(emo, {}).get("type", 0)
+            idx = self.combo_motion_type.findData(type_val)
+            if idx >= 0:
+                self.combo_motion_type.setCurrentIndex(idx)
+            else:
+                self.combo_motion_type.setCurrentIndex(0)
+
+        # Update expression selection
+        if exp_str:
+            idx = -1
+            if exp_str.isdigit():
+                val_to_find = int(exp_str)
+            else:
+                val_to_find = exp_str
+
+            for i in range(self.combo_expression.count()):
+                data_val = self.combo_expression.itemData(i)
+                if str(data_val) == str(val_to_find):
+                    idx = i
+                    break
+            if idx < 0:
+                idx = self.combo_expression.findText(exp_str)
+            if idx >= 0:
+                self.combo_expression.setCurrentIndex(idx)
+        else:
+            self.combo_expression.setCurrentIndex(0)
+
     def _selected_emotion(self):
         row = self.emo_table.currentRow()
         if row < 0:
@@ -968,6 +1238,7 @@ class CharacterEditorWidget(QtWidgets.QWidget):
         return item.text().strip().lower() if item else None
 
     def _edit_selected_emotion_override(self):
+        # Retain for compatibility or fallback, but logic now centers on _apply_dropdown_to_selected_emotion
         if not self.current_char_id or not self.current_costume_name:
             return
         emo = self._selected_emotion()
@@ -988,7 +1259,11 @@ class CharacterEditorWidget(QtWidgets.QWidget):
             )
             return
         motion_type = int(self.combo_motion_type.currentData() or 0)
-        self.main_app.preview_motion(motion_name, motion_type)
+        delay_ms = 450 if self._load_selected_costume_for_preview() else 0
+        QtCore.QTimer.singleShot(
+            delay_ms,
+            lambda: self.main_app.preview_motion(motion_name, motion_type),
+        )
 
     def _preview_selected_expression(self):
         if not self.main_app or not hasattr(self.main_app, "preview_expression"):
@@ -999,7 +1274,33 @@ class CharacterEditorWidget(QtWidgets.QWidget):
                 self, "提示", "该表情未识别到 exp ID，无法直接预览。"
             )
             return
-        self.main_app.preview_expression(exp_value)
+        delay_ms = 450 if self._load_selected_costume_for_preview() else 0
+        QtCore.QTimer.singleShot(
+            delay_ms,
+            lambda: self.main_app.preview_expression(exp_value),
+        )
+
+    def _load_selected_costume_for_preview(self) -> bool:
+        if (
+            not self.current_char_id
+            or not self.current_costume_name
+            or not self.main_app
+            or not getattr(self.main_app, "on_costume_callback", None)
+        ):
+            return False
+        char = self.mgr.get_character(self.current_char_id) or {}
+        costume = (char.get("costumes") or {}).get(self.current_costume_name) or {}
+        path = str(costume.get("path") or "").strip()
+        if not path:
+            return False
+        cfg = self.mgr.get_costume_runtime_config(
+            self.current_char_id, self.current_costume_name
+        )
+        cfg = dict(cfg)
+        cfg["preview_mode"] = True
+        cfg["suppress_auto_idle"] = True
+        self.main_app.on_costume_callback(path, cfg)
+        return True
 
     def _apply_dropdown_to_selected_emotion(self):
         if not self.current_char_id or not self.current_costume_name:
@@ -1030,7 +1331,10 @@ class CharacterEditorWidget(QtWidgets.QWidget):
         self.mgr.set_costume_emotion_override(
             self.current_char_id, self.current_costume_name, emo, payload
         )
+        current_row = self.emo_table.currentRow()
         self._refresh_costume_detail_ui()
+        if current_row >= 0:
+            self.emo_table.setCurrentCell(current_row, 0)
 
     def _clear_selected_emotion_override(self):
         if not self.current_char_id or not self.current_costume_name:
@@ -1045,7 +1349,10 @@ class CharacterEditorWidget(QtWidgets.QWidget):
         self.mgr.set_costume_emotion_override(
             self.current_char_id, self.current_costume_name, emo, None
         )
+        current_row = self.emo_table.currentRow()
         self._refresh_costume_detail_ui()
+        if current_row >= 0:
+            self.emo_table.setCurrentCell(current_row, 0)
 
     def _import_costume(self):
         if not self.current_char_id:

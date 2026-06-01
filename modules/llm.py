@@ -8,7 +8,13 @@ from urllib.parse import urlencode
 import requests
 from openai import AsyncOpenAI, OpenAI
 
-from config import LLM_ROUTER, MODELS, SENSOR_VISION_MODEL
+from config import (
+    LLM_ROUTER,
+    LLM_ROUTER_STRICT_ORDER,
+    MODELS,
+    PROVIDERS,
+    SENSOR_VISION_MODEL,
+)
 
 try:
     from modules.model_transport_state import (
@@ -63,6 +69,20 @@ def get_recent_llm_metrics(limit: int = 50):
 
 def _model_style(config: dict) -> str:
     return str((config or {}).get("api_style", "")).strip().lower()
+
+
+def _resolve_model_config(config: dict) -> dict:
+    resolved = dict(config or {})
+    provider_name = str(resolved.get("provider") or "").strip()
+    provider_cfg = PROVIDERS.get(provider_name) if provider_name else None
+    if isinstance(provider_cfg, dict):
+        provider_base = str(provider_cfg.get("base_url", "") or "").strip()
+        provider_key = str(provider_cfg.get("api_key", "") or "").strip()
+        if provider_base:
+            resolved["base_url"] = provider_base
+        if provider_key:
+            resolved["api_key"] = provider_key
+    return resolved
 
 
 def _is_gemini_model(config: dict) -> bool:
@@ -392,6 +412,7 @@ async def analyze_image(
     config = MODELS.get(target_key)
     if not config:
         return f"（视觉配置错误：找不到模型 {target_key}）"
+    config = _resolve_model_config(config)
 
     print(f"[Vision] 调用模型: {target_key}")
 
@@ -435,7 +456,7 @@ async def chat_with_ai_stream(
         yield "（配置错误：无可用模型）"
         return
 
-    preferred_model = get_preferred_model(task_type)
+    preferred_model = None if LLM_ROUTER_STRICT_ORDER else get_preferred_model(task_type)
     if preferred_model and preferred_model in model_keys:
         model_keys = [preferred_model] + [m for m in model_keys if m != preferred_model]
 
@@ -443,6 +464,7 @@ async def chat_with_ai_stream(
         config = MODELS.get(key)
         if not config:
             continue
+        config = _resolve_model_config(config)
 
         print(f"[LLM Stream] 尝试 {idx}/{len(model_keys)}: {key}")
         yielded_any = False
@@ -556,7 +578,7 @@ def chat_with_ai(
     if isinstance(model_keys, str):
         model_keys = [model_keys]
 
-    preferred_model = get_preferred_model(task_type)
+    preferred_model = None if LLM_ROUTER_STRICT_ORDER else get_preferred_model(task_type)
     if preferred_model and preferred_model in model_keys:
         model_keys = [preferred_model] + [m for m in model_keys if m != preferred_model]
 
@@ -565,6 +587,7 @@ def chat_with_ai(
         config = MODELS.get(key)
         if not config:
             continue
+        config = _resolve_model_config(config)
 
         t0 = time.time()
         attempts = _build_attempt_order(config, key)

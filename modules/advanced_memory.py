@@ -648,6 +648,8 @@ class AdvancedMemorySystem:
                 api_key=EMBEDDING_CONFIG.get("api_key", ""),
                 model_name=EMBEDDING_CONFIG["model_name"],
                 fallback_fn=fallback,
+                timeout=int(EMBEDDING_CONFIG.get("timeout", 12)),
+                max_retries=int(EMBEDDING_CONFIG.get("max_retries", 2)),
             )
         else:
             self.embedding_fn = fallback
@@ -1320,9 +1322,9 @@ Output ONLY "YES" or "NO".
         return items[: max(1, int(limit))]
 
     # ---------- 新增：导入知识（修复 hash(chunk) 不稳定问题） ----------
-    def import_knowledge_from_file(self, file_path):
+    def import_knowledge_from_file(self, file_path, progress_callback=None):
         result = import_knowledge_file_modular(
-            self.knowledge_collection, self._stable_md5, file_path
+            self.knowledge_collection, self._stable_md5, file_path, progress_callback=progress_callback
         )
         if isinstance(result, dict):
             return result

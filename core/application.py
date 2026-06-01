@@ -77,6 +77,7 @@ from modules.live2d import (
     change_costume,
     play_motion,
     set_expression,
+    estimate_bubble_display_ms,
 )
 
 
@@ -139,6 +140,7 @@ class Live2DApplication:
         self.mcp_bridge = None
         self.chat_gateway = None
         self.chat_gateway_server = None
+        self._silent_bubble_seq = 0
 
         # [新增] 屏幕感知与语音组件
         self.screen_sensor = None
@@ -287,6 +289,12 @@ class Live2DApplication:
             voice_probability = max(0, min(100, int(voice_probability_raw)))
         except Exception:
             voice_probability = int(NAPCAT_VOICE_REPLY_PROBABILITY)
+        try:
+            expression_max_prompt_items = int(
+                settings.get("expression_library_max_prompt_items", 4) or 4
+            )
+        except Exception:
+            expression_max_prompt_items = 4
         return {
             "mcp_enabled": bool(settings.get("mcp_enabled", MCP_ENABLED)),
             "mcp_server_configs": settings.get("mcp_server_configs", MCP_SERVER_CONFIGS)
@@ -363,6 +371,19 @@ class Live2DApplication:
             ),
             "gui_http_prefix": str(
                 settings.get("gui_http_prefix", GUI_HTTP_PREFIX) or GUI_HTTP_PREFIX
+            ),
+            "expression_library_enabled": bool(
+                settings.get("expression_library_enabled", True)
+            ),
+            "expression_library_use_in_chat": bool(
+                settings.get("expression_library_use_in_chat", True)
+            ),
+            "expression_library_use_in_screen": bool(
+                settings.get("expression_library_use_in_screen", True)
+            ),
+            "expression_library_max_prompt_items": max(
+                1,
+                min(8, expression_max_prompt_items),
             ),
         }
 
@@ -585,6 +606,12 @@ class Live2DApplication:
     def initialize(self):
         """初始化应用"""
         # 1. 设置日志
+        try:
+            from core.console_capture import install_console_capture
+
+            install_console_capture("./logs/console.log")
+        except Exception:
+            pass
         from core.logger import setup_logging, set_logger
 
         self.logger = setup_logging(log_dir="./logs", log_name="agent", level="INFO")
@@ -667,12 +694,15 @@ class Live2DApplication:
                 Events.UI_BUBBLE, text=text, emotion=emo, duration_ms=duration_ms
             )
 
+        async def _tts_go_idle_to_event():
+            await self.event_bus.emit(Events.LIVE2D_GO_IDLE)
+
         self.tts = TTSRouter(
             edge_cfg=edge_cfg,
             verbose=True,
             log_each_utterance=True,
             bubble_sender=_bubble_to_event,
-            go_idle_fn=None,
+            go_idle_fn=_tts_go_idle_to_event,
             state_machine=self.state_machine,
             enable_lip_sync=LIP_SYNC_ENABLED,
             rhubarb_path=RHUBARB_PATH,
@@ -1409,20 +1439,15 @@ class Live2DApplication:
                 # 说话时标记活动
                 self.emotion_controller.mark_activity("speaking")
 
-                # If thinking emotion is still active, clear it without motion.
-                if getattr(self.emotion_controller, "current_emotion", "") == "think":
-                    asyncio.create_task(
-                        self.emotion_controller.request_emotion(
-                            label="neutral",
-                            prefer_motion=False,
-                            reason="speaking_state_clear_think",
-                        )
-                    )
-
             elif new_state == AgentState.IDLE:
                 self.logger.debug(f"😴 [State] 进入空闲状态")
                 asyncio.create_task(self.event_bus.emit(Events.UI_STATUS, text="Idle"))
-                asyncio.create_task(self.event_bus.emit(Events.LIVE2D_GO_IDLE))
+                if reason not in {
+                    "tts_disabled",
+                    "tts_stream_disabled",
+                    "all_done",
+                }:
+                    asyncio.create_task(self.event_bus.emit(Events.LIVE2D_GO_IDLE))
 
         except Exception as e:
             self.logger.error(f"❌ [State] 状态事件错误: {e}", exc_info=True)
@@ -1439,32 +1464,81 @@ class Live2DApplication:
 
         if not speak:
             if show_bubble:
+                try:
+                    self._silent_bubble_seq += 1
+                    bubble_seq = self._silent_bubble_seq
+                    await self.state_machine.set_state(
+                        AgentState.SPEAKING, reason="tts_disabled_preview"
+                    )
+                    from modules.live2d import send_lip_sync
+                    from modules.text_lip_sync import (
+                        build_text_lip_sync,
+                        estimate_text_speech_duration,
+                    )
+
+                    fake_duration = estimate_text_speech_duration(text)
+                    lip_data = build_text_lip_sync(text, fake_duration)
+                    if lip_data:
+                        await send_lip_sync(lip_data)
+                    read_ms = estimate_bubble_display_ms(text)
+                    duration_ms = max(int(fake_duration * 1000) + 600, int(read_ms))
+                except Exception as exc:
+                    self.logger.debug(f"Text lip sync fallback skipped: {exc}")
+                    duration_ms = estimate_bubble_display_ms(text)
+                    bubble_seq = self._silent_bubble_seq
                 await self.event_bus.emit(
-                    Events.UI_BUBBLE, text=text, emotion=emotion, duration_ms=None
+                    Events.UI_BUBBLE,
+                    text=text,
+                    emotion=emotion,
+                    duration_ms=duration_ms,
                 )
-                self.logger.debug("TTS disabled; set idle")
+                if duration_ms and duration_ms > 0:
+                    async def _idle_after_silent_bubble(delay_ms: int, seq: int):
+                        await asyncio.sleep(max(0.35, delay_ms / 1000.0 + 0.18))
+                        if seq != self._silent_bubble_seq:
+                            return
+                        if self.state_machine.state != AgentState.SPEAKING:
+                            return
+                        self.logger.debug("TTS disabled; set idle")
+                        await self.state_machine.set_state(
+                            AgentState.IDLE, reason="tts_disabled"
+                        )
+                        await self.event_bus.emit(Events.LIVE2D_GO_IDLE)
+
+                    asyncio.create_task(
+                        _idle_after_silent_bubble(duration_ms, bubble_seq)
+                    )
+                else:
+                    self.logger.debug("TTS disabled; set idle")
+                    await self.state_machine.set_state(
+                        AgentState.IDLE, reason="tts_disabled"
+                    )
+                    await self.event_bus.emit(Events.LIVE2D_GO_IDLE)
+            else:
+                self.logger.debug("Silent output finished; UI only")
                 await self.state_machine.set_state(
                     AgentState.IDLE, reason="tts_disabled"
                 )
-            else:
-                self.logger.debug("Silent output finished; UI only")
                 await self.event_bus.emit(Events.UI_STATUS, text="Idle")
+                await self.event_bus.emit(Events.LIVE2D_GO_IDLE)
             return
 
         self.logger.debug(f"TTS预览: {text[:50]}...")
+        self._silent_bubble_seq += 1
         await self.tts.say(
             text, emotion=emotion, interrupt=interrupt, show_bubble=show_bubble
         )
 
     async def _on_stream_start(self, payload: Dict[str, Any]):
         """处理流开始事件"""
-        if not bool(payload.get("speak", True)):
+        self._silent_bubble_seq += 1
+        if not self.tts_enabled or not bool(payload.get("speak", True)):
             return
         self.tts.start_stream()
 
     async def _on_stream_feed(self, payload: Dict[str, Any]):
         """处理流数据事件"""
-        if not bool(payload.get("speak", True)):
+        if not self.tts_enabled or not bool(payload.get("speak", True)):
             return
         chunk = payload.get("chunk") or ""
         if chunk:
@@ -1473,13 +1547,15 @@ class Live2DApplication:
     async def _on_stream_end(self, payload: Dict[str, Any]):
         """处理流结束事件"""
         self.logger.debug(f"流结束，等待 TTS 播放完成")
-        if not bool(payload.get("speak", True)):
+        if not self.tts_enabled or not bool(payload.get("speak", True)):
             if bool(payload.get("show_bubble", True)):
                 await self.state_machine.set_state(
                     AgentState.IDLE, reason="tts_stream_disabled"
                 )
+                await self.event_bus.emit(Events.LIVE2D_GO_IDLE)
             else:
                 await self.event_bus.emit(Events.UI_STATUS, text="Idle")
+                await self.event_bus.emit(Events.LIVE2D_GO_IDLE)
             return
         await self.tts.stop_stream(emotion=payload.get("emotion"))
 
@@ -1652,6 +1728,15 @@ class Live2DApplication:
             except Exception as e:
                 print(f"关闭语音传感器出错: {e}")
 
+        if self.plugin_manager and self.loop and self.loop.is_running():
+            try:
+                future = asyncio.run_coroutine_threadsafe(
+                    self.plugin_manager.stop_all_plugins(), self.loop
+                )
+                future.result(timeout=3)
+            except Exception as e:
+                print(f"停止插件后台任务出错: {e}")
+
         if self.gui_ws_server:
             try:
                 self.gui_ws_server.stop()
@@ -1808,6 +1893,9 @@ class Live2DApplication:
                 self.apply_external_settings()
             except Exception as e:
                 self.logger.error(f"External settings apply failed: {e}")
+            self.loop.create_task(
+                self._sync_active_character_qq_profile(reason="startup")
+            )
             if self.gui_ws_server:
                 self.loop.create_task(self.gui_ws_server.start(self.loop))
             if self.gui_http_server:
@@ -1940,11 +2028,12 @@ class Live2DApplication:
         async def _do():
             try:
                 await change_costume(path, config)
-                await asyncio.to_thread(
-                    self.brain.add_memory,
-                    "system",
-                    f"用户为你更换了服装，文件路径为: {path}",
-                )
+                if not (isinstance(config, dict) and config.get("preview_mode")):
+                    await asyncio.to_thread(
+                        self.brain.add_memory,
+                        "system",
+                        f"用户为你更换了服装，文件路径为: {path}",
+                    )
             except Exception as e:
                 self.logger.error(f"换装失败: {e}")
 
@@ -1974,6 +2063,194 @@ class Live2DApplication:
             if self.logger:
                 self.logger.warning(f"同步当前角色 Live2D 失败: {e}")
             return False
+
+    def _character_qq_profile_config(self, char: dict) -> Dict[str, str]:
+        if not isinstance(char, dict):
+            return {}
+        raw = char.get("qq_profile")
+        if not isinstance(raw, dict):
+            return {}
+        enabled = bool(raw.get("enabled", True))
+        nickname = str(raw.get("nickname") or raw.get("nick") or "").strip()
+        avatar = str(
+            raw.get("avatar_path")
+            or raw.get("avatar")
+            or raw.get("avatar_url")
+            or raw.get("avatar_file")
+            or ""
+        ).strip()
+        if not enabled or not (nickname or avatar):
+            return {}
+        # Role switching only manages QQ nickname/avatar. Do not carry profile
+        # fields such as signature/status/personal_note into NapCat actions.
+        profile: Dict[str, str] = {}
+        if nickname:
+            profile["nickname"] = nickname
+        if avatar:
+            profile["avatar"] = avatar
+        return profile
+
+    def _resolve_role_qq_avatar_value(self, avatar: str) -> str:
+        value = str(avatar or "").strip()
+        if not value:
+            return ""
+        lowered = value.lower()
+        if lowered.startswith(("http://", "https://", "file://", "base64://")):
+            return value
+        path = Path(value).expanduser()
+        if not path.is_absolute():
+            path = Path(__file__).resolve().parent.parent / path
+        return str(path.resolve())
+
+    def _schedule_character_qq_profile_sync(self, char_id: str, char: dict) -> None:
+        profile = self._character_qq_profile_config(char)
+        if not profile:
+            if self.logger:
+                self.logger.info(f"[RoleQQSync] skipped: qq_profile disabled or empty for {char_id}")
+            return
+        if self.loop is None or not self.loop.is_running():
+            if self.logger:
+                self.logger.warning("[RoleQQSync] skipped: async loop not running")
+            return
+
+        async def _run():
+            await self._sync_character_qq_profile(char_id, profile)
+
+        try:
+            current_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            current_loop = None
+        if current_loop is self.loop:
+            self.loop.create_task(_run())
+        else:
+            asyncio.run_coroutine_threadsafe(_run(), self.loop)
+
+    async def _sync_active_character_qq_profile(self, reason: str = "startup") -> bool:
+        try:
+            from modules.character_manager import character_manager
+
+            active_id = character_manager.data.get("active_id")
+            if not active_id:
+                if self.logger:
+                    self.logger.info(f"[RoleQQSync] skipped: no active character ({reason})")
+                return False
+            char = character_manager.get_character(active_id) or {}
+            profile = self._character_qq_profile_config(char)
+            if not profile:
+                if self.logger:
+                    self.logger.info(
+                        f"[RoleQQSync] skipped: qq_profile disabled or empty for active {active_id} ({reason})"
+                    )
+                return False
+            if self.logger:
+                self.logger.info(
+                    f"[RoleQQSync] syncing active character {active_id} ({reason})"
+                )
+            await self._sync_character_qq_profile(active_id, profile)
+            return True
+        except Exception as exc:
+            if self.logger:
+                self.logger.warning(
+                    f"[RoleQQSync] active character sync failed ({reason}): {exc}"
+                )
+            return False
+
+    def _napcat_action_data(self, result: Any) -> Dict[str, Any]:
+        if not isinstance(result, dict):
+            return {}
+        response = result.get("response")
+        if isinstance(response, dict):
+            data = response.get("data")
+            if isinstance(data, dict):
+                return data
+            return response
+        data = result.get("data")
+        return data if isinstance(data, dict) else {}
+
+    async def _call_napcat_action(
+        self, action: str, params: Optional[Dict[str, Any]] = None, timeout: float = 8.0
+    ) -> Dict[str, Any]:
+        last_result: Dict[str, Any] = {}
+        server = getattr(self, "chat_gateway_server", None)
+        if server is not None and hasattr(server, "call_action"):
+            try:
+                result = await server.call_action(action, params or {}, timeout=timeout)
+                if isinstance(result, dict):
+                    last_result = result
+                    if result.get("ok"):
+                        return result
+            except Exception as exc:
+                last_result = {"ok": False, "reason": str(exc), "action": action}
+
+        gateway = getattr(self, "chat_gateway", None)
+        adapter = None
+        try:
+            adapter = getattr(gateway, "adapters", {}).get("napcat_qq")
+        except Exception:
+            adapter = None
+        if adapter is not None and hasattr(adapter, "call_action"):
+            try:
+                result = await adapter.call_action(
+                    action, params or {}, timeout=timeout
+                )
+                if isinstance(result, dict):
+                    return result
+            except Exception as exc:
+                return {"ok": False, "reason": str(exc), "action": action}
+
+        return last_result or {
+            "ok": False,
+            "reason": "napcat_action_unavailable",
+            "action": action,
+        }
+
+    async def _sync_character_qq_profile(
+        self, char_id: str, profile: Dict[str, str]
+    ) -> None:
+        nickname = str(profile.get("nickname") or "").strip()
+        avatar = self._resolve_role_qq_avatar_value(profile.get("avatar") or "")
+        try:
+            if nickname:
+                current_result = await self._call_napcat_action("get_login_info", {})
+                current_data = self._napcat_action_data(current_result)
+                current_nickname = str(current_data.get("nickname") or "").strip()
+                if current_nickname == nickname:
+                    if self.logger:
+                        self.logger.info(
+                            f"[RoleQQSync] nickname already matched for {char_id}: {nickname}"
+                        )
+                else:
+                    # Only send nickname here. QQ signature/status/说说 are not
+                    # part of role sync and must not be changed implicitly.
+                    result = await self._call_napcat_action(
+                        "set_qq_profile", {"nickname": nickname}
+                    )
+                    if self.logger:
+                        if result.get("ok"):
+                            self.logger.info(
+                                f"[RoleQQSync] nickname synced for {char_id}: {current_nickname or '-'} -> {nickname}"
+                            )
+                        else:
+                            self.logger.warning(
+                                f"[RoleQQSync] nickname sync failed for {char_id}: {result}"
+                            )
+
+            if avatar:
+                result = await self._call_napcat_action(
+                    "set_qq_avatar", {"file": avatar}, timeout=15.0
+                )
+                if self.logger:
+                    if result.get("ok"):
+                        self.logger.info(
+                            f"[RoleQQSync] avatar synced for {char_id}: {avatar}"
+                        )
+                    else:
+                        self.logger.warning(
+                            f"[RoleQQSync] avatar sync failed for {char_id}: {result}"
+                        )
+        except Exception as exc:
+            if self.logger:
+                self.logger.warning(f"[RoleQQSync] sync failed for {char_id}: {exc}")
 
     def switch_character_runtime(self, char_id: str) -> bool:
         try:
@@ -2006,6 +2283,7 @@ class Live2DApplication:
                     self.sync_active_character_live2d()
             except Exception:
                 pass
+            self._schedule_character_qq_profile_sync(char_id, char)
             return True
         except Exception as e:
             if self.logger:
@@ -2114,6 +2392,7 @@ class Live2DApplication:
     def _run_qt_gui(self):
         """运行Qt GUI"""
         global qt_ui
+        import config
         from modules.qt_gui import QtChatTrayApp, QtGuiConfig
 
         self.qt_ui = QtChatTrayApp(
@@ -2129,7 +2408,7 @@ class Live2DApplication:
             on_display_state_callback=self.publish_display_state,
             cfg=QtGuiConfig(
                 title="Live2D Agent",
-                start_minimized_to_tray=False,
+                start_minimized_to_tray=bool(getattr(config, 'START_MINIMIZED_TO_TRAY', True)),
             ),
         )
         self.qt_ui.brain = self.brain
@@ -2300,7 +2579,9 @@ class EventPresenter:
         text = self._emo_tag_any_re.sub("", text).strip()
         if not text:
             return
-        want_speak = self.tts_enabled if speak is None else bool(speak)
+        want_speak = bool(self.tts_enabled) and (
+            True if speak is None else bool(speak)
+        )
 
         await self.event_bus.emit(
             Events.ASSISTANT_UTTER,

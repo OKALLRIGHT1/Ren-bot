@@ -314,6 +314,8 @@ class ScreenSensor:
                     self.daily_counts.get(app_name, 1),
                     app_name,
                     reason="switch",
+                    app_duration_sec=self.daily_durations.get(app_name, 0.0),
+                    current_stay_sec=max(0.0, event_ts - self.current_window_start_time),
                 )
             elif kind == "activity_sample":
                 sample_seconds = self._rust_sample_seconds(event_ts, now_ts)
@@ -335,6 +337,8 @@ class ScreenSensor:
                         self.daily_counts.get(app_name, 1),
                         app_name,
                         reason="duration",
+                        app_duration_sec=self.daily_durations.get(app_name, 0.0),
+                        current_stay_sec=max(0.0, event_ts - self.current_window_start_time),
                     )
                 if (
                     self.sedentary_interval_sec > 0
@@ -1110,7 +1114,13 @@ class ScreenSensor:
                     else:
                         count = self.daily_counts[app]
                         self._try_trigger_reaction(
-                            current_title, cat, count, app, reason="switch"
+                            current_title,
+                            cat,
+                            count,
+                            app,
+                            reason="switch",
+                            app_duration_sec=self.daily_durations.get(app, 0.0),
+                            current_stay_sec=max(0.0, now - self.current_window_start_time),
                         )
 
                 else:
@@ -1163,7 +1173,13 @@ class ScreenSensor:
                                 self.logger.info(f"⏳ [Screen] 沉浸时长触发: <{app}>")
                                 count = self.daily_counts.get(app, 1)
                                 self._try_trigger_reaction(
-                                    current_title, cat, count, app, reason="duration"
+                                    current_title,
+                                    cat,
+                                    count,
+                                    app,
+                                    reason="duration",
+                                    app_duration_sec=self.daily_durations.get(app, 0.0),
+                                    current_stay_sec=max(0.0, now - self.current_window_start_time),
                                 )
 
             except Exception as e:
@@ -1178,6 +1194,8 @@ class ScreenSensor:
         count: int,
         app_name: str,
         reason: str = "switch",
+        app_duration_sec: float | None = None,
+        current_stay_sec: float | None = None,
     ):
         now = time.time()
 
@@ -1304,6 +1322,10 @@ class ScreenSensor:
         # - True  -> ChatService 调用 Smart Model (看图+吐槽)
         # - False -> ChatService 调用 Gatekeeper (判断是否无聊 -> 决定是否吐槽)
         if self._loop and self._loop.is_running():
+            if app_duration_sec is None:
+                app_duration_sec = self.daily_durations.get(app_name, 0.0)
+            if current_stay_sec is None:
+                current_stay_sec = max(0.0, time.time() - self.current_window_start_time)
             asyncio.run_coroutine_threadsafe(
                 self.chat_service.handle_sensor_event(
                     full_title,
@@ -1312,6 +1334,8 @@ class ScreenSensor:
                     use_vision=use_vision,
                     app_name=app_name,
                     reason=reason,
+                    app_duration_sec=app_duration_sec,
+                    current_stay_sec=current_stay_sec,
                 ),
                 self._loop,
             )

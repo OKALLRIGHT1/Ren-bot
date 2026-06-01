@@ -6,6 +6,14 @@ Live2D-Suzu 主程序入口
 import os
 import sys
 
+# Force standard streams to use UTF-8 encoding on Windows to prevent UnicodeEncodeError with emojis
+if sys.platform.startswith('win'):
+    try:
+        sys.stdout.reconfigure(encoding='utf-8')
+        sys.stderr.reconfigure(encoding='utf-8')
+    except Exception:
+        pass
+
 import config
 
 # 设置Qt插件路径（必须在导入任何Qt模块之前）

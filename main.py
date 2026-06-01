@@ -1,5 +1,14 @@
 # main.py (守护进程版)
 import sys
+
+# Force standard streams to use UTF-8 encoding on Windows to prevent UnicodeEncodeError with emojis
+if sys.platform.startswith('win'):
+    try:
+        sys.stdout.reconfigure(encoding='utf-8')
+        sys.stderr.reconfigure(encoding='utf-8')
+    except Exception:
+        pass
+
 import subprocess
 import time
 import os

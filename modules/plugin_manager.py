@@ -4,6 +4,8 @@ import re
 import asyncio
 import json
 import inspect
+import sys
+import types
 from typing import Dict, Any, Tuple, List, Optional, Iterable
 from pathlib import Path
 from modules.plugin_secret_store import PluginSecretStore
@@ -59,6 +61,35 @@ class PluginManager:
     def _dbg(self, message: str):
         if self.debug_enabled:
             print(message)
+
+    def _load_plugin_module(self, item_name: str, module_path: str):
+        """Load plugin.py with a package context so relative imports work."""
+        safe_name = re.sub(r"\W+", "_", str(item_name or "plugin")).strip("_") or "plugin"
+        root_name = "_live2d_plugins"
+        package_name = f"{root_name}.{safe_name}"
+        module_name = f"{package_name}.plugin"
+
+        root_pkg = sys.modules.get(root_name)
+        if root_pkg is None:
+            root_pkg = types.ModuleType(root_name)
+            root_pkg.__path__ = []
+            sys.modules[root_name] = root_pkg
+
+        pkg = sys.modules.get(package_name)
+        if pkg is None:
+            pkg = types.ModuleType(package_name)
+            sys.modules[package_name] = pkg
+        pkg.__path__ = [os.path.abspath(os.path.dirname(module_path))]
+        pkg.__package__ = package_name
+
+        sys.modules.pop(module_name, None)
+        spec = importlib.util.spec_from_file_location(module_name, module_path)
+        if spec is None or spec.loader is None:
+            raise ImportError(f"无法加载插件模块: {module_path}")
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[module_name] = module
+        spec.loader.exec_module(module)
+        return module
 
     def _normalize_access_control(self, raw_access: Optional[dict]) -> Dict[str, bool]:
         normalized = dict(DEFAULT_ACCESS_CONTROL)
@@ -231,9 +262,7 @@ class PluginManager:
                     continue
 
                 # 动态导入插件模块
-                spec = importlib.util.spec_from_file_location(item_name, module_path)
-                module = importlib.util.module_from_spec(spec)
-                spec.loader.exec_module(module)
+                module = self._load_plugin_module(item_name, module_path)
 
                 if not hasattr(module, "Plugin"):
                     print(f"⚠️ 插件 {item_name} 缺少 Plugin 类，已跳过")
@@ -340,6 +369,19 @@ class PluginManager:
                         await plugin.start()
                 except Exception as e:
                     print(f"❌ 启动插件 {name} 后台任务失败: {e}")
+
+    async def stop_all_plugins(self):
+        for name, plugin in self.plugins.items():
+            stop = getattr(plugin, "stop", None)
+            if not callable(stop):
+                continue
+            try:
+                if asyncio.iscoroutinefunction(stop):
+                    await stop()
+                else:
+                    stop()
+            except Exception as e:
+                print(f"⚠️ 停止插件 {name} 后台任务失败: {e}")
 
     # -------------------- Config Management --------------------
     def get_plugin_config(self, trigger: str) -> Optional[dict]:
@@ -623,6 +665,7 @@ class PluginManager:
             "查", "搜", "搜索", "联网", "新闻", "金价", "天气", "汇率",
             "生成", "画", "生图", "图生图", "点歌", "播放", "语音",
             "打开", "读取", "总结", "链接", "下载", "翻译", "计算", "wiki",
+            "邮件", "邮箱", "email", "mail",
         )
         return any(word in text for word in keywords)
 
@@ -1158,14 +1201,11 @@ class PluginManager:
             config["access_control"] = self._normalize_access_control(
                 config.get("access_control")
             )
+            config = self._apply_secret_overrides(trigger, config)
 
             # 4. 重新加载代码
             module_path = os.path.join(plugin_path, "plugin.py")
-            spec = importlib.util.spec_from_file_location(
-                f"{trigger}_reload", module_path
-            )
-            module = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(module)
+            module = self._load_plugin_module(dir_name, module_path)
 
             # 5. 创建新实例
             inst = module.Plugin()
@@ -1193,6 +1233,12 @@ class PluginManager:
                 inst.aliases = config.get("aliases", [trigger])
             if not hasattr(inst, "timeout_sec"):
                 inst.timeout_sec = config.get("timeout_sec") or self.default_timeout_sec
+
+            if hasattr(inst, "reload_config") and callable(inst.reload_config):
+                try:
+                    inst.reload_config()
+                except Exception as e:
+                    print(f"⚠️ 插件 {trigger} 热重载 reload_config 失败: {e}")
 
             # 7. 更新插件
             self.plugins[trigger] = inst

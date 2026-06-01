@@ -7,7 +7,7 @@ from typing import Optional, Callable, Awaitable
 from modules.tts.edge import EdgeTTS
 from modules.state_machine import AgentStateMachine, AgentState
 from modules.tts.stream_utils import StreamSentenceBuffer
-from modules.live2d import stop_sound  # 需要引入停止函数
+from modules.live2d import stop_sound, estimate_bubble_display_ms  # 需要引入停止函数
 
 try:
     from modules.llm import chat_with_ai
@@ -189,6 +189,14 @@ class TTSRouter:
         t = self._emo_tag_any_re.sub("", t)
         return t.strip()
 
+    def _has_pending_output(self) -> bool:
+        # 流式回复在 stop_stream 前允许短暂“队列见底”，这时还不能判定为彻底播完。
+        return (
+            self._stream_buffer is not None
+            or (not self._q.empty())
+            or (not self._audio_q.empty())
+        )
+
     def _ensure_worker(self):
         if not self._worker_task or self._worker_task.done():
             self._worker_task = asyncio.create_task(
@@ -249,8 +257,10 @@ class TTSRouter:
 Task: Convert input text into **natural, spoken Japanese** (Anime girl style).
 Rules:
 1. Translate Chinese/English sentences to natural Japanese.
-2. **CRITICAL**: Convert English terms/names (Python, API) to **Katakana** (パイソン, エーピーアイ).
-3. Tone: cute, casual.
+2. Keep the meaning and length close to the original. Do not add fillers, explanations, or extra commentary.
+3. **CRITICAL**: Convert English terms/names (Python, API) to **Katakana** (パイソン, エーピーアイ).
+4. Tone: cute, casual.
+5. Output only the translated Japanese text. No labels, no quotes, no markdown.
 Input: "{text}"
 Output:
 """
@@ -260,9 +270,45 @@ Output:
                 task_type="translation",
                 caller="tts_translate",
             )
-            return jp_text.strip()
+            return self._clean_translated_text(jp_text)
         except Exception:
             return text
+
+    def _clean_translated_text(self, text: str) -> str:
+        raw = str(text or "").replace("\r", "\n").strip()
+        if not raw:
+            return ""
+        raw = re.sub(r"```(?:\w+)?\n?|```", "", raw)
+        lines = [line.strip() for line in raw.splitlines() if line.strip()]
+        if not lines:
+            return ""
+        cleaned: list[str] = []
+        skip_prefixes = (
+            "input:",
+            "input：",
+            "原文:",
+            "原文：",
+            "输入:",
+            "输入：",
+            "text:",
+            "text：",
+        )
+        label_re = re.compile(
+            r"^(?:output|translation|translated text|japanese|jp|ja|日文|翻译|翻訳|訳文|出力|结果)\s*[:：]\s*",
+            flags=re.IGNORECASE,
+        )
+        for line in lines:
+            low = line.lower()
+            if low.startswith(skip_prefixes):
+                continue
+            line = label_re.sub("", line).strip()
+            line = line.strip(" \"'“”‘’「」『』")
+            if not line:
+                continue
+            cleaned.append(line)
+        if not cleaned:
+            return re.sub(r"\s+", " ", raw).strip(" \"'“”‘’「」『』")
+        return "\n".join(cleaned).strip()
 
     # ==================== 接口逻辑 ====================
 
@@ -533,26 +579,25 @@ Output:
                 if self.sm:
                     await self.sm.set_state(AgentState.SPEAKING, backend=self._active)
 
-                # 1. 发送气泡
-                if self.bubble_sender:
-                    # 将秒转为毫秒，气泡显示时间稍微比音频长一点点 (500ms) 增加连贯性
-                    ms = int(item.duration * 1000) + 500
-                    asyncio.create_task(
-                        self.bubble_sender(item.text_for_bubble, item.emotion, ms)
+                if item.audio_path and item.backend:
+                    # play_audio_file 里可能先做口型分析；气泡必须等播放指令发出后再计时。
+                    await item.backend.play_audio_file(
+                        item.audio_path, self._interrupt_event, item.emotion
                     )
 
-                # 2. 播放音频
-                if item.audio_path and item.backend:
-                    # 发送播放指令 (非阻塞)
-                    await item.backend.play_audio_file(
-                        item.audio_path, self._interrupt_event
-                    )
+                    bubble_ms = int(item.duration * 1000) + 500
+                    read_ms = estimate_bubble_display_ms(item.text_for_bubble)
+                    display_ms = max(bubble_ms, int(read_ms))
+                    wait_time = max(display_ms / 1000.0, max(0, item.duration)) + self._resolve_tail_padding(item)
+                    if self.bubble_sender:
+                        # 将秒转为毫秒，气泡显示时间稍微比音频长一点点 (500ms) 增加连贯性
+                        asyncio.create_task(
+                            self.bubble_sender(item.text_for_bubble, item.emotion, display_ms)
+                        )
 
                     # 按“中间段短、收尾段稳”的策略等待：
                     # - 同一轮内部的分段句间停顿更短；
                     # - 最后一段仍保留更稳妥的尾缓冲，避免截尾或抢状态。
-                    wait_time = max(0, item.duration) + self._resolve_tail_padding(item)
-
                     slept = 0
                     while slept < wait_time:
                         # 实时检查是否被打断
@@ -568,18 +613,23 @@ Output:
                         await asyncio.sleep(0.1)
                         slept += 0.1
                 else:
+                    read_ms = estimate_bubble_display_ms(item.text_for_bubble)
+                    ms = max(int(item.duration * 1000) + 500, int(read_ms))
+                    if self.bubble_sender:
+                        asyncio.create_task(
+                            self.bubble_sender(item.text_for_bubble, item.emotion, ms)
+                        )
                     # 静默兜底模式
-                    await asyncio.sleep(item.duration)
+                    await asyncio.sleep(ms / 1000.0)
 
                 # 任务完成
                 self._audio_q.task_done()
 
                 # 检查是否全部播完且没有新任务
-                if (
-                    self._audio_q.empty()
-                    and self._q.empty()
-                    and not self._interrupt_event.is_set()
-                ):
+                if (not self._has_pending_output()) and not self._interrupt_event.is_set():
+                    # 给下一段极短的合成/入队留一点缓冲，避免段与段之间误判为彻底结束。
+                    await asyncio.sleep(0.25)
+                if (not self._has_pending_output()) and not self._interrupt_event.is_set():
                     if self.verbose:
                         print("✅ [TTS Player] 队列清空，返回空闲状态")
                     if self.sm:

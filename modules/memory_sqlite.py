@@ -7,6 +7,7 @@ SQLite memory store (source of truth)
   - memory_items (manual long-term notes: rules/preferences/facts/assistant_said)
   - episodes (episodic summaries)
   - profile (stable user profile)
+  - expression_patterns (reply-style learning library)
   - proposals (optional: LLM write proposals awaiting approval)
   - audit_log (change history)
 
@@ -96,6 +97,25 @@ class MemorySQLite:
             # ✅ 性能优化：启用查询计划缓存
             self._local.conn.execute("PRAGMA cache_size=-10000;")
         return self._local.conn
+
+    def _table_columns(self, table_name: str) -> set[str]:
+        with self._connect() as conn:
+            rows = conn.execute(f"PRAGMA table_info({table_name})").fetchall()
+        return {str(row["name"]) for row in rows if row and row["name"]}
+
+    def _ensure_column(
+        self, conn: sqlite3.Connection, table_name: str, column_name: str, ddl: str
+    ) -> None:
+        try:
+            columns = {
+                str(row["name"])
+                for row in conn.execute(f"PRAGMA table_info({table_name})").fetchall()
+                if row and row["name"]
+            }
+            if column_name not in columns:
+                conn.execute(f"ALTER TABLE {table_name} ADD COLUMN {ddl}")
+        except Exception:
+            pass
 
     def _init_db(self) -> None:
         with self._connect() as conn:
@@ -345,6 +365,39 @@ class MemorySQLite:
             )
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_activity_events_app ON activity_events(app_name, ts_iso)"
+            )
+
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS expression_patterns (
+                    id TEXT PRIMARY KEY,
+                    character_name TEXT NOT NULL DEFAULT '',
+                    scene TEXT NOT NULL DEFAULT 'chat',
+                    situation TEXT NOT NULL DEFAULT '',
+                    style TEXT NOT NULL DEFAULT '',
+                    example TEXT NOT NULL DEFAULT '',
+                    content_list_json TEXT NOT NULL DEFAULT '[]',
+                    source TEXT NOT NULL DEFAULT 'manual',
+                    quality_score REAL NOT NULL DEFAULT 0,
+                    use_count INTEGER NOT NULL DEFAULT 0,
+                    enabled INTEGER NOT NULL DEFAULT 1,
+                    meta_json TEXT NOT NULL DEFAULT '{}',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_expression_patterns_char_scene ON expression_patterns(character_name, scene, enabled)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_expression_patterns_updated ON expression_patterns(enabled, updated_at)"
+            )
+            self._ensure_column(
+                conn,
+                "expression_patterns",
+                "content_list_json",
+                "content_list_json TEXT NOT NULL DEFAULT '[]'",
             )
             conn.commit()
 
@@ -603,6 +656,37 @@ class MemorySQLite:
                     "role": r["role"],
                     "content": r["content"],
                     "meta": _pj(r["meta_json"], {}),
+                }
+            )
+        return out
+
+    def list_transcript_sessions(self, *, limit: int = 80) -> List[Dict[str, Any]]:
+        limit = max(1, min(500, int(limit)))
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT
+                  COALESCE(NULLIF(session_id, ''), '(global)') AS session_key,
+                  COUNT(1) AS message_count,
+                  MAX(ts) AS last_ts,
+                  MAX(ts_iso) AS last_ts_iso
+                FROM transcript
+                GROUP BY session_key
+                ORDER BY last_ts DESC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+        out: List[Dict[str, Any]] = []
+        for row in rows:
+            session_key = str(row["session_key"] or "").strip()
+            out.append(
+                {
+                    "session_id": "" if session_key == "(global)" else session_key,
+                    "label": session_key,
+                    "message_count": int(row["message_count"] or 0),
+                    "last_ts": int(row["last_ts"] or 0),
+                    "last_ts_iso": row["last_ts_iso"] or "",
                 }
             )
         return out
@@ -1055,6 +1139,376 @@ class MemorySQLite:
             {"status": status},
             note="status change",
         )
+
+    # ---------- expression patterns ----------
+    def _normalize_expression_content_list(
+        self, pattern: Optional[Dict[str, Any]] = None
+    ) -> List[str]:
+        pattern = pattern if isinstance(pattern, dict) else {}
+        raw_list = pattern.get("content_list")
+        items: List[str] = []
+        if isinstance(raw_list, list):
+            items = [str(item).strip() for item in raw_list if str(item).strip()]
+        elif isinstance(raw_list, str):
+            raw = raw_list.strip()
+            if raw:
+                try:
+                    parsed = json.loads(raw)
+                except Exception:
+                    items = [raw]
+                else:
+                    if isinstance(parsed, list):
+                        items = [
+                            str(item).strip() for item in parsed if str(item).strip()
+                        ]
+        if not items:
+            meta = pattern.get("meta") if isinstance(pattern.get("meta"), dict) else {}
+            for key in ("content_list", "examples", "maibot_content_list"):
+                value = meta.get(key)
+                if isinstance(value, list):
+                    items = [str(item).strip() for item in value if str(item).strip()]
+                    if items:
+                        break
+        example = str(pattern.get("example") or "").strip()
+        if example and example not in items:
+            items.insert(0, example)
+        deduped: List[str] = []
+        for item in items:
+            if item and item not in deduped:
+                deduped.append(item)
+        return deduped[:12]
+
+    def _deserialize_expression_content_list(
+        self, row: sqlite3.Row, meta: Dict[str, Any]
+    ) -> List[str]:
+        items: List[str] = []
+        raw = None
+        try:
+            raw = row["content_list_json"]
+        except Exception:
+            raw = None
+        if isinstance(raw, str) and raw.strip():
+            items = _pj(raw, [])
+            if not isinstance(items, list):
+                items = []
+        if not items:
+            for key in ("content_list", "examples", "maibot_content_list"):
+                value = meta.get(key)
+                if isinstance(value, list):
+                    items = [str(item).strip() for item in value if str(item).strip()]
+                    if items:
+                        break
+        example = str(row["example"] or "").strip() if row["example"] else ""
+        if example and example not in items:
+            items.insert(0, example)
+        deduped: List[str] = []
+        for item in items:
+            text = str(item).strip()
+            if text and text not in deduped:
+                deduped.append(text)
+        return deduped[:12]
+
+    def upsert_expression_pattern(self, pattern: Dict[str, Any]) -> str:
+        _id = (
+            str(pattern.get("id") or "").strip()
+            or f"xp_{uuid.uuid4().hex[:10]}"
+        )
+        character_name = str(pattern.get("character_name") or "").strip()
+        scene = str(pattern.get("scene") or "chat").strip().lower() or "chat"
+        situation = str(pattern.get("situation") or "").strip()
+        style = str(pattern.get("style") or "").strip()
+        content_list = self._normalize_expression_content_list(pattern)
+        example = content_list[0] if content_list else str(pattern.get("example") or "").strip()
+        source = str(pattern.get("source") or "manual").strip() or "manual"
+        if not style and not example:
+            raise ValueError("expression pattern style/example cannot both be empty")
+        try:
+            quality_score = float(pattern.get("quality_score", 0))
+        except Exception:
+            quality_score = 0.0
+        quality_score = max(0.0, min(10.0, quality_score))
+        try:
+            use_count = max(0, int(pattern.get("use_count", 0)))
+        except Exception:
+            use_count = 0
+        enabled = 1 if bool(pattern.get("enabled", True)) else 0
+        meta = pattern.get("meta") if isinstance(pattern.get("meta"), dict) else {}
+        now = _now_iso()
+        before = self.get_expression_pattern(_id)
+        with self._lock:
+            with self._connect() as conn:
+                conn.execute(
+                    "INSERT INTO expression_patterns("
+                    "id, character_name, scene, situation, style, example, content_list_json, source, "
+                    "quality_score, use_count, enabled, meta_json, created_at, updated_at"
+                    ") VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?) "
+                    "ON CONFLICT(id) DO UPDATE SET "
+                    "character_name=excluded.character_name, scene=excluded.scene, "
+                    "situation=excluded.situation, style=excluded.style, "
+                    "example=excluded.example, content_list_json=excluded.content_list_json, source=excluded.source, "
+                    "quality_score=excluded.quality_score, use_count=excluded.use_count, "
+                    "enabled=excluded.enabled, meta_json=excluded.meta_json, "
+                    "updated_at=excluded.updated_at",
+                    (
+                        _id,
+                        character_name,
+                        scene,
+                        situation,
+                        style,
+                        example,
+                        _j(content_list),
+                        source,
+                        quality_score,
+                        use_count,
+                        enabled,
+                        _j(meta),
+                        now if before is None else (before.get("created_at") or now),
+                        now,
+                    ),
+                )
+                conn.commit()
+        self._audit(
+            "upsert",
+            "expression_patterns",
+            _id,
+            before,
+            {
+                "id": _id,
+                "character_name": character_name,
+                "scene": scene,
+                "situation": situation,
+                "style": style,
+                "example": example,
+                "content_list": content_list,
+                "source": source,
+                "quality_score": quality_score,
+                "use_count": use_count,
+                "enabled": enabled,
+                "meta": meta,
+            },
+            note="upsert expression pattern",
+        )
+        return _id
+
+    def get_expression_pattern(self, pattern_id: str) -> Optional[Dict[str, Any]]:
+        pattern_id = str(pattern_id or "").strip()
+        if not pattern_id:
+            return None
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM expression_patterns WHERE id=?",
+                (pattern_id,),
+            ).fetchone()
+        if not row:
+            return None
+        meta = _pj(row["meta_json"], {})
+        content_list = self._deserialize_expression_content_list(row, meta)
+        return {
+            "id": row["id"],
+            "character_name": row["character_name"] or "",
+            "scene": row["scene"] or "chat",
+            "situation": row["situation"] or "",
+            "style": row["style"] or "",
+            "example": content_list[0] if content_list else (row["example"] or ""),
+            "content_list": content_list,
+            "source": row["source"] or "manual",
+            "quality_score": float(row["quality_score"] or 0),
+            "use_count": int(row["use_count"] or 0),
+            "enabled": bool(row["enabled"]),
+            "meta": meta,
+            "created_at": row["created_at"],
+            "updated_at": row["updated_at"],
+        }
+
+    def list_expression_patterns(
+        self,
+        *,
+        character_name: str = "",
+        scene: str = "",
+        enabled_only: bool = False,
+        query: str = "",
+        limit: int = 200,
+        offset: int = 0,
+    ) -> List[Dict[str, Any]]:
+        character_name = str(character_name or "").strip()
+        scene = str(scene or "").strip().lower()
+        query = str(query or "").strip()
+        limit = max(1, min(1000, int(limit)))
+        offset = max(0, int(offset))
+        where: List[str] = []
+        args: List[Any] = []
+        if character_name:
+            where.append("character_name=?")
+            args.append(character_name)
+        if scene:
+            where.append("scene=?")
+            args.append(scene)
+        if enabled_only:
+            where.append("enabled=1")
+        if query:
+            like = f"%{query}%"
+            where.append(
+                "(character_name LIKE ? OR situation LIKE ? OR style LIKE ? OR example LIKE ? OR content_list_json LIKE ? OR source LIKE ?)"
+            )
+            args.extend([like, like, like, like, like, like])
+        sql = "SELECT * FROM expression_patterns"
+        if where:
+            sql += " WHERE " + " AND ".join(where)
+        sql += " ORDER BY enabled DESC, quality_score DESC, use_count DESC, updated_at DESC LIMIT ? OFFSET ?"
+        args.extend([limit, offset])
+        with self._connect() as conn:
+            rows = conn.execute(sql, args).fetchall()
+        out = []
+        for row in rows:
+            meta = _pj(row["meta_json"], {})
+            content_list = self._deserialize_expression_content_list(row, meta)
+            out.append(
+                {
+                    "id": row["id"],
+                    "character_name": row["character_name"] or "",
+                    "scene": row["scene"] or "chat",
+                    "situation": row["situation"] or "",
+                    "style": row["style"] or "",
+                    "example": content_list[0] if content_list else (row["example"] or ""),
+                    "content_list": content_list,
+                    "source": row["source"] or "manual",
+                    "quality_score": float(row["quality_score"] or 0),
+                    "use_count": int(row["use_count"] or 0),
+                    "enabled": bool(row["enabled"]),
+                    "meta": meta,
+                    "created_at": row["created_at"],
+                    "updated_at": row["updated_at"],
+                }
+            )
+        return out
+
+    def delete_expression_pattern(self, pattern_id: str) -> bool:
+        pattern_id = str(pattern_id or "").strip()
+        if not pattern_id:
+            return False
+        before = self.get_expression_pattern(pattern_id)
+        if before is None:
+            return False
+        with self._lock:
+            try:
+                with self._connect() as conn:
+                    conn.execute(
+                        "DELETE FROM expression_patterns WHERE id=?",
+                        (pattern_id,),
+                    )
+                    conn.commit()
+            except Exception as e:
+                print(f"[MemorySQLite] 删除 expression_patterns 失败: {e}")
+                return False
+        self._audit(
+            "delete",
+            "expression_patterns",
+            pattern_id,
+            before,
+            None,
+            note="delete expression pattern",
+        )
+        return True
+
+    def import_expression_patterns(
+        self, rows: List[Dict[str, Any]], *, replace: bool = False
+    ) -> Dict[str, int]:
+        stats = {"inserted": 0, "skipped": 0}
+        if not isinstance(rows, list):
+            return stats
+        for row in rows:
+            if not isinstance(row, dict):
+                stats["skipped"] += 1
+                continue
+            payload = dict(row)
+            row_id = str(payload.get("id") or "").strip()
+            if row_id and self.get_expression_pattern(row_id) and not replace:
+                stats["skipped"] += 1
+                continue
+            try:
+                self.upsert_expression_pattern(payload)
+                stats["inserted"] += 1
+            except Exception:
+                stats["skipped"] += 1
+        return stats
+
+    def select_expression_patterns_for_prompt(
+        self,
+        *,
+        character_name: str = "",
+        scene: str = "chat",
+        limit: int = 4,
+    ) -> List[Dict[str, Any]]:
+        character_name = str(character_name or "").strip()
+        scene = str(scene or "chat").strip().lower() or "chat"
+        limit = max(1, min(12, int(limit)))
+        args: List[Any] = [scene, scene, limit]
+        sql = (
+            "SELECT * FROM expression_patterns "
+            "WHERE enabled=1 "
+            "AND (scene=? OR scene='' OR scene='any' OR scene='*') "
+        )
+        if character_name:
+            sql += "AND (character_name=? OR character_name='') "
+            args = [scene, scene, character_name, limit]
+            order_sql = (
+                "ORDER BY "
+                "CASE WHEN character_name=? THEN 0 WHEN character_name='' THEN 1 ELSE 2 END, "
+                "CASE WHEN scene=? THEN 0 WHEN scene IN ('', 'any', '*') THEN 1 ELSE 2 END, "
+                "quality_score DESC, use_count DESC, updated_at DESC LIMIT ?"
+            )
+            args = [scene, character_name, character_name, scene, limit]
+            sql = (
+                "SELECT * FROM expression_patterns "
+                "WHERE enabled=1 "
+                "AND (scene=? OR scene='' OR scene='any' OR scene='*') "
+                "AND (character_name=? OR character_name='') "
+                + order_sql
+            )
+        else:
+            sql += (
+                "ORDER BY CASE WHEN character_name='' THEN 0 ELSE 1 END, "
+                "CASE WHEN scene=? THEN 0 WHEN scene IN ('', 'any', '*') THEN 1 ELSE 2 END, "
+                "quality_score DESC, use_count DESC, updated_at DESC LIMIT ?"
+            )
+        with self._connect() as conn:
+            rows = conn.execute(sql, args).fetchall()
+        out = []
+        for row in rows:
+            meta = _pj(row["meta_json"], {})
+            content_list = self._deserialize_expression_content_list(row, meta)
+            out.append(
+                {
+                    "id": row["id"],
+                    "character_name": row["character_name"] or "",
+                    "scene": row["scene"] or "chat",
+                    "situation": row["situation"] or "",
+                    "style": row["style"] or "",
+                    "example": content_list[0] if content_list else (row["example"] or ""),
+                    "content_list": content_list,
+                    "source": row["source"] or "manual",
+                    "quality_score": float(row["quality_score"] or 0),
+                    "use_count": int(row["use_count"] or 0),
+                    "enabled": bool(row["enabled"]),
+                    "meta": meta,
+                    "created_at": row["created_at"],
+                    "updated_at": row["updated_at"],
+                }
+            )
+        return out
+
+    def bump_expression_pattern_use(self, pattern_ids: List[str]) -> None:
+        ids = [str(item).strip() for item in (pattern_ids or []) if str(item).strip()]
+        if not ids:
+            return
+        now = _now_iso()
+        with self._lock:
+            with self._connect() as conn:
+                conn.executemany(
+                    "UPDATE expression_patterns SET use_count=use_count+1, updated_at=? WHERE id=?",
+                    [(now, item_id) for item_id in ids],
+                )
+                conn.commit()
 
     # ---------- episodes ----------
     def upsert_episode(self, ep: Dict[str, Any]) -> str:

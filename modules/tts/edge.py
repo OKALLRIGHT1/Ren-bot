@@ -2,7 +2,6 @@
 import asyncio
 import os
 import tempfile
-import shutil
 from typing import Callable, Awaitable, Optional, Tuple
 
 import edge_tts
@@ -12,7 +11,7 @@ try:
 except Exception:
     miniaudio = None
 
-from modules.live2d import play_sound_file, send_lip_sync
+from modules.live2d import play_sound_file, send_lip_sync, trigger_emotion
 from core.logger import get_logger
 
 logger = get_logger()
@@ -113,42 +112,42 @@ class EdgeTTS:
 
     # 🟢  纯播放 (增加延迟清理)
     async def play_audio_file(
-        self, mp3_path: str, interrupt_event: asyncio.Event = None
+        self,
+        mp3_path: str,
+        interrupt_event: asyncio.Event = None,
+        emotion: str | None = None,
     ):
         if not mp3_path or not os.path.exists(mp3_path):
             return
 
-        lip_sync_task = None
+        lip_data = None
         if self.enable_lip_sync and self.lip_sync_engine:
             try:
                 rhubarb_input = mp3_path
-                if mp3_path.lower().endswith(".mp3"):
-                    ogg_path = mp3_path[:-4] + ".ogg"
-                    shutil.copyfile(mp3_path, ogg_path)
-                    rhubarb_input = ogg_path
-                lip_sync_task = asyncio.create_task(
-                    self.lip_sync_engine.analyze_audio(rhubarb_input)
-                )
+                lip_data = await self.lip_sync_engine.analyze_audio(rhubarb_input)
+                if lip_data:
+                    lip_data = self.lip_sync_engine.smooth_lip_data(
+                        lip_data, window_size=self.lip_sync_smooth_window
+                    )
+                    lip_data = self.lip_sync_engine.fade_lip_data(lip_data)
             except:
                 pass
 
         if self.use_live2d_player:
+            if emotion:
+                try:
+                    await trigger_emotion(emotion)
+                except Exception:
+                    pass
             # 发送播放指令
             await play_sound_file(
                 mp3_path, channel=self.live2d_channel, volume=self.live2d_volume
             )
 
-            # 处理口型
-            if lip_sync_task:
+            # 口型数据必须贴近音频播放发送，不能等播放开始后再慢慢分析。
+            if lip_data:
                 try:
-                    lip_data = await lip_sync_task
-                    if lip_data:
-                        lip_data = self.lip_sync_engine.smooth_lip_data(
-                            lip_data, window_size=self.lip_sync_smooth_window
-                        )
-                        await send_lip_sync(
-                            self.lip_sync_engine.fade_lip_data(lip_data)
-                        )
+                    await send_lip_sync(lip_data)
                 except:
                     pass
 
@@ -166,7 +165,7 @@ class EdgeTTS:
     async def say(self, text: str, emotion: str | None = None, **kwargs) -> bool:
         path, dur = await self.synthesize(text)
         if path:
-            await self.play_audio_file(path, kwargs.get("interrupt_event"))
+            await self.play_audio_file(path, kwargs.get("interrupt_event"), emotion)
             # 简单的阻塞以模拟等待播放
             await asyncio.sleep(dur)
             return True

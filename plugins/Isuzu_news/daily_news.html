@@ -9,7 +9,7 @@ body {
   margin: 0;
   padding: 0;
   background: var(--theme-bg);
-  -webkit-font-smoothing: subpixel-antialiased;
+  -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
   font-family: var(--font-body);
   font-weight: 400;
@@ -17,26 +17,25 @@ body {
 }
 
 :root {
-  --font-body: "Noto Sans SC", "HarmonyOS Sans SC", "Microsoft YaHei UI", sans-serif;
+  --font-body: "HarmonyOS Sans SC", "Noto Sans SC", "Microsoft YaHei UI", sans-serif;
   --font-title-en: "Noto Sans SC Black", "Noto Sans SC", "Microsoft YaHei UI", sans-serif;
 
-  /* 五十铃怜 x 八云御魂 明亮主题配色 */
-  --theme-bg: #f8f7ff;          /* 极淡的丁香白（外层背景）- 整体提亮 */
-  --panel-bg: #ffffff;          /* 纯白（面板背景）- 极致明亮 */
-  --panel-border: #c4b7cf;      /* 明亮丁香紫（面板边框）- 柔和过渡 */
-  --panel-border-deep: #8e7c9f; /* 柔紫灰（深色边框/日历文字）*/
-  --panel-tag-bg: #ffffff;      /* 纯白（标签背景） */
+  /*  丁香紫与甜粉 */
+  --theme-bg: linear-gradient(135deg, #fbf9ff 0%, #f4ecff 100%);
+  --panel-bg: rgba(255, 255, 255, 0.9);
+  --panel-border: rgba(196, 183, 207, 0.4);
+  --panel-shadow: 0 8px 32px 0 rgba(154, 139, 181, 0.08), 
+                  0 4px 12px 0 rgba(154, 139, 181, 0.04);
+  
+  --primary-color: #9a8bb5; /* 亮薰衣草紫 */
+  --accent-pink: #ff6584;   /* 甜粉 */
+  --accent-violet: #7c5cb7; /* 活力罗兰紫 */
+  --text-main: #2d263b;     /* 深炭灰紫 */
+  --text-soft: #8e83a0;     /* 柔和紫灰 */
+  --text-accent: #ff527b;   /* 强调粉红 */
 
-  --title-main: #9a8bb5;        /* 亮薰衣草紫（标题主色）- 柔和不刺眼 */
-  --title-shadow: #d8cfe0;      /* 非常淡的紫灰色（标题立体阴影）- 减轻压迫感 */
-  --title-white: #ffffff;       /* 标题描边 */
-
-  --text-main: #3a3541;         /* 暗炭灰（正文文本）- 柔和的黑色 */
-  --text-soft: #a398b0;         /* 柔丁香灰（次要文本） */
-  --text-accent: #e05e83;       /* 鲜明玫红（强调色/节日/名言）- 八云御魂灵魂宝石色调 */
-
-  --badge-hot: #e05e83;         /* 玫红（热点徽章） */
-  --badge-warm: #5ca4df;        /* 清澈天蓝（推荐徽章）- 五十铃怜灵魂宝石色调 */
+  --gradient-hot: linear-gradient(135deg, #ff6b8b, #ff8e53);
+  --gradient-warm: linear-gradient(135deg, #5ca4df, #7957d5);
 }
 
 @font-face {
@@ -88,29 +87,55 @@ body {
   width: 578px;
   box-sizing: border-box;
   background: var(--theme-bg);
-  padding: 16px;
+  padding: 20px;
+  position: relative;
+  overflow: hidden;
 }
 
 .main {
   background: var(--panel-bg);
-  border-radius: 18px;
-  padding: 16px 16px 14px;
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  border: 1px solid rgba(255, 255, 255, 0.6);
+  border-radius: 24px;
+  padding: 24px 20px 20px;
+  box-shadow: 0 10px 40px -10px rgba(154, 139, 181, 0.15);
   box-sizing: border-box;
 }
 
 .header {
   display: flex;
-  align-items: flex-start;
-  gap: 12px;
+  align-items: center;
+  gap: 16px;
+  border-bottom: 2px dashed rgba(196, 183, 207, 0.3);
+  padding-bottom: 20px;
+  margin-bottom: 24px;
 }
 
 .header-figure {
-  width: 102px;
-  flex: 0 0 102px;
-  padding-top: 2px;
+  width: 90px;
+  flex: 0 0 90px;
+  position: relative;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+}
+
+.header-figure::before {
+  content: "";
+  position: absolute;
+  top: 15%;
+  left: 15%;
+  width: 70%;
+  height: 70%;
+  background: radial-gradient(circle, rgba(255, 101, 132, 0.2) 0%, rgba(154, 139, 181, 0.15) 50%, rgba(255, 255, 255, 0) 70%);
+  border-radius: 50%;
+  z-index: 1;
 }
 
 .header-figure img {
+  position: relative;
+  z-index: 2;
   display: block;
   width: 100%;
   height: auto;
@@ -119,173 +144,177 @@ body {
 .header-main {
   flex: 1;
   min-width: 0;
-  padding-top: 8px;
 }
 
 .title-cn {
   margin: 0;
-  font-family: "SSFangTangTi";
-  font-size: 66px;
-  line-height: 0.95;
-  letter-spacing: 0.5px;
-  color: var(--title-main);
-  -webkit-text-stroke: 2px var(--title-white);
-  text-shadow: 5px 3px 0 var(--title-shadow);
+  font-family: "SSFangTangTi", var(--font-body);
+  font-size: 42px;
+  line-height: 1.1;
+  font-weight: 700;
+  background: linear-gradient(135deg, var(--accent-violet) 0%, #9078b5 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  filter: drop-shadow(0 2px 4px rgba(154, 139, 181, 0.1));
 }
 
 .title-en {
-  margin: 8px 0 0 7px;
+  margin: 6px 0 0 2px;
   font-family: var(--font-title-en);
   font-weight: 900;
-  font-size: 24px;
-  line-height: 1;
-  letter-spacing: 0.5px;
-  color: var(--title-main);
-  -webkit-text-stroke: 1px var(--title-white);
-  text-shadow: 2px 2px 0 var(--title-shadow);
+  font-size: 13px;
+  letter-spacing: 2px;
+  color: var(--text-soft);
+  text-transform: uppercase;
 }
 
 .date-card {
-  width: 120px;
-  flex: 0 0 120px;
-  margin-top: 18px;
-  border: 2px solid var(--panel-border);
-  border-radius: 14px;
+  width: 100px;
+  flex: 0 0 100px;
+  border-radius: 16px;
   overflow: hidden;
-  background: #f4f0f8; /* 亮淡紫 */
+  box-shadow: 0 6px 18px rgba(154, 139, 181, 0.12);
+  border: 1px solid rgba(255, 255, 255, 0.8);
+  background: #ffffff;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
 }
 
-.date-week {
-  height: 80px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-family: var(--font-body);
-  font-weight: 700;
-  font-size: 50px;
-  line-height: 1;
-  color: var(--panel-border);
-  background: #e9e5ef; /* 亮丁香灰 */
-}
-
-.date-date {
-  min-height: 30px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: var(--panel-border);
+.date-header {
+  width: 100%;
+  padding: 6px 0;
+  background: linear-gradient(135deg, var(--accent-violet), var(--primary-color));
   color: #ffffff;
   font-family: var(--font-body);
   font-weight: 700;
-  font-size: 10px;
-  letter-spacing: 0.3px;
+  font-size: 12px;
+  letter-spacing: 1px;
 }
 
-.date-lunar {
-  min-height: 32px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: var(--panel-tag-bg);
-  color: var(--panel-border-deep);
-  font-family: var(--font-body);
+.date-day {
+  font-family: "SSFangTangTi", var(--font-body);
+  font-size: 34px;
   font-weight: 700;
-  font-size: 12px;
+  line-height: 1.1;
+  color: var(--text-main);
+  padding: 6px 0 2px;
+}
+
+.date-bottom {
+  width: 100%;
+  padding: 4px 0 6px;
+  border-top: 1px dashed rgba(196, 183, 207, 0.3);
+  color: var(--text-soft);
+  font-family: var(--font-body);
+  font-size: 10px;
+  font-weight: 600;
 }
 
 .lead-row {
   margin-top: 18px;
   display: grid;
-  grid-template-columns: 1fr 1.5fr;
-  gap: 22px;
+  grid-template-columns: 1fr 1.3fr;
+  gap: 20px;
 }
 
 .panel {
   position: relative;
   box-sizing: border-box;
   background: var(--panel-bg);
-  border: 3px solid var(--panel-border);
-  border-radius: 11px;
-  padding: 34px 14px 14px;
+  border: 1.5px solid var(--panel-border);
+  border-radius: 20px;
+  padding: 28px 16px 16px;
+  box-shadow: var(--panel-shadow);
 }
 
 .panel-tag {
   position: absolute;
-  top: -22px;
-  left: 8px;
+  top: -15px;
+  left: 16px;
   z-index: 2;
-  height: 34px;
+  height: 30px;
   display: inline-flex;
   align-items: center;
-  gap: 7px;
-  padding: 0 13px 0 10px;
+  gap: 6px;
+  padding: 0 14px;
   box-sizing: border-box;
-  border: 2px solid var(--panel-border);
-  border-radius: 10px;
-  background: var(--panel-tag-bg);
-  color: var(--text-accent);
+  border-radius: 15px;
+  background: linear-gradient(135deg, var(--accent-violet), var(--primary-color));
+  color: #ffffff;
   font-family: var(--font-body);
   font-weight: 700;
-  font-size: 14px;
-  white-space: nowrap;
+  font-size: 13px;
+  box-shadow: 0 4px 10px rgba(124, 92, 183, 0.2);
 }
 
 .panel-tag img {
-  width: 18px;
-  height: 18px;
+  width: 16px;
+  height: 16px;
   object-fit: contain;
+  filter: brightness(0) invert(1);
 }
 
 .moyu-panel,
 .bili-panel {
-  min-height: 248px;
+  min-height: 230px;
 }
 
 .moyu-list {
   display: flex;
   flex-direction: column;
   gap: 10px;
-  padding-top: 2px;
+  padding-top: 6px;
 }
 
 .moyu-item {
   display: flex;
-  align-items: baseline;
-  gap: 7px;
+  align-items: center;
+  justify-content: space-between;
+  background: rgba(246, 240, 255, 0.5);
+  padding: 8px 12px;
+  border-radius: 10px;
+  border: 1px solid rgba(196, 183, 207, 0.15);
   color: var(--text-main);
   font-family: var(--font-body);
-  font-weight: 400;
   font-size: 13px;
-  line-height: 1.4;
 }
 
 .moyu-item .holiday-name {
-  color: var(--text-accent);
+  color: var(--accent-violet);
   font-weight: 700;
 }
 
+.moyu-item .holiday-days-box {
+  display: flex;
+  align-items: baseline;
+  gap: 2px;
+}
+
 .moyu-item .holiday-days {
-  min-width: 20px;
-  display: inline-block;
-  text-align: center;
-  font-weight: 700;
+  color: var(--text-accent);
+  font-size: 18px;
+  font-weight: 800;
+  font-family: "SSFangTangTi", var(--font-body);
 }
 
 .bili-list {
   display: flex;
   flex-direction: column;
   gap: 8px;
+  padding-top: 4px;
 }
 
 .bili-item {
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   gap: 8px;
   color: var(--text-main);
   font-family: var(--font-body);
-  font-weight: 400;
-  font-size: 12px;
-  line-height: 1.55;
+  font-weight: 500;
+  font-size: 13px;
+  line-height: 1.4;
 }
 
 .bili-badge {
@@ -295,103 +324,137 @@ body {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  border-radius: 4px;
+  border-radius: 6px;
   color: #fff;
   font-family: var(--font-body);
   font-weight: 700;
   font-size: 11px;
   line-height: 1;
-  margin-top: 1px;
 }
 
 .bili-badge.hot {
-  background: var(--badge-hot);
+  background: var(--gradient-hot);
+  box-shadow: 0 2px 6px rgba(255, 107, 139, 0.25);
 }
 
 .bili-badge.warm {
-  background: var(--badge-warm);
+  background: var(--gradient-warm);
+  box-shadow: 0 2px 6px rgba(121, 87, 213, 0.2);
 }
 
 .section-panel {
-  margin-top: 18px;
+  margin-top: 24px;
 }
 
 .anime-panel {
-  padding-top: 26px;
+  padding-top: 28px;
 }
 
 .anime-grid {
   display: grid;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
-  column-gap: 10px;
-  row-gap: 14px;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 12px;
 }
 
 .anime-card {
+  background: #ffffff;
+  border-radius: 14px;
+  padding: 6px;
+  border: 1px solid rgba(196, 183, 207, 0.15);
+  box-shadow: 0 4px 10px rgba(154, 139, 181, 0.05);
   text-align: center;
 }
 
 .anime-img {
   display: block;
-  width: 84px;
-  height: 126px;
+  width: 100%;
+  height: 130px;
   object-fit: cover;
-  border-radius: 4px;
-  margin: 0 auto;
+  border-radius: 10px;
 }
 
 .anime-text {
-  /* 移除原本的 height: 38px; 改由行数来控制高度 */
-  margin: 7px auto 0;
+  margin: 6px auto 2px;
   color: var(--text-main);
   font-family: var(--font-body);
-  font-weight: 400;
-  font-size: 12px;
+  font-weight: 600;
+  font-size: 11px;
   line-height: 1.35;
-  word-break: break-all; /* 优化中日文长标题的换行逻辑 */
-
-  /* 新增：多行文本超出显示省略号的魔法 */
+  word-break: break-all;
+  height: 2.7em;
   display: -webkit-box;
   -webkit-box-orient: vertical;
-  -webkit-line-clamp: 2; /* 限制最多显示 2 行，你可以根据需要改成 3 */
+  -webkit-line-clamp: 2;
   overflow: hidden;
 }
 
 .news-panel {
-  min-height: 150px;
   padding-top: 28px;
 }
 
 .news-list {
   margin: 0;
-  padding-left: 18px;
-  color: var(--text-main);
-  font-family: var(--font-body);
-  font-weight: 400;
-  font-size: 12px;
-  line-height: 1.78;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
 }
 
 .news-list li {
-  margin-bottom: 3px;
-  padding-left: 3px;
+  position: relative;
+  padding-left: 20px;
+  color: var(--text-main);
+  font-family: var(--font-body);
+  font-weight: 500;
+  font-size: 13px;
+  line-height: 1.5;
 }
 
-.news-list li:last-child {
-  margin-bottom: 0;
+.news-list li::before {
+  content: "";
+  position: absolute;
+  left: 4px;
+  top: 7px;
+  width: 6px;
+  height: 6px;
+  background: linear-gradient(135deg, var(--accent-pink), var(--primary-color));
+  border-radius: 50%;
+  box-shadow: 0 1px 4px rgba(255, 101, 132, 0.3);
 }
 
 .quote-panel {
-  min-height: 92px;
-  padding-top: 26px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
+  background: linear-gradient(135deg, rgba(124, 92, 183, 0.04) 0%, rgba(255, 101, 132, 0.04) 100%);
+  border: 1.5px solid rgba(196, 183, 207, 0.25);
+  padding: 28px 20px 20px;
 }
 
 .quote-box {
+  position: relative;
   width: 100%;
   text-align: center;
+}
+
+.quote-box::before {
+  content: "“";
+  position: absolute;
+  top: -20px;
+  left: -4px;
+  font-size: 54px;
+  font-family: "Georgia", serif;
+  color: rgba(124, 92, 183, 0.12);
+  line-height: 1;
+}
+
+.quote-box::after {
+  content: "”";
+  position: absolute;
+  bottom: -28px;
+  right: -4px;
+  font-size: 54px;
+  font-family: "Georgia", serif;
+  color: rgba(124, 92, 183, 0.12);
+  line-height: 1;
 }
 
 .quote-text {
@@ -399,28 +462,31 @@ body {
   color: var(--text-accent);
   font-family: var(--font-body);
   font-weight: 700;
-  font-size: 16px;
-  line-height: 1.55;
+  font-size: 15px;
+  line-height: 1.6;
+  letter-spacing: 0.5px;
+  padding: 0 12px;
 }
 
 .quote-from {
   display: block;
-  margin-top: 6px;
+  margin-top: 8px;
   color: var(--text-soft);
   font-family: var(--font-body);
-  font-weight: 400;
-  font-size: 12px;
-  text-align: right;
+  font-weight: 600;
+  font-size: 11px;
+  letter-spacing: 0.5px;
 }
 
 .footer-note {
-  margin-top: 12px;
-  color: #6d647a; /* 暗丁香灰 */
-  text-align: right;
+  margin-top: 16px;
+  color: var(--text-soft);
+  text-align: center;
   font-family: var(--font-body);
-  font-weight: 400;
-  font-size: 10px;
-  letter-spacing: 0.5px;
+  font-weight: 600;
+  font-size: 11px;
+  letter-spacing: 2px;
+  opacity: 0.8;
 }
     </style>
 </head>
@@ -434,12 +500,12 @@ body {
                 </div>
                 <div class="header-main">
                     <p class="title-cn">魔法日报</p>
-                    <p class="title-en">MAGICAL DAILY</p>
+                    <p class="title-en">MAGICAL DAILY • {{ date_info.date_str | replace('-', ' . ') }}</p>
                 </div>
                 <div class="date-card">
-                    <div class="date-week">{{ date_info.week_cn[-1] if date_info.week_cn else '' }}</div>
-                    <div class="date-date">{{ date_info.date_str | replace('-', '年', 1) | replace('-', '月', 1) }}日</div>
-                    <div class="date-lunar">{{ date_info.cn_date_str }}</div>
+                    <div class="date-header">{{ date_info.week_cn }}</div>
+                    <div class="date-day">{{ date_info.date_str.split('-')[2] }}</div>
+                    <div class="date-bottom">{{ date_info.cn_date_str }}</div>
                 </div>
             </div>
 
@@ -449,11 +515,8 @@ body {
                     <div class="moyu-list">
                         {% for item in moyu_list %}
                         <div class="moyu-item">
-                            <span>距离</span>
-                            <span class="holiday-name">{{ item.name }}</span>
-                            <span>还剩</span>
-                            <span class="holiday-days">{{ item.days_left }}</span>
-                            <span>天</span>
+                            <span>距离 <span class="holiday-name">{{ item.name }}</span></span>
+                            <span class="holiday-days-box">还剩 <span class="holiday-days">{{ item.days_left }}</span> 天</span>
                         </div>
                         {% endfor %}
                     </div>
@@ -485,7 +548,7 @@ body {
             </div>
 
             <div class="panel section-panel news-panel">
-                <div class="panel-tag"><img src="./res/icon/it.png" alt="科技资讯" onerror="this.style.display='none'">科技资讯</div>
+                <div class="panel-tag"><img src="./res/icon/it.png" alt="每日资讯" onerror="this.style.display='none'">每日资讯</div>
                 <ul class="news-list">
                     {% for news in world_news %}
                     <li>{{ news }}</li>
@@ -494,7 +557,7 @@ body {
             </div>
 
             <div class="panel section-panel news-panel">
-                <div class="panel-tag"><img src="./res/icon/game.png" alt="游戏资讯" onerror="this.style.display='none'">游戏资讯</div>
+                <div class="panel-tag"><img src="./res/icon/game.png" alt="科技资讯" onerror="this.style.display='none'">科技资讯</div>
                 <ul class="news-list">
                     {% for news in it_news %}
                     <li>{{ news }}</li>
@@ -505,12 +568,12 @@ body {
             <div class="panel section-panel quote-panel">
                 <div class="panel-tag"><img src="./res/icon/hitokoto.png" alt="今日一言" onerror="this.style.display='none'">今日一言</div>
                 <div class="quote-box">
-                    <p class="quote-text">“ {{ hitokoto_data.hitokoto }} ”</p>
+                    <p class="quote-text">{{ hitokoto_data.hitokoto }}</p>
                     <span class="quote-from">—— {{ hitokoto_data.from }}</span>
                 </div>
             </div>
 
-            <div class="footer-note">MAGICAL  DAILY © 2026</div>
+            <div class="footer-note">MAGICAL DAILY © 2026</div>
         </div>
     </div>
 </body>

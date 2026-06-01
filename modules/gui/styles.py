@@ -265,18 +265,64 @@ def get_main_styles(ball_config: dict) -> str:
         }}
     """
 
+def hex_to_rgba(hex_str: str, alpha: float) -> str:
+    hex_str = hex_str.strip().lstrip('#')
+    if len(hex_str) == 3:
+        hex_str = ''.join([c*2 for c in hex_str])
+    if len(hex_str) == 6:
+        r = int(hex_str[0:2], 16)
+        g = int(hex_str[2:4], 16)
+        b = int(hex_str[4:6], 16)
+        return f"rgba({r}, {g}, {b}, {alpha})"
+    return hex_str
+
+def get_background_image_qss(for_settings: bool) -> tuple[str, bool]:
+    try:
+        from modules.runtime_settings import load_runtime_settings
+        runtime = load_runtime_settings()
+        bg_path = runtime.get("bg_image_path", "").strip()
+        
+        enabled = False
+        if for_settings:
+            enabled = bool(runtime.get("bg_image_settings_enabled", False))
+        else:
+            enabled = bool(runtime.get("bg_image_main_enabled", False))
+            
+        if enabled and bg_path:
+            p = Path(bg_path)
+            if p.exists():
+                normalized_path = str(p.absolute()).replace("\\", "/")
+                return f'border-image: url("{normalized_path}") 0 0 0 0 stretch stretch;', True
+    except Exception:
+        pass
+    return "", False
+
 def get_panel_styles() -> str:
     p = get_ui_palette()
     common = get_common_qss(p)
+    bg_qss, bg_active = get_background_image_qss(for_settings=False)
+    
+    if bg_active:
+        bg_card_style = hex_to_rgba(p["bg_card"], 0.75)
+        bg_soft_style = hex_to_rgba(p["bg_soft"], 0.75)
+        border_style = hex_to_rgba(p["border"], 0.5)
+        console_bg_style = hex_to_rgba(p["console_main"]["bg"], 0.75)
+    else:
+        bg_card_style = p["bg_card"]
+        bg_soft_style = p["bg_soft"]
+        border_style = p["border"]
+        console_bg_style = p["console_main"]["bg"]
+        
     return common + f"""
         QWidget {{
             font-family: 'Segoe UI', 'Microsoft YaHei';
             color: {p["text_primary"]};
         }}
         QFrame#container {{
-            background-color: {p["bg_card"]};
+            background-color: {bg_card_style};
+            {bg_qss}
             border-radius: 20px;
-            border: 1px solid {p["border"]};
+            border: 1px solid {border_style};
         }}
         QLabel#statusLabel {{
             color: {p["text_muted"]};
@@ -304,7 +350,7 @@ def get_panel_styles() -> str:
         QFrame#heroCard {{
             background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
                 stop:0 {p["accent_soft"]}, stop:1 {p["bg_app"]});
-            border: 1px solid {p["border"]};
+            border: 1px solid {border_style};
             border-radius: 16px;
         }}
         QLabel#heroTitle {{
@@ -327,7 +373,7 @@ def get_panel_styles() -> str:
             font-weight: 600;
         }}
         QTextEdit#historyView {{
-            background-color: {p["console_main"]["bg"]};
+            background-color: {console_bg_style};
             border: 1px solid {p["console_main"]["border"]};
             border-radius: 12px;
             color: {p["console_main"]["fg"]};
@@ -339,7 +385,7 @@ def get_panel_styles() -> str:
             selection-color: {p["console_main"]["selection_fg"]};
         }}
         QFrame#inputShell {{
-            background-color: {p["bg_soft"]};
+            background-color: {bg_soft_style};
             border-radius: 15px;
             border: 1px solid transparent;
             min-height: 36px;
@@ -405,24 +451,38 @@ def get_panel_styles() -> str:
 def get_settings_styles() -> str:
     p = get_ui_palette()
     common = get_common_qss(p)
+    bg_qss, bg_active = get_background_image_qss(for_settings=True)
+    
+    if bg_active:
+        bg_card_style = hex_to_rgba(p["bg_card"], 0.75)
+        bg_soft_style = hex_to_rgba(p["bg_soft"], 0.75)
+        border_style = hex_to_rgba(p["border"], 0.5)
+    else:
+        bg_card_style = p["bg_card"]
+        bg_soft_style = p["bg_soft"]
+        border_style = p["border"]
+        
     return common + f"""
         QDialog {{
             background-color: {p["bg_app"]};
             font-family: 'Segoe UI', 'Microsoft YaHei';
         }}
+        QDialog#SettingsDialog {{
+            {bg_qss}
+        }}
         QFrame#settingsNavCard, QFrame#settingsContentCard {{
-            background: {p["bg_card"]};
-            border: 1px solid {p["border"]};
+            background: {bg_card_style};
+            border: 1px solid {border_style};
             border-radius: 18px;
         }}
         QFrame#settingsHeaderCard, QFrame#launchCard {{
-            background: {p["bg_card"]};
-            border: 1px solid {p["border"]};
+            background: {bg_card_style};
+            border: 1px solid {border_style};
             border-radius: 14px;
         }}
         QFrame#settingsActionBar {{
-            background: {p["bg_soft"]};
-            border: 1px solid {p["border"]};
+            background: {bg_soft_style};
+            border: 1px solid {border_style};
             border-radius: 16px;
         }}
         QLabel#settingsNavTitle {{
@@ -462,6 +522,15 @@ def get_settings_styles() -> str:
             border-radius: 12px;
             gridline-color: {p["border"]};
             color: {p["text_primary"]};
+        }}
+        QTableWidget::item {{
+            color: {p["text_primary"]};
+            background-color: transparent;
+            padding: 4px;
+        }}
+        QTableWidget::item:selected {{
+            background-color: {p["accent_soft"]};
+            color: {p["accent_hover"]};
         }}
         QHeaderView::section {{
             background: {p["bg_soft"]};
@@ -504,13 +573,14 @@ def get_settings_styles() -> str:
             font-size: 13px;
             font-weight: 600;
         }}
-        QTextBrowser#consoleView {{
+        QTextBrowser#consoleView, QPlainTextEdit#consoleView {{
             background-color: {p["console_codex"]["bg"]};
             border: 1px solid {p["console_codex"]["border"]};
             border-radius: 12px;
             color: {p["console_codex"]["fg"]};
             font-family: 'Cascadia Mono', 'Consolas', 'JetBrains Mono', monospace;
             font-size: 12px;
+            padding: 10px;
             selection-background-color: {p["console_codex"]["selection_bg"]};
             selection-color: {p["console_codex"]["selection_fg"]};
         }}
@@ -568,13 +638,23 @@ def get_tool_dialog_styles() -> str:
             border-radius: 12px;
             color: {p["text_primary"]};
         }}
-        QTextBrowser#consoleView {{
+        QTableWidget::item {{
+            color: {p["text_primary"]};
+            background-color: transparent;
+            padding: 4px;
+        }}
+        QTableWidget::item:selected {{
+            background-color: {p["accent_soft"]};
+            color: {p["accent_hover"]};
+        }}
+        QTextBrowser#consoleView, QPlainTextEdit#consoleView {{
             background-color: {p["console_codex"]["bg"]};
             border: 1px solid {p["console_codex"]["border"]};
             border-radius: 12px;
             color: {p["console_codex"]["fg"]};
             font-family: 'Cascadia Mono', 'Consolas', 'JetBrains Mono', monospace;
             font-size: 12px;
+            padding: 10px;
             selection-background-color: {p["console_codex"]["selection_bg"]};
             selection-color: {p["console_codex"]["selection_fg"]};
         }}

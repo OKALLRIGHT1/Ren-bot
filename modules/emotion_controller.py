@@ -1,7 +1,6 @@
 # modules/emotion_controller.py
 from __future__ import annotations
 import asyncio
-import random
 import time
 from dataclasses import dataclass
 from typing import Dict, Optional, Tuple, Any
@@ -13,8 +12,7 @@ try:
 except Exception:
     EMO_TO_LIVE2D = {}
 
-# 情绪惯性配置
-EMO_INERTIA_WINDOW = 15.0  # 惯性窗口(秒)：在此时间内，强情绪不容易被 Neutral 覆盖
+# 情绪保持配置
 EMO_DECAY_TIMEOUT = 300.0  # 衰减阈值(秒)：超过5分钟无互动，情绪回归平静
 NEUTRAL_LABELS = {"neutral", "idle", "default"}
 
@@ -29,7 +27,6 @@ class EmotionController:
         self.current_intensity: float = 0.3
         self.last_emotion_change: float = time.time()  # 上次情绪改变时间
         self.last_activity: float = time.time()  # 上次互动时间
-        self.last_idle_motion_at: float = 0.0
 
         self._lock = asyncio.Lock()
 
@@ -57,19 +54,7 @@ class EmotionController:
         new_emo = (label or "neutral").lower()
         new_intensity = float(intensity) if intensity is not None else 0.5
 
-        # 1. 情绪惯性逻辑 (Inertia)
-        # 如果新请求是 Neutral，但当前情绪很强烈且是最近发生的，则忽略 Neutral
-        # (让笑容多停留一会儿)
-        now = time.time()
-        is_requesting_neutral = new_emo in NEUTRAL_LABELS
-        is_current_strong = self.current_emotion not in NEUTRAL_LABELS and self.current_intensity > 0.4
-        is_recent = (now - self.last_emotion_change) < EMO_INERTIA_WINDOW
-
-        if is_requesting_neutral and is_current_strong and is_recent:
-            print(f"🧊 [Emotion] 触发情绪惯性，保持 {self.current_emotion} (忽略 {new_emo})")
-            return
-
-        # 2. 执行切换
+        # 执行模型给出的情绪，不再用本地惯性规则拦截 neutral/idle。
         await self._apply_emotion(new_emo, new_intensity, prefer_motion)
 
     async def _decay_loop(self):
@@ -112,6 +97,12 @@ class EmotionController:
 
             # 1. 设置表情 (Expression)
             exp_id = cfg.get("exp")
+            logger = live2d._get_logger()
+            logger.info(
+                f"[EmotionController] emotion={emo} intensity={intensity:.2f} "
+                f"prefer_motion={prefer_motion} exp={exp_id} mtn={cfg.get('mtn')} "
+                f"type={cfg.get('type', 0)}"
+            )
             if exp_id is not None:
                 try:
                     await live2d.set_expression(int(exp_id))
@@ -119,19 +110,15 @@ class EmotionController:
                     pass
 
             # 2. 触发动作 (Motion)
-            # 策略：如果是明确请求 motion (prefer_motion=True)，或者随机概率
             mtn = cfg.get("mtn")
             if mtn:
                 should_play = False
                 # Keep think motion only in THINKING state.
                 think_motion_blocked = (emo == "think" and self.agent_state != AgentState.THINKING)
                 if not think_motion_blocked:
-                    if prefer_motion is True:
-                        should_play = True
-                    elif prefer_motion is None:
-                        # ??????????Neutral ???
-                        prob = 0.8 if intensity > 0.6 else 0.2
-                        should_play = (random.random() < prob)
+                    # 只要模型已经给出情绪，就稳定执行对应动作；需要静默时由调用方
+                    # 显式传 prefer_motion=False。避免低强度情绪被随机概率吞掉。
+                    should_play = prefer_motion is not False
 
                 if should_play:
                     try:
@@ -140,10 +127,15 @@ class EmotionController:
                         pass
 
     async def maybe_enter_idle(self):
-        """进入空闲状态"""
+        """进入空闲动作，但不清理当前表情。
+
+        说话结束后只让动作回到 idle/default；表情由模型下一次情绪判断或
+        后台自然衰减接管，避免刚说完就被硬切成 neutral。
+        """
         cfg = live2d.resolve_emotion_config("idle", self.mapping)
         if not cfg:
             cfg = live2d.resolve_emotion_config("neutral", self.mapping)
+
         if not cfg:
             return
 
@@ -151,12 +143,7 @@ class EmotionController:
         if not mtn:
             return
 
-        now = time.time()
-        if now - self.last_idle_motion_at < 0.8:
-            return
-
         try:
             await live2d.play_motion(str(mtn), motion_type=int(cfg.get("type", 0)))
-            self.last_idle_motion_at = now
         except Exception:
             pass

@@ -507,6 +507,26 @@ class NapCatOneBotAdapter(BaseChatAdapter):
                 result["ws_fallback"] = ws_result
             return result
 
+    async def call_action(
+        self,
+        action: str,
+        params: Optional[Dict[str, Any]] = None,
+        *,
+        timeout: float = 8.0,
+        skip_http_fallback: bool = False,
+    ) -> Any:
+        action_name = str(action or "").strip()
+        if not action_name:
+            return {"ok": False, "reason": "empty_action"}
+        payload = params if isinstance(params, dict) else {}
+        return await self._send_action(
+            "",
+            action_name,
+            payload,
+            timeout=timeout,
+            skip_http_fallback=skip_http_fallback,
+        )
+
     def normalize_event(self, payload: Dict[str, Any]) -> Optional[ChatMessageEvent]:
         post_type = str(payload.get("post_type") or "")
         message_type = str(payload.get("message_type") or "")

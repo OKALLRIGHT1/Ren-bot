@@ -109,6 +109,7 @@ class RhubarbLipSync:
         
         logger.debug(f"Rhubarb 命令: {' '.join(cmd)}")
         
+        process = None
         try:
             # 运行 Rhubarb（使用 asyncio 包装同步调用）
             process = await asyncio.create_subprocess_exec(
@@ -167,6 +168,12 @@ class RhubarbLipSync:
             
         except asyncio.TimeoutError:
             logger.warning(f"Rhubarb 执行超时（{self.timeout_sec:.1f}秒）")
+            if process is not None:
+                try:
+                    process.kill()
+                    await process.wait()
+                except Exception:
+                    pass
             if temp_file and os.path.exists(output_json):
                 try:
                     os.remove(output_json)

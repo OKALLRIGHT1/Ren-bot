@@ -14,6 +14,14 @@ from modules.gui.dialogs.plugin_manager import PluginManagerDialog
 
 from modules.gui.dialogs.memory_editor import MemoryEditorDialog
 
+from modules.gui.dialogs.knowledge_manager import KnowledgeManagerDialog
+
+from modules.gui.dialogs.expression_library_manager import ExpressionLibraryManagerDialog
+
+from modules.gui.dialogs.meme_manager import MemeManagerDialog
+
+from modules.gui.dialogs.status_screen_manager import StatusScreenManagerDialog
+
 from modules.gui.styles import (
     THEMES,
     get_settings_styles,
@@ -1263,9 +1271,17 @@ class SettingsDialog(QtWidgets.QDialog):
         if main_app is not None and hasattr(main_app, "_icon"):
             self.setWindowIcon(main_app._icon)
 
-        self.resize(1040, 760)
+        # 动态计算初始大小，防止超出屏幕
+        screen = QtWidgets.QApplication.primaryScreen()
+        if screen:
+            avail = screen.availableGeometry()
+            width = min(1040, int(avail.width() * 0.9))
+            height = min(760, int(avail.height() * 0.9))
+            self.resize(width, height)
+        else:
+            self.resize(1040, 760)
 
-        self.setMinimumSize(920, 680)
+        self.setMinimumSize(720, 460)
 
         self.setSizeGripEnabled(True)
 
@@ -1298,9 +1314,29 @@ class SettingsDialog(QtWidgets.QDialog):
                 "desc": "进入插件管理器，查看启停状态、兼容入口和插件配置。",
             },
             {
+                "nav": "📚 高级 · 知识库",
+                "title": "知识库",
+                "desc": "维护助手的本地及远程知识库文档与向量检索配置。",
+            },
+            {
+                "nav": "🗣️ 高级 · 表达学习库",
+                "title": "表达学习库",
+                "desc": "记录和学习定制表情、动作和反应映射的数据库。",
+            },
+            {
+                "nav": "🖼️ 高级 · 表情包库",
+                "title": "表情包库",
+                "desc": "管理生成的表情包、本地图片与对应的文本触发词映射。",
+            },
+            {
                 "nav": "🧠 高级 · 记忆数据",
                 "title": "记忆数据",
                 "desc": "打开重型记忆编辑器，适合排查 transcript、todo、图记忆等底层数据。",
+            },
+            {
+                "nav": "📟 高级 · 状态屏",
+                "title": "状态屏",
+                "desc": "配置外置墨水屏或各种状态屏幕的数据源和更新频率。",
             },
             {
                 "nav": "🩺 高级 · 依赖体检",
@@ -1421,7 +1457,15 @@ class SettingsDialog(QtWidgets.QDialog):
 
         self._safe_init_page(self._init_plugin_page, "插件工具")
 
+        self._safe_init_page(self._init_knowledge_page, "知识库")
+
+        self._safe_init_page(self._init_expression_library_page, "表达学习库")
+
+        self._safe_init_page(self._init_meme_page, "表情包库")
+
         self._safe_init_page(self._init_memory_page, "记忆数据")
+
+        self._safe_init_page(self._init_status_screen_page, "状态屏")
 
         self._safe_init_page(self._init_dependency_page, "依赖体检")
 
@@ -5076,28 +5120,33 @@ class SettingsDialog(QtWidgets.QDialog):
 
     # ---------- Other tabs ----------
 
+    def _wrap_in_scroll_area(self, widget: QtWidgets.QWidget) -> QtWidgets.QScrollArea:
+        scroll = QtWidgets.QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        scroll.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        scroll.setWidget(widget)
+        return scroll
+
     def _init_costume_page(self):
         page = QtWidgets.QWidget()
         layout = QtWidgets.QVBoxLayout(page)
         layout.setContentsMargins(0, 0, 0, 0)
-        # 在这里加上拉伸因子 1，让形象管理面板自适应撑满整个页面的垂直空间
-        layout.addWidget(CharacterEditorWidget(self.main_app), 1)
+        widget = CharacterEditorWidget(self.main_app)
+        widget.setMinimumSize(0, 0)
+        layout.addWidget(widget, 1)
         self.stack.addWidget(page)
 
     def _init_plugin_page(self):
         page = QtWidgets.QWidget()
-
         layout = QtWidgets.QVBoxLayout(page)
-
         layout.setContentsMargins(0, 0, 0, 0)
-
         plugin_manager = (
             getattr(self.main_app, "plugin_manager", None) if self.main_app else None
         )
-
         if plugin_manager is None:
             layout.addWidget(QtWidgets.QLabel("当前上下文不支持插件管理。"))
-
         else:
             widget = PluginManagerDialog(
                 parent=page,
@@ -5105,20 +5154,45 @@ class SettingsDialog(QtWidgets.QDialog):
                 main_app=self.main_app,
                 embedded=True,
             )
-
-            layout.addWidget(widget, 1)
-
+            widget.setMinimumSize(0, 0)
+            scroll = self._wrap_in_scroll_area(widget)
+            layout.addWidget(scroll, 1)
         self.stack.addWidget(page)
+
+    def _add_embedded_dialog_page(self, dialog_cls, label: str):
+        page = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout(page)
+        layout.setContentsMargins(0, 0, 0, 0)
+        try:
+            widget = dialog_cls(parent=page, main_app=self.main_app)
+            widget.setWindowFlags(QtCore.Qt.WindowType.Widget)
+            widget.setMinimumSize(0, 0)
+            scroll = self._wrap_in_scroll_area(widget)
+            layout.addWidget(scroll, 1)
+        except Exception as exc:
+            fallback = QtWidgets.QLabel(f"{label}加载失败：{exc}")
+            fallback.setWordWrap(True)
+            layout.addWidget(fallback)
+        self.stack.addWidget(page)
+
+    def _init_knowledge_page(self):
+        self._add_embedded_dialog_page(KnowledgeManagerDialog, "知识库")
+
+    def _init_expression_library_page(self):
+        self._add_embedded_dialog_page(ExpressionLibraryManagerDialog, "表达学习库")
+
+    def _init_meme_page(self):
+        self._add_embedded_dialog_page(MemeManagerDialog, "表情包库")
 
     def _init_memory_page(self):
         page = QtWidgets.QWidget()
-
         layout = QtWidgets.QVBoxLayout(page)
-
         layout.setContentsMargins(0, 0, 0, 0)
-
         widget = MemoryEditorDialog(parent=page, embedded=True)
-
-        layout.addWidget(widget, 1)
-
+        widget.setMinimumSize(0, 0)
+        scroll = self._wrap_in_scroll_area(widget)
+        layout.addWidget(scroll, 1)
         self.stack.addWidget(page)
+
+    def _init_status_screen_page(self):
+        self._add_embedded_dialog_page(StatusScreenManagerDialog, "状态屏")

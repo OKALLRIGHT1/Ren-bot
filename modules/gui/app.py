@@ -25,6 +25,9 @@ from modules.gui.dialogs.settings import SettingsDialog
 from modules.gui.dialogs.knowledge_manager import KnowledgeManagerDialog
 from modules.gui.dialogs.status_screen_manager import StatusScreenManagerDialog
 from modules.gui.dialogs.codex_assistant import CodexAssistantDialog
+from modules.gui.dialogs.console_log import ConsoleLogDialog
+from modules.gui.dialogs.expression_library_manager import ExpressionLibraryManagerDialog
+from modules.gui.dialogs.meme_manager import MemeManagerDialog
 from modules.character_manager import character_manager
 
 # 引入配置
@@ -130,6 +133,9 @@ class QtChatTrayApp(QtCore.QObject):
         self._plugin_dialog = None
         self._memory_dialog = None
         self._codex_dialog = None
+        self._console_dialog = None
+        self._expression_library_dialog = None
+        self._meme_dialog = None
 
         # 启动逻辑
         if self.cfg.start_minimized_to_tray:
@@ -160,12 +166,23 @@ class QtChatTrayApp(QtCore.QObject):
                         self._codex_dialog._refresh_history(force=True)
                     except Exception:
                         pass
+            if self._console_dialog:
+                self._console_dialog.setStyleSheet(get_tool_dialog_styles())
             if self._memory_dialog:
                 self._memory_dialog.setStyleSheet(get_memory_dialog_styles())
             if self._plugin_dialog:
                 self._plugin_dialog.setStyleSheet(get_tool_dialog_styles())
+            if hasattr(self, "_expression_library_dialog") and self._expression_library_dialog:
+                self._expression_library_dialog.setStyleSheet(get_tool_dialog_styles())
+            if hasattr(self, "_meme_dialog") and self._meme_dialog:
+                self._meme_dialog.setStyleSheet(get_tool_dialog_styles())
+            if hasattr(self, "_knowledge_dialog") and self._knowledge_dialog:
+                self._knowledge_dialog.setStyleSheet(get_tool_dialog_styles())
+            if hasattr(self, "_status_screen_dialog") and self._status_screen_dialog:
+                self._status_screen_dialog.setStyleSheet(get_tool_dialog_styles())
         except Exception:
             pass
+
 
     def _build_window(self) -> QtWidgets.QWidget:
         w = QtWidgets.QWidget()
@@ -345,6 +362,7 @@ class QtChatTrayApp(QtCore.QObject):
         dnd_tip = "免打扰 (当前: 开启)" if init_dnd_state else "免打扰 (当前: 关闭)"
         self._btn_dnd = mk_btn(dnd_icon, self._toggle_dnd, dnd_tip)
         self._btn_costume = mk_btn("👗", self._on_quick_costume_clicked, "快速换装")
+        self._btn_console = mk_btn("🖥", self._on_console_clicked, "打开控制台输出")
         self._btn_settings = mk_btn("⚙️", self._on_settings_clicked, "设置中心")
 
         self._btn_more = mk_btn("⋯", self._show_more_menu, "更多功能")
@@ -355,6 +373,7 @@ class QtChatTrayApp(QtCore.QObject):
         tools_layout.addWidget(self._btn_costume)
         tools_layout.addStretch()
         tools_layout.addWidget(self._btn_mode)
+        tools_layout.addWidget(self._btn_console)
         tools_layout.addWidget(self._btn_settings)
         tools_layout.addWidget(self._btn_more)
         tools_layout.addWidget(self._btn_expand)
@@ -403,11 +422,14 @@ class QtChatTrayApp(QtCore.QObject):
 
     def _show_more_menu(self):
         menu = QtWidgets.QMenu(self._btn_more)
+        menu.addAction("🖥 控制台输出").triggered.connect(self._on_console_clicked)
         menu.addAction("💻 代码助手").triggered.connect(self._on_codex_clicked)
         menu.addAction("📊 模型监控").triggered.connect(self._on_monitor_clicked)
         menu.addSeparator()
         menu.addAction("🧩 插件管理").triggered.connect(self._on_plugin_clicked)
         menu.addAction("📚 知识库管理").triggered.connect(self._on_knowledge_clicked)
+        menu.addAction("🗣️ 表达库管理").triggered.connect(self._on_expression_library_clicked)
+        menu.addAction("🖼️ 表情包管理").triggered.connect(self._on_meme_clicked)
         menu.addAction("📟 状态屏管理").triggered.connect(
             self._on_status_screen_clicked
         )
@@ -563,42 +585,57 @@ class QtChatTrayApp(QtCore.QObject):
         self._settings_dialog.raise_()
         self._settings_dialog.activateWindow()
 
+    def _on_console_clicked(self):
+        if not self._console_dialog:
+            self._console_dialog = ConsoleLogDialog(parent=None)
+        self._console_dialog.showNormal()
+        self._console_dialog.raise_()
+        self._console_dialog.activateWindow()
+
     def _on_plugin_clicked(self):
         self._on_settings_clicked()
         if self._settings_dialog and hasattr(self._settings_dialog, "open_page"):
-            self._settings_dialog.open_page(3)
+            self._settings_dialog.open_page(4)
 
     def _on_memory_clicked(self):
         try:
             self._on_settings_clicked()
             if self._settings_dialog and hasattr(self._settings_dialog, "open_page"):
-                self._settings_dialog.open_page(4)
+                self._settings_dialog.open_page(8)
         except Exception as e:
             self.append("system", f"❌ 记忆编辑器加载失败: {e}")
 
     def _on_knowledge_clicked(self):
         try:
-            if not self._knowledge_dialog:
-                self._knowledge_dialog = KnowledgeManagerDialog(
-                    parent=None, main_app=self
-                )
-            self._knowledge_dialog.show()
-            self._knowledge_dialog.raise_()
-            self._knowledge_dialog.activateWindow()
+            self._on_settings_clicked()
+            if self._settings_dialog and hasattr(self._settings_dialog, "open_page"):
+                self._settings_dialog.open_page(5)
         except Exception as e:
             self.append("system", f"❌ 知识库管理器加载失败: {e}")
 
     def _on_status_screen_clicked(self):
         try:
-            if not self._status_screen_dialog:
-                self._status_screen_dialog = StatusScreenManagerDialog(
-                    parent=None, main_app=self
-                )
-            self._status_screen_dialog.show()
-            self._status_screen_dialog.raise_()
-            self._status_screen_dialog.activateWindow()
+            self._on_settings_clicked()
+            if self._settings_dialog and hasattr(self._settings_dialog, "open_page"):
+                self._settings_dialog.open_page(9)
         except Exception as e:
             self.append("system", f"❌ 状态屏管理器加载失败: {e}")
+
+    def _on_expression_library_clicked(self):
+        try:
+            self._on_settings_clicked()
+            if self._settings_dialog and hasattr(self._settings_dialog, "open_page"):
+                self._settings_dialog.open_page(6)
+        except Exception as e:
+            self.append("system", f"❌ 表达学习库加载失败: {e}")
+
+    def _on_meme_clicked(self):
+        try:
+            self._on_settings_clicked()
+            if self._settings_dialog and hasattr(self._settings_dialog, "open_page"):
+                self._settings_dialog.open_page(7)
+        except Exception as e:
+            self.append("system", f"❌ 表情包管理器加载失败: {e}")
 
     def _on_costume_triggered(self, name, cfg=None):
         safe_cfg = cfg if isinstance(cfg, dict) else {}
@@ -987,6 +1024,7 @@ class QtChatTrayApp(QtCore.QObject):
         t.activated.connect(self._on_tray_activated)
         m = QtWidgets.QMenu()
         m.addAction("显示/隐藏").triggered.connect(self.toggle_show_hide)
+        m.addAction("控制台输出").triggered.connect(self._on_console_clicked)
         m.addAction("代码助手").triggered.connect(self._on_codex_clicked)
         m.addAction("模型监控").triggered.connect(self._on_monitor_clicked)
         m.addAction("模式预设").triggered.connect(self._on_mode_menu_clicked)

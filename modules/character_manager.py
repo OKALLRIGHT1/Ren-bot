@@ -3,7 +3,7 @@ import os
 import time
 import uuid
 from copy import deepcopy
-from typing import Dict, Optional
+from typing import Any, Dict, Optional
 
 DATA_FILE = "data/characters.json"
 
@@ -24,6 +24,128 @@ DEFAULT_CATCHPHRASE_CONFIG = {
     "text": "",
     "probability": 0,
 }
+
+EMOTION_MOTION_PREFERENCES = {
+    "neutral": ["nf03", "nf01", "idle01", "motion_001", "motion_100", "motion_000"],
+    "happy": ["smile04", "smile03", "smile01", "motion_100"],
+    "sad": ["sad01", "cry03", "cry01", "motion_100"],
+    "angry": ["angry01", "angry03", "angry02", "motion_200"],
+    "flustered": ["shame01", "shame02", "odoodo01", "motion_300"],
+    "confused": ["surprised02", "surprised01", "thinking01", "motion_400"],
+    "think": ["thinking01", "thinking02", "motion_001"],
+    "idle": ["idle01", "nf03", "motion_000", "motion_001"],
+    "music": ["smile04", "smile03", "motion_100"],
+}
+
+
+def _resolve_model_path(path: str) -> str:
+    raw = str(path or "").strip().replace("\\", "/")
+    if not raw:
+        return ""
+    if os.path.isabs(raw):
+        return raw
+    return os.path.abspath(raw)
+
+
+def _pick_first_existing(candidates: list[str], available: dict[str, Any]) -> Any:
+    if not available:
+        return None
+    lowered = {str(k).lower(): v for k, v in available.items()}
+    for name in candidates:
+        key = str(name).lower()
+        if key in lowered:
+            return lowered[key]
+    for name in candidates:
+        needle = str(name).lower()
+        for key, value in lowered.items():
+            if needle and needle in key:
+                return value
+    return None
+
+
+def _read_model_motion_meta(model_path: str) -> tuple[dict[str, str], dict[str, int]]:
+    """Return motion tokens and expression indices keyed by readable names."""
+    abs_path = _resolve_model_path(model_path)
+    if not abs_path or not os.path.exists(abs_path):
+        return {}, {}
+
+    try:
+        with open(abs_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception:
+        return {}, {}
+
+    motions: dict[str, str] = {}
+    expressions: dict[str, int] = {}
+
+    file_refs = data.get("FileReferences") if isinstance(data, dict) else None
+    if isinstance(file_refs, dict):
+        raw_motions = file_refs.get("Motions") or {}
+        if isinstance(raw_motions, dict):
+            for group, entries in raw_motions.items():
+                if not isinstance(entries, list):
+                    continue
+                group_name = str(group or "").strip()
+                for idx, entry in enumerate(entries):
+                    if not isinstance(entry, dict):
+                        continue
+                    name = str(entry.get("Name") or "").strip()
+                    if not name:
+                        file_name = os.path.basename(str(entry.get("File") or ""))
+                        name = file_name.split(".", 1)[0] if file_name else f"{group_name}_{idx}"
+                    token = f"{group_name}:{name}" if group_name else name
+                    motions[name] = token
+
+        raw_expressions = file_refs.get("Expressions") or []
+        if isinstance(raw_expressions, list):
+            for idx, entry in enumerate(raw_expressions):
+                if not isinstance(entry, dict):
+                    continue
+                name = str(entry.get("Name") or entry.get("File") or "").strip()
+                if name:
+                    base = os.path.basename(name).split(".", 1)[0]
+                    expressions[base] = idx
+                    expressions[name] = idx
+
+        return motions, expressions
+
+    raw_motions = data.get("motions") if isinstance(data, dict) else None
+    if isinstance(raw_motions, dict):
+        for name in raw_motions.keys():
+            key = str(name or "").strip()
+            if key:
+                motions[key] = key
+
+    raw_expressions = data.get("expressions") if isinstance(data, dict) else None
+    if isinstance(raw_expressions, list):
+        for idx, entry in enumerate(raw_expressions):
+            if not isinstance(entry, dict):
+                continue
+            name = str(entry.get("name") or entry.get("file") or "").strip()
+            if name:
+                base = os.path.basename(name).split(".", 1)[0]
+                expressions[base] = idx
+                expressions[name] = idx
+
+    return motions, expressions
+
+
+def _derive_emotion_map_from_model(model_path: str) -> dict[str, dict[str, Any]]:
+    motions, expressions = _read_model_motion_meta(model_path)
+    if not motions:
+        return {}
+
+    derived: dict[str, dict[str, Any]] = {}
+    for emotion, candidates in EMOTION_MOTION_PREFERENCES.items():
+        motion = _pick_first_existing(candidates, motions)
+        if not motion:
+            continue
+        payload: dict[str, Any] = {"mtn": motion, "type": 0}
+        exp = _pick_first_existing(candidates + ["default"], expressions)
+        if exp is not None:
+            payload["exp"] = int(exp)
+        derived[emotion] = payload
+    return derived
 
 
 class CharacterManager:
@@ -193,6 +315,11 @@ class CharacterManager:
                 "prompt_lang": "ja",
                 "prompt_text": "",
             },
+            "qq_profile": {
+                "enabled": False,
+                "nickname": "",
+                "avatar_path": "",
+            },
         }
         self.save()
 
@@ -274,7 +401,14 @@ class CharacterManager:
         emotion_map = costume.get("emotion_map")
         if not isinstance(emotion_map, dict):
             emotion_map = {}
-        return {"emotion_map": deepcopy(emotion_map)}
+        model_path = str(costume.get("path") or "").strip()
+        derived_map = _derive_emotion_map_from_model(model_path)
+        runtime_map = deepcopy(derived_map)
+        runtime_map.update(deepcopy(emotion_map))
+        return {
+            "emotion_map": runtime_map,
+            "derived_emotion_keys": sorted(derived_map.keys()),
+        }
 
     def set_costume_emotion_override(
         self, char_id: str, costume_name: str, emotion: str, cfg: Optional[dict]

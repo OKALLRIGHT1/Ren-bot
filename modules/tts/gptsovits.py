@@ -7,7 +7,7 @@ import wave
 from typing import Callable, Awaitable, Optional, Tuple
 
 from modules.tts.base import BaseTTS
-from modules.live2d import play_sound_file, send_lip_sync
+from modules.live2d import play_sound_file, send_lip_sync, trigger_emotion
 from core.logger import get_logger
 
 logger = get_logger()
@@ -212,34 +212,40 @@ class GPTSoVITSTTS(BaseTTS):
 
     # 纯播放逻辑 (增加延迟清理)
     async def play_audio_file(
-        self, wav_path: str, interrupt_event: asyncio.Event = None
+        self,
+        wav_path: str,
+        interrupt_event: asyncio.Event = None,
+        emotion: str | None = None,
     ):
         if not wav_path or not os.path.exists(wav_path):
             return
 
-        # 启动口型分析任务
-        lip_sync_task = None
+        # 先完成口型分析，再播放音频；否则短句会在口型数据到达前播完。
+        lip_data = None
         if self.enable_lip_sync and self.lip_sync_engine:
             try:
-                lip_sync_task = asyncio.create_task(
-                    self.lip_sync_engine.analyze_audio(wav_path)
-                )
+                lip_data = await self.lip_sync_engine.analyze_audio(wav_path)
+                if lip_data:
+                    lip_data = self.lip_sync_engine.smooth_lip_data(
+                        lip_data, window_size=self.lip_sync_smooth_window
+                    )
+                    lip_data = self.lip_sync_engine.fade_lip_data(lip_data)
+            except Exception:
+                pass
+
+        if emotion:
+            try:
+                await trigger_emotion(emotion)
             except Exception:
                 pass
 
         # 播放指令 (通过 WS 发送给前端)
         await play_sound_file(wav_path)
 
-        # 发送口型数据
-        if lip_sync_task:
+        # 口型数据贴近播放指令发送，减少换模型后的同步丢失。
+        if lip_data:
             try:
-                lip_data = await lip_sync_task
-                if lip_data:
-                    lip_data = self.lip_sync_engine.smooth_lip_data(
-                        lip_data, window_size=self.lip_sync_smooth_window
-                    )
-                    lip_data = self.lip_sync_engine.fade_lip_data(lip_data)
-                    await send_lip_sync(lip_data)
+                await send_lip_sync(lip_data)
             except Exception:
                 pass
 
@@ -258,6 +264,6 @@ class GPTSoVITSTTS(BaseTTS):
     async def say(self, text: str, emotion: str | None = None, **kwargs) -> bool:
         path, dur = await self.synthesize(text, emotion)
         if path:
-            await self.play_audio_file(path, kwargs.get("interrupt_event"))
+            await self.play_audio_file(path, kwargs.get("interrupt_event"), emotion)
             return True
         return False

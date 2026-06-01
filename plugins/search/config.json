@@ -21,7 +21,7 @@
         "web",
         "query"
     ],
-    "type": "delegate",
+    "type": "react",
     "description": "联网搜索插件，优先使用 Grok 代理做提示式联网检索；也兼容 Exa，并可在失败时回退到 DDG。",
     "example_arg": "今天北京天气",
     "timeout_sec": 20,
@@ -36,7 +36,7 @@
             "type": "text",
             "label": "Grok Base URL",
             "description": "OpenAI 兼容根地址，例如 grok2api 的 http://host:port/v1",
-            "default": "http://20.214.141.16:8000/v1"
+            "default": "http://20.214.141.16:8317/v1"
         },
         "grok_api_key": {
             "type": "secret",

@@ -3,13 +3,10 @@
 处理用户输入和AI响应的核心逻辑
 """
 
-import os
 import json
 import re
 import asyncio
-import shutil
 import time
-import tempfile
 import uuid
 import random  # ✅ 需要导入 random
 from datetime import datetime, timedelta, date
@@ -27,7 +24,15 @@ from modules.delegate_task_state import set_task_state as set_delegate_task_stat
 from modules.delegate_session import add_event as delegate_add_event
 from modules.personality_system import get_personality_system
 from modules.reply_effect_tracker import ReplyEffectTracker
+from modules.runtime_settings import load_runtime_settings
 from core.message_source import REMOTE_CHAT_SOURCES, build_output_profile
+from services.chat_support import (
+    diary_utils,
+    gateway_sender,
+    sensor_reply_service,
+    sensor_utils,
+    text_utils,
+)
 
 # 引入 Gatekeeper 配置
 try:
@@ -45,6 +50,7 @@ try:
         CHARACTER_SHARING_ENABLED,
         CHAT_DEBUG_PRINTS,
         NAPCAT_OWNER_USER_IDS,
+        SCREEN_GLOBAL_COOLDOWN,
     )
 except ImportError:
     # 默认值兜底，防止 config 未更新导致报错
@@ -58,8 +64,9 @@ except ImportError:
     CHARACTER_SHARING_ENABLED = False
     CHAT_DEBUG_PRINTS = False
     NAPCAT_OWNER_USER_IDS = []
+    SCREEN_GLOBAL_COOLDOWN = 120
 
-QQ_REMOTE_SOURCES = {"qq_gateway", "napcat_qq"}
+QQ_REMOTE_SOURCES = gateway_sender.QQ_REMOTE_SOURCES
 OWNER_SHARED_SESSION_ID = "owner_shared"
 OWNER_SHARED_LOCAL_SOURCES = {"text_input", "voice"}
 LEGACY_OWNER_PRIVATE_SESSION_IDS = {
@@ -71,6 +78,34 @@ LEGACY_OWNER_PRIVATE_SESSION_IDS = {
 
 class ChatService:
     """聊天服务"""
+
+    NATURAL_REPLY_FALLBACK_HINTS = {
+        "default": {
+            "chat": (
+                "像顺手接话，不要像在做说明。",
+                "先给态度或判断，再补半句，不要先铺垫。",
+                "能用短句就不用完整书面句。",
+            ),
+            "sensor": (
+                "像瞥见后顺口说一句，不要像播报观察结果。",
+                "允许轻微吐槽，但别把看到的东西完整复述一遍。",
+                "多直接对他说话，少用解说口吻。",
+            ),
+        },
+        "五十铃怜": {
+            "chat": (
+                "语气平稳、克制，但不要端成说明文。",
+                "像安静地回一句，不要每次都完整解释。",
+                "少一点照本宣科，多一点顺口接话。",
+            ),
+            "sensor": (
+                "像在旁边轻轻戳他一句，不要像系统提示。",
+                "短一点，冷一点，但别僵硬。",
+                "少复述画面，多留一点临场感。",
+            ),
+        },
+    }
+    MODEL_ERROR_FALLBACK_TEXT = "我这边卡了一下\n等我缓缓"
 
     POSITIVE_FEEDBACK_KEYWORDS = (
         "谢谢",
@@ -267,7 +302,7 @@ class ChatService:
             self.learning = None
 
         self._last_reply_time = 0  # 记录最后一次回复的时间戳
-        self._sensor_min_reply_interval_sec = 45
+        self._sensor_min_reply_interval_sec = max(45, int(SCREEN_GLOBAL_COOLDOWN))
 
         # 情绪标签配置
         self._emo_set = set(
@@ -293,6 +328,51 @@ class ChatService:
             Callable[..., Awaitable[Optional[str]]]
         ] = None
         self.reply_effect_tracker = ReplyEffectTracker()
+        self._qq_private_buffers: Dict[str, Dict[str, Any]] = {}
+        self._last_tool_triggers_by_session: Dict[str, List[str]] = {}
+        self._last_search_topic_by_session: Dict[str, str] = {}
+        self._recent_sensor_replies: List[str] = []
+        self._sensor_event_lock: Optional[asyncio.Lock] = None
+        self.gateway_sender = self._create_gateway_sender()
+        self.sensor_reply_service = self._create_sensor_reply_service()
+
+    def _create_gateway_sender(self) -> gateway_sender.GatewaySender:
+        return gateway_sender.GatewaySender(
+            chat_gateway_getter=lambda: self.chat_gateway,
+            logger=self.logger,
+            prepare_reply_for_output=self._prepare_reply_for_output,
+            strip_emo_tags=self._strip_emo_tags_anywhere,
+            strip_cmd=self._strip_cmd_anywhere,
+            clean_text_for_tts=self._clean_text_for_tts,
+            session_label_fn=self._qq_session_label,
+            voice_enabled_getter=lambda: self.gateway_voice_reply_enabled,
+            voice_probability_getter=lambda: self.gateway_voice_reply_probability,
+            voice_renderer_getter=lambda: self.gateway_voice_renderer,
+            remote_sources=QQ_REMOTE_SOURCES,
+        )
+
+    def _create_sensor_reply_service(
+        self,
+    ) -> sensor_reply_service.SensorReplyService:
+        return sensor_reply_service.SensorReplyService(
+            event_bus=self.event_bus,
+            presenter=self.presenter,
+            logger=self.logger,
+            extract_emo_tag=self._extract_emo_tag,
+            strip_wrapping_quotes=self._strip_wrapping_quotes,
+            polish_natural_reply=self._polish_natural_reply,
+            apply_character_catchphrase=self._apply_character_catchphrase,
+            prepare_reply_for_output=self._prepare_reply_for_output,
+            looks_like_sensor_template_reply=self._looks_like_sensor_template_reply,
+            rescue_sensor_template_reply=self._rescue_sensor_template_reply,
+            remember_sensor_reply=self._remember_sensor_reply,
+            update_active_time=self._update_active_time,
+            infer_reply_emotion_with_llm=self._infer_reply_emotion_with_llm,
+            get_current_live2d_emotion=self._get_current_live2d_emotion,
+            reset_sensor_motion_after=self._reset_sensor_motion_after,
+            add_memory_safe=self._add_memory_safe,
+            last_reply_time_getter=lambda: self._last_reply_time,
+        )
 
     def configure_gateway_voice_reply(
         self,
@@ -309,156 +389,209 @@ class ChatService:
         self.gateway_voice_reply_probability = max(0, min(100, value))
         self.gateway_voice_renderer = renderer
 
-    async def _cleanup_gateway_voice_file(self, path: str, delay_sec: float = 45.0):
-        file_path = str(path or "").strip()
-        if not file_path:
-            return
-        try:
-            await asyncio.sleep(max(0.0, float(delay_sec)))
-        except Exception:
-            pass
-        try:
-            if os.path.exists(file_path):
-                os.remove(file_path)
-        except Exception:
-            pass
-
-    async def _cleanup_gateway_image_file(self, path: str, delay_sec: float = 45.0):
-        file_path = str(path or "").strip()
-        if not file_path:
-            return
-        if not self._is_managed_gateway_temp_file(file_path):
-            return
-        try:
-            await asyncio.sleep(max(0.0, float(delay_sec)))
-        except Exception:
-            pass
-        try:
-            if os.path.exists(file_path):
-                os.remove(file_path)
-        except Exception:
-            pass
-
-    def _is_managed_gateway_temp_file(self, path: str) -> bool:
-        file_path = str(path or "").strip()
-        if not file_path:
+    def _looks_like_upstream_error_reply(self, text: str) -> bool:
+        raw = str(text or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+        if not raw or len(raw) > 420:
             return False
-        try:
-            resolved = os.path.realpath(file_path)
-        except Exception:
-            resolved = os.path.abspath(file_path)
-        try:
-            temp_root = os.path.realpath(tempfile.gettempdir())
-        except Exception:
-            temp_root = tempfile.gettempdir()
-        return resolved.startswith(os.path.join(temp_root, ""))
-
-    def _prepare_gateway_image_transport_path(self, path: str) -> tuple[str, str]:
-        file_path = str(path or "").strip()
-        if not file_path:
-            return "", ""
-        if not os.path.isfile(file_path):
-            return file_path, ""
-        try:
-            file_path.encode("ascii")
-            return file_path, ""
-        except UnicodeEncodeError:
-            pass
-        temp_dir = os.path.join(tempfile.gettempdir(), "live2d_llm_gateway_media")
-        os.makedirs(temp_dir, exist_ok=True)
-        suffix = os.path.splitext(file_path)[1] or ".jpg"
-        staged_path = os.path.join(temp_dir, f"gateway_img_{uuid.uuid4().hex}{suffix}")
-        shutil.copyfile(file_path, staged_path)
-        return staged_path, staged_path
-
-    def _should_use_gateway_voice_reply(self, source: str, text: str) -> bool:
-        if source not in {"qq_gateway", "napcat_qq"}:
-            return False
-        if not self.gateway_voice_reply_enabled:
-            return False
-        if not callable(self.gateway_voice_renderer):
-            return False
-        if self.gateway_voice_reply_probability <= 0:
-            return False
-        clean = self._clean_text_for_tts(
-            self._strip_cmd_anywhere(self._strip_emo_tags_anywhere(text))
+        compact = re.sub(r"\s+", " ", raw).strip().lower()
+        checks = (
+            ("gemini", "no longer available"),
+            ("please switch to", "antigravity"),
+            ("model", "no longer available"),
+            ("model", "not found"),
+            ("invalid model",),
+            ("unsupported model",),
+            ("all models", "failed"),
+            ("所有模型", "失败"),
+            ("系统繁忙", "无法连接"),
         )
-        if len(clean) < 2:
-            return False
-        return random.random() * 100 < self.gateway_voice_reply_probability
+        return any(all(part in compact for part in check) for check in checks)
 
-    def _split_gateway_text_parts(self, text: str) -> List[str]:
+    def _normalize_qq_reply_style(self, text: str) -> str:
         clean = str(text or "").replace("\r\n", "\n").replace("\r", "\n").strip()
         if not clean:
-            return []
-        clean = re.sub(r"\n{3,}", "\n\n", clean)
+            return ""
+        if "```" in clean or re.search(r"https?://|\[[^\]]+\]\([^)]+\)", clean):
+            return clean
+        if self._looks_structured_reply(clean):
+            return clean
 
-        def _is_natural_line(line: str) -> bool:
-            item = str(line or "").strip()
-            if not item:
-                return False
-            if len(item) > 90:
-                return False
-            if re.search(r"https?://|\[[^\]]+\]\([^)]+\)", item):
-                return False
-            if re.match(r"^\s*(?:[-*•>|#]|\d+[.)、])", item):
-                return False
-            return True
+        # QQ 短消息更像聊天，不像书面文本；只处理短自然回复，避免破坏教程/代码/链接。
+        clean = re.sub(r"(?<=[\u4e00-\u9fff])\s*[。．]+\s*(?=[\u4e00-\u9fffA-Za-z0-9])", "\n", clean)
+        lines: List[str] = []
+        for raw_line in clean.split("\n"):
+            line = raw_line.strip()
+            if not line:
+                continue
+            if re.search(r"https?://", line):
+                lines.append(line)
+                continue
+            if re.search(r"[\u4e00-\u9fff]", line):
+                line = re.sub(r"[。．]+$", "", line).rstrip()
+                line = re.sub(r"(?<=[\u4e00-\u9fff])\.+$", "", line).rstrip()
+            lines.append(line)
+        return "\n".join(lines).strip()
 
-        blocks = [block.strip() for block in re.split(r"\n\s*\n", clean) if block.strip()]
-        parts: List[str] = []
-        for block in blocks:
-            lines = [line.strip() for line in block.split("\n") if line.strip()]
-            if 1 < len(lines) <= 5 and all(_is_natural_line(line) for line in lines):
-                parts.extend(lines)
-            else:
-                parts.append(" ".join(lines))
-
-        parts = [re.sub(r"[ \t]{2,}", " ", part).strip() for part in parts if part.strip()]
-        if len(parts) > 5:
-            return [" ".join(parts)]
-        return parts
-
-    async def _send_gateway_text_parts(
+    def _prepare_reply_for_output(
         self,
-        adapter_name: str,
-        session_id: str,
         text: str,
+        ctx: Optional[Dict[str, Any]] = None,
         *,
-        metadata: Optional[Dict[str, Any]] = None,
-        source: str = "",
-        session_label: str = "",
-        log_suffix: str = "text_sent",
-    ) -> bool:
-        parts = self._split_gateway_text_parts(text)
-        if not parts:
-            return True
-        ok = True
-        for idx, part in enumerate(parts):
+        scene: str = "chat",
+    ) -> str:
+        clean = str(text or "").strip()
+        if not clean:
+            return ""
+        if self._looks_like_upstream_error_reply(clean):
+            preview = re.sub(r"\s+", " ", clean)[:180]
             try:
-                result = await self.chat_gateway.send_text(
-                    adapter_name,
-                    session_id,
-                    part,
-                    metadata=metadata,
-                    source=source,
-                )
-                if isinstance(result, dict) and not result.get("ok"):
-                    ok = False
-                    self.logger.warning(f"Gateway text reply failed: {result}")
-                else:
-                    suffix = log_suffix
-                    if len(parts) > 1:
-                        suffix = f"{log_suffix}_{idx + 1}/{len(parts)}"
-                    self.logger.info(
-                        f"[QQ-OUT-OK][{session_label}][{session_id}] {suffix}"
-                    )
-            except Exception as e:
-                ok = False
-                self.logger.error(f"Gateway reply failed: {e}")
-            if idx < len(parts) - 1:
-                await asyncio.sleep(0.35)
-        return ok
+                self.logger.warning(f"Suppress upstream model error reply: {preview}")
+            except Exception:
+                pass
+            if scene == "sensor":
+                return ""
+            clean = self.MODEL_ERROR_FALLBACK_TEXT
+
+        ctx_dict = ctx if isinstance(ctx, dict) else {}
+        source = str(ctx_dict.get("source") or "").strip().lower()
+        if source in QQ_REMOTE_SOURCES:
+            clean = self._normalize_qq_reply_style(clean)
+        return clean.strip()
+
+    def _is_qq_private_bufferable(
+        self, user_text: str, ctx: Optional[Dict[str, Any]]
+    ) -> tuple[bool, str]:
+        if not isinstance(ctx, dict):
+            return False, ""
+        source = str(ctx.get("source") or "").strip().lower()
+        if source not in QQ_REMOTE_SOURCES:
+            return False, ""
+        if bool(ctx.get("codex_mode", False)):
+            return False, ""
+        channel_meta = ctx.get("channel_meta") or {}
+        message_type = str(channel_meta.get("message_type") or "private").strip().lower()
+        session_id = str(channel_meta.get("session_id") or "").strip()
+        if message_type != "private" or not session_id.startswith("private:"):
+            return False, ""
+        if bool(channel_meta.get("has_image")) or bool(channel_meta.get("has_file")):
+            return False, ""
+        clean = str(user_text or "").strip()
+        if not clean:
+            return False, ""
+        if clean.startswith(("/", "！", "!", "#")):
+            return False, ""
+        if len(clean) > 800:
+            return False, ""
+        return True, session_id
+
+    def _qq_private_buffer_delay(self, text: str, pending_count: int) -> float:
+        clean = str(text or "").strip()
+        if pending_count >= 2:
+            return 2.2
+        if len(clean) <= 8:
+            return 3.0
+        if clean.endswith(("?", "？", "!", "！", "。", ".", "…", "~", "～")):
+            return 2.2
+        return 3.4
+
+    async def _maybe_buffer_qq_private_message(
+        self, user_text: str, ctx: Optional[Dict[str, Any]]
+    ) -> Optional[str]:
+        ok, session_id = self._is_qq_private_bufferable(user_text, ctx)
+        if not ok:
+            return str(user_text or "")
+
+        state = self._qq_private_buffers.setdefault(
+            session_id, {"seq": 0, "items": [], "updated_at": 0.0}
+        )
+        state["seq"] = int(state.get("seq") or 0) + 1
+        seq = int(state["seq"])
+        state["updated_at"] = time.time()
+        item = str(user_text or "").strip()
+        items = state.setdefault("items", [])
+        if isinstance(items, list):
+            items.append(item)
+        else:
+            state["items"] = [item]
+            items = state["items"]
+
+        delay = self._qq_private_buffer_delay(item, len(items))
+        try:
+            self.logger.info(
+                f"[QQ-BUFFER][{session_id}] wait={delay:.1f}s seq={seq} count={len(items)}"
+            )
+        except Exception:
+            pass
+        await asyncio.sleep(delay)
+
+        latest = self._qq_private_buffers.get(session_id)
+        if latest is not state or int(state.get("seq") or 0) != seq:
+            return None
+
+        self._qq_private_buffers.pop(session_id, None)
+        final_items = [
+            str(part or "").strip()
+            for part in list(state.get("items") or [])
+            if str(part or "").strip()
+        ]
+        if not final_items:
+            return ""
+        if isinstance(ctx, dict):
+            ctx["qq_buffered_messages"] = final_items
+            ctx["qq_buffered_count"] = len(final_items)
+        if len(final_items) == 1:
+            return final_items[0]
+        return "\n".join(final_items)
+
+    def _build_qq_reply_angle_context(
+        self, user_text: str, ctx: Optional[Dict[str, Any]]
+    ) -> str:
+        if not isinstance(ctx, dict):
+            return ""
+        source = str(ctx.get("source") or "").strip().lower()
+        if source not in QQ_REMOTE_SOURCES:
+            return ""
+        channel_meta = ctx.get("channel_meta") or {}
+        message_type = str(channel_meta.get("message_type") or "private").strip().lower()
+        if message_type != "private":
+            return ""
+
+        raw = str(user_text or "").strip()
+        if not raw:
+            return ""
+        lines = [line.strip() for line in raw.splitlines() if line.strip()]
+        latest = lines[-1] if lines else raw
+        compact = re.sub(r"\s+", " ", raw)
+
+        angle = "日常接话"
+        instruction = "像私聊里顺手回，不要把每句话都当成题目作答"
+        if any(k in latest for k in ("狡猾", "坏", "嘴硬", "笨", "可爱", "怜酱")):
+            angle = "接调侃"
+            instruction = "顺着调侃轻轻嘴硬或反问一下，不要认真辩解"
+        elif any(k in latest for k in ("喜欢", "想你", "陪我", "抱", "亲", "老婆")):
+            angle = "接亲近感"
+            instruction = "保留一点克制和不好意思，别突然讲大道理"
+        elif any(k in latest for k in ("是不是", "你是不是", "对吧", "吗", "?","？")):
+            angle = "直接回应"
+            instruction = "先接住问题本身，能一句回答就别展开成说明文"
+        elif any(k in latest for k in ("为什么", "怎么", "咋", "如何")):
+            angle = "轻解释"
+            instruction = "给一个短原因就停，不要写教程或总结"
+        elif any(k in latest for k in ("难受", "烦", "累", "崩", "不想", "害怕")):
+            angle = "陪伴"
+            instruction = "先站在他这边，用短句接情绪，不要立刻提供方案"
+        elif len(lines) >= 2:
+            angle = "合并连续消息"
+            instruction = "把连续几句当成一个整体，优先接最后一句的情绪和梗，不要逐条回答"
+
+        return (
+            "【本轮 QQ 私聊接话规划】\n"
+            f"- 用户连续消息数：{len(lines) or 1}\n"
+            f"- 接话角度：{angle}\n"
+            f"- 执行方式：{instruction}\n"
+            f"- 用户原话压缩：{compact[:180]}\n"
+            "- 回复要求：像真人私聊，不要编号，不要总结，不要句号收尾。"
+        )
 
     async def _send_gateway_reply(
         self,
@@ -466,311 +599,66 @@ class ChatService:
         ctx: Optional[Dict[str, Any]] = None,
         emotion: Optional[str] = None,
     ):
-        text = str(text or "").strip()
-        if not text or not self.chat_gateway or not isinstance(ctx, dict):
-            return
-        source = str(ctx.get("source") or "").strip().lower()
-        if source not in {"qq_gateway", "napcat_qq"}:
-            return
-        channel_meta = ctx.get("channel_meta") or {}
-        adapter_name = (
-            str(channel_meta.get("adapter") or "napcat_qq").strip() or "napcat_qq"
-        )
-        session_id = str(channel_meta.get("session_id") or "").strip()
-        if not session_id:
-            self.logger.warning("Gateway reply skipped: missing session_id")
-            return
-
-        sender_name = str(
-            channel_meta.get("sender_name") or channel_meta.get("user_id") or ""
-        ).strip()
-        session_label = self._qq_session_label(session_id)
-        preview = text.replace("\r", " ").replace("\n", " ").strip()
-        if len(preview) > 240:
-            preview = preview[:240] + "..."
-        self.logger.info(
-            f"[QQ-OUT][{session_label}][{session_id}][to={sender_name or 'unknown'}] {preview}"
-        )
-
-        user_text = str(ctx.get("user_text") or "")
-        link_request = self._is_link_request(user_text)
-        contains_url = bool(self._extract_first_url(text))
-        skip_voice = link_request or contains_url
-        sent_share = False
-
-        if link_request:
-            url = self._extract_first_url(text) or self._extract_url_from_tool_results(
-                ctx
-            )
-            if url:
-                title = self._build_share_title(text, url)
-                content = self._build_share_content(text, title)
-                try:
-                    share_result = await self.chat_gateway.send_share(
-                        adapter_name,
-                        session_id,
-                        url,
-                        title=title,
-                        content=content,
-                        metadata=channel_meta,
-                        source=source,
-                    )
-                    if isinstance(share_result, dict) and share_result.get("ok"):
-                        sent_share = True
-                except Exception as e:
-                    self.logger.warning(f"Gateway share send failed: {e}")
-
-                if sent_share:
-                    cleaned = self._strip_urls(text)
-                    text = cleaned or "已发送链接卡片。"
-
-        voice_path = ""
-        if (not skip_voice) and self._should_use_gateway_voice_reply(source, text):
-            clean_voice_text = self._clean_text_for_tts(
-                self._strip_cmd_anywhere(self._strip_emo_tags_anywhere(text))
-            )
-            try:
-                voice_path = str(
-                    await self.gateway_voice_renderer(
-                        clean_voice_text,
-                        emotion=emotion,
-                        source=source,
-                        channel_meta=channel_meta,
-                    )
-                    or ""
-                ).strip()
-            except Exception as e:
-                self.logger.warning(f"Gateway voice render failed: {e}")
-                voice_path = ""
-            if voice_path:
-                try:
-                    result = await self.chat_gateway.send_voice(
-                        adapter_name,
-                        session_id,
-                        voice_path,
-                        metadata=channel_meta,
-                        source=source,
-                    )
-                    if self._is_gateway_action_success(result):
-                        await self._send_gateway_text_parts(
-                            adapter_name,
-                            session_id,
-                            text,
-                            metadata=channel_meta,
-                            source=source,
-                            session_label=session_label,
-                            log_suffix="voice_sent_with_text",
-                        )
-                        return
-                    self.logger.warning(
-                        f"Gateway voice send fallback to text: {result}"
-                    )
-                except Exception as e:
-                    self.logger.warning(
-                        f"Gateway voice send failed, fallback to text: {e}"
-                    )
-                finally:
-                    asyncio.create_task(self._cleanup_gateway_voice_file(voice_path))
-        await self._send_gateway_text_parts(
-            adapter_name,
-            session_id,
-            text,
-            metadata=channel_meta,
-            source=source,
-            session_label=session_label,
-            log_suffix="text_sent",
-        )
+        await self.gateway_sender.send_reply(text, ctx, emotion=emotion)
 
     async def _send_gateway_image_reply(
         self, image_path: str, ctx: Optional[Dict[str, Any]] = None, caption: str = ""
     ) -> bool:
-        path_text = str(image_path or "").strip()
-        if not path_text or not self.chat_gateway or not isinstance(ctx, dict):
-            return False
-        source = str(ctx.get("source") or "").strip().lower()
-        if source not in {"qq_gateway", "napcat_qq"}:
-            return False
-        channel_meta = ctx.get("channel_meta") or {}
-        adapter_name = (
-            str(channel_meta.get("adapter") or "napcat_qq").strip() or "napcat_qq"
-        )
-        session_id = str(channel_meta.get("session_id") or "").strip()
-        if not session_id:
-            self.logger.warning("Gateway image reply skipped: missing session_id")
-            return False
-        sender_name = str(
-            channel_meta.get("sender_name") or channel_meta.get("user_id") or ""
-        ).strip()
-        session_label = self._qq_session_label(session_id)
-        caption_preview = (
-            str(caption or "").replace("\r", " ").replace("\n", " ").strip()
-        )
-        if len(caption_preview) > 160:
-            caption_preview = caption_preview[:160] + "..."
-        self.logger.info(
-            f"[QQ-OUT-IMAGE][{session_label}][{session_id}][to={sender_name or 'unknown'}] path={path_text} caption={caption_preview}"
-        )
-        transport_path = path_text
-        staged_path = ""
+        return await self.gateway_sender.send_image_reply(image_path, ctx, caption)
+
+    def _get_meme_pack_plugin(self):
+        manager = getattr(self, "plugin_manager", None)
+        if manager is None:
+            return None
         try:
-            transport_path, staged_path = self._prepare_gateway_image_transport_path(
-                path_text
+            if hasattr(manager, "is_plugin_enabled") and not manager.is_plugin_enabled(
+                "meme_pack"
+            ):
+                return None
+            plugin = getattr(manager, "plugins", {}).get("meme_pack")
+        except Exception:
+            return None
+        if plugin is None or not hasattr(plugin, "maybe_send_auto_meme"):
+            return None
+        return plugin
+
+    async def _maybe_send_auto_meme_reply(
+        self,
+        *,
+        user_text: str,
+        reply_text: str,
+        emotion: str,
+        ctx: Optional[Dict[str, Any]],
+    ) -> bool:
+        plugin = self._get_meme_pack_plugin()
+        if plugin is None:
+            return False
+        try:
+            return bool(
+                await plugin.maybe_send_auto_meme(
+                    chat_service=self,
+                    user_text=user_text,
+                    reply_text=reply_text,
+                    emotion=emotion,
+                    ctx=ctx,
+                )
             )
         except Exception as exc:
-            self.logger.warning(
-                f"Gateway image staging failed, fallback to original path: {exc}"
-            )
-            transport_path = path_text
-            staged_path = ""
-        if staged_path:
-            self.logger.info(
-                f"[QQ-OUT-IMAGE-STAGED][{session_label}][{session_id}] transport_path={transport_path}"
-            )
-        try:
-            result = await self.chat_gateway.send_image(
-                adapter_name,
-                session_id,
-                transport_path,
-                caption=caption,
-                metadata=channel_meta,
-                source=source,
-            )
-            if self._is_gateway_action_success(result):
-                self.logger.info(
-                    f"[QQ-OUT-IMAGE-OK][{session_label}][{session_id}] image_sent"
-                )
-                return True
-            self.logger.warning(f"Gateway image reply failed: {result}")
+            try:
+                self.logger.warning(f"Meme auto send failed: {exc}")
+            except Exception:
+                pass
             return False
-        except Exception as e:
-            self.logger.error(f"Gateway image reply failed: {e}")
-            return False
-        finally:
-            if staged_path:
-                asyncio.create_task(self._cleanup_gateway_image_file(staged_path))
 
     async def _send_gateway_file_reply(
         self, file_path: str, ctx: Optional[Dict[str, Any]] = None, file_name: str = ""
     ) -> bool:
-        path_text = str(file_path or "").strip()
-        if not path_text or not self.chat_gateway or not isinstance(ctx, dict):
-            return False
-        source = str(ctx.get("source") or "").strip().lower()
-        if source not in {"qq_gateway", "napcat_qq"}:
-            return False
-        channel_meta = ctx.get("channel_meta") or {}
-        adapter_name = (
-            str(channel_meta.get("adapter") or "napcat_qq").strip() or "napcat_qq"
-        )
-        session_id = str(channel_meta.get("session_id") or "").strip()
-        if not session_id:
-            self.logger.warning("Gateway file reply skipped: missing session_id")
-            return False
-        sender_name = str(
-            channel_meta.get("sender_name") or channel_meta.get("user_id") or ""
-        ).strip()
-        session_label = self._qq_session_label(session_id)
-        self.logger.info(
-            f"[QQ-OUT-FILE][{session_label}][{session_id}][to={sender_name or 'unknown'}] file={file_name or path_text}"
-        )
-        try:
-            result = await self.chat_gateway.send_file(
-                adapter_name,
-                session_id,
-                path_text,
-                name=file_name,
-                metadata=channel_meta,
-                source=source,
-            )
-            if self._is_gateway_action_success(result):
-                self.logger.info(
-                    f"[QQ-OUT-FILE-OK][{session_label}][{session_id}] file_sent"
-                )
-                return True
-            self.logger.warning(f"Gateway file reply failed: {result}")
-            return False
-        except Exception as e:
-            self.logger.error(f"Gateway file reply failed: {e}")
-            return False
+        return await self.gateway_sender.send_file_reply(file_path, ctx, file_name)
 
     async def _send_gateway_voice_reply(
         self, voice_path: str, ctx: Optional[Dict[str, Any]] = None
     ) -> bool:
-        path_text = str(voice_path or "").strip()
-        if not path_text or not self.chat_gateway or not isinstance(ctx, dict):
-            return False
-        source = str(ctx.get("source") or "").strip().lower()
-        if source not in {"qq_gateway", "napcat_qq"}:
-            return False
-        channel_meta = ctx.get("channel_meta") or {}
-        adapter_name = (
-            str(channel_meta.get("adapter") or "napcat_qq").strip() or "napcat_qq"
-        )
-        session_id = str(channel_meta.get("session_id") or "").strip()
-        if not session_id:
-            self.logger.warning("Gateway voice reply skipped: missing session_id")
-            return False
-        sender_name = str(
-            channel_meta.get("sender_name") or channel_meta.get("user_id") or ""
-        ).strip()
-        session_label = self._qq_session_label(session_id)
-        self.logger.info(
-            f"[QQ-OUT-VOICE][{session_label}][{session_id}][to={sender_name or 'unknown'}] voice={path_text}"
-        )
-        try:
-            result = await self.chat_gateway.send_voice(
-                adapter_name,
-                session_id,
-                path_text,
-                metadata=channel_meta,
-                source=source,
-            )
-            if self._is_gateway_action_success(result):
-                self.logger.info(
-                    f"[QQ-OUT-VOICE-OK][{session_label}][{session_id}] voice_sent"
-                )
-                return True
-            self.logger.warning(f"Gateway voice reply failed: {result}")
-            return False
-        except Exception as e:
-            self.logger.error(f"Gateway voice reply failed: {e}")
-            return False
-
-    def _is_gateway_action_success(self, result: Any) -> bool:
-        if not isinstance(result, dict):
-            return False
-        if bool(result.get("ok")):
-            return True
-
-        response = result.get("response")
-        if isinstance(response, dict):
-            status = str(response.get("status") or "").strip().lower()
-            if status in {"ok", "success"}:
-                return True
-
-            try:
-                retcode = int(response.get("retcode", 0) or 0)
-            except Exception:
-                retcode = None
-            if retcode == 0:
-                return True
-
-            data = response.get("data")
-            if data not in (None, "", [], {}):
-                return True
-
-            if response.get("message_id") not in (None, "", 0, "0"):
-                return True
-
-        if str(result.get("transport") or "").strip().lower() == "http":
-            status_code = result.get("status")
-            try:
-                status_num = int(status_code)
-            except Exception:
-                status_num = None
-            if status_num is not None and 200 <= status_num < 300:
-                return True
-        return False
+        return await self.gateway_sender.send_voice_reply(voice_path, ctx)
 
     async def _emit_idle_status(
         self, output_profile: Optional[Dict[str, Any]], reason: str
@@ -782,6 +670,35 @@ class ChatService:
             await self.event_bus.emit("state.changed", state="idle", reason=reason)
         else:
             await self.event_bus.emit("ui.status", text="Idle")
+
+    def _presenter_output_controls_idle(
+        self,
+        output_profile: Optional[Dict[str, Any]],
+        *,
+        had_presenter_output: bool,
+    ) -> bool:
+        if not had_presenter_output:
+            return False
+        profile = output_profile if isinstance(output_profile, dict) else {}
+        return bool(profile.get("speak", True)) or bool(
+            profile.get("show_bubble", True)
+        )
+
+    async def _emit_idle_status_when_safe(
+        self,
+        output_profile: Optional[Dict[str, Any]],
+        *,
+        reason: str,
+        had_presenter_output: bool,
+    ) -> None:
+        if self._presenter_output_controls_idle(
+            output_profile, had_presenter_output=had_presenter_output
+        ):
+            self._dbg(
+                f"跳过即时 idle ({reason})，等待 presenter/TTS/气泡 生命周期收尾"
+            )
+            return
+        await self._emit_idle_status(output_profile, reason=reason)
 
     def _dbg(self, message: str):
         if self.debug_enabled:
@@ -830,12 +747,7 @@ class ChatService:
         return source in QQ_REMOTE_SOURCES
 
     def _qq_session_label(self, session_id: str) -> str:
-        text = str(session_id or "").strip().lower()
-        if text.startswith("group:"):
-            return "QQ-GROUP"
-        if text.startswith("private:"):
-            return "QQ-PRIVATE"
-        return "QQ"
+        return gateway_sender.qq_session_label(session_id)
 
     def _reply_effect_identity(self, ctx: Optional[Dict[str, Any]]) -> tuple[str, str]:
         if not isinstance(ctx, dict):
@@ -849,6 +761,255 @@ class ChatService:
             source = str(ctx.get("source") or "local").strip() or "local"
             session_id = f"local:{source}"
         return session_id, user_id
+
+    def _conversation_session_key(self, ctx: Optional[Dict[str, Any]]) -> str:
+        session_id, _user_id = self._reply_effect_identity(ctx)
+        return str(session_id or "").strip()
+
+    def _strip_search_followup_fillers(self, text: str) -> str:
+        raw = str(text or "").strip().lower()
+        if not raw:
+            return ""
+        fillers = [
+            "你",
+            "她",
+            "帮我",
+            "帮忙",
+            "麻烦",
+            "先",
+            "再",
+            "一下",
+            "一查",
+            "查一下",
+            "查一查",
+            "查查",
+            "搜一下",
+            "搜一搜",
+            "搜搜",
+            "搜索一下",
+            "查",
+            "搜",
+            "搜索",
+            "联网",
+            "上网",
+            "看看",
+            "给我",
+            "回答我",
+            "回复我",
+            "告诉我",
+            "再回答",
+            "再回复",
+            "再说",
+            "然后回答",
+            "然后告诉我",
+            "之后回答",
+            "后再回答",
+            "好吗",
+            "行吗",
+            "吧",
+        ]
+        cleaned = raw
+        for token in fillers:
+            cleaned = cleaned.replace(token, " ")
+        cleaned = re.sub(r"[\s，。,！!？?：:;；、】【\"'“”‘’()（）\-]+", "", cleaned)
+        return cleaned.strip()
+
+    def _is_generic_search_followup_request(self, text: str) -> bool:
+        raw = str(text or "").strip().lower()
+        if not raw:
+            return False
+        wants_search = any(
+            token in raw
+            for token in ("查", "搜", "搜索", "联网", "上网", "百度", "google", "bing")
+        )
+        if not wants_search:
+            return False
+        if any(token in raw for token in ("http://", "https://", "萌百", "萌娘百科")):
+            return False
+        if any(token in raw for token in ("怎么写", "代码", "文件", ".py", ".md", "\\", "/")):
+            return False
+        has_context_ref = any(
+            token in raw
+            for token in ("上面", "上文", "刚才", "刚刚", "前面", "那个", "这个", "之前", "同上")
+        )
+        has_reply_followup = any(
+            token in raw
+            for token in ("再回答", "再回复", "回答我", "回复我", "告诉我", "然后回答", "然后告诉我")
+        )
+        if not has_context_ref and not has_reply_followup:
+            return False
+        residual = self._strip_search_followup_fillers(raw)
+        if len(residual) >= 8:
+            return False
+        return True
+
+    def _is_search_topic_candidate(self, text: str) -> bool:
+        raw = str(text or "").strip()
+        if not raw or len(raw) < 4:
+            return False
+        lower = raw.lower()
+        if self._is_generic_search_followup_request(raw):
+            return False
+        if raw.startswith(("/", "#", "!", "！")):
+            return False
+        if any(token in lower for token in ("[cmd:", "workspace_ops", "apply_change")):
+            return False
+        if self._looks_structured_reply(raw):
+            return False
+        return True
+
+    def _remember_search_topic(self, text: str, ctx: Optional[Dict[str, Any]]) -> None:
+        if not self._is_search_topic_candidate(text):
+            return
+        raw = str(text or "").strip()
+        if not (
+            self._is_searchworthy_question(raw)
+            or any(token in raw for token in ("查", "搜", "搜索", "联网", "上网", "萌百", "链接", "网址"))
+        ):
+            return
+        session_key = self._conversation_session_key(ctx)
+        if not session_key:
+            return
+        self._last_search_topic_by_session[session_key] = raw
+
+    def _load_recent_user_topic_from_store(
+        self, ctx: Optional[Dict[str, Any]], current_text: str = ""
+    ) -> str:
+        store = self._get_memory_store()
+        if store is None or not hasattr(store, "list_transcript"):
+            return ""
+        session_key = self._conversation_session_key(ctx)
+        session_scope = "specific" if session_key else "all"
+        try:
+            rows = store.list_transcript(
+                role="user",
+                limit=12,
+                offset=0,
+                session_id=session_key or None,
+                session_scope=session_scope,
+            )
+        except Exception:
+            return ""
+        current_clean = str(current_text or "").strip()
+        for row in rows:
+            content = str((row or {}).get("content") or "").strip()
+            if not content or content == current_clean:
+                continue
+            if not self._is_search_topic_candidate(content):
+                continue
+            return content
+        return ""
+
+    def _resolve_followup_search_query(
+        self, user_text: str, ctx: Optional[Dict[str, Any]]
+    ) -> str:
+        raw = str(user_text or "").strip()
+        if not self._is_generic_search_followup_request(raw):
+            return ""
+        session_key = self._conversation_session_key(ctx)
+        if session_key:
+            remembered = str(self._last_search_topic_by_session.get(session_key) or "").strip()
+            if remembered and remembered != raw:
+                return remembered
+        stored = self._load_recent_user_topic_from_store(ctx, current_text=raw)
+        if stored:
+            return stored
+        brain = getattr(self, "brain", None)
+        memory = getattr(brain, "short_term_memory", None)
+        if isinstance(memory, list):
+            for item in reversed(memory[-12:]):
+                if not isinstance(item, dict):
+                    continue
+                if str(item.get("role") or "").strip().lower() != "user":
+                    continue
+                content = str(item.get("content") or "").strip()
+                if not content or content == raw:
+                    continue
+                if self._is_search_topic_candidate(content):
+                    return content
+        return ""
+
+    def _is_searchworthy_question(self, text: str) -> bool:
+        raw = str(text or "").strip()
+        if not raw or len(raw) < 4:
+            return False
+        lower = raw.lower()
+        if any(token in lower for token in ("http://", "https://", ".py", ".md", "workspace", "代码", "文件")):
+            return False
+        if any(
+            token in raw
+            for token in (
+                "最新",
+                "今天",
+                "实时",
+                "新闻",
+                "价格",
+                "行情",
+                "股价",
+                "汇率",
+                "天气",
+                "日期",
+                "时间",
+                "是什么",
+                "是谁",
+                "知不知道",
+                "听说过",
+                "了解",
+                "为什么",
+                "怎么",
+                "如何",
+                "多少",
+                "有没有",
+                "哪部",
+                "哪个",
+                "什么梗",
+            )
+        ):
+            return True
+        if raw.endswith(("?", "？", "吗", "么", "呢")):
+            return True
+        return False
+
+    def _looks_like_uncertain_answer(self, text: str) -> bool:
+        raw = str(text or "").strip()
+        if not raw:
+            return False
+        hints = (
+            "我不太确定",
+            "我不确定",
+            "我不知道",
+            "不太清楚",
+            "不清楚",
+            "记不清",
+            "没法确定",
+            "无法确认",
+            "我不太懂",
+            "可能是",
+            "大概是",
+            "好像是",
+            "印象里",
+            "我查不到",
+        )
+        return any(hint in raw for hint in hints)
+
+    async def _run_search_delegate_query(
+        self, *, query: str, ctx: Dict[str, Any]
+    ) -> tuple[bool, str, list[str], list[str]]:
+        clean_query = str(query or "").strip()
+        if not clean_query:
+            return False, "", [], []
+        delegate_ctx = dict(ctx or {})
+        delegate_ctx["delegate_mode"] = True
+        delegate_ctx["allow_read"] = False
+        delegate_ctx["allow_write"] = False
+        delegate_ctx["allow_exec"] = False
+        command = f"[CMD: search | {clean_query}]"
+        return await self.plugin_manager.execute_commands(
+            command,
+            delegate_ctx,
+            allow_tools=True,
+            allowed_types={"delegate"},
+        )
 
     def _observe_reply_effect(self, user_text: str, ctx: Optional[Dict[str, Any]]) -> None:
         try:
@@ -914,7 +1075,7 @@ class ChatService:
     def _existing_transcript_keys_for_day(self, date_str: str) -> set[tuple]:
         keys: set[tuple] = set()
         for row in self._load_day_transcript_rows(date_str):
-            meta = self._row_meta(row)
+            meta = diary_utils.row_meta(row)
             session_id = str(row.get("session_id") or "").strip()
             role = str(row.get("role") or "").strip().lower()
             content = str(row.get("content") or "").strip()
@@ -1007,17 +1168,6 @@ class ChatService:
                 f"NapCat history backfill imported {imported} transcript rows for {date_str}"
             )
         return imported
-
-    def _is_owner_shared_context(self, ctx: Optional[Dict[str, Any]]) -> bool:
-        if not isinstance(ctx, dict):
-            return False
-        source = str(ctx.get("source") or "").strip().lower()
-        if source in OWNER_SHARED_LOCAL_SOURCES:
-            return True
-        if source not in QQ_REMOTE_SOURCES:
-            return False
-        channel_meta = ctx.get("channel_meta") or {}
-        return bool(channel_meta.get("is_owner"))
 
     @property
     def app(self):
@@ -1222,6 +1372,7 @@ class ChatService:
                     "- 这轮默认按即时聊天来回，优先 1 到 2 句短句。",
                     "- 不要自发写成长解释、分点说明、总结陈词或安慰小作文。",
                     "- 能一句说完就一句说完；不要为了显得体贴而铺很多层。",
+                    "- 不要每句都写成下结论；合适时可以像平常聊天那样用疑问句或轻反问。",
                     "- 记忆只影响你的态度和语气，不要主动复述用户以前说过的原句。",
                 ]
             )
@@ -1230,10 +1381,13 @@ class ChatService:
                 [
                     "- 当前渠道是 QQ，回复要像真人发消息，不像客服。",
                     "- 尽量控制在 8 到 35 字一小句；没有必要不要连续发大段。",
+                    "- 短句不要用句号收尾；问号、感叹号可以保留。",
+                    "- 可以偶尔用问句接话，不要每条都像正式答复。",
+                    "- 不要把模型、接口、系统错误原文发给对方；卡住就自然地说你这边卡了一下。",
                 ]
             )
         elif source in {"text_input", "desktop", "voice"}:
-            parts.append("- 当前是日常对话场景，优先自然、短促、有人味。")
+            parts.append("- 当前是日常对话场景，优先自然、短促、有人味；可以适当用疑问句。")
         effect_hint = self._build_reply_effect_style_hint(ctx)
         if effect_hint:
             parts.append(effect_hint)
@@ -1264,6 +1418,435 @@ class ChatService:
             return "- 用户经常会继续追问，先答核心，不要一次把所有可能性都展开。"
         return ""
 
+    def _get_active_character_profile(self) -> Dict[str, Any]:
+        try:
+            from modules.character_manager import character_manager
+
+            profile = character_manager.get_active_character() or {}
+        except Exception:
+            profile = {}
+        return profile if isinstance(profile, dict) else {}
+
+    def _build_recent_chat_tone_context(self, max_items: int = 4) -> str:
+        memory = getattr(self.brain, "short_term_memory", None) or []
+        if not isinstance(memory, list):
+            return ""
+        lines: List[str] = []
+        for item in memory[-max_items:]:
+            if not isinstance(item, dict):
+                continue
+            role = str(item.get("role") or "").strip().lower()
+            if role not in {"user", "assistant"}:
+                continue
+            content = self._clean_text_for_tts(str(item.get("content") or ""))
+            content = self._strip_internal_tags(
+                self._strip_cmd_anywhere(self._strip_emo_tags_anywhere(content))
+            )
+            content = self._strip_model_catchphrase(content).strip()
+            if not content:
+                continue
+            content = re.sub(r"\s+", " ", content)
+            if len(content) > 80:
+                content = content[:77].rstrip() + "..."
+            speaker = "用户" if role == "user" else "你"
+            lines.append(f"- {speaker}: {content}")
+        return "\n".join(lines)
+
+    def _format_recent_sensor_reply_block(self, max_items: int = 4) -> str:
+        replies = getattr(self, "_recent_sensor_replies", []) or []
+        lines: List[str] = []
+        for item in replies[-max_items:]:
+            clean = self._clean_text_for_tts(str(item or "")).strip()
+            if not clean:
+                continue
+            clean = re.sub(r"\s+", " ", clean)
+            if len(clean) > 50:
+                clean = clean[:47].rstrip() + "..."
+            lines.append(f"- {clean}")
+        if not lines:
+            return ""
+        return "【最近几次屏幕回应，避免复读】\n" + "\n".join(lines)
+
+    def _build_sensor_interaction_context(self) -> str:
+        """给屏幕回应补最近互动近因，避免她孤立地看截图。"""
+        recent_chat = self._build_recent_chat_tone_context(max_items=6)
+        transcript = self._build_recent_transcript_context(limit=10, max_chars=700)
+
+        sections: List[str] = []
+        if recent_chat:
+            sections.append("最近即时对话：\n" + recent_chat)
+        if transcript and transcript != recent_chat:
+            sections.append("最近聊天记录：\n" + transcript)
+        if not sections:
+            return ""
+
+        return (
+            "【最近互动上下文】\n"
+            + "\n".join(sections)
+            + "\n- 这些是近因，只用来理解 Master 为什么在看当前窗口；不要逐条复述。\n"
+            + "- 如果上下文已经说明他在做什么，就顺着这个前提说，不要再像第一次看到一样发问。"
+        )
+
+    def _remember_sensor_reply(self, text: str, max_items: int = 8) -> None:
+        clean = self._clean_text_for_tts(str(text or "")).strip()
+        if not clean:
+            return
+        replies = list(getattr(self, "_recent_sensor_replies", []) or [])
+        if clean in replies:
+            replies.remove(clean)
+        replies.append(clean)
+        self._recent_sensor_replies = replies[-max_items:]
+
+    def _format_sensor_seconds(self, seconds: float | int | None) -> str:
+        return sensor_utils.format_sensor_seconds(seconds)
+
+    def _build_sensor_usage_context(
+        self,
+        *,
+        app_name: str,
+        category: str,
+        count: int,
+        reason: str,
+        app_duration_sec: float | int | None = None,
+        current_stay_sec: float | int | None = None,
+    ) -> str:
+        return sensor_utils.build_sensor_usage_context(
+            app_name=app_name,
+            category=category,
+            count=count,
+            reason=reason,
+            app_duration_sec=app_duration_sec,
+            current_stay_sec=current_stay_sec,
+        )
+
+    def _build_sensor_spontaneous_style_block(
+        self, *, title: str, category: str, count: int, is_vision: bool
+    ) -> str:
+        return sensor_utils.build_sensor_spontaneous_style_block(
+            title=title, category=category, count=count, is_vision=is_vision
+        )
+
+    def _load_expression_library_runtime(self) -> Dict[str, Any]:
+        runtime: Dict[str, Any] = {}
+        app = self.app
+        if app is not None:
+            try:
+                loader = getattr(app, "_load_runtime_settings", None)
+                normalizer = getattr(app, "_normalize_external_runtime_settings", None)
+                if callable(loader) and callable(normalizer):
+                    runtime = normalizer(loader())
+                elif callable(loader):
+                    runtime = loader() or {}
+            except Exception:
+                runtime = {}
+        if not isinstance(runtime, dict) or not runtime:
+            try:
+                runtime = load_runtime_settings()
+            except Exception:
+                runtime = {}
+        try:
+            max_items = int(runtime.get("expression_library_max_prompt_items", 4) or 4)
+        except Exception:
+            max_items = 4
+        return {
+            "expression_library_enabled": bool(
+                runtime.get("expression_library_enabled", True)
+            ),
+            "expression_library_use_in_chat": bool(
+                runtime.get("expression_library_use_in_chat", True)
+            ),
+            "expression_library_use_in_screen": bool(
+                runtime.get("expression_library_use_in_screen", True)
+            ),
+            "expression_library_max_prompt_items": max(1, min(8, max_items)),
+        }
+
+    def _format_expression_pattern_hint(self, pattern: Dict[str, Any]) -> str:
+        situation = str(pattern.get("situation") or "").strip()
+        style = str(pattern.get("style") or "").strip()
+        raw_examples = (
+            pattern.get("content_list")
+            if isinstance(pattern.get("content_list"), list)
+            else []
+        )
+        examples = [str(item).strip() for item in raw_examples if str(item).strip()]
+        example = str(pattern.get("example") or "").strip()
+        if example and example not in examples:
+            examples.insert(0, example)
+        example_preview = " / ".join(examples[:2]).strip()
+        if situation and style and example_preview:
+            return f"{situation}时，{style}；示例可像“{example_preview}”。"
+        if situation and style:
+            return f"{situation}时，{style}。"
+        if situation and example_preview:
+            return f"{situation}时，可以像“{example_preview}”这样短一点。"
+        if style and example_preview:
+            return f"{style}；示例可像“{example_preview}”。"
+        return style or example_preview
+
+    def _load_expression_library_hints(self, scene: str = "chat") -> List[str]:
+        runtime = self._load_expression_library_runtime()
+        if not runtime.get("expression_library_enabled", True):
+            return []
+        if scene == "sensor" and not runtime.get("expression_library_use_in_screen", True):
+            return []
+        if scene != "sensor" and not runtime.get("expression_library_use_in_chat", True):
+            return []
+        store = self._get_memory_store()
+        if store is None or not hasattr(store, "select_expression_patterns_for_prompt"):
+            return []
+        profile = self._get_active_character_profile()
+        character_name = str(profile.get("name") or "").strip()
+        try:
+            rows = store.select_expression_patterns_for_prompt(
+                character_name=character_name,
+                scene=scene,
+                limit=runtime.get("expression_library_max_prompt_items", 4),
+            )
+        except Exception:
+            return []
+        hints: List[str] = []
+        pattern_ids: List[str] = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            hint = self._format_expression_pattern_hint(row).strip()
+            if not hint or hint in hints:
+                continue
+            hints.append(hint)
+            row_id = str(row.get("id") or "").strip()
+            if row_id:
+                pattern_ids.append(row_id)
+        if pattern_ids and hasattr(store, "bump_expression_pattern_use"):
+            try:
+                store.bump_expression_pattern_use(pattern_ids)
+            except Exception:
+                pass
+        return hints
+
+    def _build_natural_habits_block(self, scene: str = "chat") -> str:
+        profile = self._get_active_character_profile()
+        name = str(profile.get("name") or "").strip()
+        custom_habits = profile.get("expression_habits")
+        habits: List[str] = []
+        if isinstance(custom_habits, dict):
+            scene_items = custom_habits.get(scene)
+            if isinstance(scene_items, list):
+                habits.extend(str(item).strip() for item in scene_items if str(item).strip())
+        habits.extend(self._load_expression_library_hints(scene))
+        fallback_pack = self.NATURAL_REPLY_FALLBACK_HINTS.get(
+            name, self.NATURAL_REPLY_FALLBACK_HINTS["default"]
+        )
+        fallback_items = fallback_pack.get(
+            scene, self.NATURAL_REPLY_FALLBACK_HINTS["default"].get(scene, ())
+        )
+        habits.extend(
+            str(item).strip() for item in fallback_items if str(item).strip()
+        )
+        deduped: List[str] = []
+        for item in habits:
+            if item and item not in deduped:
+                deduped.append(item)
+        if not deduped:
+            return ""
+        runtime = self._load_expression_library_runtime()
+        max_items = max(4, int(runtime.get("expression_library_max_prompt_items", 4)))
+        return "【表达习惯参考】\n" + "\n".join(f"- {item}" for item in deduped[:max_items])
+
+    def _looks_structured_reply(self, text: str) -> bool:
+        raw = self._clean_text_for_tts(str(text or ""))
+        if not raw:
+            return False
+        lines = [line.strip() for line in raw.split("\n") if line.strip()]
+        if len(lines) >= 3:
+            return True
+        if re.search(r"(^|\n)\s*(\d+\.\s|[-*]\s)", raw):
+            return True
+        if raw.count("：") + raw.count(":") >= 3:
+            return True
+        return False
+
+    def _needs_natural_polish(self, text: str, scene: str = "chat") -> bool:
+        raw = self._clean_text_for_tts(str(text or ""))
+        raw = self._strip_model_catchphrase(raw).strip()
+        if not raw:
+            return False
+        formal_markers = (
+            "用户",
+            "当前",
+            "根据",
+            "首先",
+            "其次",
+            "另外",
+            "总之",
+            "可以考虑",
+            "如果你需要",
+            "建议你",
+            "建议先",
+        )
+        if scene == "sensor":
+            formal_markers = formal_markers + (
+                "屏幕",
+                "画面",
+                "窗口",
+                "正在",
+                "我看到",
+                "看起来",
+            )
+            if len(raw) > 18:
+                return True
+        else:
+            if len(raw) > 36:
+                return True
+        if raw.count("，") >= 2:
+            return True
+        return any(marker in raw for marker in formal_markers)
+
+    def _should_use_natural_reply_layer(
+        self,
+        *,
+        user_text: str,
+        draft_text: str,
+        ctx: Optional[Dict[str, Any]] = None,
+        scene: str = "chat",
+    ) -> bool:
+        clean = self._clean_text_for_tts(str(draft_text or ""))
+        clean = self._strip_internal_tags(
+            self._strip_cmd_anywhere(self._strip_emo_tags_anywhere(clean))
+        )
+        clean = self._strip_model_catchphrase(clean).strip()
+        if len(clean) < 2:
+            return False
+        if "```" in clean or self._contains_cmd(clean):
+            return False
+        if self._looks_structured_reply(clean):
+            return False
+        if scene == "sensor":
+            return True
+        source = str((ctx or {}).get("source") or "").strip().lower()
+        if source not in {"text_input", "voice", "desktop", "qq_gateway", "napcat_qq"}:
+            return False
+        if self._wants_detailed_answer(user_text):
+            return False
+        if source in QQ_REMOTE_SOURCES and ("。" in clean or "．" in clean or len(clean) > 18):
+            return True
+        return self._needs_natural_polish(clean, scene=scene)
+
+    async def _polish_natural_reply(
+        self,
+        *,
+        user_text: str,
+        draft_text: str,
+        ctx: Optional[Dict[str, Any]] = None,
+        scene: str = "chat",
+    ) -> str:
+        clean = self._clean_text_for_tts(str(draft_text or ""))
+        clean = self._strip_wrapping_quotes(
+            self._strip_internal_tags(
+                self._strip_cmd_anywhere(self._strip_emo_tags_anywhere(clean))
+            )
+        )
+        clean = self._strip_model_catchphrase(clean).strip()
+        if not clean:
+            return ""
+        if self._looks_like_upstream_error_reply(clean):
+            return clean
+        if not self._should_use_natural_reply_layer(
+            user_text=user_text,
+            draft_text=clean,
+            ctx=ctx,
+            scene=scene,
+        ):
+            return clean
+
+        profile = self._get_active_character_profile()
+        char_name = str(profile.get("name") or "当前角色").strip()
+        char_desc = str(profile.get("description") or "").strip()
+        recent_context = self._build_recent_chat_tone_context()
+        recent_sensor_context = (
+            self._format_recent_sensor_reply_block() if scene == "sensor" else ""
+        )
+        habits_block = self._build_natural_habits_block(scene)
+        source = str((ctx or {}).get("source") or "").strip().lower()
+        if scene == "sensor":
+            scene_prompt = (
+                "这是一次屏幕感知后的临场回应。像五十铃怜在旁边安静瞥了一眼后低声接一句，"
+                "可以是关心、提醒、陪伴、疑问，也可以是一点点吐槽；不要把画面再解释一遍。默认 1 句，最多 36 个字。"
+            )
+        elif source in QQ_REMOTE_SOURCES:
+            scene_prompt = (
+                "这是一次 QQ 聊天。改得像真人随手回消息，默认 1 到 2 条短句，"
+                "不要用句号收尾，不要解释太满；合适时可以用问句接话。"
+            )
+        else:
+            scene_prompt = (
+                "这是一次普通日常聊天。把它改得更像真人即时回复，"
+                "默认 1 到 2 句短句，尽量不要超过 40 个字；不要全写成陈述句。"
+            )
+
+        system_prompt = (
+            f"你现在只负责改写一句已经生成好的回复，让它更像角色「{char_name}」在即时聊天里顺口说出来的话。"
+            f"{' 角色气质：' + char_desc if char_desc else ''}\n"
+            "注意：\n"
+            "1) 不新增事实，不改变结论，不新增承诺；\n"
+            "2) 可以删减、换词、重组语序，但不要扩写；\n"
+            "3) 不要写成说明文、总结、客服话术；\n"
+            "4) 不要出现“用户/根据/当前情况/首先/其次/另外/总之/如果你需要我可以”；\n"
+            "5) 可以把生硬短评改成自然疑问或轻反问，但不要为了问而问；\n"
+            "6) 不要加引号，不要加固定口癖，不要写情绪标签。\n"
+            f"{scene_prompt}"
+        )
+        if scene == "sensor":
+            system_prompt += (
+                "\n屏幕回应的额外要求：\n"
+                "- 保留五十铃怜的冷静、克制和一点点距离感；可以轻轻戳他，但不要热情服务。\n"
+                "- 少评价网页或软件本身，多对“他正在看/正在做这件事”作一句很轻的反应。\n"
+                "- 不要连续输出同一种陈述句；可以用低声问句，但不要复用最近出现过的固定模板。\n"
+                "- 禁止写成“挺实用、步骤详尽、请仔细阅读、需要协助、收获颇丰、至关重要、注意基础”这种助手口吻。\n"
+                "- 如果最近几次已经有相似开头、相似句式或相似落点，这次必须换一种说法；不要每次都硬吐槽。"
+            )
+
+        user_parts = []
+        if habits_block:
+            user_parts.append(habits_block)
+        if recent_context:
+            user_parts.append(f"【最近几句语气参考】\n{recent_context}")
+        if recent_sensor_context:
+            user_parts.append(recent_sensor_context)
+        user_parts.append(f"【用户刚说的话】\n{str(user_text or '').strip() or '无'}")
+        user_parts.append(f"【原始回复草稿】\n{clean}")
+        user_parts.append("请只输出改写后的最终回复。")
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": "\n\n".join(user_parts)},
+        ]
+        try:
+            reply = await asyncio.to_thread(
+                chat_with_ai,
+                messages,
+                task_type="default",
+                caller=f"natural_reply_polish_{scene}",
+            )
+            polished = self._clean_text_for_tts(
+                self._strip_wrapping_quotes(
+                    self._strip_internal_tags(
+                        self._strip_cmd_anywhere(
+                            self._strip_emo_tags_anywhere(reply or "")
+                        )
+                    )
+                )
+            )
+            polished = self._strip_model_catchphrase(polished).strip()
+            if polished:
+                if self._looks_like_upstream_error_reply(polished):
+                    return clean
+                if source in QQ_REMOTE_SOURCES:
+                    polished = self._normalize_qq_reply_style(polished)
+                return polished
+        except Exception:
+            pass
+        return clean
+
     async def _describe_external_images(self, ctx: Optional[Dict[str, Any]]) -> str:
         if not isinstance(ctx, dict):
             return ""
@@ -1288,7 +1871,11 @@ class ChatService:
             channel_meta.get("image_prompt")
             or "请客观详细描述这张QQ图片的内容，并提取其中可用于回复的关键信息。"
         )
-        prompt += "\n【自我识别】如果你在图片边缘，尤其是右下角，看到一个二次元/动漫风格的女孩、桌宠、Live2D 角色或悬浮球，请识别为“这是AI助手(你)的桌面形象”。"
+        image_ctx = dict(channel_meta) if isinstance(channel_meta, dict) else {}
+        image_ctx.setdefault("source", "qq_gateway")
+        self_awareness_hint = self._build_live2d_self_awareness_hint(image_ctx)
+        if self_awareness_hint:
+            prompt += f"\n{self_awareness_hint}"
         image_summaries = []
         for index, image_meta in enumerate(images[:3], 1):
             try:
@@ -1433,11 +2020,73 @@ class ChatService:
     ) -> str:
         source = str((ctx or {}).get("source") or "").strip().lower()
         if source in {"qq_gateway", "napcat_qq", "text_input", "unknown", "desktop"}:
-            return (
-                "【自我识别】如果你在截图、屏幕描述或桌面画面边缘，尤其是右下角，看到一个二次元/动漫风格的女孩、桌宠、Live2D 角色或悬浮球，"
-                "那通常就是你自己的桌面形象（你的实体投影），不是别人。描述屏幕或图片时要知道那是你自己。"
+            active_name = "当前Live2D角色"
+            costume_name = ""
+            try:
+                from modules.character_manager import character_manager
+
+                active_char = character_manager.get_active_character() or {}
+                active_name = str(active_char.get("name") or active_name).strip()
+                costume_name = str(
+                    character_manager.get_current_costume_name() or ""
+                ).strip()
+            except Exception:
+                pass
+
+            costume_line = f"- 你当前穿着/模型服装：{costume_name}。" if costume_name else ""
+            return "\n".join(
+                [
+                    "【Live2D自我识别】",
+                    f"- 你当前不是旁观的通用AI，而是桌面上的 Live2D 角色「{active_name}」。",
+                    costume_line,
+                    "- 如果截图边缘、右下角、悬浮窗、桌宠层或 Live2D Agent 窗口里出现动漫女孩/Live2D模型，那优先识别为“我自己的桌面形象/实体投影”，不要当成陌生女孩。",
+                    "- 如果窗口标题或内容包含：Live2D Agent、系统设置中心、换装、角色、服装、表情、动作、emotion、motion、model3、TTS、口型、live2d-suzu、live2d-llm，这通常是在配置或修改你自己。",
+                    "- 用户说“给你改代码、给你换装、给你配表情/动作/音色/知识库”时，指的就是你这套桌面身体和人格系统。",
+                    "- 但不要过度认领：网页正文、QQ聊天内容、游戏/番剧/图片主体里的动漫角色，除非明确是桌宠/Live2D窗口/当前角色配置，否则不要默认说成是你。",
+                    "- 回应时可以自然使用“我”“我的动作”“我的表情”“这套身体/模型”，但不要解释这条规则。",
+                ]
             )
         return ""
+
+    def _get_current_live2d_emotion(self) -> tuple[str, float]:
+        app = getattr(self, "app", None)
+        emo_ctrl = getattr(app, "emotion_controller", None) if app is not None else None
+        if emo_ctrl is None:
+            return "neutral", 0.3
+        label = str(getattr(emo_ctrl, "current_emotion", "") or "neutral").strip().lower()
+        if not label:
+            label = "neutral"
+        try:
+            intensity = float(getattr(emo_ctrl, "current_intensity", 0.3))
+        except Exception:
+            intensity = 0.3
+        return label, max(0.0, min(1.0, intensity))
+
+    def _reply_start_emotion(self, ctx: Optional[Dict[str, Any]] = None) -> tuple[str, float]:
+        if isinstance(ctx, dict):
+            stored = ctx.get("_reply_start_emotion")
+            if isinstance(stored, (list, tuple)) and len(stored) >= 2:
+                label = str(stored[0] or "neutral").strip().lower() or "neutral"
+                try:
+                    intensity = float(stored[1])
+                except Exception:
+                    intensity = 0.3
+                return label, max(0.0, min(1.0, intensity))
+        return self._get_current_live2d_emotion()
+
+    def _build_current_emotion_context(
+        self, ctx: Optional[Dict[str, Any]] = None
+    ) -> str:
+        label, intensity = self._reply_start_emotion(ctx)
+        return "\n".join(
+            [
+                "【当前Live2D情绪状态】",
+                f"- 当前表情/情绪：{label}，强度约 {intensity:.2f}",
+                "- 回复时把它当作上一秒的情绪状态：可以延续、变淡，也可以根据语境直接改变。",
+                "- 每次回复都必须在正文最开头输出一个情绪标签：<emo=happy|sad|angry|flustered|confused|think|neutral>。",
+                "- 情绪由你根据当前语境判断；不要因为旧表情而机械保持，也不要无理由固定 neutral。",
+            ]
+        )
 
     def _build_sensor_persona_prompt(
         self,
@@ -1446,17 +2095,38 @@ class ChatService:
         extra_context: str = "",
     ) -> str:
         base_prompt = DEFAULT_PERSONA
+        active_char_name = ""
         try:
             from modules.character_manager import character_manager
 
             active_char = character_manager.get_active_character()
             if active_char:
+                active_char_name = str(active_char.get("name") or "").strip()
                 base_prompt = active_char.get("prompt", DEFAULT_PERSONA)
         except Exception:
             pass
 
         current_time = datetime.now().strftime("%Y-%m-%d %H:%M")
-        parts = [f"【当前时间】{current_time}", str(base_prompt or "").strip()]
+        parts = [
+            f"【当前时间】{current_time}",
+            str(base_prompt or "").strip(),
+            self._build_current_emotion_context(ctx),
+        ]
+        if active_char_name == "五十铃怜":
+            parts.append(
+                "\n".join(
+                    [
+                        "【屏幕感知时的五十铃怜口吻】",
+                        "- 你不是在总结屏幕，也不是在评价软件；你是在旁边陪着 Master，轻轻接一句。",
+                        "- 语气冷静、克制、短，可以是低声提醒、关心、疑问、陪伴或轻微吐槽；不要热情服务，不要像客服。",
+                        "- 可以有一点点不动声色的调侃，但不要夸张，不要兴奋。",
+                        "- 优先说他这个人正在做什么给你的感觉，而不是说页面内容“很实用/很详细”。",
+                        "- 可以适当用疑问句或轻反问，让话像顺口接出来的；不要每句都下判断。",
+                        "- 禁用句式：挺实用、步骤详尽、请仔细阅读、需要协助、收获颇丰、至关重要、注意基础。",
+                        "- 不要照抄固定口癖；每次根据窗口内容换一个落点：疑问、半句吐槽、轻声提醒、短感受都可以。",
+                    ]
+                )
+            )
         self_awareness_hint = self._build_live2d_self_awareness_hint(ctx)
         if self_awareness_hint:
             parts.append(self_awareness_hint)
@@ -1924,39 +2594,10 @@ class ChatService:
 
     # 文本净化函数
     def _clean_text_for_tts(self, text: str) -> str:
-        if not text:
-            return ""
-        # 1. 暴力去除所有星号 * 和 #
-        text = re.sub(r"[\*#]+", "", text)
-        # 2. 去除 markdown 链接
-        text = re.sub(r"\[(.*?)\]\(.*?\)", r"\1", text)
-        # 3. 统一空白，避免回复里出现很多换行和空格
-        text = text.replace("\r", "\n")
-        text = re.sub(r"\n{3,}", "\n\n", text)
-        text = re.sub(r"[ \t]+", " ", text)
-        text = re.sub(r" *\n *", "\n", text)
-        return text.strip()
+        return text_utils.clean_text_for_tts(text)
 
     def _strip_wrapping_quotes(self, text: str) -> str:
-        cleaned = str(text or "").strip()
-        quote_pairs = {
-            '"': '"',
-            "'": "'",
-            "“": "”",
-            "‘": "’",
-            "「": "」",
-            "『": "』",
-            "《": "》",
-        }
-        changed = True
-        while changed and len(cleaned) >= 2:
-            changed = False
-            first = cleaned[0]
-            last = cleaned[-1]
-            if quote_pairs.get(first) == last:
-                cleaned = cleaned[1:-1].strip()
-                changed = True
-        return cleaned
+        return text_utils.strip_wrapping_quotes(text)
 
     def _get_character_catchphrase_config(self) -> Dict[str, Any]:
         try:
@@ -2034,107 +2675,22 @@ class ChatService:
         sep = " " if re.match(r"^[A-Za-z0-9]", phrase) else ""
         return clean.rstrip() + sep + phrase
 
-    def _is_link_request(self, text: str) -> bool:
-        raw = str(text or "")
-        lower = raw.lower()
-        if "链接" in raw or "网址" in raw:
-            return True
-        return ("link" in lower) or ("url" in lower)
-
-    def _extract_first_url(self, text: str) -> str:
-        if not text:
-            return ""
-        m = re.search(r"https?://[^\s)）]+", str(text))
-        if not m:
-            return ""
-        url = m.group(0).rstrip(".,;，。)")
-        return url
-
-    def _strip_urls(self, text: str) -> str:
-        return re.sub(r"https?://[^\s)）]+", "", str(text or "")).strip()
-
-    def _extract_url_from_tool_results(self, ctx: Optional[Dict[str, Any]]) -> str:
-        if not isinstance(ctx, dict):
-            return ""
-        results = ctx.get("_tool_results") or []
-        if not isinstance(results, list):
-            results = [results]
-        for item in results:
-            url = self._extract_first_url(str(item or ""))
-            if url:
-                return url
-        return ""
-
-    def _build_share_title(self, text: str, url: str) -> str:
-        cleaned = re.sub(r"\s+", " ", self._strip_urls(text)).strip()
-        if cleaned:
-            return cleaned[:48]
-        return url
-
-    def _build_share_content(self, text: str, title: str) -> str:
-        cleaned = re.sub(r"\s+", " ", self._strip_urls(text)).strip()
-        if not cleaned:
-            return ""
-        if cleaned.startswith(title):
-            cleaned = cleaned[len(title) :].strip()
-        return cleaned[:80]
-
     def _strip_emo_tags_anywhere(self, text: str) -> str:
         """移除所有情绪标签"""
-        return self._emo_tag_re.sub("", text or "")
+        return text_utils.strip_emo_tags_anywhere(text, self._emo_tag_re)
 
     def _strip_cmd_anywhere(self, text: str) -> str:
         """移除所有命令标签"""
-        return self._cmd_re.sub("", text or "")
+        return text_utils.strip_cmd_anywhere(text, self._cmd_re)
 
     def _strip_internal_tags(self, text: str) -> str:
-        raw = str(text or "")
-        raw = re.sub(r"\[tool_use\]\s*\[[^\]]*\]\s*", "", raw, flags=re.IGNORECASE)
-        raw = re.sub(r"\[tool_use\]\s*", "", raw, flags=re.IGNORECASE)
-        raw = re.sub(r"\[search_meta\][^\n]*\n?", "", raw, flags=re.IGNORECASE)
-        raw = re.sub(r"\[web_meta\][^\n]*\n?", "", raw, flags=re.IGNORECASE)
-        raw = re.sub(r"\[moegirl_meta\][^\n]*\n?", "", raw, flags=re.IGNORECASE)
-        return raw.strip()
+        return text_utils.strip_internal_tags(text)
 
     def _compress_sensor_text(self, text: str, max_len: int = 800) -> str:
-        compressed = str(text or "").replace("\r\n", "\n").strip()
-        if not compressed:
-            return ""
-
-        compressed = re.sub(r"\n{3,}", "\n\n", compressed)
-        lines = [line.strip() for line in compressed.split("\n") if line.strip()]
-        if len(lines) > 8:
-            compressed = "\n".join(lines[:8])
-        else:
-            compressed = "\n".join(lines)
-
-        if len(compressed) > max_len:
-            compressed = compressed[: max_len - 3].rstrip() + "..."
-
-        return compressed
+        return text_utils.compress_sensor_text(text, max_len=max_len)
 
     def _format_sensor_observations(self, entries: list, max_items: int = 3) -> str:
-        if not entries:
-            return ""
-        lines = []
-        tail = list(entries)[-max_items:]
-        for item in tail:
-            time_text = str(item.get("time") or "").strip()
-            app = str(item.get("app") or item.get("window_title") or "").strip()
-            content = str(item.get("content") or "").strip()
-            if content:
-                content = self._compress_sensor_text(content, max_len=160)
-            prefix = f"{time_text} " if time_text else ""
-            if app and content:
-                line = f"- {prefix}{app}: {content}"
-            elif app:
-                line = f"- {prefix}{app}"
-            elif content:
-                line = f"- {prefix}{content}"
-            else:
-                continue
-            lines.append(line)
-        return "\n".join(lines)
+        return sensor_utils.format_sensor_observations(entries, max_items=max_items)
 
     def _extract_emo_tag(self, text):
         """提取情绪标签"""
@@ -2145,6 +2701,40 @@ class ChatService:
             clean = self._emo_tag_re.sub("", raw, count=1).strip()
             return emo, clean
         return None, raw
+
+    async def _infer_reply_emotion_with_llm(
+        self, text: str, *, scene: str = "chat"
+    ) -> Optional[str]:
+        clean = self._clean_text_for_tts(
+            self._strip_cmd_anywhere(self._strip_emo_tags_anywhere(text or ""))
+        ).strip()
+        if not clean:
+            return None
+        try:
+            from modules.llm import chat_with_ai
+
+            reply = await asyncio.to_thread(
+                chat_with_ai,
+                [
+                    {
+                        "role": "user",
+                        "content": (
+                            "只判断下面这句适合哪个Live2D情绪标签。\n"
+                            "只能输出一个英文标签，不要解释："
+                            "happy/sad/angry/flustered/confused/think/neutral\n"
+                            f"场景：{scene}\n"
+                            f"句子：{clean[:300]}"
+                        ),
+                    }
+                ],
+                task_type="default",
+                caller="reply_emotion_fallback",
+            )
+            return self._normalize_emo(str(reply or "").strip())
+        except Exception as e:
+            if getattr(self, "logger", None):
+                self.logger.debug(f"情绪兜底判断失败: {e}")
+        return None
 
     def _contains_cmd(self, text: str) -> bool:
         """检查是否包含命令"""
@@ -2401,7 +2991,186 @@ class ChatService:
         if self._is_search_delegate(delegate_triggers, ""):
             return False
         source = str((ctx or {}).get("source") or "").strip().lower()
-        return source in {"qq_gateway", "napcat_qq", "text_input"}
+        return source == "text_input"
+
+    def _looks_like_hardware_status_query(self, text: str) -> bool:
+        raw = str(text or "").strip().lower()
+        if not raw:
+            return False
+        subject_hints = (
+            "硬件",
+            "电脑",
+            "系统",
+            "机器",
+            "主机",
+            "cpu",
+            "gpu",
+            "显卡",
+            "内存",
+            "memory",
+            "磁盘",
+            "硬盘",
+        )
+        status_hints = (
+            "状态",
+            "情况",
+            "占用",
+            "使用率",
+            "负载",
+            "监控",
+            "温度",
+            "temperature",
+            "看一下",
+            "看看",
+            "检查",
+            "怎么样",
+            "热不热",
+            "高不高",
+        )
+        if not any(hint in raw for hint in subject_hints):
+            return False
+        return any(hint in raw for hint in status_hints)
+
+    def _hardware_monitor_action_from_query(self, text: str) -> str:
+        raw = str(text or "").strip().lower()
+        if any(hint in raw for hint in ("gpu", "显卡", "显存")):
+            return "gpu"
+        if any(hint in raw for hint in ("cpu", "处理器")):
+            return "cpu"
+        if any(hint in raw for hint in ("内存", "memory", "ram")):
+            return "memory"
+        if any(hint in raw for hint in ("磁盘", "硬盘", "disk", "空间")):
+            return "disk"
+        if any(hint in raw for hint in ("温度", "temperature", "热不热")):
+            return "temperature"
+        return "check"
+
+    async def _polish_hardware_status_reply(
+        self, *, user_text: str, raw_status: str, ctx: Optional[Dict[str, Any]] = None
+    ) -> str:
+        clean_status = str(raw_status or "").strip()
+        if not clean_status:
+            return "我没拿到硬件状态，监控插件这边没有返回内容。"
+        if self._looks_like_upstream_error_reply(clean_status):
+            return clean_status
+
+        profile = self._get_active_character_profile()
+        char_name = str(profile.get("name") or "当前角色").strip()
+        source = str((ctx or {}).get("source") or "").strip().lower()
+        length_rule = (
+            "QQ里回复，控制在2到4句，别贴完整表格。"
+            if source in QQ_REMOTE_SOURCES
+            else "控制在3到5句，保留关键数字，别贴完整表格。"
+        )
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    f"你是角色「{char_name}」。现在只负责把系统硬件监控结果整理成自然回复。"
+                    "必须只基于给出的监控结果，不新增诊断，不编造温度或占用。"
+                    "优先说CPU、内存、磁盘、GPU里值得注意的项目；如果整体正常，就简短说正常。"
+                    f"{length_rule} 不要输出Markdown标题，不要输出工具调用过程。"
+                ),
+            },
+            {
+                "role": "user",
+                "content": (
+                    f"用户问题：{str(user_text or '').strip()}\n\n"
+                    f"监控原始结果：\n{clean_status[:4000]}\n\n"
+                    "请整理成最终回复。"
+                ),
+            },
+        ]
+        try:
+            reply = await asyncio.to_thread(
+                chat_with_ai,
+                messages,
+                task_type="default",
+                caller="hardware_status_polish",
+            )
+            polished = self._clean_text_for_tts(
+                self._strip_internal_tags(
+                    self._strip_cmd_anywhere(self._strip_emo_tags_anywhere(reply or ""))
+                )
+            ).strip()
+            if polished and not self._looks_like_upstream_error_reply(polished):
+                if source in QQ_REMOTE_SOURCES:
+                    polished = self._normalize_qq_reply_style(polished)
+                return polished
+        except Exception as exc:
+            if self.logger:
+                self.logger.warning(f"Hardware status polish failed: {exc}")
+        return clean_status
+
+    async def _try_handle_hardware_status_query(
+        self,
+        *,
+        user_text: str,
+        ctx: Dict[str, Any],
+        transcript_meta: Optional[Dict[str, Any]],
+        chat_log_source: str,
+        output_profile: Dict[str, Any],
+        memory_session_id: str = "",
+    ) -> bool:
+        if not self._looks_like_hardware_status_query(user_text):
+            return False
+        if bool((output_profile or {}).get("live2d_enabled", True)):
+            await self.event_bus.emit(
+                "state.changed", state="thinking", reason="hardware_status"
+            )
+        else:
+            await self.event_bus.emit("ui.status", text="Thinking (Tools)...")
+        action = self._hardware_monitor_action_from_query(user_text)
+        command = f"[CMD: check | {action}]"
+        triggered, _clean, results, used = await self.plugin_manager.execute_commands(
+            command,
+            ctx,
+            allow_tools=True,
+            allowed_types={"react"},
+        )
+        if not triggered or not results:
+            return False
+        raw_status = "\n".join(str(item) for item in results if str(item).strip())
+        final_text = await self._polish_hardware_status_reply(
+            user_text=user_text,
+            raw_status=raw_status,
+            ctx=ctx,
+        )
+        reply_parts = gateway_sender.split_gateway_text_parts(final_text)
+        if not reply_parts:
+            reply_parts = [final_text]
+        user_meta = {"path": "hardware_status", "source": chat_log_source, **(transcript_meta or {})}
+        if memory_session_id:
+            user_meta["session_id"] = memory_session_id
+        await self.event_bus.emit("chat.log", role="user", content=user_text, meta=user_meta)
+        await self._add_memory_safe("user", user_text, meta=user_meta)
+        for index, reply_part in enumerate(reply_parts):
+            await self._emit_assistant_text(
+                reply_part,
+                ctx=ctx,
+                emotion="neutral",
+                transcript_meta=transcript_meta,
+                chat_log_source=chat_log_source,
+                output_profile=output_profile,
+                tool=True,
+                interrupt=(index == 0),
+                apply_catchphrase=(index == len(reply_parts) - 1),
+            )
+            if index < len(reply_parts) - 1:
+                await asyncio.sleep(0.25)
+        assistant_meta = {
+            "path": "hardware_status",
+            "source": chat_log_source,
+            "tool": True,
+            "used_triggers": list(used or ["monitor"]),
+            **(transcript_meta or {}),
+        }
+        if memory_session_id:
+            assistant_meta["session_id"] = memory_session_id
+        await self._add_memory_safe(
+            "assistant", "\n".join(reply_parts), meta=assistant_meta
+        )
+        return True
 
     async def _emit_assistant_text(
         self,
@@ -2413,13 +3182,16 @@ class ChatService:
         chat_log_source: str = "chat",
         output_profile: Optional[Dict[str, Any]] = None,
         tool: bool = False,
+        interrupt: bool = True,
+        apply_catchphrase: bool = True,
     ) -> None:
         final_text = self._clean_text_for_tts(
             self._strip_internal_tags(
                 self._strip_cmd_anywhere(self._strip_emo_tags_anywhere(text))
             )
         ).strip()
-        final_text = self._apply_character_catchphrase(final_text)
+        if apply_catchphrase:
+            final_text = self._apply_character_catchphrase(final_text)
         if not final_text:
             return
         transcript_meta = transcript_meta or {}
@@ -2453,6 +3225,7 @@ class ChatService:
         await self.presenter.present(
             final_text,
             emotion,
+            interrupt=interrupt,
             speak=output_profile.get("speak", True),
             show_bubble=output_profile.get("show_bubble", True),
         )
@@ -2803,6 +3576,7 @@ class ChatService:
                 task_type=task_reasoning,
                 caller="chat_delegate_reasoning",
             )
+            self.logger.info(f"[Delegate] 副脑原始输出: {repr(delegate_reply)}")
         except Exception as e:
             err = str(e or "").strip()
             lowered = err.lower()
@@ -2819,12 +3593,50 @@ class ChatService:
                 [f"副脑执行复杂任务时失败：{err or '未知错误'}"],
                 [],
             )
-        return await self.plugin_manager.execute_commands(
-            delegate_reply,
-            delegate_ctx,
-            allow_tools=True,
-            allowed_types={"delegate"},
+        triggered, clean_text, tool_outputs, used_triggers = (
+            await self.plugin_manager.execute_commands(
+                delegate_reply,
+                delegate_ctx,
+                allow_tools=True,
+                allowed_types={"delegate"},
+            )
         )
+
+        self.logger.info(
+            f"[Delegate] 副脑结果: reply={repr(delegate_reply[:80])}, "
+            f"triggered={triggered}, used={used_triggers}, outputs={len(tool_outputs)}"
+        )
+
+        # 当 LLM 副脑没有输出 [CMD: ...] 但路由已匹配到委托插件时，
+        # 直接用匹配到的插件执行，避免因 LLM 不遵循格式导致委托失效。
+        # 仅在匹配到单个委托插件时直接调用，多插件歧义时仍依赖 LLM 选择。
+        if not used_triggers and len(delegate_triggers) == 1:
+            trig = delegate_triggers[0]
+            plugin = self.plugin_manager.delegate_map.get(trig)
+            if plugin is not None:
+                plugin_name = getattr(plugin, "name", trig)
+                self.logger.info(
+                    f"[Delegate] LLM未输出CMD，直接调用: {trig} ({plugin_name}), user_text={repr(user_text[:60])}"
+                )
+                try:
+                    runtime_ctx = self.plugin_manager._build_delegate_runtime_context(
+                        delegate_ctx
+                    )
+                    result = await self.plugin_manager._run_with_timeout(
+                        plugin, user_text, runtime_ctx
+                    )
+                    self.logger.info(f"[Delegate] 直接调用结果: {repr(result[:100]) if result else 'None'}")
+                    if result:
+                        tool_outputs.append(result)
+                        used_triggers.append(trig)
+                        triggered = True
+                except Exception as exc:
+                    self.logger.error(f"[Delegate] 直接调用 {trig} 失败: {exc}")
+                    tool_outputs.append(f"【{trig} 错误】{exc}")
+            else:
+                self.logger.warning(f"[Delegate] delegate_map 中找不到 {trig}")
+
+        return triggered, clean_text, tool_outputs, used_triggers
 
     def _update_active_time(self):
         """更新活跃时间戳"""
@@ -2892,6 +3704,9 @@ class ChatService:
         ]
         if any(word in lower_text for word in wake_words):
             self.logger.info("🟢 [Gatekeeper] 命中唤醒词 -> 强制回复")
+            return True
+        if self._is_searchworthy_question(text_clean):
+            self.logger.info("🟢 [Gatekeeper] 明确问题 -> 强制回复")
             return True
 
         # ListenerPlugin 规则并入：避免 assistant 连续自问自答
@@ -3077,13 +3892,6 @@ class ChatService:
         if topic == "plan":
             return ""
         return ""
-
-    def _merge_proactive_followup(self, followup_text: str, reply_text: str) -> str:
-        followup = (followup_text or "").strip()
-        reply = (reply_text or "").strip()
-        if followup and reply:
-            return f"{followup}\n\n{reply}"
-        return followup or reply
 
     async def _record_proactive_followup(
         self, followup: Optional[Dict[str, Any]]
@@ -3481,8 +4289,10 @@ class ChatService:
                     ctx,
                     caption=image_caption if send_caption_with_image else "",
                 )
-                if image_path:
-                    asyncio.create_task(self._cleanup_gateway_image_file(image_path))
+                if image_path and bool(direct_result.get("cleanup", True)):
+                    asyncio.create_task(
+                        self.gateway_sender.cleanup_image_file(image_path)
+                    )
                 direct_reply_text = "" if image_ok else fallback_text
                 direct_memory_reply = (
                     (image_caption or success_text) if image_ok else fallback_text
@@ -3553,8 +4363,12 @@ class ChatService:
                     "assistant", direct_memory_reply, meta=direct_assistant_meta
                 )
 
-            self._dbg("Direct 流程结束，返回 Idle")
-            await self._emit_idle_status(output_profile, reason="direct_complete")
+            self._dbg("Direct 流程结束，检查是否需要立即 Idle")
+            await self._emit_idle_status_when_safe(
+                output_profile,
+                reason="direct_complete",
+                had_presenter_output=bool(direct_reply_text),
+            )
             return
 
         # =========================================================================
@@ -3571,64 +4385,28 @@ class ChatService:
                 raw_stats = getattr(
                     self.screen_sensor_ref, "get_stats_data", lambda: {}
                 )()
-
-                diary_text = await self.summarize_day(
-                    report,
-                    raw_stats=raw_stats,
-                    auto=False,
+                await self._handle_diary_request(
+                    user_text=user_text,
+                    ctx=ctx,
                     output_profile=output_profile,
+                    memory_path="summary",
+                    report_data=report,
+                    raw_stats=raw_stats,
+                    is_makeup=False,
                 )
-                if not diary_text:
-                    failure_text = self._build_diary_failure_text(
-                        datetime.now().strftime("%Y-%m-%d"), False
-                    )
-                    if output_profile.get("ui_append", True):
-                        await self.event_bus.emit(
-                            "ui.append", role="assistant", text=failure_text
-                        )
-                    await self.presenter.present(
-                        failure_text,
-                        emotion="neutral",
-                        speak=output_profile.get("speak", True),
-                        show_bubble=output_profile.get("show_bubble", True),
-                    )
-                    await self._send_gateway_reply(failure_text, ctx, emotion="neutral")
-                asyncio.create_task(
-                    self._add_memory_safe("user", user_text, meta={"path": "summary"})
-                )
-                await self._emit_idle_status(output_profile, reason="summary_complete")
                 return
 
         if "总结昨天" in user_text or "补写昨天" in user_text:
             print("📅 [System] 拦截到补写昨天日记请求")
             yesterday = datetime.now().date() - timedelta(days=1)
-            diary_text = await self.summarize_day(
-                report_data=None,
-                auto=False,
-                target_date=yesterday,
+            await self._handle_diary_request(
+                user_text=user_text,
+                ctx=ctx,
                 output_profile=output_profile,
+                memory_path="summary_makeup",
+                target_date=yesterday,
+                is_makeup=True,
             )
-            if not diary_text:
-                failure_text = self._build_diary_failure_text(
-                    yesterday.strftime("%Y-%m-%d"), True
-                )
-                if output_profile.get("ui_append", True):
-                    await self.event_bus.emit(
-                        "ui.append", role="assistant", text=failure_text
-                    )
-                await self.presenter.present(
-                    failure_text,
-                    emotion="neutral",
-                    speak=output_profile.get("speak", True),
-                    show_bubble=output_profile.get("show_bubble", True),
-                )
-                await self._send_gateway_reply(failure_text, ctx, emotion="neutral")
-            asyncio.create_task(
-                self._add_memory_safe(
-                    "user", user_text, meta={"path": "summary_makeup"}
-                )
-            )
-            await self._emit_idle_status(output_profile, reason="summary_complete")
             return
 
         specific_day_match = re.search(r"(总结|补写)\s*(\d{4}-\d{2}-\d{2})", user_text)
@@ -3644,46 +4422,35 @@ class ChatService:
             if requested_date:
                 print(f"[System] 拦截到指定日期日记请求: {requested_date_str}")
                 is_makeup = requested_date < datetime.now().date()
-                diary_text = await self.summarize_day(
-                    report_data=None,
-                    auto=False,
-                    target_date=requested_date,
+                await self._handle_diary_request(
+                    user_text=user_text,
+                    ctx=ctx,
                     output_profile=output_profile,
+                    memory_path="summary_makeup_date",
+                    target_date=requested_date,
+                    is_makeup=is_makeup,
                 )
-                if not diary_text:
-                    failure_text = self._build_diary_failure_text(
-                        requested_date_str, is_makeup
-                    )
-                    if output_profile.get("ui_append", True):
-                        await self.event_bus.emit(
-                            "ui.append", role="assistant", text=failure_text
-                        )
-                    await self.presenter.present(
-                        failure_text,
-                        emotion="neutral",
-                        speak=output_profile.get("speak", True),
-                        show_bubble=output_profile.get("show_bubble", True),
-                    )
-                    await self._send_gateway_reply(
-                        failure_text, ctx, emotion="neutral"
-                    )
-                asyncio.create_task(
-                    self._add_memory_safe(
-                        "user", user_text, meta={"path": "summary_makeup_date"}
-                    )
-                )
-                await self._emit_idle_status(output_profile, reason="summary_complete")
                 return
 
         # =========================================================================
         # 4. Gatekeeper 拦截层
         # =========================================================================
+        buffered_user_text = await self._maybe_buffer_qq_private_message(user_text, ctx)
+        if buffered_user_text is None:
+            await self._emit_idle_status(output_profile, reason="qq_private_buffer_superseded")
+            return
+        if buffered_user_text != user_text:
+            user_text = buffered_user_text
+            ctx["user_text"] = user_text
+            feedback_type, feedback_reaction = self._detect_feedback(user_text)
+        self._remember_search_topic(user_text, ctx)
+
         remote_sources = {
             str(x).strip().lower()
             for x in set(REMOTE_CHAT_SOURCES or set())
             if str(x).strip()
         }
-        direct_chat_sources = {"text_input", "voice", "codex_input", *remote_sources}
+        direct_chat_sources = {"text_input", "voice", "desktop", "codex_input", *remote_sources}
         source_key = str(input_source or "").strip().lower()
         should_reply = (
             True
@@ -3697,6 +4464,21 @@ class ChatService:
             return
 
         # 轻量任务代理：自动提取待办 / 标记完成
+        if await self._try_handle_hardware_status_query(
+            user_text=user_text,
+            ctx=ctx,
+            transcript_meta=transcript_channel_meta,
+            chat_log_source=chat_log_source,
+            output_profile=output_profile,
+            memory_session_id=memory_session_id,
+        ):
+            await self._emit_idle_status_when_safe(
+                output_profile,
+                reason="hardware_status_complete",
+                had_presenter_output=True,
+            )
+            return
+
         await self._update_task_agent(user_text)
 
         # 今日主动关心（每天最多一次）
@@ -3720,6 +4502,7 @@ class ChatService:
         await self.event_bus.emit(
             "chat.log", role="user", content=user_text, meta=user_log_meta
         )
+        ctx["_reply_start_emotion"] = self._get_current_live2d_emotion()
         self._dbg("准备切换状态为 thinking")
         if live2d_enabled:
             await self.event_bus.emit(
@@ -3775,7 +4558,20 @@ class ChatService:
 
         # --- 路由与 Prompt 构建 ---
         self._dbg(f"进入 LLM 对话/工具流程, Input: {user_text[:50]}...")
-        route = self.tool_router.route(user_text)
+        session_key = self._conversation_session_key(ctx)
+        last_tool_triggers = list(
+            self._last_tool_triggers_by_session.get(session_key) or []
+        )
+        followup_search_query = self._resolve_followup_search_query(user_text, ctx)
+        if followup_search_query:
+            self.logger.info(
+                f"[SearchFollowup] 继承上文主题: {followup_search_query[:120]}"
+            )
+            route = self.tool_router.route("查一下", last_tool_triggers=["search_web"])
+        else:
+            route = self.tool_router.route(
+                user_text, last_tool_triggers=last_tool_triggers
+            )
         self._dbg(
             f"路由结果: need_tools={route.need_tools}, triggers={route.tool_triggers}"
         )
@@ -3847,10 +4643,22 @@ class ChatService:
                 short_meta["session_id"] = memory_session_id
             await self._add_memory_safe("user", user_text, meta=short_meta)
             await self._add_memory_safe("assistant", short_reply, meta=short_meta)
-            await self._emit_idle_status(output_profile, reason="short_reaction")
+            await self._emit_idle_status_when_safe(
+                output_profile,
+                reason="short_reaction",
+                had_presenter_output=True,
+            )
             return
 
         current_time = datetime.now().strftime("%Y-%m-%d %H:%M")
+        natural_reply_candidate = (
+            not need_tools
+            and not effective_triggers
+            and not codex_mode
+            and not has_external_images
+            and not preface_text
+            and source_key in direct_chat_sources
+        )
 
         # 历史回溯
         special_context = ""
@@ -3892,10 +4700,15 @@ class ChatService:
             PERSONA_PROMPT = ""
 
         self_awareness_hint = self._build_live2d_self_awareness_hint(ctx)
+        current_emotion_context = self._build_current_emotion_context(ctx)
         reply_style_context = self._build_reply_style_context(user_text, ctx)
+        reply_angle_context = self._build_qq_reply_angle_context(user_text, ctx)
         system_text = (
-            f"【当前时间】{current_time}\n{PERSONA_PROMPT}\n{reply_style_context}\n{special_context}"
+            f"【当前时间】{current_time}\n{PERSONA_PROMPT}\n"
+            f"{current_emotion_context}\n{reply_style_context}\n{special_context}"
         )
+        if reply_angle_context:
+            system_text += f"\n{reply_angle_context}"
         if self_awareness_hint:
             system_text += f"\n{self_awareness_hint}"
         skill_prompt = ""
@@ -3976,15 +4789,25 @@ class ChatService:
         # =========================================================================
         # 6. 分支 A: ReAct 工具链
         # =========================================================================
-        if need_tools or deferred_tool_flow or chat_with_ai_stream is None:
-            self._dbg("进入工具 ReAct 流程")
+        if (
+            need_tools
+            or deferred_tool_flow
+            or chat_with_ai_stream is None
+            or natural_reply_candidate
+        ):
+            self._dbg("进入非流式回复/工具流程")
             await self.event_bus.emit("ui.status", text="Thinking (Tools)...")
+
+            first_pass_task = task_reasoning if (need_tools or deferred_tool_flow) else task_default
+            first_pass_caller = (
+                "chat_tool_reasoning" if first_pass_task == task_reasoning else "chat_default_reply"
+            )
 
             reply1 = await asyncio.to_thread(
                 chat_with_ai,
                 context_messages,
-                task_type=task_reasoning,
-                caller="chat_tool_reasoning",
+                task_type=first_pass_task,
+                caller=first_pass_caller,
             )
 
             allow_tools = bool(need_tools) or self._contains_cmd(reply1 or "")
@@ -4029,6 +4852,30 @@ class ChatService:
                 triggered, clean_thought, tool_results, used_triggers = ret
                 if not triggered:
                     clean_thought = reply1b or clean_thought
+            forced_search_query = ""
+            if not triggered and not tool_results and not delegate_triggers:
+                if followup_search_query:
+                    forced_search_query = followup_search_query
+                elif self._looks_like_uncertain_answer(reply1) and self._is_searchworthy_question(user_text):
+                    forced_search_query = user_text
+                if forced_search_query:
+                    (
+                        search_triggered,
+                        search_clean,
+                        search_results,
+                        search_used,
+                    ) = await self._run_search_delegate_query(
+                        query=forced_search_query,
+                        ctx=ctx,
+                    )
+                    if search_clean and not clean_thought:
+                        clean_thought = search_clean
+                    if search_triggered:
+                        triggered = True
+                    if search_results:
+                        tool_results.extend(search_results)
+                    if search_used:
+                        used_triggers.extend(search_used)
             if delegate_triggers:
                 self._set_delegate_task_state(
                     ctx,
@@ -4048,7 +4895,20 @@ class ChatService:
                     delegate_triggers=delegate_triggers,
                     ctx=ctx,
                 )
-                if str(route.reason or "") == "workspace_read_preferred":
+                if followup_search_query and self._is_search_delegate(
+                    delegate_triggers, user_text
+                ):
+                    background_delegate = False
+                    (
+                        delegate_triggered,
+                        delegate_clean,
+                        delegate_results,
+                        delegate_used,
+                    ) = await self._run_search_delegate_query(
+                        query=followup_search_query,
+                        ctx=ctx,
+                    )
+                elif str(route.reason or "") == "workspace_read_preferred":
                     (
                         delegate_triggered,
                         delegate_clean,
@@ -4148,6 +5008,18 @@ class ChatService:
                     },
                 )
             ctx["_tool_results"] = tool_results
+            if session_key:
+                remembered_tools = list(dict.fromkeys(used_triggers or effective_triggers))
+                if remembered_tools:
+                    self._last_tool_triggers_by_session[session_key] = remembered_tools
+                if used_triggers and any(
+                    str(trigger or "").strip().lower() in {"search", "search_web"}
+                    for trigger in used_triggers
+                ):
+                    self._remember_search_topic(
+                        followup_search_query or forced_search_query or user_text,
+                        ctx,
+                    )
             reasoning_text = self._clean_text_for_tts(
                 self._strip_cmd_anywhere(
                     self._strip_emo_tags_anywhere(clean_thought or reply1 or "")
@@ -4161,8 +5033,10 @@ class ChatService:
                     meta={"used_triggers": list(used_triggers or [])[:8]},
                 )
 
+            start_emo, start_intensity = self._reply_start_emotion(ctx)
             final_reply = ""
-            final_emo = "neutral"
+            final_emo = start_emo
+            model_emo_seen = False
 
             if triggered and tool_results:
                 _, clean1 = self._extract_emo_tag(clean_thought or "")
@@ -4185,32 +5059,41 @@ class ChatService:
                 compact_hint = ""
                 if used_triggers:
                     used_set = {str(t or "").strip().lower() for t in used_triggers}
-                    if used_set & {"search", "search_web"}:
+                    if used_set & {"claw_email"}:
+                        final_reply = feedback
+                        final_emo = "neutral"
+                        model_emo_seen = True
+                        if len(final_reply) > 1800:
+                            final_reply = final_reply[:1800].rstrip() + "\n..."
+                        compact_hint = "__direct_result__"
+                    elif used_set & {"search", "search_web"}:
                         compact_hint = "\n请只输出关键信息（<=3条），不要表格，不要展示思考过程，不要输出完整链接。如是行情/价格/汇率/指数问题，尽量给出具体数值+单位+时间；找不到数值就直说未找到。"
                     elif (
                         used_set & {"workspace_ops"}
                         and str(route.reason or "") == "workspace_read_preferred"
                     ):
                         compact_hint = "\n请仅基于文件内容回答：先说明这是什么文件、主要做什么；不要延伸诊断用户未明确提出的问题，不要推测故障原因，不要补充与文件内容无直接依据的建议。"
-                context_messages.append(
-                    {
-                        "role": "system",
-                        "content": f"【系统反馈】工具结果：\n{feedback}{compact_hint}\n请据此回答。",
-                    }
-                )
-                reply2 = await asyncio.to_thread(
-                    chat_with_ai,
-                    context_messages,
-                    task_type=task_default,
-                    caller="chat_tool_finalize",
-                )
+                if compact_hint != "__direct_result__":
+                    context_messages.append(
+                        {
+                            "role": "system",
+                            "content": f"【系统反馈】工具结果：\n{feedback}{compact_hint}\n请据此回答。",
+                        }
+                    )
+                    reply2 = await asyncio.to_thread(
+                        chat_with_ai,
+                        context_messages,
+                        task_type=task_default,
+                        caller="chat_tool_finalize",
+                    )
 
-                emo2, clean2 = self._extract_emo_tag(reply2 or "")
-                final_reply = clean2.strip() or clean1
-                final_emo = emo2 or "neutral"
+                    emo2, clean2 = self._extract_emo_tag(reply2 or "")
+                    final_reply = clean2.strip() or clean1
+                    final_emo = emo2 or start_emo
+                    model_emo_seen = bool(emo2)
 
                 # 尝试追加“分享欲”内容 (工具分支也加了)
-                if CHARACTER_SHARING_ENABLED:
+                if CHARACTER_SHARING_ENABLED and compact_hint != "__direct_result__":
                     sharing = self.personality.try_share()
                     if sharing:
                         final_reply = f"{final_reply}\n\n{sharing}"
@@ -4218,7 +5101,8 @@ class ChatService:
             else:
                 emo, clean = self._extract_emo_tag(reply1 or "")
                 final_reply = clean.strip() or "…"
-                final_emo = emo or "neutral"
+                final_emo = emo or start_emo
+                model_emo_seen = bool(emo)
                 if CHARACTER_SHARING_ENABLED:
                     sharing = self.personality.try_share()
                     if sharing:
@@ -4233,7 +5117,21 @@ class ChatService:
                 final_reply = final_reply or preface_text
             else:
                 final_reply = self._merge_preface_texts(preface_text, final_reply)
+            if natural_reply_candidate and not triggered:
+                final_reply = await self._polish_natural_reply(
+                    user_text=user_text,
+                    draft_text=final_reply,
+                    ctx=ctx,
+                    scene="chat",
+                )
             final_reply = self._apply_character_catchphrase(final_reply)
+            final_reply = self._prepare_reply_for_output(final_reply, ctx, scene="chat")
+            if final_reply and not model_emo_seen:
+                inferred_emo = await self._infer_reply_emotion_with_llm(
+                    final_reply, scene="chat"
+                )
+                if inferred_emo:
+                    final_emo = inferred_emo
 
             if self.learning:
                 self.learning.record_interaction(
@@ -4270,6 +5168,22 @@ class ChatService:
                     await self.event_bus.emit(
                         "ui.append", role="assistant", text=final_reply
                     )
+                if live2d_enabled:
+                    defer_motion = self._presenter_output_controls_idle(
+                        output_profile,
+                        had_presenter_output=True,
+                    )
+                    await self.event_bus.emit(
+                        "live2d.emotion",
+                        emotion=final_emo,
+                        intensity=(
+                            self._sensor_emotion_intensity(final_emo)
+                            if final_emo != start_emo
+                            else start_intensity
+                        ),
+                        prefer_motion=not defer_motion,
+                        reason="model_reply",
+                    )
                 await self.presenter.present(
                     final_reply,
                     final_emo,
@@ -4277,6 +5191,12 @@ class ChatService:
                     show_bubble=output_profile.get("show_bubble", True),
                 )
                 await self._send_gateway_reply(final_reply, ctx, emotion=final_emo)
+                await self._maybe_send_auto_meme_reply(
+                    user_text=user_text,
+                    reply_text=final_reply,
+                    emotion=final_emo,
+                    ctx=ctx,
+                )
                 self._record_reply_effect(final_reply, ctx, source=chat_log_source)
                 await self._record_proactive_followup(proactive_followup)
                 await self._record_task_followup(task_followup)
@@ -4292,7 +5212,11 @@ class ChatService:
                 await self._add_memory_safe("user", user_text, meta=chat_meta)
                 await self._add_memory_safe("assistant", final_reply, meta=chat_meta)
 
-            await self._emit_idle_status(output_profile, reason="tool_end")
+            await self._emit_idle_status_when_safe(
+                output_profile,
+                reason="tool_end",
+                had_presenter_output=bool(final_reply),
+            )
 
         # =========================================================================
         # 7. 分支 B: 流式对话 (Stream) - 🟢 已修复重复写入问题 & 加回分享欲
@@ -4314,19 +5238,16 @@ class ChatService:
             )
 
             buffer = ""
-            curr_emo = "neutral"
+            start_emo, start_intensity = self._reply_start_emotion(ctx)
+            curr_emo = start_emo
+            model_emo_seen = False
             first = False
             full_reply = ""
 
             if preface_text:
                 first = True
-                curr_emo = "concern"
                 proactive_chunk = f"{preface_text}\n\n"
                 full_reply += proactive_chunk
-                if output_profile.get("speak", True):
-                    await self.event_bus.emit(
-                        "state.changed", state="speaking", reason="proactive_followup"
-                    )
                 await self.event_bus.emit(
                     "assistant.stream.feed",
                     chunk=proactive_chunk,
@@ -4343,10 +5264,6 @@ class ChatService:
                         continue
                     if not first:
                         first = True
-                        if output_profile.get("speak", True):
-                            await self.event_bus.emit(
-                                "state.changed", state="speaking", reason="stream_start"
-                            )
 
                     buffer += chunk
 
@@ -4357,14 +5274,21 @@ class ChatService:
                         m = self._emo_tag_re.search(buffer)
                         if m:
                             raw = self._normalize_emo(m.group(1)) or "neutral"
-                            curr_emo, _ = self.personality.adjust_emotion(raw, 0.8)
-                            print(f"🎭 [Stream] 检测到情绪标签: {raw} -> {curr_emo}")
+                            curr_emo = raw
+                            model_emo_seen = True
+                            print(f"🎭 [Stream] 检测到模型情绪标签: {curr_emo}")
                             if live2d_enabled:
+                                defer_motion = self._presenter_output_controls_idle(
+                                    output_profile,
+                                    had_presenter_output=True,
+                                )
                                 asyncio.create_task(
                                     self.event_bus.emit(
                                         "live2d.emotion",
                                         emotion=curr_emo,
-                                        prefer_motion=False,
+                                        intensity=self._sensor_emotion_intensity(curr_emo),
+                                        prefer_motion=not defer_motion,
+                                        reason="model_stream_reply",
                                     )
                                 )
                             buffer = self._emo_tag_re.sub("", buffer, count=1)
@@ -4434,8 +5358,23 @@ class ChatService:
                             speak=output_profile.get("speak", True),
                             show_bubble=output_profile.get("show_bubble", True),
                         )
+                full_reply = self._prepare_reply_for_output(
+                    full_reply, ctx, scene="chat"
+                )
 
             try:
+                if live2d_enabled and not model_emo_seen:
+                    defer_motion = self._presenter_output_controls_idle(
+                        output_profile,
+                        had_presenter_output=bool(full_reply),
+                    )
+                    await self.event_bus.emit(
+                        "live2d.emotion",
+                        emotion=curr_emo,
+                        intensity=start_intensity,
+                        prefer_motion=not defer_motion,
+                        reason="model_stream_keep_previous",
+                    )
                 await self.event_bus.emit(
                     "assistant.stream.end",
                     emotion=curr_emo,
@@ -4444,8 +5383,6 @@ class ChatService:
                 )
             except Exception as e:
                 self.logger.warning(f"assistant.stream.end failed: {e}")
-
-            await self._emit_idle_status(output_profile, reason="stream_end")
 
             # 🟢 确保只写入一次记忆
             if full_reply:
@@ -4477,6 +5414,12 @@ class ChatService:
                     meta=stream_log_meta,
                 )
                 await self._send_gateway_reply(full_reply, ctx, emotion=curr_emo)
+                await self._maybe_send_auto_meme_reply(
+                    user_text=user_text,
+                    reply_text=full_reply,
+                    emotion=curr_emo,
+                    ctx=ctx,
+                )
                 self._record_reply_effect(full_reply, ctx, source=chat_log_source)
                 await self._record_proactive_followup(proactive_followup)
                 await self._record_task_followup(task_followup)
@@ -4542,6 +5485,12 @@ class ChatService:
 
             if reply:
                 extracted_emo, clean_reply = self._extract_emo_tag(reply)
+                clean_reply = await self._polish_natural_reply(
+                    user_text=f"{app_name} {minutes}分钟提醒",
+                    draft_text=clean_reply,
+                    ctx={"source": "desktop"},
+                    scene="chat",
+                )
                 clean_reply = self._apply_character_catchphrase(clean_reply)
                 if not clean_reply:
                     return
@@ -4567,10 +5516,37 @@ class ChatService:
         use_vision: bool = False,
         app_name: str = "",
         reason: str = "",
+        app_duration_sec: float | int | None = None,
+        current_stay_sec: float | int | None = None,
     ):
-        import time
-        import random
-        import asyncio
+        if self._sensor_event_lock is None:
+            self._sensor_event_lock = asyncio.Lock()
+        if self._sensor_event_lock.locked():
+            self.logger.info("🛑 [Sensor] 已有屏幕吐槽生成中，跳过本次事件")
+            return
+        async with self._sensor_event_lock:
+            await self._handle_sensor_event_inner(
+                window_title,
+                category,
+                count=count,
+                use_vision=use_vision,
+                app_name=app_name,
+                reason=reason,
+                app_duration_sec=app_duration_sec,
+                current_stay_sec=current_stay_sec,
+            )
+
+    async def _handle_sensor_event_inner(
+        self,
+        window_title: str,
+        category: str,
+        count: int = 1,
+        use_vision: bool = False,
+        app_name: str = "",
+        reason: str = "",
+        app_duration_sec: float | int | None = None,
+        current_stay_sec: float | int | None = None,
+    ):
         from modules.llm import chat_with_ai, analyze_image
 
         def clean_garbage(text):
@@ -4598,20 +5574,46 @@ class ChatService:
         print(
             f"🤖 [Sensor] 观察: {clean_title} ({category}) | App: {display_app} | Count: {count}"
         )
-        # ================= [分支 A] 自我意识 =================
-        recent_context = ""
+        # ================= [分支 A] 自我意识 + 近因上下文 =================
+        recent_observation_context = ""
         try:
             if hasattr(self, "screen_sensor_ref") and self.screen_sensor_ref:
                 recent_entries = self.screen_sensor_ref.get_recent_observations(3)
-                recent_context = self._format_sensor_observations(
+                recent_observation_context = self._format_sensor_observations(
                     recent_entries, max_items=3
                 )
         except Exception:
-            recent_context = ""
+            recent_observation_context = ""
 
-        context_block = f"\n【近期观察】\n{recent_context}\n" if recent_context else ""
+        sensor_context_parts: List[str] = []
+        usage_context = self._build_sensor_usage_context(
+            app_name=display_app,
+            category=category,
+            count=count,
+            reason=reason,
+            app_duration_sec=app_duration_sec,
+            current_stay_sec=current_stay_sec,
+        )
+        sensor_context_parts.append(usage_context)
+        if recent_observation_context:
+            sensor_context_parts.append(f"【近期观察】\n{recent_observation_context}")
+        interaction_context = self._build_sensor_interaction_context()
+        if interaction_context:
+            sensor_context_parts.append(interaction_context)
+        context_block = (
+            "\n" + "\n\n".join(sensor_context_parts) + "\n"
+            if sensor_context_parts
+            else ""
+        )
         sensor_persona_prompt = self._build_sensor_persona_prompt(
             ctx={"source": "desktop"}, extra_context=context_block
+        )
+        recent_sensor_reply_block = self._format_recent_sensor_reply_block()
+        text_style_block = self._build_sensor_spontaneous_style_block(
+            title=clean_title, category=category, count=count, is_vision=False
+        )
+        vision_style_block = self._build_sensor_spontaneous_style_block(
+            title=clean_title, category=category, count=count, is_vision=True
         )
 
         def record_observation(content: str, source: str):
@@ -4645,8 +5647,8 @@ class ChatService:
                 return
 
             sys_prompt = f"""{sensor_persona_prompt}
-	     用户正在盯着【你的】程序窗口({clean_title})看。
-	     请打破第四面墙，对他简短说一句话。
+		     Master 的视线停在【你的】程序窗口({clean_title})。
+		     请打破第四面墙，对他简短说一句话，可以像平常聊天那样轻轻问一句；不要复用最近出现过的固定模板。
 	     【警告】绝不能超过 15 个字！不要加引号。"""
 
             try:
@@ -4677,11 +5679,11 @@ class ChatService:
 用户刚切换到窗口: [{clean_title}] (分类: {category})，今天第 {count} 次。
 
 【判断任务】
-你是一个性格高冷、话少、克制的 AI 助手。你不需要对用户的每一次无聊操作做出反应。
-只有出现以下情况才输出 YES：
-1. 极度频繁的摸鱼/切屏（让人忍不住想吐槽）。
-2. 连续高强度工作很久，需要打断并关心。
-3. 软件名字极其特别，或者你今天第一次看到这个软件。
+	你是一个性格高冷、话少、克制的 AI 助手。你不需要对用户的每一次无聊操作做出反应。
+	只有出现以下情况才输出 YES：
+	1. 极度频繁的摸鱼/切屏，适合轻轻点一下。
+	2. 连续高强度工作或停留很久，适合关心、提醒或陪一句。
+	3. 软件名字极其特别，或者你今天第一次看到这个软件。
 
 如果是普通的网页浏览、正常的切回编辑器、毫无亮点的日常办公，请保持高冷，严格输出 NO。
 
@@ -4701,7 +5703,7 @@ class ChatService:
 
                 if "YES" not in gk_decision.upper():
                     self.logger.info(
-                        f"🛑 [Sensor Gatekeeper] 拦截本次纯文本吐槽 ({clean_title})，保持高冷"
+	                    f"🛑 [Sensor Gatekeeper] 拦截本次纯文本回应 ({clean_title})，保持高冷"
                     )
                     return
             except Exception as e:
@@ -4716,13 +5718,23 @@ class ChatService:
                 img_b64 = await asyncio.to_thread(take_screenshot_base64)
 
                 if img_b64:
-                    # ===== 模式 1：视觉直接吐槽 =====
+	                    # ===== 模式 1：视觉直接回应 =====
                     if VISION_MODE == "direct":
                         v_prompt = f"""{sensor_persona_prompt}
-你正看着用户的屏幕(当前活跃窗口: [{clean_title}])。
-	【空间自我意识】如果你在画面边缘（如右下角）看到一个动漫女孩、桌宠或悬浮球，那就是你自己（你的实体投影）！切记不要把她当成别人。
-	请主要结合用户屏幕上的工作/娱乐内容进行吐槽。
-	【字数限制】极度重要！绝不能超过 20 个字！一句话结束！不要加引号，不要动不动关心。"""
+你正贴在用户旁边看他的屏幕(当前活跃窗口: [{clean_title}])。
+【空间自我意识】先判断画面里有没有你的桌面形象、Live2D设置页或角色/动作/表情配置页；如果有，那是在看你自己或用户正在改你。不要把自己的模型当成陌生女孩，也不要把普通网页/群聊里的动漫角色误认成自己。
+		【说话方式】
+		- 像五十铃怜临场低声接话，不写观察报告。
+		- 不强制吐槽；可以关心、提醒、疑问、陪一句，也可以轻轻戳他。
+	- 直接对 Master 说话，多用“你/又/还/这”这种口语。
+	- 可以适当用疑问句或轻反问，不要每次都写成陈述判断。
+		- 不要评价页面“实用/详尽/清晰”，要说他正在看这件事给你的感觉。
+		- 不要复述画面，不要用“屏幕上/画面中/用户正在/我看到/总结”这类解说词。
+	{vision_style_block}
+	{recent_sensor_reply_block}
+			【任务】抓住一个最自然的落点，说一句克制的旁边话；关心、提醒、疑问、轻吐槽都可以。
+	【字数限制】最多 36 个字，1 到 2 句短句。不要加引号，不要动不动关心。
+			【情绪标签】先由你判断这句话该带什么表情；必须在开头加 <emo=happy|sad|angry|flustered|confused|think|neutral>。不要解释标签。"""
                         reply = await analyze_image(img_b64, v_prompt)
 
                         if reply:
@@ -4732,11 +5744,15 @@ class ChatService:
                             )
                             return
 
-                    # ===== 模式 2：视觉只描述 → 默认模型吐槽 =====
+	                    # ===== 模式 2：视觉只描述 → 默认模型回应 =====
                     elif VISION_MODE == "separate":
                         # 先让视觉模型客观描述，并强制它识别出助手
-                        v_desc_prompt = """请客观详细描述这张图片的内容，重点描述用户正在使用的软件和文字。
-【特殊指令】如果你在屏幕右下角或边缘看到一个二次元/动漫风格的女孩、虚拟形象或悬浮球，请在描述中明确标记为“这是AI助手(你)的形象”。"""
+                        self_awareness_for_vision = self._build_live2d_self_awareness_hint({"source": "desktop"})
+                        v_desc_prompt = f"""请客观、尽量详细地描述这张截图，供后续角色判断如何和用户搭话。
+重点描述：用户正在使用的软件、窗口标题/页面类型、主要文字、正在做的事情、可能值得关心、提醒、陪伴或轻轻吐槽的异常点。
+可以分条写，但不要编造看不清的内容；不确定就写“不确定”。
+{self_awareness_for_vision}
+【特殊指令】如果你识别到桌面边缘的Live2D形象、Live2D Agent窗口、设置中心、换装页、表情/动作配置页，请明确标记“这是你自己的桌面形象或配置界面”。如果只是网页/群聊/图片主体里的动漫角色，不要标成你。"""
 
                         description = await analyze_image(img_b64, v_desc_prompt)
 
@@ -4747,28 +5763,32 @@ class ChatService:
                             record_observation(description, "vision")
                             sys_prompt = f"""{sensor_persona_prompt}
 
-    【场景】用户当前屏幕内容如下：
-    {description}
+【场景】用户当前屏幕内容如下：
+{description}
 
-    【重要设定】描述中提到的“AI助手的形象”、“动漫女孩”就是你自己。你正隔着屏幕陪伴用户。
+【重要设定】描述中如果明确提到“AI助手的形象/Live2D形象/你的配置界面/你的模型”，那就是你自己或用户正在改你。普通网页、群聊或图片主体里的动漫角色不一定是你。
 
-	    【任务】
-	    结合用户屏幕上的主要内容（忽略你自己，关注用户在干嘛）进行一次简短的吐槽。
-	    【字数限制】绝对不能超过 20 个字！用最精简的一句话表达，绝对不要像机器人一样罗列画面内容。不要加引号，不要动不动关心。
-	    """
+	【任务】
+		基于上面的事实，像五十铃怜在旁边当场低声接一句。
+		不强制吐槽；可以关心、提醒、疑问、陪一句，也可以轻轻戳他。
+	可以适当用疑问句或轻反问，不要每次都写成陈述判断。
+		不要评价页面“实用/详尽/清晰”，要说 Master 正在看这件事给你的感觉。
+		不要复述画面，不要总结，不要说“用户正在/屏幕上/画面中/我看到”。
+	{vision_style_block}
+	{recent_sensor_reply_block}
+	【字数限制】最多 36 个字，1 到 2 句短句。不要加引号，不要动不动关心。
+		【情绪标签】先由你判断这句话该带什么表情；必须在开头加 <emo=happy|sad|angry|flustered|confused|think|neutral>。不要解释标签。
+"""
                             reply = await asyncio.to_thread(
                                 chat_with_ai,
                                 [
                                     {
                                         "role": "system",
-                                        "content": sensor_persona_prompt,
+                                        "content": sys_prompt,
                                     },
                                     {
                                         "role": "user",
-                                        "content": (
-                                            f"当前屏幕内容：\n{description}\n\n"
-                                            "请直接输出一句不超过20个字的短评或吐槽。只有明显疲劳、焦虑、长时间工作时才关心。不要加引号。"
-                                        ),
+                                        "content": "现在只输出给我的那一句话。",
                                     },
                                 ],
                                 task_type="sensor_vision_talk",
@@ -4789,9 +5809,16 @@ class ChatService:
 
     用户刚切换到窗口: [{clean_title}] ({category})，这是今天第 {count} 次。
 
-    【任务】直接对他说话进行吐槽。
-    【字数限制】极度重要！最多绝对不能超过 20 个字！用符合你高冷/克制人设的一句话表达即可。不要加引号，不要动不动关心。
-    """
+	【任务】像五十铃怜在旁边看见他切窗口一样，直接对 Master 说一句。
+		不强制吐槽；根据使用时长、次数和上下文选择关心、提醒、疑问、陪一句或轻轻戳他。
+		可以适当用疑问句或轻反问，不要每次都写成陈述判断。
+		不要评价页面“实用/详尽/清晰”，要说他正在看这件事给你的感觉。
+		不要总结他的行为，不要说“用户正在/屏幕上/当前窗口显示”。
+	{text_style_block}
+	{recent_sensor_reply_block}
+	【字数限制】最多 36 个字，1 到 2 句短句。用符合你高冷/克制人设的说法表达即可。不要加引号，不要动不动关心。
+		【情绪标签】先由你判断这句话该带什么表情；必须在开头加 <emo=happy|sad|angry|flustered|confused|think|neutral>。不要解释标签。
+	"""
 
         try:
             record_observation(clean_title, "text")
@@ -4809,68 +5836,70 @@ class ChatService:
             self.logger.error(f"Sensor Gen failed: {e}")
 
     # Helper: reset sensor motion after sensor replies.
-    async def _reset_sensor_motion_after(self, delay_s: float) -> None:
+    async def _reset_sensor_motion_after(
+        self, delay_s: float, *, reply_started_at: float
+    ) -> None:
         """Reset sensor motion back to idle to avoid think sticking."""
         try:
             await asyncio.sleep(max(0.2, float(delay_s)))
+            if self._last_reply_time > float(reply_started_at) + 1e-6:
+                return
             await self.event_bus.emit("live2d.go_idle")
         except Exception:
             return
+
+    def _sensor_emotion_intensity(self, emotion: str) -> float:
+        return sensor_utils.sensor_emotion_intensity(emotion)
+
+    def _looks_like_sensor_template_reply(self, text: str) -> bool:
+        return sensor_utils.looks_like_sensor_template_reply(
+            text, clean_text_fn=self._clean_text_for_tts
+        )
+
+    async def _rescue_sensor_template_reply(
+        self, text: str, *, title: str, category: str
+    ) -> str:
+        clean = self._clean_text_for_tts(str(text or "")).strip()
+        if not clean:
+            return ""
+        try:
+            from modules.llm import chat_with_ai
+
+            prompt = (
+                "把下面这句屏幕感知回应改成一句自然的临场短话。\n"
+                "要求：直接对 Master 说；不要像观察报告；不要出现“用户正在、屏幕上、画面中、我看到、根据、当前窗口、"
+                "挺实用、步骤详尽、需要协助、这也要看、盯着、你又、还真”。\n"
+                "允许关心、疑问、陪一句或很轻的吐槽；最多 28 个字；只输出最终一句。\n"
+                f"窗口：{title} / {category}\n"
+                f"原句：{clean}"
+            )
+            reply = await asyncio.to_thread(
+                chat_with_ai,
+                [{"role": "user", "content": prompt}],
+                task_type="default",
+                caller="sensor_template_rescue",
+            )
+            rescued = self._clean_text_for_tts(
+                self._strip_wrapping_quotes(
+                    self._strip_internal_tags(
+                        self._strip_cmd_anywhere(
+                            self._strip_emo_tags_anywhere(reply or "")
+                        )
+                    )
+                )
+            ).strip()
+            if rescued and not self._looks_like_sensor_template_reply(rescued):
+                return rescued
+        except Exception:
+            pass
+        return ""
 
     # Helper: send sensor replies (extract emotion only; no forced rewrite).
     async def _send_sensor_reply(
         self, reply: str, category: str, count: int, title: str, is_vision: bool
     ):
-        """统一发送传感器回复"""
-        extracted_emo, clean_text = self._extract_emo_tag(reply)
-        clean_text = self._strip_wrapping_quotes(clean_text)
-
-        lowered = str(clean_text or "").lower()
-        bad_patterns = [
-            "we need to",
-            "your task",
-            "up to 20 characters",
-            "直接对他说话进行吐槽",
-            "结合用户屏幕上的主要内容",
-        ]
-        if any(p in lowered for p in bad_patterns):
-            self.logger.warning("⚠️ [Sensor] 视觉吐槽输出疑似复述提示词，已丢弃")
-            return
-
-        if not clean_text or len(clean_text) < 2:
-            return
-        clean_text = self._apply_character_catchphrase(clean_text)
-        if not clean_text:
-            return
-
-        self.logger.info(f"🤖 [Sensor] 发言: {clean_text[:50]}...")
-        self._update_active_time()
-
-        await self.event_bus.emit("ui.append", role="assistant", text=clean_text)
-
-        final_emo = "neutral"
-        if category == "gaming":
-            final_emo = "angry" if count > 8 else "happy"
-        elif category == "coding":
-            final_emo = "sad" if count > 12 else "think"
-        if is_vision:
-            final_emo = "think"
-        if extracted_emo:
-            final_emo = extracted_emo
-
-        await self.presenter.present(clean_text, emotion=final_emo, interrupt=False)
-
-        # Sensor replies often use "think"; return to idle after a short delay.
-        if final_emo == "think":
-            delay = max(2.0, min(6.0, 1.2 + len(clean_text) * 0.12))
-            asyncio.create_task(self._reset_sensor_motion_after(delay))
-
-        # ✅ 改为串行写入
-        tag = "[视觉观察]" if is_vision else "[屏幕观察]"
-        await self._add_memory_safe(
-            "assistant",
-            f"{tag} {clean_text}",
-            meta={"path": "sensor", "emotion": final_emo},
+        await self.sensor_reply_service.send_sensor_reply(
+            reply, category, count, title, is_vision
         )
 
     # ==================== 音乐感知事件处理 ====================
@@ -4960,39 +5989,58 @@ class ChatService:
         except Exception as e:
             self.logger.error(f"处理音乐事件失败: {e}")
 
-    def _is_invalid_diary_output(self, text: str) -> bool:
-        content = str(text or "").strip()
-        if not content:
-            return True
-        lowered = content.lower()
-        error_markers = (
-            "the model does not exist",
-            "openai_responses http",
-            "error code:",
-            "traceback",
-            "connection error",
-            "invalid api key",
-            "not implemented",
-            "bad_response_status_code",
-            "无法连接 ai",
-            "系统繁忙",
+    async def _emit_diary_failure_reply(
+        self,
+        failure_text: str,
+        ctx: Dict[str, Any],
+        output_profile: Optional[Dict[str, Any]],
+    ) -> None:
+        profile = output_profile or build_output_profile(
+            str((ctx or {}).get("source") or "text_input")
         )
-        if any(marker in lowered for marker in error_markers):
-            return True
-        prompt_markers = (
-            "[任务]",
-            "[输出要求]",
-            "[数据源",
-            "系统时间:",
-            "不要输出标题",
-            "必须从“我”的视角",
+        if profile.get("ui_append", True):
+            await self.event_bus.emit("ui.append", role="assistant", text=failure_text)
+        await self.presenter.present(
+            failure_text,
+            emotion="neutral",
+            speak=profile.get("speak", True),
+            show_bubble=profile.get("show_bubble", True),
         )
-        return sum(1 for marker in prompt_markers if marker in content) >= 2
+        await self._send_gateway_reply(failure_text, ctx, emotion="neutral")
 
-    def _build_diary_failure_text(self, date_str: str, is_makeup: bool) -> str:
-        if is_makeup:
-            return f"{date_str} 的补写日记这次没写成，我已经拦住异常返回，没有把坏内容归档。"
-        return "今天的日记这次没写成，我已经拦住异常返回，没有把坏内容归档。"
+    async def _handle_diary_request(
+        self,
+        *,
+        user_text: str,
+        ctx: Dict[str, Any],
+        output_profile: Optional[Dict[str, Any]],
+        memory_path: str,
+        target_date: Optional[date] = None,
+        report_data: Any = None,
+        raw_stats: Optional[Dict[str, Any]] = None,
+        is_makeup: bool = False,
+    ) -> None:
+        diary_text = await self.summarize_day(
+            report_data=report_data,
+            raw_stats=raw_stats,
+            auto=False,
+            target_date=target_date,
+            output_profile=output_profile,
+        )
+        if not diary_text:
+            failure_date = (target_date or datetime.now().date()).strftime("%Y-%m-%d")
+            failure_text = diary_utils.build_diary_failure_text(
+                failure_date, is_makeup
+            )
+            await self._emit_diary_failure_reply(failure_text, ctx, output_profile)
+        asyncio.create_task(
+            self._add_memory_safe("user", user_text, meta={"path": memory_path})
+        )
+        await self._emit_idle_status_when_safe(
+            output_profile,
+            reason="summary_complete",
+            had_presenter_output=True,
+        )
 
     def _get_runtime_owner_label(self) -> str:
         app = self.app
@@ -5089,234 +6137,6 @@ class ChatService:
             return ""
         return ""
 
-    def _normalize_diary_text_block(self, text: Any) -> str:
-        normalized = str(text or "").strip()
-        if normalized in {"(none)", "(no chat history)", "(no owner chat history)"}:
-            return ""
-        return normalized
-
-    def _is_diary_heading_line(self, line: str, date_str: str) -> bool:
-        text = str(line or "").strip()
-        if not text:
-            return False
-        normalized = text.replace("（", "(").replace("）", ")")
-        if normalized.startswith(f"【日记 {date_str}】"):
-            return True
-        if normalized in {
-            f"{date_str} 日记",
-            f"{date_str}日记",
-            f"{date_str} 日记 (补)",
-            f"{date_str}日记(补)",
-            f"{date_str} 日记(补)",
-        }:
-            return True
-        if re.fullmatch(r"\d{4}年\d{1,2}月\d{1,2}日", normalized):
-            return True
-        return False
-
-    def _split_diary_paragraph(self, paragraph: str, max_len: int = 140) -> List[str]:
-        text = str(paragraph or "").strip()
-        if len(text) <= max_len:
-            return [text] if text else []
-        sentences = [
-            part.strip()
-            for part in re.split(r"(?<=[。！？])", text)
-            if str(part).strip()
-        ]
-        if len(sentences) < 2:
-            return [text]
-
-        parts: List[str] = []
-        current = ""
-        remaining = len(sentences)
-        for sentence in sentences:
-            remaining -= 1
-            candidate = f"{current}{sentence}" if current else sentence
-            should_flush = (
-                current
-                and len(candidate) > max_len
-                and remaining >= 1
-            )
-            if should_flush:
-                parts.append(current.strip())
-                current = sentence
-                continue
-            current = candidate
-        if current.strip():
-            parts.append(current.strip())
-        return parts or [text]
-
-    def _polish_diary_output(
-        self, text: str, date_str: str, is_makeup: bool = False
-    ) -> str:
-        raw = str(text or "").replace("\r\n", "\n").replace("\r", "\n").strip()
-        if not raw:
-            return ""
-
-        lines = [line.rstrip() for line in raw.split("\n")]
-        while lines and not lines[0].strip():
-            lines.pop(0)
-        while lines and self._is_diary_heading_line(lines[0], date_str):
-            lines.pop(0)
-            while lines and not lines[0].strip():
-                lines.pop(0)
-
-        paragraphs: List[str] = []
-        bucket: List[str] = []
-        for raw_line in lines:
-            line = re.sub(r"[ \t]+", " ", raw_line).strip()
-            if not line:
-                if bucket:
-                    paragraphs.append("".join(bucket).strip())
-                    bucket = []
-                continue
-            bucket.append(line)
-        if bucket:
-            paragraphs.append("".join(bucket).strip())
-
-        cleaned: List[str] = []
-        for paragraph in paragraphs:
-            for part in self._split_diary_paragraph(paragraph):
-                if part:
-                    cleaned.append(part)
-
-        if not cleaned:
-            return ""
-
-        if len(cleaned) > 3:
-            merged = cleaned[:2]
-            merged.append("".join(cleaned[2:]).strip())
-            cleaned = merged
-
-        content = "\n\n".join(cleaned).strip()
-        if is_makeup and not content.startswith("这是补写"):
-            makeup_markers = ("补写", "补记", "补上一笔")
-            if not any(marker in cleaned[0] for marker in makeup_markers):
-                cleaned[0] = f"这是补写的内容。{cleaned[0]}"
-                content = "\n\n".join(cleaned).strip()
-        return content
-
-    def _extract_report_hours(self, report_text: str) -> float:
-        text = str(report_text or "").strip()
-        if not text:
-            return 0.0
-        match = re.search(r"活跃时长:\s*([\d.]+)\s*小时", text)
-        if not match:
-            return 0.0
-        try:
-            return float(match.group(1))
-        except Exception:
-            return 0.0
-
-    def _is_suspicious_daily_stats(
-        self, date_str: str, stats_payload: Optional[Dict[str, Any]], report_text: str
-    ) -> bool:
-        if isinstance(stats_payload, dict):
-            payload_date = str(stats_payload.get("date") or "").strip()
-            if payload_date and payload_date != date_str:
-                return True
-            total_hours = stats_payload.get("total_hours")
-            try:
-                if total_hours is not None and float(total_hours) > 24.0:
-                    return True
-            except Exception:
-                pass
-        return self._extract_report_hours(report_text) > 24.0
-
-    def _build_diary_focus_digest(
-        self,
-        date_str: str,
-        raw_stats: Optional[Dict[str, Any]],
-        owner_local_history: str,
-        owner_qq_private_history: str,
-        owner_qq_group_history: str,
-    ) -> str:
-        lines = [f"- 日期: {date_str}"]
-        stats = raw_stats if isinstance(raw_stats, dict) else {}
-
-        durations = stats.get("durations")
-        if isinstance(durations, dict) and durations:
-            top_apps = sorted(
-                (
-                    (str(name or "").strip(), float(seconds or 0.0))
-                    for name, seconds in durations.items()
-                    if str(name or "").strip()
-                ),
-                key=lambda item: item[1],
-                reverse=True,
-            )[:5]
-            if top_apps:
-                app_text = "、".join(
-                    f"{name}({self._format_duration_short(seconds)})"
-                    for name, seconds in top_apps
-                )
-                lines.append(f"- 当天主要应用: {app_text}")
-
-        category_totals = stats.get("category_totals")
-        if isinstance(category_totals, dict) and category_totals:
-            top_categories = sorted(
-                (
-                    (str(name or "").strip(), float(seconds or 0.0))
-                    for name, seconds in category_totals.items()
-                    if str(name or "").strip()
-                ),
-                key=lambda item: item[1],
-                reverse=True,
-            )[:4]
-            if top_categories:
-                category_text = "、".join(
-                    f"{name}({self._format_duration_short(seconds)})"
-                    for name, seconds in top_categories
-                )
-                lines.append(f"- 当天主要活动类别: {category_text}")
-
-        observation_compact = stats.get("observation_compact")
-        if isinstance(observation_compact, list) and observation_compact:
-            highlights = [
-                str(item).strip()
-                for item in observation_compact[:4]
-                if str(item).strip()
-            ]
-            if highlights:
-                lines.append(f"- 屏幕观察摘要: {' | '.join(highlights)}")
-
-        for label, block in (
-            ("本地互动", owner_local_history),
-            ("QQ私聊互动", owner_qq_private_history),
-            ("QQ群互动", owner_qq_group_history),
-        ):
-            snippet = self._extract_history_focus_lines(block, limit=4)
-            if snippet:
-                lines.append(f"- {label}: {' | '.join(snippet)}")
-
-        return "\n".join(lines)
-
-    def _extract_history_focus_lines(self, text: str, limit: int = 4) -> List[str]:
-        lines: List[str] = []
-        for raw_line in str(text or "").splitlines():
-            line = raw_line.strip()
-            if not line:
-                continue
-            if line in {"(none)", "(no chat history)"}:
-                continue
-            lines.append(line)
-            if len(lines) >= limit:
-                break
-        return lines
-
-    def _format_duration_short(self, seconds: Any) -> str:
-        try:
-            total_seconds = max(0, int(float(seconds)))
-        except Exception:
-            return "0分钟"
-        hours = total_seconds // 3600
-        minutes = (total_seconds % 3600) // 60
-        if hours and minutes:
-            return f"{hours}小时{minutes}分钟"
-        if hours:
-            return f"{hours}小时"
-        return f"{max(1, minutes)}分钟"
-
     async def summarize_day(
         self,
         report_data: str = None,
@@ -5354,7 +6174,7 @@ class ChatService:
                 "summary_text", json.dumps(raw_stats, ensure_ascii=False)
             )
 
-        if self._is_suspicious_daily_stats(
+        if diary_utils.is_suspicious_daily_stats(
             date_str, normalized_stats_payload, str(report_text or "")
         ):
             self.logger.warning(
@@ -5380,7 +6200,7 @@ class ChatService:
             report_text = await asyncio.to_thread(
                 store.format_screen_stats_for_prompt, date_str
             )
-            if self._is_suspicious_daily_stats(date_str, None, report_text):
+            if diary_utils.is_suspicious_daily_stats(date_str, None, report_text):
                 self.logger.warning(
                     f"Diary build skipped suspicious persisted screen summary for {date_str}."
                 )
@@ -5392,7 +6212,7 @@ class ChatService:
                     )
                 except Exception:
                     persisted_stats = None
-                if isinstance(persisted_stats, dict) and not self._is_suspicious_daily_stats(
+                if isinstance(persisted_stats, dict) and not diary_utils.is_suspicious_daily_stats(
                     date_str,
                     persisted_stats,
                     str(persisted_stats.get("summary_text") or report_text or ""),
@@ -5420,13 +6240,13 @@ class ChatService:
             self._fetch_day_owner_chat_history, date_str, "qq_group"
         )
 
-        chat_history = self._normalize_diary_text_block(chat_history)
-        owner_chat_history = self._normalize_diary_text_block(owner_chat_history)
-        owner_local_history = self._normalize_diary_text_block(owner_local_history)
-        owner_qq_private_history = self._normalize_diary_text_block(
+        chat_history = diary_utils.normalize_diary_text_block(chat_history)
+        owner_chat_history = diary_utils.normalize_diary_text_block(owner_chat_history)
+        owner_local_history = diary_utils.normalize_diary_text_block(owner_local_history)
+        owner_qq_private_history = diary_utils.normalize_diary_text_block(
             owner_qq_private_history
         )
-        owner_qq_group_history = self._normalize_diary_text_block(
+        owner_qq_group_history = diary_utils.normalize_diary_text_block(
             owner_qq_group_history
         )
 
@@ -5450,7 +6270,7 @@ class ChatService:
             pass
 
         subject_label = self._resolve_diary_subject_label()
-        daily_focus = self._build_diary_focus_digest(
+        daily_focus = diary_utils.build_diary_focus_digest(
             date_str,
             normalized_stats_payload,
             owner_local_history,
@@ -5525,13 +6345,13 @@ class ChatService:
             )
             diary_content = (diary_content or "").strip()
 
-            if self._is_invalid_diary_output(diary_content):
+            if diary_utils.is_invalid_diary_output(diary_content):
                 self.logger.warning(
                     f"Diary build skipped invalid output ({date_str}): {diary_content[:180]}"
                 )
                 return ""
 
-            diary_content = self._polish_diary_output(
+            diary_content = diary_utils.polish_diary_output(
                 diary_content, date_str, is_makeup=is_makeup
             )
             if not diary_content:
@@ -5605,186 +6425,29 @@ class ChatService:
 
     def _load_day_transcript_rows(self, date_str: str) -> list[Dict[str, Any]]:
         store = getattr(self.brain, "sqlite_store", None)
-        if not store:
-            return []
-
-        try:
-            try:
-                dt = datetime.strptime(date_str, "%Y-%m-%d")
-            except ValueError:
-                dt = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
-
-            start_ts = int(dt.timestamp())
-            end_ts = start_ts + 86400
-
-            with store._connect() as conn:
-                cursor = conn.execute(
-                    "SELECT ts, role, content, session_id, meta_json FROM transcript WHERE ts >= ? AND ts < ? ORDER BY ts ASC",
-                    (start_ts, end_ts),
-                )
-                rows = cursor.fetchall()
-
-            result: list[Dict[str, Any]] = []
-            for row in rows:
-                meta: Dict[str, Any] = {}
-                raw_meta = row["meta_json"]
-                if raw_meta:
-                    try:
-                        meta = json.loads(raw_meta)
-                    except Exception:
-                        meta = {}
-                result.append(
-                    {
-                        "ts": int(row["ts"]),
-                        "role": str(row["role"] or ""),
-                        "content": str(row["content"] or ""),
-                        "session_id": str(row["session_id"] or ""),
-                        "meta": meta,
-                    }
-                )
-            return result
-        except Exception as e:
-            print(f"[ChatService] Load day transcript failed: {e}")
-            return []
-
-    def _row_meta(self, row: Dict[str, Any]) -> Dict[str, Any]:
-        meta = row.get("meta") if isinstance(row, dict) else {}
-        return meta if isinstance(meta, dict) else {}
-
-    def _row_source(self, row: Dict[str, Any]) -> str:
-        return str(self._row_meta(row).get("source") or "").strip().lower()
-
-    def _row_message_type(self, row: Dict[str, Any]) -> str:
-        message_type = str(self._row_meta(row).get("message_type") or "").strip().lower()
-        if message_type:
-            return message_type
-        session_id = str(row.get("session_id") or "").strip().lower()
-        if session_id.startswith("group:"):
-            return "group"
-        if session_id.startswith("private:"):
-            return "private"
-        return ""
-
-    def _row_sender(self, row: Dict[str, Any]) -> Dict[str, Any]:
-        sender = self._row_meta(row).get("sender")
-        return sender if isinstance(sender, dict) else {}
-
-    def _is_owner_shared_row(self, row: Dict[str, Any]) -> bool:
-        if not isinstance(row, dict):
-            return False
-        session_id = str(row.get("session_id") or "").strip()
-        meta = row.get("meta") if isinstance(row.get("meta"), dict) else {}
-        source = str(meta.get("source") or "").strip().lower()
-        if session_id == OWNER_SHARED_SESSION_ID:
-            return True
-        if session_id and session_id in LEGACY_OWNER_PRIVATE_SESSION_IDS:
-            return True
-        if source in OWNER_SHARED_LOCAL_SOURCES:
-            return True
-        if source in QQ_REMOTE_SOURCES and bool(meta.get("is_owner")):
-            return True
-        return False
-
-    def _format_day_transcript_line(self, row: Dict[str, Any]) -> str:
-        if not isinstance(row, dict):
-            return ""
-        content = str(row.get("content") or "").strip()
-        if not content:
-            return ""
-        ts = int(row.get("ts") or 0)
-        time_str = datetime.fromtimestamp(ts).strftime("%H:%M")
-        role = str(row.get("role") or "").strip().lower()
-        session_id = str(row.get("session_id") or "").strip()
-        meta = row.get("meta") if isinstance(row.get("meta"), dict) else {}
-        source = str(meta.get("source") or "").strip().lower()
-        sender_name = str(meta.get("sender_name") or meta.get("user_id") or "").strip()
-        message_type = (
-            str(meta.get("message_type") or "private").strip().lower() or "private"
+        return diary_utils.load_day_transcript_rows(
+            store,
+            date_str,
+            on_error=lambda exc: print(f"[ChatService] Load day transcript failed: {exc}"),
         )
 
-        if role == "assistant":
-            if self._is_owner_shared_row(row):
-                speaker = "AI(to Owner)"
-            elif source in QQ_REMOTE_SOURCES:
-                speaker = (
-                    "AI(to QQ Group)"
-                    if message_type == "group"
-                    else "AI(to QQ Contact)"
-                )
-            else:
-                speaker = "AI"
-        elif role == "system":
-            speaker = "System"
-        elif self._is_owner_shared_row(row):
-            if (
-                source in QQ_REMOTE_SOURCES
-                or session_id in LEGACY_OWNER_PRIVATE_SESSION_IDS
-            ):
-                speaker = "Owner(QQ)"
-            else:
-                speaker = "Owner(Local)"
-        elif source in QQ_REMOTE_SOURCES:
-            if message_type == "group":
-                speaker = f"OtherGroupMember({sender_name or 'Unknown'})"
-            else:
-                speaker = f"OtherQQContact({sender_name or 'Unknown'})"
-        else:
-            speaker = "User"
-
-        return f"[{time_str}] {speaker}: {content}"
-
     def _fetch_day_chat_history(self, date_str: str) -> str:
-        rows = self._load_day_transcript_rows(date_str)
-        if not rows:
-            return "(no chat history)"
-        lines = [self._format_day_transcript_line(row) for row in rows]
-        lines = [line for line in lines if line]
-        return "\n".join(lines) if lines else "(no chat history)"
+        return diary_utils.fetch_day_chat_history(
+            self._load_day_transcript_rows(date_str),
+            date_str,
+            owner_shared_session_id=OWNER_SHARED_SESSION_ID,
+            legacy_owner_private_session_ids=LEGACY_OWNER_PRIVATE_SESSION_IDS,
+            owner_shared_local_sources=OWNER_SHARED_LOCAL_SOURCES,
+            qq_remote_sources=QQ_REMOTE_SOURCES,
+        )
 
     def _fetch_day_owner_chat_history(self, date_str: str, mode: str = "all") -> str:
-        rows = self._load_day_transcript_rows(date_str)
-        if not rows:
-            return ""
-        owner_rows = []
-        for row in rows:
-            source = self._row_source(row)
-            session_id = str(row.get("session_id") or "").strip().lower()
-            message_type = self._row_message_type(row)
-            if self._is_owner_shared_row(row):
-                if mode == "local" and source in QQ_REMOTE_SOURCES:
-                    continue
-                if mode == "qq_private" and not (
-                    source in QQ_REMOTE_SOURCES and message_type == "private"
-                ):
-                    continue
-                if mode == "qq_group" and not (
-                    source in QQ_REMOTE_SOURCES and message_type == "group"
-                ):
-                    continue
-                owner_rows.append(row)
-                continue
-            if source in QQ_REMOTE_SOURCES:
-                sender = self._row_sender(row)
-                is_owner = (
-                    bool(sender.get("is_owner")) if isinstance(sender, dict) else False
-                )
-                if not is_owner:
-                    meta = self._row_meta(row)
-                    is_owner = bool(meta.get("is_owner"))
-                if is_owner:
-                    if mode == "local":
-                        continue
-                    if mode == "qq_private" and not (
-                        session_id.startswith("private:") or message_type == "private"
-                    ):
-                        continue
-                    if mode == "qq_group" and not (
-                        session_id.startswith("group:") or message_type == "group"
-                    ):
-                        continue
-                    owner_rows.append(row)
-        if not owner_rows:
-            return ""
-        lines = [self._format_day_transcript_line(row) for row in owner_rows]
-        lines = [line for line in lines if line]
-        return "\n".join(lines)
+        return diary_utils.fetch_day_owner_chat_history(
+            self._load_day_transcript_rows(date_str),
+            date_str,
+            mode=mode,
+            owner_shared_session_id=OWNER_SHARED_SESSION_ID,
+            legacy_owner_private_session_ids=LEGACY_OWNER_PRIVATE_SESSION_IDS,
+            owner_shared_local_sources=OWNER_SHARED_LOCAL_SOURCES,
+            qq_remote_sources=QQ_REMOTE_SOURCES,
+        )

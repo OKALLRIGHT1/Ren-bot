@@ -71,6 +71,7 @@ MQTT_DISPLAY_TOPIC = os.getenv("MQTT_DISPLAY_TOPIC", "suzu/display/status")
 # "qt"：使用 Qt 版 GUI（modules/qt_gui.py，需要 pip install PySide6）
 # "auto"：优先 Qt，失败自动回退 Tk
 GUI_BACKEND = "auto"
+START_MINIMIZED_TO_TRAY = get_env_bool("START_MINIMIZED_TO_TRAY", "0")
 GUI_WS_HOST = os.getenv("GUI_WS_HOST", "127.0.0.1")
 GUI_WS_PORT = int(os.getenv("GUI_WS_PORT", "8096"))
 GUI_WS_PATH = os.getenv("GUI_WS_PATH", "/gui")
@@ -201,7 +202,7 @@ SCREEN_DEBUG_VERBOSE = False  # 是否输出详细的屏幕吐槽调试日志
 # 反应冷却时间（秒）：防止她频繁打断你
 # 比如你从 VSCode 切到 Chrome 查资料又切回来，不应该连续触发
 SCREEN_REACTION_COOLDOWN = 600  # 同一类事件 10 分钟内不重复评论
-SCREEN_GLOBAL_COOLDOWN = 120  # 任何主动发言至少间隔 2 分钟
+SCREEN_GLOBAL_COOLDOWN = 180  # 任何主动发言至少间隔 3 分钟
 
 # 久坐提醒配置
 SEDENTARY_REMINDER_MINUTES = 60  # 久坐提醒间隔（分钟）
@@ -349,10 +350,11 @@ CODEX_ROUTE_CHAIN += ["gemini-3-flash"]
 
 # 任务路由：根据不同场景选择模型
 TASK_MODEL_TTL_HOURS = 12  # 任务级成功模型粘性时长（小时）
+LLM_ROUTER_STRICT_ORDER = get_env_bool("LLM_ROUTER_STRICT_ORDER", "1")
 
 LLM_ROUTER = {
     # 默认闲聊场景
-    "default": ["gemini-3-flash, glm-4.7-flash"],
+    "default": ["gemini-3-flash", "glm-4.7-flash"],
     # 复杂推理场景
     "tool_reasoning": ["gemini-3-flash", "or-dp"],
     # 记忆总结场景
@@ -371,9 +373,11 @@ SENSOR_VISION_MODEL = "GLM-4V-Flash"
 VISION_MODEL_KEY = "GLM-4V-Flash"
 # ==================== 向量数据库配置 ====================
 EMBEDDING_CONFIG = {
-    "api_url": "https://api.siliconflow.cn/v1/embeddings",
-    "api_key": os.getenv("SILICONFLOW_KEY"),  # 需要.env中配置
-    "model_name": "BAAI/bge-m3",
+    "api_url": os.getenv("EMBEDDING_API_URL", "http://127.0.0.1:11434/v1/embeddings"),
+    "api_key": os.getenv("EMBEDDING_API_KEY", "ollama"),
+    "model_name": os.getenv("EMBEDDING_MODEL_NAME", "bge-m3"),
+    "timeout": int(os.getenv("EMBEDDING_TIMEOUT", "60")),
+    "max_retries": int(os.getenv("EMBEDDING_MAX_RETRIES", "1")),
 }
 
 # ==================== 记忆系统配置 ====================
@@ -424,7 +428,7 @@ MEMORY_SETTINGS = {
 # 1. 通用系统规则 (格式 + 工具) - 所有角色共用
 SYSTEM_RULES_PROMPT = """
 【输出格式规范】
-- 你可以在回复开头加情绪标签：<emo=happy|sad|angry|flustered|confused|neutral>
+- 每次回复必须在正文最开头加一个情绪标签：<emo=happy|sad|angry|flustered|confused|think|neutral>
 - 只允许 <emo=xxx>，禁止使用 <neutral> / <happy> 等简写。
 - 严禁提及自己是 AI，不要跳出角色设定。
 - 请使用【用户档案】中记录的名称来称呼用户。
@@ -673,3 +677,6 @@ def load_custom_models(*, force: bool = False) -> bool:
 
     _CUSTOM_MODELS_LOADED = True
     return loaded_any
+
+
+load_custom_models()

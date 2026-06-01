@@ -19,6 +19,8 @@ class Plugin:
         self._init_db()
         # 存储 send_bubble 的引用，供后台任务使用
         self._send_bubble = None
+        self._check_task = None
+        self._stopping = False
 
     def _migrate_legacy_db_if_needed(self):
         """兼容旧版本数据库路径，避免提醒/账单历史丢失。"""
@@ -59,12 +61,27 @@ class Plugin:
 
     async def start(self):
         """插件加载时启动后台轮询"""
+        if self._check_task and not self._check_task.done():
+            return
+        self._stopping = False
         logger.info("生活管家后台提醒服务已启动")
-        asyncio.create_task(self._check_reminders_loop())
+        self._check_task = asyncio.create_task(self._check_reminders_loop())
+
+    async def stop(self):
+        """停止后台提醒轮询，避免程序关闭后继续提交线程池任务。"""
+        self._stopping = True
+        task = self._check_task
+        self._check_task = None
+        if task and not task.done():
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
 
     async def _check_reminders_loop(self):
         """后台检查提醒的循环"""
-        while True:
+        while not self._stopping:
             try:
                 now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
 
@@ -108,9 +125,15 @@ class Plugin:
                             print(f"🔔 提醒时间到！\n{content}")
 
             except Exception as e:
+                if isinstance(e, RuntimeError) and "after shutdown" in str(e):
+                    logger.info("生活管家后台提醒服务随主程序关闭退出")
+                    break
                 logger.error(f"生活管家循环错误: {e}")
 
-            await asyncio.sleep(10)  # 每10秒检查一次
+            try:
+                await asyncio.sleep(10)  # 每10秒检查一次
+            except asyncio.CancelledError:
+                break
 
     @handle_plugin_errors("生活管家")
     async def run(self, args, ctx):
