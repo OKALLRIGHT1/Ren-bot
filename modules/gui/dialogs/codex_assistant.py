@@ -1,7 +1,9 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
+import asyncio
 import html
 import uuid
+from dataclasses import asdict
 from pathlib import Path
 from typing import Callable, Dict, List, Optional
 
@@ -9,6 +11,26 @@ from PySide6 import QtCore, QtGui, QtWidgets
 
 from modules.gui.styles import get_tool_dialog_styles, get_ui_palette
 from modules.runtime_settings import load_runtime_settings, update_runtime_settings
+
+
+class _ExternalAgentWorker(QtCore.QObject):
+    finished = QtCore.Signal(dict)
+    failed = QtCore.Signal(str)
+
+    def __init__(self, request_data: Dict):
+        super().__init__()
+        self._request_data = request_data
+
+    @QtCore.Slot()
+    def run(self):
+        try:
+            from modules.code_agent import CodeAgentRequest, run_code_agent
+
+            request = CodeAgentRequest(**self._request_data)
+            result = asyncio.run(run_code_agent(request))
+            self.finished.emit(asdict(result))
+        except Exception as exc:
+            self.failed.emit(str(exc))
 
 
 class CodexAssistantDialog(QtWidgets.QDialog):
@@ -21,10 +43,12 @@ class CodexAssistantDialog(QtWidgets.QDialog):
         self._runtime = load_runtime_settings()
         self._active_task_id = str(self._runtime.get("codex_last_task_id", "")).strip()
         self._last_history_html = ""
+        self._agent_thread: Optional[QtCore.QThread] = None
+        self._agent_worker: Optional[_ExternalAgentWorker] = None
 
-        self.setWindowTitle("代码助手")
-        self.resize(940, 680)
-        self.setMinimumSize(780, 560)
+        self.setWindowTitle("代码代理")
+        self.resize(900, 600)
+        self.setMinimumSize(760, 480)
         self.setModal(False)
         self.setWindowModality(QtCore.Qt.WindowModality.NonModal)
         self.setWindowFlags(
@@ -39,40 +63,44 @@ class CodexAssistantDialog(QtWidgets.QDialog):
         self.setStyleSheet(get_tool_dialog_styles())
 
         outer = QtWidgets.QVBoxLayout(self)
-        outer.setContentsMargins(16, 16, 16, 16)
+        outer.setContentsMargins(12, 12, 12, 12)
 
         shell = QtWidgets.QFrame()
         shell.setObjectName("dialogShell")
         outer.addWidget(shell)
 
         layout = QtWidgets.QVBoxLayout(shell)
-        layout.setContentsMargins(18, 18, 18, 18)
-        layout.setSpacing(14)
+        layout.setContentsMargins(14, 14, 14, 14)
+        layout.setSpacing(10)
 
-        header = QtWidgets.QFrame()
-        header.setObjectName("dialogHeader")
-        header_layout = QtWidgets.QVBoxLayout(header)
-        header_layout.setContentsMargins(14, 12, 14, 12)
-        header_layout.setSpacing(4)
-        title = QtWidgets.QLabel("代码助手")
+        title = QtWidgets.QLabel("代码代理")
         title.setObjectName("dialogTitle")
-        header_layout.addWidget(title)
-        desc = QtWidgets.QLabel("这里会显示你和 AI 的任务对话、思考摘要，以及待你确认的改动预览。")
-        desc.setObjectName("dialogDesc")
-        desc.setWordWrap(True)
-        header_layout.addWidget(desc)
-        layout.addWidget(header)
+        layout.addWidget(title)
 
         section = QtWidgets.QFrame()
         section.setObjectName("dialogSection")
         section_layout = QtWidgets.QVBoxLayout(section)
-        section_layout.setContentsMargins(14, 12, 14, 12)
-        section_layout.setSpacing(10)
+        section_layout.setContentsMargins(12, 10, 12, 10)
+        section_layout.setSpacing(8)
 
         self.chk_mode = QtWidgets.QCheckBox("启用代码助手模式 (Codex)")
         self.chk_mode.setChecked(bool(self._runtime.get("codex_mode_enabled", False)))
         self.chk_mode.toggled.connect(self._on_mode_toggled)
         section_layout.addWidget(self.chk_mode)
+
+        provider_row = QtWidgets.QHBoxLayout()
+        provider_row.addWidget(QtWidgets.QLabel("代理类型"))
+        self.provider_combo = QtWidgets.QComboBox()
+        self.provider_combo.addItem("内置助手", "internal")
+        self.provider_combo.addItem("自定义 CLI", "custom_cli")
+        self.provider_combo.addItem("Codex CLI", "codex_cli")
+        self.provider_combo.addItem("Claude Code", "claude_code")
+        saved_provider = str(self._runtime.get("code_agent_provider", "internal")).strip()
+        provider_index = self.provider_combo.findData(saved_provider)
+        self.provider_combo.setCurrentIndex(provider_index if provider_index >= 0 else 0)
+        self.provider_combo.currentIndexChanged.connect(self._on_provider_changed)
+        provider_row.addWidget(self.provider_combo, 1)
+        section_layout.addLayout(provider_row)
 
         path_row = QtWidgets.QHBoxLayout()
         self.path_edit = QtWidgets.QLineEdit()
@@ -108,13 +136,39 @@ class CodexAssistantDialog(QtWidgets.QDialog):
         perm_row.addWidget(self.chk_autorun)
         perm_row.addStretch()
         section_layout.addLayout(perm_row)
+
+        cli_row = QtWidgets.QHBoxLayout()
+        self.command_edit = QtWidgets.QLineEdit()
+        self.command_edit.setPlaceholderText("外部 CLI 命令模板，例如: codex exec {prompt}")
+        self.command_edit.setText(str(self._runtime.get("code_agent_command_template", "")))
+        cli_row.addWidget(self.command_edit, 1)
+
+        self.btn_detect_agent = QtWidgets.QPushButton("自动检测")
+        self.btn_detect_agent.clicked.connect(lambda: self._detect_agent_command(show_message=True))
+        cli_row.addWidget(self.btn_detect_agent)
+
+        self.btn_pick_agent = QtWidgets.QPushButton("选择程序")
+        self.btn_pick_agent.clicked.connect(self._pick_agent_executable)
+        cli_row.addWidget(self.btn_pick_agent)
+
+        self.timeout_spin = QtWidgets.QSpinBox()
+        self.timeout_spin.setRange(5, 3600)
+        self.timeout_spin.setSuffix(" 秒")
+        self.timeout_spin.setValue(int(self._runtime.get("code_agent_timeout_sec", 300) or 300))
+        cli_row.addWidget(self.timeout_spin)
+        section_layout.addLayout(cli_row)
+
+        self.cli_hint = QtWidgets.QLabel("外部 CLI 不经过 Live2D/TTS；命令模板不使用 shell，{prompt} 会作为单独参数传入。")
+        self.cli_hint.setObjectName("dialogHint")
+        self.cli_hint.setWordWrap(True)
+        section_layout.addWidget(self.cli_hint)
         layout.addWidget(section)
 
         history_card = QtWidgets.QFrame()
         history_card.setObjectName("dialogSection")
         history_layout = QtWidgets.QVBoxLayout(history_card)
-        history_layout.setContentsMargins(14, 12, 14, 12)
-        history_layout.setSpacing(8)
+        history_layout.setContentsMargins(12, 10, 12, 10)
+        history_layout.setSpacing(6)
 
         history_head = QtWidgets.QHBoxLayout()
         history_title = QtWidgets.QLabel("对话 / 思考 / 变更确认")
@@ -134,46 +188,38 @@ class CodexAssistantDialog(QtWidgets.QDialog):
         self.history_view = QtWidgets.QTextBrowser()
         self.history_view.setObjectName("consoleView")
         self.history_view.setReadOnly(True)
-        self.history_view.setMinimumHeight(220)
+        self.history_view.setMinimumHeight(180)
         self.history_view.document().setDocumentMargin(10)
         history_layout.addWidget(self.history_view, 1)
-
-        self.confirm_hint = QtWidgets.QLabel(
-            "如果需要改文件，代码助手会先给出计划和 diff 预览；只有你明确确认后，才会真正 apply_change。"
-        )
-        self.confirm_hint.setObjectName("dialogHint")
-        self.confirm_hint.setWordWrap(True)
-        history_layout.addWidget(self.confirm_hint)
 
         layout.addWidget(history_card, 1)
 
         hint_card = QtWidgets.QFrame()
         hint_card.setObjectName("dialogSection")
         hint_layout = QtWidgets.QVBoxLayout(hint_card)
-        hint_layout.setContentsMargins(14, 12, 14, 12)
-        hint_layout.setSpacing(8)
-        tip = QtWidgets.QLabel(
-            "可直接输入需求，例如:\n"
+        hint_layout.setContentsMargins(12, 10, 12, 10)
+        hint_layout.setSpacing(6)
+
+        self.input_edit = QtWidgets.QTextEdit()
+        self.input_edit.setAcceptRichText(False)
+        self.input_edit.setPlaceholderText(
+            "输入代码相关任务...\n"
+            "例如：\n"
             "1) 帮我检查这个路径下有哪些 TODO\n"
             "2) 读取并解释某个文件\n"
             "3) 修改某函数并给出 diff 预览"
         )
-        tip.setObjectName("dialogHint")
-        tip.setWordWrap(True)
-        hint_layout.addWidget(tip)
-
-        self.input_edit = QtWidgets.QTextEdit()
-        self.input_edit.setAcceptRichText(False)
-        self.input_edit.setPlaceholderText("输入代码相关任务...")
+        self.input_edit.setMinimumHeight(60)
+        self.input_edit.setMaximumHeight(100)
         hint_layout.addWidget(self.input_edit, 1)
-        layout.addWidget(hint_card, 1)
+        layout.addWidget(hint_card, 0)
 
         btn_row = QtWidgets.QHBoxLayout()
         btn_row.addStretch()
-        btn_send = QtWidgets.QPushButton("发送到代码助手")
-        btn_send.setObjectName("primaryAction")
-        btn_send.clicked.connect(self._send)
-        btn_row.addWidget(btn_send)
+        self.btn_send = QtWidgets.QPushButton("发送到代码代理")
+        self.btn_send.setObjectName("primaryAction")
+        self.btn_send.clicked.connect(self._send)
+        btn_row.addWidget(self.btn_send)
         layout.addLayout(btn_row)
 
         self._refresh_timer = QtCore.QTimer(self)
@@ -182,16 +228,122 @@ class CodexAssistantDialog(QtWidgets.QDialog):
         self._refresh_timer.start()
 
         self._on_mode_toggled(self.chk_mode.isChecked())
+        self._on_provider_changed()
         self._refresh_history(force=True)
 
     def showEvent(self, event):
         super().showEvent(event)
+        QtCore.QTimer.singleShot(0, self._ensure_visible_on_screen)
         self._refresh_history(force=True)
 
+    def _ensure_visible_on_screen(self):
+        screen = self.screen() or QtGui.QGuiApplication.primaryScreen()
+        if not screen:
+            return
+        available = screen.availableGeometry()
+        margin = 12
+        max_width = max(480, available.width() - margin * 2)
+        max_height = max(420, available.height() - margin * 2)
+        if self.width() > max_width or self.height() > max_height:
+            self.resize(min(self.width(), max_width), min(self.height(), max_height))
+        frame = self.frameGeometry()
+        x = min(max(frame.x(), available.left() + margin), available.right() - frame.width() - margin)
+        y = min(max(frame.y(), available.top() + margin), available.bottom() - frame.height() - margin)
+        self.move(max(available.left() + margin, x), max(available.top() + margin, y))
+
     def _on_mode_toggled(self, enabled: bool):
+        if self._selected_provider() != "internal":
+            self.chk_allow_write.setEnabled(True)
+            self.chk_allow_exec.setEnabled(True)
+            self.chk_autorun.setEnabled(False)
+            return
         self.chk_allow_write.setEnabled(bool(enabled))
         self.chk_allow_exec.setEnabled(bool(enabled))
         self.chk_autorun.setEnabled(bool(enabled))
+
+    def _selected_provider(self) -> str:
+        return str(self.provider_combo.currentData() or "internal")
+
+    def _on_provider_changed(self):
+        provider = self._selected_provider()
+        external = provider != "internal"
+        templates = {
+            "codex_cli": "codex exec {prompt}",
+            "claude_code": "claude -p {prompt}",
+        }
+        current_template = self.command_edit.text().strip()
+        should_refresh_template = (
+            not current_template
+            or current_template in ("codex {prompt}", "claude {prompt}")
+            or current_template.lower().endswith("\\codex.cmd {prompt}")
+            or current_template.lower().endswith("\\claude.cmd {prompt}")
+        )
+        detected = False
+        if provider in templates and should_refresh_template:
+            detected = self._detect_agent_command(show_message=False)
+            if not detected:
+                self.command_edit.setText(templates[provider])
+        self.chk_mode.setEnabled(not external)
+        self.command_edit.setEnabled(external)
+        self.btn_detect_agent.setEnabled(provider in ("codex_cli", "claude_code"))
+        self.btn_pick_agent.setEnabled(external)
+        self.timeout_spin.setEnabled(external)
+        self.cli_hint.setVisible(external)
+        if not detected:
+            self._set_cli_hint()
+        self._on_mode_toggled(self.chk_mode.isChecked())
+
+    def _set_cli_hint(self, text: str = ""):
+        if text:
+            self.cli_hint.setText(text)
+            return
+        provider = self._selected_provider()
+        if provider in ("codex_cli", "claude_code"):
+            self.cli_hint.setText("会优先在 PATH 中检测本地 CLI；检测不到时可点“选择程序”手动指定 exe/cmd。")
+        else:
+            self.cli_hint.setText("外部 CLI 不经过 Live2D/TTS；命令模板不使用 shell，{prompt} 会作为单独参数传入。")
+
+    def _detect_agent_command(self, show_message: bool = False) -> bool:
+        provider = self._selected_provider()
+        if provider not in ("codex_cli", "claude_code"):
+            if show_message:
+                QtWidgets.QMessageBox.information(self, "代码代理", "当前代理类型没有可自动检测的默认 CLI。")
+            return False
+        try:
+            from modules.code_agent import discover_agent_command
+
+            command = discover_agent_command(provider)
+        except Exception as exc:
+            command = ""
+            if show_message:
+                QtWidgets.QMessageBox.warning(self, "代码代理", f"自动检测失败: {exc}")
+        if command:
+            self.command_edit.setText(command)
+            self._set_cli_hint(f"已检测到本地 CLI: {command}")
+            if show_message:
+                QtWidgets.QMessageBox.information(self, "代码代理", f"已检测到:\n{command}")
+            return True
+        self._set_cli_hint("未在 PATH 中检测到对应 CLI。可以手动填写命令模板，或点击“选择程序”。")
+        if show_message:
+            QtWidgets.QMessageBox.information(self, "代码代理", "未在 PATH 中检测到对应 CLI，请手动选择程序或填写命令模板。")
+        return False
+
+    def _pick_agent_executable(self):
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self,
+            "选择代码代理程序",
+            str(Path.cwd()),
+            "Executable (*.exe *.cmd *.bat);;All Files (*)",
+        )
+        if not path:
+            return
+        try:
+            from modules.code_agent import build_command_template
+
+            self.command_edit.setText(build_command_template(path, self._selected_provider()))
+            self._set_cli_hint(f"已选择程序: {path}")
+        except Exception as exc:
+            QtWidgets.QMessageBox.warning(self, "代码代理", f"选择程序失败: {exc}")
 
     def _pick_file(self):
         path, _ = QtWidgets.QFileDialog.getOpenFileName(self, "选择代码文件", str(Path.cwd()))
@@ -210,6 +362,11 @@ class CodexAssistantDialog(QtWidgets.QDialog):
 
         task_id = uuid.uuid4().hex[:8]
         self._active_task_id = task_id
+        provider = self._selected_provider()
+        if provider != "internal":
+            self._send_external(text, task_id, provider)
+            return
+
         codex_mode = bool(self.chk_mode.isChecked())
         payload = {
             "source": "codex_input",
@@ -238,6 +395,112 @@ class CodexAssistantDialog(QtWidgets.QDialog):
             self.on_submit(text, payload)
         self.input_edit.clear()
         self._refresh_history(force=True)
+
+    def _send_external(self, text: str, task_id: str, provider: str):
+        if self._agent_thread and self._agent_thread.isRunning():
+            QtWidgets.QMessageBox.information(self, "代码代理", "已有外部代理任务正在运行。")
+            return
+        if not self.chk_allow_exec.isChecked():
+            QtWidgets.QMessageBox.warning(self, "代码代理", "外部 CLI 模式需要先勾选“允许执行命令”。")
+            return
+
+        code_path = self.path_edit.text().strip()
+        command_template = self.command_edit.text().strip()
+        request_data = {
+            "provider": provider,
+            "prompt": text,
+            "cwd": code_path,
+            "command_template": command_template,
+            "timeout_sec": int(self.timeout_spin.value()),
+            "allow_write": bool(self.chk_allow_write.isChecked()),
+            "allow_exec": bool(self.chk_allow_exec.isChecked()),
+            "task_id": task_id,
+        }
+        update_runtime_settings(
+            {
+                "code_agent_provider": provider,
+                "code_agent_command_template": command_template,
+                "code_agent_timeout_sec": int(self.timeout_spin.value()),
+                "code_agent_last_path": code_path,
+                "code_agent_allow_write": bool(self.chk_allow_write.isChecked()),
+                "code_agent_allow_exec": bool(self.chk_allow_exec.isChecked()),
+                "codex_last_task_id": task_id,
+                "codex_last_path": code_path,
+            }
+        )
+
+        try:
+            from modules.codex_session import add_event
+            from modules.codex_task_state import set_task_state
+
+            meta = {"task_id": task_id, "provider": provider}
+            add_event("user_task", user_text=text, code_path=code_path, meta=meta)
+            add_event("external_agent_start", user_text=f"启动外部代码代理: {provider}", code_path=code_path, meta=meta)
+            set_task_state(task_id, "external_running", code_path=code_path, summary=f"外部代码代理运行中: {provider}", meta=meta)
+        except Exception:
+            pass
+
+        self.input_edit.clear()
+        self.btn_send.setEnabled(False)
+        self._refresh_history(force=True)
+
+        self._agent_thread = QtCore.QThread(self)
+        self._agent_worker = _ExternalAgentWorker(request_data)
+        self._agent_worker.moveToThread(self._agent_thread)
+        self._agent_thread.started.connect(self._agent_worker.run)
+        self._agent_worker.finished.connect(lambda result: self._on_external_finished(task_id, code_path, provider, result))
+        self._agent_worker.failed.connect(lambda error: self._on_external_failed(task_id, code_path, provider, error))
+        self._agent_worker.finished.connect(self._agent_thread.quit)
+        self._agent_worker.failed.connect(self._agent_thread.quit)
+        self._agent_thread.finished.connect(self._agent_worker.deleteLater)
+        self._agent_thread.finished.connect(self._agent_thread.deleteLater)
+        self._agent_thread.finished.connect(self._clear_external_worker)
+        self._agent_thread.start()
+
+    def _on_external_finished(self, task_id: str, code_path: str, provider: str, result: Dict):
+        try:
+            from modules.codex_session import add_event
+            from modules.codex_task_state import set_task_state
+
+            meta = {
+                "task_id": task_id,
+                "provider": provider,
+                "exit_code": result.get("exit_code"),
+                "duration_sec": result.get("duration_sec"),
+                "command_preview": result.get("command_preview"),
+            }
+            stdout = str(result.get("stdout", "")).strip()
+            stderr = str(result.get("stderr", "")).strip()
+            if stdout:
+                add_event("external_agent_stdout", user_text=stdout, code_path=code_path, meta=meta)
+            if stderr:
+                add_event("external_agent_stderr", user_text=stderr, code_path=code_path, meta=meta)
+            ok = bool(result.get("ok"))
+            state = "external_done" if ok else "external_failed"
+            summary = f"外部代码代理完成 exit={result.get('exit_code')}"
+            add_event("external_agent_done", user_text=summary, code_path=code_path, meta=meta)
+            set_task_state(task_id, state, code_path=code_path, summary=summary, meta=meta)
+        except Exception as exc:
+            QtWidgets.QMessageBox.warning(self, "代码代理", f"记录外部代理结果失败: {exc}")
+        self.btn_send.setEnabled(True)
+        self._refresh_history(force=True)
+
+    def _on_external_failed(self, task_id: str, code_path: str, provider: str, error: str):
+        try:
+            from modules.codex_session import add_event
+            from modules.codex_task_state import set_task_state
+
+            meta = {"task_id": task_id, "provider": provider}
+            add_event("external_agent_error", user_text=error, code_path=code_path, meta=meta)
+            set_task_state(task_id, "external_error", code_path=code_path, summary=error, meta=meta)
+        except Exception:
+            pass
+        self.btn_send.setEnabled(True)
+        self._refresh_history(force=True)
+
+    def _clear_external_worker(self):
+        self._agent_thread = None
+        self._agent_worker = None
 
     def _refresh_history(self, force: bool = False):
         try:
@@ -296,7 +559,7 @@ class CodexAssistantDialog(QtWidgets.QDialog):
         parts = [
             f"<html><body style=\"margin:0; color:{fg}; "
             "font-family:'Cascadia Mono','Consolas','JetBrains Mono', monospace; "
-            "font-size:12px; line-height:1.55;\">"
+            "font-size:12px; line-height:150%;\">"
         ]
         if active_task:
             parts.append(self._render_task_card(active_task))
@@ -316,6 +579,18 @@ class CodexAssistantDialog(QtWidgets.QDialog):
             parts.append(
                 f"<div style=\"padding:6px 0; color:{muted}; font-size:11px;\">暂无对话事件。</div>"
             )
+
+        hint_style = (
+            f"margin-top:14px; border-top:1px dashed {colors['border']}; "
+            f"padding-top:10px; color:{colors['muted']}; font-size:11px; "
+            "font-family:'Segoe UI','Microsoft YaHei',sans-serif;"
+        )
+        parts.append(
+            f"<div style=\"{hint_style}\">"
+            "💡 <b>提示</b>：如果需要修改文件，代码助手会先给出计划和 diff 预览；"
+            "只有您在主窗口或此处明确确认后，才会真正应用变更。"
+            "</div>"
+        )
         parts.append("</body></html>")
         return "".join(parts)
     def _render_task_card(self, task: Dict) -> str:
@@ -388,6 +663,11 @@ class CodexAssistantDialog(QtWidgets.QDialog):
             "assistant_reply": "AI",
             "proposed_change": "CHANGE",
             "apply_change": "APPLIED",
+            "external_agent_start": "AGENT",
+            "external_agent_stdout": "STDOUT",
+            "external_agent_stderr": "STDERR",
+            "external_agent_done": "DONE",
+            "external_agent_error": "ERROR",
         }
         role = role_map.get(event_type, "SYS")
 

@@ -20,6 +20,8 @@ from modules.gui.dialogs.expression_library_manager import ExpressionLibraryMana
 
 from modules.gui.dialogs.meme_manager import MemeManagerDialog
 
+from modules.gui.dialogs.model_routing_overview import ModelRoutingOverviewDialog
+
 from modules.gui.dialogs.status_screen_manager import StatusScreenManagerDialog
 
 from modules.gui.styles import (
@@ -1772,6 +1774,11 @@ class SettingsDialog(QtWidgets.QDialog):
 
         top_actions.addStretch()
 
+        btn_routing_overview = QtWidgets.QPushButton("打开路由总览")
+        btn_routing_overview.clicked.connect(self._open_routing_overview)
+
+        top_actions.addWidget(btn_routing_overview)
+
         btn_provider = QtWidgets.QPushButton("管理提供商")
 
         btn_provider.clicked.connect(lambda: self.open_page(1))
@@ -1878,6 +1885,7 @@ class SettingsDialog(QtWidgets.QDialog):
 
         route_items = [
             ("default", "闲聊", "主回复"),
+            ("reply_polish", "润色", "回复润色/情绪兜底"),
             ("tool_reasoning", "推理", "工具规划"),
             ("summary", "总结", "摘要压缩"),
             ("gatekeeper", "看门人", "是否触发"),
@@ -2136,6 +2144,15 @@ class SettingsDialog(QtWidgets.QDialog):
             self._save_to_json()
 
             self._refresh_router()
+
+    def _open_routing_overview(self):
+        if not hasattr(self, "_routing_overview_dlg") or self._routing_overview_dlg is None:
+            self._routing_overview_dlg = ModelRoutingOverviewDialog(self)
+        else:
+            self._routing_overview_dlg._refresh()
+        self._routing_overview_dlg.show()
+        self._routing_overview_dlg.raise_()
+        self._routing_overview_dlg.activateWindow()
 
     def _save_to_json(self):
         data = {"models": MODELS, "router": LLM_ROUTER, "providers": PROVIDERS}

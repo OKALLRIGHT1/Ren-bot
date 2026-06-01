@@ -15,6 +15,7 @@ from config import (
     PROVIDERS,
     SENSOR_VISION_MODEL,
 )
+from modules.task_registry import check_caller_task
 
 try:
     from modules.model_transport_state import (
@@ -46,6 +47,7 @@ _LOG_LOCK = threading.Lock()
 _METRIC_LOCK = threading.Lock()
 _METRICS = []
 _MAX_METRICS = 300
+_UNKNOWN_CALLER_WARNED = set()
 
 
 def _trace_log(*lines):
@@ -59,6 +61,24 @@ def _record_metric(entry: dict):
         _METRICS.append(entry)
         if len(_METRICS) > _MAX_METRICS:
             del _METRICS[: len(_METRICS) - _MAX_METRICS]
+
+
+def _warn_caller_task_check(check, *, prefix: str, trace: str = "") -> None:
+    if check.known:
+        if not check.ok:
+            suffix = f" ({trace})" if trace else ""
+            _trace_log(
+                f"{prefix} caller/task_type mismatch caller={check.caller} expected={check.expected_task_type} actual={check.task_type}{suffix}"
+            )
+        return
+    key = (check.caller, check.task_type)
+    if key in _UNKNOWN_CALLER_WARNED:
+        return
+    _UNKNOWN_CALLER_WARNED.add(key)
+    suffix = f" ({trace})" if trace else ""
+    _trace_log(
+        f"{prefix} unknown caller caller={check.caller} task={check.task_type}{suffix}"
+    )
 
 
 def get_recent_llm_metrics(limit: int = 50):
@@ -407,14 +427,18 @@ async def analyze_image(
     image_base64: str,
     prompt: str = "请详细描述这张图片的内容。",
     model_name: str = None,
+    caller: str = "",
 ) -> str:
+    caller = caller or "vision"
+    check = check_caller_task(caller, "vision")
+    _warn_caller_task_check(check, prefix="[Vision]")
     target_key = model_name if model_name else (SENSOR_VISION_MODEL or "default")
     config = MODELS.get(target_key)
     if not config:
         return f"（视觉配置错误：找不到模型 {target_key}）"
     config = _resolve_model_config(config)
 
-    print(f"[Vision] 调用模型: {target_key}")
+    print(f"[Vision] 调用模型: {target_key} caller={caller}")
 
     try:
         client = AsyncOpenAI(api_key=config["api_key"], base_url=config["base_url"])
@@ -447,8 +471,11 @@ async def analyze_image(
 
 
 async def chat_with_ai_stream(
-    messages_context, task_type="default"
+    messages_context, task_type="default", caller: str = ""
 ) -> AsyncGenerator[str, None]:
+    caller = caller or "unknown"
+    check = check_caller_task(caller, task_type)
+    _warn_caller_task_check(check, prefix="[LLM Stream]")
     model_keys = LLM_ROUTER.get(task_type, LLM_ROUTER.get("default", []))
     if isinstance(model_keys, str):
         model_keys = [model_keys]
@@ -556,6 +583,7 @@ def chat_with_ai(
 ):
     request_id = request_id or uuid.uuid4().hex[:8]
     caller = caller or "unknown"
+    check = check_caller_task(caller, task_type)
     trace = (
         f"task={task_type} caller={caller} req={request_id} tid={threading.get_ident()}"
     )
@@ -573,6 +601,7 @@ def chat_with_ai(
         f"[LLM Sync] {trace}",
         f"[LLM Sync] payload messages={msg_count} chars~{msg_chars} ({trace})",
     )
+    _warn_caller_task_check(check, prefix="[LLM Sync]", trace=trace)
 
     model_keys = LLM_ROUTER.get(task_type, LLM_ROUTER.get("default", []))
     if isinstance(model_keys, str):

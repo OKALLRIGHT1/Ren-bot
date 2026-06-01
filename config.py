@@ -355,6 +355,8 @@ LLM_ROUTER_STRICT_ORDER = get_env_bool("LLM_ROUTER_STRICT_ORDER", "1")
 LLM_ROUTER = {
     # 默认闲聊场景
     "default": ["gemini-3-flash", "glm-4.7-flash"],
+    # 回复润色 / 情绪兜底：初始复用 default 链，先把语义从闲聊里拆出来
+    "reply_polish": ["gemini-3-flash", "glm-4.7-flash"],
     # 复杂推理场景
     "tool_reasoning": ["gemini-3-flash", "or-dp"],
     # 记忆总结场景
