@@ -48,7 +48,7 @@
             "type": "text",
             "label": "Grok 模型",
             "description": "用于联网搜索的模型名。建议先用 grok-4.20-0309-non-reasoning 或 fast 类模型。",
-            "default": "grok-4.20-0309-non-reasoning"
+            "default": "grok-4.20-multi-agent-xhigh"
         },
         "grok_use_active_character": {
             "type": "bool",

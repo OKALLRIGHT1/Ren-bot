@@ -139,7 +139,7 @@ class CodexAssistantDialog(QtWidgets.QDialog):
 
         cli_row = QtWidgets.QHBoxLayout()
         self.command_edit = QtWidgets.QLineEdit()
-        self.command_edit.setPlaceholderText("外部 CLI 命令模板，例如: codex exec {prompt}")
+        self.command_edit.setPlaceholderText("外部 CLI 命令模板，例如: codex exec {prompt_stdin}")
         self.command_edit.setText(str(self._runtime.get("code_agent_command_template", "")))
         cli_row.addWidget(self.command_edit, 1)
 
@@ -158,7 +158,7 @@ class CodexAssistantDialog(QtWidgets.QDialog):
         cli_row.addWidget(self.timeout_spin)
         section_layout.addLayout(cli_row)
 
-        self.cli_hint = QtWidgets.QLabel("外部 CLI 不经过 Live2D/TTS；命令模板不使用 shell，{prompt} 会作为单独参数传入。")
+        self.cli_hint = QtWidgets.QLabel("外部 CLI 不经过 Live2D/TTS；命令模板不使用 shell，优先用 {prompt_stdin} 从标准输入传任务。")
         self.cli_hint.setObjectName("dialogHint")
         self.cli_hint.setWordWrap(True)
         section_layout.addWidget(self.cli_hint)
@@ -268,15 +268,17 @@ class CodexAssistantDialog(QtWidgets.QDialog):
         provider = self._selected_provider()
         external = provider != "internal"
         templates = {
-            "codex_cli": "codex exec {prompt}",
-            "claude_code": "claude -p {prompt}",
+            "codex_cli": "codex exec {prompt_stdin}",
+            "claude_code": "claude -p {prompt_stdin}",
         }
         current_template = self.command_edit.text().strip()
         should_refresh_template = (
             not current_template
-            or current_template in ("codex {prompt}", "claude {prompt}")
+            or current_template in ("codex {prompt}", "claude {prompt}", "codex exec {prompt}", "claude -p {prompt}")
             or current_template.lower().endswith("\\codex.cmd {prompt}")
             or current_template.lower().endswith("\\claude.cmd {prompt}")
+            or current_template.lower().endswith("\\codex.cmd exec {prompt}")
+            or current_template.lower().endswith("\\claude.cmd -p {prompt}")
         )
         detected = False
         if provider in templates and should_refresh_template:
@@ -301,7 +303,7 @@ class CodexAssistantDialog(QtWidgets.QDialog):
         if provider in ("codex_cli", "claude_code"):
             self.cli_hint.setText("会优先在 PATH 中检测本地 CLI；检测不到时可点“选择程序”手动指定 exe/cmd。")
         else:
-            self.cli_hint.setText("外部 CLI 不经过 Live2D/TTS；命令模板不使用 shell，{prompt} 会作为单独参数传入。")
+            self.cli_hint.setText("外部 CLI 不经过 Live2D/TTS；命令模板不使用 shell。支持 {prompt_stdin} 或旧式 {prompt}。")
 
     def _detect_agent_command(self, show_message: bool = False) -> bool:
         provider = self._selected_provider()

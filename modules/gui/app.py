@@ -28,6 +28,10 @@ from modules.gui.dialogs.codex_assistant import CodexAssistantDialog
 from modules.gui.dialogs.console_log import ConsoleLogDialog
 from modules.gui.dialogs.expression_library_manager import ExpressionLibraryManagerDialog
 from modules.gui.dialogs.meme_manager import MemeManagerDialog
+from modules.gui.sedentary_popup import (
+    build_sedentary_popup_options,
+    show_sedentary_popup_dialog,
+)
 from modules.character_manager import character_manager
 
 # 引入配置
@@ -42,6 +46,39 @@ except ImportError:
     BALL_CONFIG = DEFAULT_BALL_CONFIG
 
 
+WORK_SESSION_EMPTY_LABEL = "久坐时间 --"
+WORK_SESSION_LABEL_WIDTH = 168
+WORK_SESSION_REFRESH_INTERVAL_MS = 10_000
+
+
+def format_work_session_label(session: Optional[dict]) -> str:
+    if not isinstance(session, dict):
+        return ""
+    try:
+        active_minutes = int(session.get("active_minutes") or 0)
+    except Exception:
+        active_minutes = 0
+    try:
+        active_seconds = int(session.get("active_seconds") or 0)
+    except Exception:
+        active_seconds = 0
+    if active_minutes <= 0 and active_seconds <= 0:
+        if session.get("source"):
+            return "久坐时间 采集中"
+        return ""
+
+    if active_minutes >= 60:
+        hours = active_minutes // 60
+        minutes = active_minutes % 60
+        duration = f"{hours} 小时" if minutes == 0 else f"{hours} 小时 {minutes} 分钟"
+    elif active_minutes <= 0:
+        duration = "<1 分钟"
+    else:
+        duration = f"{active_minutes} 分钟"
+
+    return f"久坐时间 {duration}"
+
+
 class _Bridge(QtCore.QObject):
     sig_append = QtCore.Signal(str, str)
     sig_status = QtCore.Signal(str)
@@ -54,6 +91,7 @@ class _Bridge(QtCore.QObject):
     sig_set_tts = QtCore.Signal(bool)
     sig_toggle_gui = QtCore.Signal()
     sig_send_text = QtCore.Signal(str)
+    sig_sedentary_popup = QtCore.Signal(str, int, str, object)
 
 
 class QtChatTrayApp(QtCore.QObject):
@@ -89,6 +127,7 @@ class QtChatTrayApp(QtCore.QObject):
         self.on_apply_external_settings_callback = on_apply_external_settings_callback
         self.on_display_state_callback = on_display_state_callback
         self.plugin_manager = plugin_manager
+        self.screen_sensor = None
 
         # --- 内部状态 ---
         self._is_ball_mode = True
@@ -122,10 +161,15 @@ class QtChatTrayApp(QtCore.QObject):
         self._bridge.sig_trigger_costume_name.connect(self._on_costume_triggered)
         self._bridge.sig_toggle_gui.connect(self.toggle_show_hide)
         self._bridge.sig_send_text.connect(self._send_text_from_asr)
+        self._bridge.sig_sedentary_popup.connect(self._show_sedentary_popup_ui)
 
         # --- 构建 UI ---
         self._win = self._build_window()
         self._tray = self._build_tray()
+        self._work_session_timer = QtCore.QTimer(self)
+        self._work_session_timer.setInterval(WORK_SESSION_REFRESH_INTERVAL_MS)
+        self._work_session_timer.timeout.connect(self.refresh_work_session_status)
+        self._work_session_timer.start()
 
         self._settings_dialog = None
         self._knowledge_dialog = None
@@ -146,6 +190,7 @@ class QtChatTrayApp(QtCore.QObject):
             self._win.show()
 
         self.set_status("Ready")
+        self.refresh_work_session_status()
 
     def apply_external_settings(self, settings: Optional[dict] = None):
         if callable(self.on_apply_external_settings_callback):
@@ -281,6 +326,19 @@ class QtChatTrayApp(QtCore.QObject):
         self._current_costume_name = self._resolve_initial_costume_name()
         self._refresh_character_status()
 
+        self._lbl_work_session = QtWidgets.QLabel("")
+        self._lbl_work_session.setObjectName("workSessionLabel")
+        self._lbl_work_session.setFixedWidth(WORK_SESSION_LABEL_WIDTH)
+        self._lbl_work_session.setAlignment(
+            QtCore.Qt.AlignmentFlag.AlignCenter
+            | QtCore.Qt.AlignmentFlag.AlignVCenter
+        )
+        self._lbl_work_session.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Fixed,
+            QtWidgets.QSizePolicy.Policy.Fixed,
+        )
+        self._lbl_work_session.setTextFormat(QtCore.Qt.TextFormat.PlainText)
+
         btn_shrink = QtWidgets.QPushButton("─")
         btn_shrink.setObjectName("windowCtl")
         btn_shrink.clicked.connect(self._switch_to_ball)
@@ -292,6 +350,7 @@ class QtChatTrayApp(QtCore.QObject):
         top_bar.addWidget(self._dot)
         top_bar.addWidget(self._lbl_status)
         top_bar.addWidget(self._lbl_character)
+        top_bar.addWidget(self._lbl_work_session)
         top_bar.addStretch()
         top_bar.addWidget(btn_shrink)
         top_bar.addWidget(btn_close)
@@ -419,6 +478,38 @@ class QtChatTrayApp(QtCore.QObject):
                 self._input.setPlaceholderText("可以直接说话，也可以继续输入…")
             else:
                 self._input.setPlaceholderText("和我聊聊，或直接输入任务 / 指令…")
+
+    def set_screen_sensor(self, screen_sensor: Any) -> None:
+        self.screen_sensor = screen_sensor
+        self.refresh_work_session_status()
+
+    def refresh_work_session_status(self) -> None:
+        label = WORK_SESSION_EMPTY_LABEL
+        tooltip = ""
+        try:
+            sensor = getattr(self, "screen_sensor", None)
+            if sensor and hasattr(sensor, "get_current_work_session"):
+                label = (
+                    format_work_session_label(sensor.get_current_work_session())
+                    or WORK_SESSION_EMPTY_LABEL
+                )
+                tooltip = label
+            else:
+                tooltip = "ScreenSensor 未绑定，暂时没有久坐时间数据"
+        except Exception as exc:
+            label = WORK_SESSION_EMPTY_LABEL
+            tooltip = f"久坐时间数据读取失败: {exc}"
+
+        if not hasattr(self, "_lbl_work_session"):
+            return
+        metrics = self._lbl_work_session.fontMetrics()
+        text_width = max(24, self._lbl_work_session.contentsRect().width() - 16)
+        display_text = metrics.elidedText(
+            label, QtCore.Qt.TextElideMode.ElideRight, text_width
+        )
+        self._lbl_work_session.setText(display_text)
+        self._lbl_work_session.setToolTip(tooltip or label)
+        self._lbl_work_session.setVisible(True)
 
     def _show_more_menu(self):
         menu = QtWidgets.QMenu(self._btn_more)
@@ -902,22 +993,22 @@ class QtChatTrayApp(QtCore.QObject):
         self._history.ensureCursorVisible()
 
     def append(self, role, text):
-        self._bridge.sig_append.emit(role, text)
+        self._emit_bridge_signal("sig_append", role, text)
 
     def set_status(self, text):
-        self._bridge.sig_status.emit(text)
+        self._emit_bridge_signal("sig_status", text)
 
     def refresh_character_status(self):
-        self._bridge.sig_refresh_character.emit()
+        self._emit_bridge_signal("sig_refresh_character")
 
     def sync_active_character_visual(self):
-        self._bridge.sig_sync_active_character_visual.emit()
+        self._emit_bridge_signal("sig_sync_active_character_visual")
 
     def publish_display_snapshot(self):
         self._publish_display_state()
 
     def trigger_costume_by_name(self, costume_name: str):
-        self._bridge.sig_trigger_costume_name.emit(str(costume_name or ""))
+        self._emit_bridge_signal("sig_trigger_costume_name", str(costume_name or ""))
 
     def apply_character_switch(
         self,
@@ -927,12 +1018,68 @@ class QtChatTrayApp(QtCore.QObject):
         costume_name: Optional[str] = None,
         character_name: Optional[str] = None,
     ):
-        self._bridge.sig_apply_character_switch.emit(
+        self._emit_bridge_signal(
+            "sig_apply_character_switch",
             str(model_path or ""),
             cfg if isinstance(cfg, dict) else {},
             str(costume_name or ""),
             str(character_name or ""),
         )
+
+    def show_sedentary_popup(
+        self,
+        app_name: str,
+        active_minutes: int,
+        image_path: str = "",
+        on_result: Optional[Callable[[str], None]] = None,
+    ):
+        self._emit_bridge_signal(
+            "sig_sedentary_popup",
+            str(app_name or ""),
+            int(active_minutes or 0),
+            str(image_path or ""),
+            on_result,
+        )
+
+    def _emit_bridge_signal(self, signal_name: str, *args) -> bool:
+        try:
+            bridge = getattr(self, "_bridge", None)
+            signal = getattr(bridge, signal_name, None)
+            if signal is None:
+                return False
+            signal.emit(*args)
+            return True
+        except RuntimeError as exc:
+            if "already deleted" in str(exc):
+                return False
+            raise
+
+    @QtCore.Slot(str, int, str, object)
+    def _show_sedentary_popup_ui(
+        self, app_name: str, active_minutes: int, image_path: str, on_result: object
+    ):
+        try:
+            import config
+
+            options = build_sedentary_popup_options(
+                config,
+                app_name=app_name,
+                active_minutes=active_minutes,
+                image_path_override=image_path,
+            )
+            result = show_sedentary_popup_dialog(self._win, options)
+        except Exception as exc:
+            result = "error"
+            try:
+                self.append("system", f"久坐提醒弹窗失败: {exc}")
+            except Exception:
+                pass
+
+        if callable(on_result):
+            try:
+                on_result(result)
+            except Exception:
+                pass
 
     @QtCore.Slot(str, object, str, str)
     def _apply_character_switch(
@@ -967,11 +1114,19 @@ class QtChatTrayApp(QtCore.QObject):
             self._refresh_character_status()
 
     def toggle_show_hide(self):
-        if self._win.isVisible():
-            self._win.hide()
-        else:
-            self._win.show()
-            self._ensure_on_screen()
+        try:
+            win = getattr(self, "_win", None)
+            if win is None:
+                return
+            if win.isVisible():
+                win.hide()
+            else:
+                win.show()
+                self.refresh_work_session_status()
+                self._ensure_on_screen()
+        except RuntimeError as exc:
+            if "already deleted" not in str(exc):
+                raise
 
     def _on_app_state_changed(self, state):
         if state == QtCore.Qt.ApplicationState.ApplicationActive:

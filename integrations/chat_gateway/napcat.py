@@ -4,6 +4,7 @@ import asyncio
 import base64
 import json
 import mimetypes
+import os
 import re
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
@@ -35,6 +36,16 @@ try:
     from config import NAPCAT_OWNER_LABEL
 except Exception:
     NAPCAT_OWNER_LABEL = "主人"
+
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+DEFAULT_ALLOWED_FILE_ROOTS = (
+    PROJECT_ROOT / "audio_cache",
+    PROJECT_ROOT / "temp_audio",
+    PROJECT_ROOT / "data" / "outbound",
+    PROJECT_ROOT / "data" / "qq_file_browser",
+    PROJECT_ROOT / "plugins" / "meme_pack" / "assets",
+)
 
 try:
     from config import NAPCAT_IMAGE_VISION_ENABLED
@@ -119,6 +130,45 @@ class NapCatOneBotAdapter(BaseChatAdapter):
             if str(item).strip()
         ]
         self.ws_action_sender = ws_action_sender
+        self.allowed_file_roots = self._build_allowed_file_roots()
+
+    def _build_allowed_file_roots(self) -> List[Path]:
+        roots = list(DEFAULT_ALLOWED_FILE_ROOTS)
+        extra = str(os.getenv("NAPCAT_ALLOWED_FILE_ROOTS", "") or "").strip()
+        if extra:
+            for item in re.split(r"[;\n]+", extra):
+                text = item.strip()
+                if text:
+                    roots.append(Path(text).expanduser())
+
+        resolved: List[Path] = []
+        for root in roots:
+            try:
+                candidate = root.resolve()
+            except Exception:
+                candidate = root.absolute()
+            if candidate not in resolved:
+                resolved.append(candidate)
+        return resolved
+
+    @staticmethod
+    def _is_relative_to(path: Path, base: Path) -> bool:
+        try:
+            return path.is_relative_to(base)
+        except AttributeError:
+            return path == base or base in path.parents
+
+    def _file_allowed(self, path: Path) -> bool:
+        return any(self._is_relative_to(path, root) for root in self.allowed_file_roots)
+
+    def _file_blocked_result(self, session_id: str, path: Path, kind: str) -> Dict[str, Any]:
+        return {
+            "ok": False,
+            "reason": f"{kind}_path_not_allowed",
+            "session_id": session_id,
+            f"{kind}_path": str(path),
+            "allowed_roots": [str(root) for root in self.allowed_file_roots],
+        }
 
     def set_ws_action_sender(
         self,
@@ -814,6 +864,8 @@ class NapCatOneBotAdapter(BaseChatAdapter):
                 "session_id": session_id,
                 "voice_path": str(voice_file),
             }
+        if not self._file_allowed(voice_file):
+            return self._file_blocked_result(session_id, voice_file, "voice")
 
         variants = self._build_voice_message_variants(voice_file)
         ws_timeout = float(kwargs.get("timeout") or 8)
@@ -939,6 +991,8 @@ class NapCatOneBotAdapter(BaseChatAdapter):
                 "session_id": session_id,
                 "image_path": str(image_file),
             }
+        if not self._file_allowed(image_file):
+            return self._file_blocked_result(session_id, image_file, "image")
 
         caption = str(kwargs.get("caption") or "").strip()
         message = [
@@ -1041,6 +1095,8 @@ class NapCatOneBotAdapter(BaseChatAdapter):
                 "session_id": session_id,
                 "file_path": str(file_item),
             }
+        if not self._file_allowed(file_item):
+            return self._file_blocked_result(session_id, file_item, "file")
 
         file_name = str(kwargs.get("name") or "").strip() or file_item.name
         message = [

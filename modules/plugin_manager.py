@@ -24,8 +24,8 @@ except Exception:
 QQ_REMOTE_SOURCES = {"qq_gateway", "napcat_qq"}
 DEFAULT_ACCESS_CONTROL = {
     "allow_local": True,
-    "allow_remote_qq": True,
-    "allow_qq_owner": True,
+    "allow_remote_qq": False,
+    "allow_qq_owner": False,
     "allow_qq_others": False,
     "allow_group_without_at": False,
 }

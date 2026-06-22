@@ -1,4 +1,5 @@
 import asyncio
+import ast
 import re
 import subprocess
 import tempfile
@@ -8,17 +9,20 @@ import sys
 from pathlib import Path
 from typing import Optional, Dict, Any
 from core.logger import get_logger
+from modules.security_redaction import redact_sensitive_text
 from plugins.plugin_utils import handle_plugin_errors, safe_get_context
 
 # 导入配置
 try:
     from config import (
+        CODE_EXECUTOR_ENABLED,
         CODE_EXECUTOR_MAX_TIME,
         CODE_EXECUTOR_MAX_LENGTH,
         CODE_EXECUTOR_MAX_OUTPUT
     )
 except ImportError:
     # 如果配置不存在，使用默认值
+    CODE_EXECUTOR_ENABLED = False
     CODE_EXECUTOR_MAX_TIME = 30
     CODE_EXECUTOR_MAX_LENGTH = 5000
     CODE_EXECUTOR_MAX_OUTPUT = 100
@@ -30,7 +34,7 @@ def _get_logger():
     """安全获取logger，如果未初始化则返回None"""
     try:
         return get_logger()
-    except:
+    except Exception:
         return None
 
 
@@ -60,10 +64,29 @@ class Plugin:
     }
     
     # 从配置文件读取安全限制
+    ENABLED = CODE_EXECUTOR_ENABLED
     MAX_EXECUTION_TIME = CODE_EXECUTOR_MAX_TIME  # 秒
     MAX_CODE_LENGTH = CODE_EXECUTOR_MAX_LENGTH   # 字符
     MAX_OUTPUT_LINES = CODE_EXECUTOR_MAX_OUTPUT   # 行
     MAX_LINE_LENGTH = 200    # 字符
+    EXECUTION_ENV_ALLOWLIST = {
+        "APPDATA",
+        "COMSPEC",
+        "LOCALAPPDATA",
+        "NUMBER_OF_PROCESSORS",
+        "PATH",
+        "PATHEXT",
+        "PROCESSOR_ARCHITECTURE",
+        "PROGRAMDATA",
+        "PROGRAMFILES",
+        "PROGRAMFILES(X86)",
+        "SYSTEMDRIVE",
+        "SYSTEMROOT",
+        "TEMP",
+        "TMP",
+        "USERPROFILE",
+        "WINDIR",
+    }
     
     @handle_plugin_errors("代码执行器")
     async def run(self, args: str, ctx: Dict[str, Any]) -> str:
@@ -79,6 +102,8 @@ class Plugin:
         """
         if not args or not args.strip():
             return "❌ 请提供要执行的Python代码"
+        if not self.ENABLED:
+            return "❌ 代码执行器未启用。需要在本地显式设置 CODE_EXECUTOR_ENABLED=1 后才能执行。"
         
         # 提取代码块（支持```python ... ```格式）
         code = self._extract_code(args)
@@ -99,8 +124,8 @@ class Plugin:
         except Exception as e:
             log = _get_logger()
             if log:
-                log.error(f"代码执行失败: {e}")
-            return f"❌ 执行失败: {str(e)}"
+                log.error(f"代码执行失败: {redact_sensitive_text(e)}")
+            return f"❌ 执行失败: {redact_sensitive_text(e)}"
     
     def _extract_code(self, text: str) -> str:
         """从文本中提取Python代码块"""
@@ -130,6 +155,9 @@ class Plugin:
                 'valid': False,
                 'reason': f'代码长度超过限制（{self.MAX_CODE_LENGTH}字符）'
             }
+        ast_result = self._validate_ast(code)
+        if not ast_result['valid']:
+            return ast_result
         
         # 检查导入语句
         for module in self.RESTRICTED_MODULES:
@@ -151,7 +179,8 @@ class Plugin:
             r'\beval\s*\(', r'\bexec\s*\(', r'\bcompile\s*\(',
             r'\bopen\s*\(', r'\bfile\s*\(',
             r'\bsubprocess\.', r'\bos\.system',
-            r'\b__import__\s*\('
+            r'\b__import__\s*\(', r'\bglobals\s*\(', r'\blocals\s*\(',
+            r'\bvars\s*\(', r'__builtins__'
         ]
         
         for pattern in dangerous_patterns:
@@ -168,8 +197,71 @@ class Plugin:
                     'valid': False,
                     'reason': '检测到潜在无限循环'
                 }
-        
+
         return {'valid': True, 'reason': ''}
+
+    def _validate_ast(self, code: str) -> Dict[str, Any]:
+        try:
+            tree = ast.parse(code)
+        except SyntaxError as exc:
+            return {'valid': False, 'reason': f'语法错误: {exc}'}
+
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    module = str(alias.name or "")
+                    result = self._validate_import_name(module)
+                    if not result['valid']:
+                        return result
+            elif isinstance(node, ast.ImportFrom):
+                module = str(node.module or "")
+                result = self._validate_import_name(module)
+                if not result['valid']:
+                    return result
+            elif isinstance(node, ast.Call):
+                call_name = self._call_name(node.func)
+                if isinstance(node.func, (ast.Call, ast.Subscript, ast.Lambda)):
+                    return {'valid': False, 'reason': f'禁止动态调用表达式: {call_name or type(node.func).__name__}'}
+                root = call_name.split(".", 1)[0]
+                if call_name in self.RESTRICTED_MODULES or root in self.RESTRICTED_MODULES:
+                    return {'valid': False, 'reason': f'禁止调用: {call_name}'}
+        return {'valid': True, 'reason': ''}
+
+    def _validate_import_name(self, module: str) -> Dict[str, Any]:
+        module = str(module or "").strip()
+        root = module.split(".", 1)[0]
+        if root in self.RESTRICTED_MODULES or module in self.RESTRICTED_MODULES:
+            return {'valid': False, 'reason': f'禁止使用模块: {module}'}
+        if module not in self.ALLOWED_IMPORTS and root not in self.ALLOWED_IMPORTS:
+            return {'valid': False, 'reason': f'未在白名单中的模块: {module}'}
+        return {'valid': True, 'reason': ''}
+
+    def _call_name(self, node: ast.AST) -> str:
+        if isinstance(node, ast.Name):
+            return node.id
+        if isinstance(node, ast.Attribute):
+            parent = self._call_name(node.value)
+            return f"{parent}.{node.attr}" if parent else node.attr
+        if isinstance(node, ast.Call):
+            parent = self._call_name(node.func)
+            return f"{parent}()" if parent else "<call>"
+        if isinstance(node, ast.Subscript):
+            parent = self._call_name(node.value)
+            return f"{parent}[]" if parent else "<subscript>"
+        if isinstance(node, ast.Lambda):
+            return "<lambda>"
+        return ""
+
+    def _build_execution_env(self, temp_dir: str) -> Dict[str, str]:
+        env: Dict[str, str] = {}
+        for key in self.EXECUTION_ENV_ALLOWLIST:
+            if key in os.environ:
+                env[key] = os.environ[key]
+        env["PYTHONPATH"] = ""
+        env["PYTHONNOUSERSITE"] = "1"
+        env["PYTHONDONTWRITEBYTECODE"] = "1"
+        env["MPLCONFIGDIR"] = temp_dir
+        return env
     
     async def _execute_code(self, code: str) -> Dict[str, Any]:
         """
@@ -186,15 +278,8 @@ class Plugin:
             code_file = Path(temp_dir) / 'script.py'
             code_file.write_text(code, encoding='utf-8')
             
-            # 准备执行环境
-            env = os.environ.copy()
-            # 移除网络相关的环境变量
-            env.pop('HTTP_PROXY', None)
-            env.pop('HTTPS_PROXY', None)
-            env.pop('http_proxy', None)
-            env.pop('https_proxy', None)
-            # 设置PYTHONPATH为空，禁止导入项目模块
-            env['PYTHONPATH'] = ''
+            # 准备执行环境：只传递运行 Python 所需的最小白名单，避免泄露 API key/token。
+            env = self._build_execution_env(temp_dir)
             
             # 执行代码
             start_time = asyncio.get_event_loop().time()
@@ -229,7 +314,7 @@ class Plugin:
                 try:
                     process.kill()
                     await process.wait()
-                except:
+                except Exception:
                     pass
                 
                 return {
@@ -247,7 +332,7 @@ class Plugin:
             except Exception as e:
                 log = _get_logger()
                 if log:
-                    log.warning(f"清理临时目录失败: {e}")
+                    log.warning(f"清理临时目录失败: {redact_sensitive_text(e)}")
     
     def _format_output(self, result: Dict[str, Any]) -> str:
         """格式化执行结果"""
@@ -256,7 +341,7 @@ class Plugin:
             if result['stderr']:
                 error_lines = result['stderr'].strip().split('\n')
                 # 只显示最后几行错误
-                error_msg = '\n'.join(error_lines[-5:])
+                error_msg = redact_sensitive_text('\n'.join(error_lines[-5:]))
                 return f"❌ 执行失败:\n```\n{error_msg}\n```"
             return "❌ 执行失败，无错误信息"
         
@@ -280,7 +365,7 @@ class Plugin:
                 truncated_lines.append(line[:self.MAX_LINE_LENGTH] + '...')
             else:
                 truncated_lines.append(line)
-        output = '\n'.join(truncated_lines)
+        output = redact_sensitive_text('\n'.join(truncated_lines))
         
         # 格式化输出
         execution_time = result['execution_time']

@@ -13,12 +13,36 @@
     "example_arg": "list_tools",
     "access_control": {
         "allow_local": true,
-        "allow_remote_qq": true,
-        "allow_qq_owner": true,
+        "allow_remote_qq": false,
+        "allow_qq_owner": false,
         "allow_qq_others": false
     },
     "timeout_sec": 6,
     "settings": {
+        "allow_all_local_tools": {
+            "type": "bool",
+            "default": true,
+            "label": "允许全部本地 MCP 工具",
+            "description": "关闭后，本地 MCP 工具也必须写入 allowed_tool_names 才能调用。"
+        },
+        "allow_all_remote_tools": {
+            "type": "bool",
+            "default": false,
+            "label": "允许全部远程 MCP 工具",
+            "description": "默认关闭。开启后所有 mcp.<server>.<tool> 远程工具都可被 mcp_tools 调用。"
+        },
+        "allowed_server_names": {
+            "type": "list",
+            "default": [],
+            "label": "允许的远程 MCP server",
+            "description": "填写 mcp.<server>.<tool> 中的 server slug，例如 mcp.demo.read 的 server 是 demo。"
+        },
+        "allowed_tool_names": {
+            "type": "list",
+            "default": [],
+            "label": "允许的 MCP 工具名",
+            "description": "填写完整工具名，例如 plugin.list 或 mcp.demo.read；精确工具名优先于全局开关。"
+        },
         "intent_route_enabled": {
             "type": "bool",
             "default": true,

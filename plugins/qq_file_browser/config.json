@@ -30,9 +30,7 @@
             "item_type": "app_list",
             "label": "额外挂载目录",
             "description": "格式为 别名|本地路径，例如 qqsave|D:\\QQDownloads。保存后可在 QQ 里用 /cd /qqsave 进入。",
-            "default": [
-                "113|D:/qq/record/1132824061/FileRecv"
-            ]
+            "default": []
         },
         "inbox_mount": {
             "type": "text",

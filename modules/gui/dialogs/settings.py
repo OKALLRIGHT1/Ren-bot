@@ -4,6 +4,8 @@ import os
 
 import re
 
+import config
+
 
 from PySide6 import QtCore, QtGui, QtWidgets
 
@@ -24,12 +26,32 @@ from modules.gui.dialogs.model_routing_overview import ModelRoutingOverviewDialo
 
 from modules.gui.dialogs.status_screen_manager import StatusScreenManagerDialog
 
+from modules.gui.dialogs.screen_app_rules import ScreenAppRulesDialog
+
 from modules.gui.styles import (
     THEMES,
     get_settings_styles,
     get_ui_palette,
     get_current_theme_name,
 )
+from modules.gui.sedentary_popup import (
+    build_sedentary_popup_options,
+    show_sedentary_popup_dialog,
+)
+
+
+def select_sedentary_preview_image_path(main_app, app_name: str, active_minutes: int) -> str:
+    backend = getattr(main_app, "app", main_app)
+    selector = getattr(backend, "select_sedentary_meme_image_path", None)
+    if not callable(selector):
+        return ""
+    try:
+        result = selector(app_name, active_minutes)
+        if hasattr(result, "result"):
+            result = result.result(timeout=8)
+        return str(result or "")
+    except Exception:
+        return ""
 
 
 try:
@@ -86,6 +108,14 @@ try:
         NAPCAT_WEBHOOK_PORT,
         PROVIDERS,
         REMOTE_CHAT_UI_APPEND,
+        SEDENTARY_REMINDER_MINUTES,
+        SEDENTARY_REMINDER_COOLDOWN_MINUTES,
+        SEDENTARY_POPUP_ENABLED,
+        SEDENTARY_POPUP_TITLE,
+        SEDENTARY_POPUP_MESSAGE,
+        SEDENTARY_POPUP_IMAGE_PATH,
+        SEDENTARY_POPUP_SNOOZE_MINUTES,
+        SEDENTARY_POPUP_AUTO_CLOSE_SECONDS,
     )
 
 except ImportError:
@@ -1341,6 +1371,16 @@ class SettingsDialog(QtWidgets.QDialog):
                 "desc": "配置外置墨水屏或各种状态屏幕的数据源和更新频率。",
             },
             {
+                "nav": "🧭 高级 · 应用识别",
+                "title": "应用识别",
+                "desc": "维护屏幕传感器的本地应用分类规则，优先于 AI 分类生效。",
+            },
+            {
+                "nav": "⏰ 高级 · 久坐提醒",
+                "title": "久坐提醒",
+                "desc": "调整连续工作判定、休息重置、提醒冷却、弹窗文案和表情包预览。",
+            },
+            {
                 "nav": "🩺 高级 · 依赖体检",
                 "title": "依赖体检",
                 "desc": "扫描插件缺失依赖并生成安装命令，适合排查插件为什么不能正常工作。",
@@ -1469,6 +1509,10 @@ class SettingsDialog(QtWidgets.QDialog):
 
         self._safe_init_page(self._init_status_screen_page, "状态屏")
 
+        self._safe_init_page(self._init_screen_app_rules_page, "应用识别")
+
+        self._safe_init_page(self._init_sedentary_page, "久坐提醒")
+
         self._safe_init_page(self._init_dependency_page, "依赖体检")
 
         self._safe_init_page(self._init_mcp_page, "MCP")
@@ -1587,6 +1631,180 @@ class SettingsDialog(QtWidgets.QDialog):
             layout.addWidget(msg)
 
             self.stack.addWidget(page)
+
+    # ---------- Sedentary ----------
+
+    def _init_sedentary_page(self):
+        state = self._load_gateway_settings()
+        page = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout(page)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(12)
+
+        form_group = QtWidgets.QGroupBox("久坐判定")
+        form = QtWidgets.QFormLayout(form_group)
+        form.setLabelAlignment(QtCore.Qt.AlignmentFlag.AlignRight)
+        form.setHorizontalSpacing(12)
+        form.setVerticalSpacing(10)
+
+        self.sedentary_enabled = QtWidgets.QCheckBox("启用久坐弹窗")
+        self.sedentary_enabled.setChecked(bool(state["sedentary_popup_enabled"]))
+        form.addRow("弹窗:", self.sedentary_enabled)
+
+        self.sedentary_reminder_minutes = QtWidgets.QSpinBox()
+        self.sedentary_reminder_minutes.setRange(1, 720)
+        self.sedentary_reminder_minutes.setSuffix(" 分钟")
+        self.sedentary_reminder_minutes.setValue(int(state["sedentary_reminder_minutes"]))
+        form.addRow("提醒间隔:", self.sedentary_reminder_minutes)
+
+        self.sedentary_break_minutes = QtWidgets.QSpinBox()
+        self.sedentary_break_minutes.setRange(1, 120)
+        self.sedentary_break_minutes.setSuffix(" 分钟")
+        self.sedentary_break_minutes.setValue(int(state["sedentary_break_minutes"]))
+        form.addRow("休息重置:", self.sedentary_break_minutes)
+
+        self.sedentary_cooldown_minutes = QtWidgets.QSpinBox()
+        self.sedentary_cooldown_minutes.setRange(1, 720)
+        self.sedentary_cooldown_minutes.setSuffix(" 分钟")
+        self.sedentary_cooldown_minutes.setValue(int(state["sedentary_cooldown_minutes"]))
+        form.addRow("提醒冷却:", self.sedentary_cooldown_minutes)
+
+        popup_group = QtWidgets.QGroupBox("弹窗内容")
+        popup_form = QtWidgets.QFormLayout(popup_group)
+        popup_form.setLabelAlignment(QtCore.Qt.AlignmentFlag.AlignRight)
+        popup_form.setHorizontalSpacing(12)
+        popup_form.setVerticalSpacing(10)
+
+        self.sedentary_popup_title = QtWidgets.QLineEdit(state["sedentary_popup_title"])
+        popup_form.addRow("标题:", self.sedentary_popup_title)
+
+        self.sedentary_popup_message = QtWidgets.QPlainTextEdit()
+        self.sedentary_popup_message.setPlainText(state["sedentary_popup_message"])
+        self.sedentary_popup_message.setMinimumHeight(90)
+        popup_form.addRow("正文模板:", self.sedentary_popup_message)
+
+        self.sedentary_popup_image_path = QtWidgets.QLineEdit(
+            state["sedentary_popup_image_path"]
+        )
+        btn_pick = QtWidgets.QPushButton("选择")
+        btn_pick.clicked.connect(self._pick_sedentary_popup_image)
+        image_row = QtWidgets.QWidget()
+        image_layout = QtWidgets.QHBoxLayout(image_row)
+        image_layout.setContentsMargins(0, 0, 0, 0)
+        image_layout.addWidget(self.sedentary_popup_image_path, 1)
+        image_layout.addWidget(btn_pick)
+        popup_form.addRow("默认图片:", image_row)
+
+        self.sedentary_snooze_minutes = QtWidgets.QSpinBox()
+        self.sedentary_snooze_minutes.setRange(1, 240)
+        self.sedentary_snooze_minutes.setSuffix(" 分钟")
+        self.sedentary_snooze_minutes.setValue(
+            int(state["sedentary_popup_snooze_minutes"])
+        )
+        popup_form.addRow("稍后提醒:", self.sedentary_snooze_minutes)
+
+        self.sedentary_auto_close_seconds = QtWidgets.QSpinBox()
+        self.sedentary_auto_close_seconds.setRange(0, 3600)
+        self.sedentary_auto_close_seconds.setSuffix(" 秒")
+        self.sedentary_auto_close_seconds.setSpecialValueText("不自动关闭")
+        self.sedentary_auto_close_seconds.setValue(
+            int(state["sedentary_popup_auto_close_seconds"])
+        )
+        popup_form.addRow("自动关闭:", self.sedentary_auto_close_seconds)
+
+        hint = QtWidgets.QLabel(
+            "正文模板可使用 {app_name} 和 {active_minutes}。保存后 Python 侧立即生效；Rust 久坐判定参数需要重启程序或重启采集 sidecar 后完全生效。"
+        )
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color:#6B7280;")
+
+        footer = QtWidgets.QHBoxLayout()
+        footer.addStretch()
+        btn_preview = QtWidgets.QPushButton("预览弹窗")
+        btn_preview.clicked.connect(self._preview_sedentary_popup)
+        btn_save = QtWidgets.QPushButton("保存并应用")
+        btn_save.setObjectName("primaryAction")
+        btn_save.clicked.connect(self._save_sedentary_settings)
+        footer.addWidget(btn_preview)
+        footer.addWidget(btn_save)
+
+        layout.addWidget(form_group)
+        layout.addWidget(popup_group)
+        layout.addWidget(hint)
+        layout.addLayout(footer)
+        layout.addStretch()
+        self.stack.addWidget(page)
+
+    def _collect_sedentary_settings(self):
+        return {
+            "sedentary_reminder_minutes": int(self.sedentary_reminder_minutes.value()),
+            "sedentary_break_minutes": int(self.sedentary_break_minutes.value()),
+            "sedentary_cooldown_minutes": int(self.sedentary_cooldown_minutes.value()),
+            "sedentary_popup_enabled": self.sedentary_enabled.isChecked(),
+            "sedentary_popup_title": self.sedentary_popup_title.text().strip()
+            or SEDENTARY_POPUP_TITLE,
+            "sedentary_popup_message": self.sedentary_popup_message.toPlainText().strip()
+            or SEDENTARY_POPUP_MESSAGE,
+            "sedentary_popup_image_path": self.sedentary_popup_image_path.text().strip(),
+            "sedentary_popup_snooze_minutes": int(self.sedentary_snooze_minutes.value()),
+            "sedentary_popup_auto_close_seconds": int(
+                self.sedentary_auto_close_seconds.value()
+            ),
+        }
+
+    def _pick_sedentary_popup_image(self):
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self,
+            "选择久坐提醒图片",
+            self.sedentary_popup_image_path.text().strip() or os.getcwd(),
+            "Images (*.png *.jpg *.jpeg *.gif *.webp);;All Files (*)",
+        )
+        if path:
+            self.sedentary_popup_image_path.setText(path)
+
+    def _preview_sedentary_popup(self):
+        values = self._collect_sedentary_settings()
+        app_name = "电脑"
+        active_minutes = int(values["sedentary_reminder_minutes"])
+        image_path = select_sedentary_preview_image_path(
+            self.main_app, app_name, active_minutes
+        )
+        cfg = type("SedentaryPreviewConfig", (), {})()
+        cfg.SEDENTARY_POPUP_ENABLED = True
+        cfg.SEDENTARY_POPUP_TITLE = values["sedentary_popup_title"]
+        cfg.SEDENTARY_POPUP_MESSAGE = values["sedentary_popup_message"]
+        cfg.SEDENTARY_POPUP_IMAGE_PATH = values["sedentary_popup_image_path"]
+        cfg.SEDENTARY_POPUP_SNOOZE_MINUTES = values["sedentary_popup_snooze_minutes"]
+        cfg.SEDENTARY_POPUP_AUTO_CLOSE_SECONDS = values[
+            "sedentary_popup_auto_close_seconds"
+        ]
+        options = build_sedentary_popup_options(
+            cfg,
+            app_name=app_name,
+            active_minutes=active_minutes,
+            image_path_override=image_path,
+        )
+        show_sedentary_popup_dialog(self, options)
+
+    def _save_sedentary_settings(self):
+        new_settings = self._collect_sedentary_settings()
+        update_runtime_settings(new_settings)
+        apply_result = {}
+        if getattr(self.main_app, "apply_external_settings", None):
+            try:
+                apply_result = self.main_app.apply_external_settings(new_settings) or {}
+            except Exception as exc:
+                apply_result = {"error": str(exc)}
+        if apply_result.get("error"):
+            QtWidgets.QMessageBox.warning(
+                self, "久坐提醒", f"配置已保存，但应用失败：{apply_result['error']}"
+            )
+            return
+        QtWidgets.QMessageBox.information(
+            self,
+            "久坐提醒",
+            "配置已保存。Rust 久坐判定参数会在下次重启采集 sidecar 后完全生效。",
+        )
 
     # ---------- Provider ----------
 
@@ -2699,6 +2917,53 @@ class SettingsDialog(QtWidgets.QDialog):
             ),
             "remote_chat_ui_append": bool(
                 runtime.get("remote_chat_ui_append", REMOTE_CHAT_UI_APPEND)
+            ),
+            "sedentary_reminder_minutes": int(
+                runtime.get("sedentary_reminder_minutes", SEDENTARY_REMINDER_MINUTES)
+                or SEDENTARY_REMINDER_MINUTES
+            ),
+            "sedentary_break_minutes": int(
+                runtime.get(
+                    "sedentary_break_minutes",
+                    getattr(config, "ACTIVITY_AGENT_SEDENTARY_BREAK_MINUTES", 5),
+                )
+                or 5
+            ),
+            "sedentary_cooldown_minutes": int(
+                runtime.get(
+                    "sedentary_cooldown_minutes",
+                    SEDENTARY_REMINDER_COOLDOWN_MINUTES,
+                )
+                or SEDENTARY_REMINDER_COOLDOWN_MINUTES
+            ),
+            "sedentary_popup_enabled": bool(
+                runtime.get("sedentary_popup_enabled", SEDENTARY_POPUP_ENABLED)
+            ),
+            "sedentary_popup_title": str(
+                runtime.get("sedentary_popup_title", SEDENTARY_POPUP_TITLE)
+                or SEDENTARY_POPUP_TITLE
+            ),
+            "sedentary_popup_message": str(
+                runtime.get("sedentary_popup_message", SEDENTARY_POPUP_MESSAGE)
+                or SEDENTARY_POPUP_MESSAGE
+            ),
+            "sedentary_popup_image_path": str(
+                runtime.get("sedentary_popup_image_path", SEDENTARY_POPUP_IMAGE_PATH)
+                or ""
+            ),
+            "sedentary_popup_snooze_minutes": int(
+                runtime.get(
+                    "sedentary_popup_snooze_minutes",
+                    SEDENTARY_POPUP_SNOOZE_MINUTES,
+                )
+                or SEDENTARY_POPUP_SNOOZE_MINUTES
+            ),
+            "sedentary_popup_auto_close_seconds": int(
+                runtime.get(
+                    "sedentary_popup_auto_close_seconds",
+                    SEDENTARY_POPUP_AUTO_CLOSE_SECONDS,
+                )
+                or SEDENTARY_POPUP_AUTO_CLOSE_SECONDS
             ),
         }
 
@@ -5213,3 +5478,6 @@ class SettingsDialog(QtWidgets.QDialog):
 
     def _init_status_screen_page(self):
         self._add_embedded_dialog_page(StatusScreenManagerDialog, "状态屏")
+
+    def _init_screen_app_rules_page(self):
+        self._add_embedded_dialog_page(ScreenAppRulesDialog, "应用识别")

@@ -1,12 +1,14 @@
 import asyncio
+import ipaddress
 import json
 import re
 import shutil
+import socket
 import time
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Any, Dict, List, Optional, Tuple
-from urllib.parse import unquote, urlparse
+from urllib.parse import unquote, urljoin, urlparse
 
 try:
     import aiohttp
@@ -14,13 +16,18 @@ except Exception:  # pragma: no cover - optional dependency
     aiohttp = None
 
 
+DEFAULT_LOCAL_ROOT = Path("./data/qq_file_browser")
 VFS_MAP = {
-    "/bot": r"E:\\QQ_Bot",
+    "/bot": str(DEFAULT_LOCAL_ROOT),
 }
 DEFAULT_VFS = "/bot"
 INBOX_VPATH = "/bot/inbox"
 SESSION_TTL_SEC = 1800
 LIST_LIMIT = 200
+MAX_DOWNLOAD_BYTES = 25 * 1024 * 1024
+MAX_INBOX_BYTES = 200 * 1024 * 1024
+MAX_DOWNLOAD_REDIRECTS = 4
+BLOCKED_DOWNLOAD_HOSTS = {"localhost", "localhost.localdomain"}
 
 
 @dataclass
@@ -225,6 +232,58 @@ def _unique_path(dest_dir: Path, name: str) -> Path:
     return dest_dir / f"{stem}_{int(time.time())}{suffix}"
 
 
+def _directory_size(path: Path) -> int:
+    total = 0
+    try:
+        for item in path.rglob("*"):
+            try:
+                if item.is_file():
+                    total += item.stat().st_size
+            except Exception:
+                continue
+    except Exception:
+        return total
+    return total
+
+
+def _is_unsafe_ip(value: str) -> bool:
+    try:
+        ip = ipaddress.ip_address(str(value or "").strip("[]"))
+    except ValueError:
+        return False
+    return any(
+        (
+            ip.is_loopback,
+            ip.is_private,
+            ip.is_link_local,
+            ip.is_multicast,
+            ip.is_reserved,
+            ip.is_unspecified,
+        )
+    )
+
+
+def _validate_public_download_url(url: str) -> None:
+    parsed = urlparse(str(url or ""))
+    if parsed.scheme.lower() not in {"http", "https"}:
+        raise ValueError("invalid_scheme")
+    host = str(parsed.hostname or "").strip().lower()
+    if not host:
+        raise ValueError("missing_host")
+    if host in BLOCKED_DOWNLOAD_HOSTS or host.endswith(".local"):
+        raise ValueError("blocked_host")
+    if _is_unsafe_ip(host):
+        raise ValueError("blocked_ip")
+    try:
+        infos = socket.getaddrinfo(host, parsed.port, type=socket.SOCK_STREAM)
+    except socket.gaierror as exc:
+        raise ValueError("dns_failed") from exc
+    for info in infos:
+        addr = str((info[4] or [""])[0])
+        if _is_unsafe_ip(addr):
+            raise ValueError("blocked_resolved_ip")
+
+
 class Plugin:
     def __init__(self):
         self._config_path = Path(__file__).with_name("config.json")
@@ -237,7 +296,12 @@ class Plugin:
         except Exception:
             config = {}
         settings = config.get("settings") or {}
-        mounts = {"/bot": r"E:\\QQ_Bot"}
+        default_root = DEFAULT_LOCAL_ROOT
+        try:
+            (default_root / "inbox").mkdir(parents=True, exist_ok=True)
+        except Exception:
+            pass
+        mounts = {"/bot": str(default_root)}
         extra_mounts = self._read_setting(settings, "extra_mounts", [])
         if isinstance(extra_mounts, list):
             for item in extra_mounts:
@@ -378,6 +442,9 @@ class Plugin:
                     results.append(f"✅ 已保存: {dest.name}")
                     continue
                 if url and aiohttp is not None:
+                    if _directory_size(inbox_path) >= MAX_INBOX_BYTES:
+                        results.append(f"⚠️ 收件箱配额已满，跳过: {name}")
+                        continue
                     dest = _unique_path(inbox_path, name)
                     ok = await self._download_file(url, dest)
                     results.append(
@@ -393,18 +460,64 @@ class Plugin:
         if aiohttp is None:
             return False
         timeout = aiohttp.ClientTimeout(total=30)
+        existing_size = _directory_size(dest.parent)
+        remaining_quota = max(0, MAX_INBOX_BYTES - existing_size)
+        max_bytes = min(MAX_DOWNLOAD_BYTES, remaining_quota)
+        if max_bytes <= 0:
+            return False
+        current_url = str(url or "").strip()
         try:
+            _validate_public_download_url(current_url)
             async with aiohttp.ClientSession(timeout=timeout) as session:
-                async with session.get(url) as resp:
-                    if resp.status != 200:
-                        return False
-                    with open(dest, "wb") as f:
-                        async for chunk in resp.content.iter_chunked(65536):
-                            if not chunk:
-                                continue
-                            f.write(chunk)
-            return True
+                for _ in range(MAX_DOWNLOAD_REDIRECTS + 1):
+                    _validate_public_download_url(current_url)
+                    async with session.get(current_url, allow_redirects=False) as resp:
+                        if resp.status in {301, 302, 303, 307, 308}:
+                            location = resp.headers.get("Location", "")
+                            if not location:
+                                return False
+                            current_url = urljoin(current_url, location)
+                            continue
+                        if resp.status != 200:
+                            return False
+                        content_length = resp.headers.get("Content-Length")
+                        if content_length:
+                            try:
+                                content_length_value = int(content_length)
+                            except ValueError:
+                                content_length_value = 0
+                            if content_length_value > max_bytes:
+                                return False
+                        written = 0
+                        too_large = False
+                        with open(dest, "wb") as f:
+                            async for chunk in resp.content.iter_chunked(65536):
+                                if not chunk:
+                                    continue
+                                written += len(chunk)
+                                if written > max_bytes:
+                                    too_large = True
+                                    break
+                                f.write(chunk)
+                        if too_large:
+                            try:
+                                dest.unlink(missing_ok=True)
+                            except TypeError:
+                                if dest.exists():
+                                    dest.unlink()
+                            except Exception:
+                                pass
+                            return False
+                        return True
+                return False
         except Exception:
+            try:
+                dest.unlink(missing_ok=True)
+            except TypeError:
+                if dest.exists():
+                    dest.unlink()
+            except Exception:
+                pass
             return False
 
     async def run(self, args: str, context: dict):

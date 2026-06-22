@@ -13,19 +13,7 @@
             "description": "可在 GUI 中手动选择一个或多个知识目录，之后可一键学习这些目录；独立知识库窗口里支持按目录开关。",
             "default": [
                 {
-                    "path": "D:/Desktop/乱七八糟/宝可梦知识库/abilities",
-                    "enabled": true
-                },
-                {
-                    "path": "D:/Desktop/乱七八糟/宝可梦知识库/moves",
-                    "enabled": true
-                },
-                {
-                    "path": "D:/Desktop/乱七八糟/宝可梦知识库/pokemon",
-                    "enabled": true
-                },
-                {
-                    "path": "D:/Desktop/live2d-suzu/live2d-llm/knowledge_docs",
+                    "path": "knowledge_docs",
                     "enabled": true
                 }
             ]

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import secrets
 import threading
 import uuid
 from typing import Any, Dict, Optional
@@ -74,21 +75,34 @@ class NapCatWebhookServer:
 
     def _check_token(self, token_value: str) -> bool:
         if not self.access_token:
-            return True
+            return False
         token = str(token_value or "").strip()
         if token.lower().startswith("bearer "):
             token = token[7:].strip()
-        return token == self.access_token
+        return bool(token) and secrets.compare_digest(token, self.access_token)
 
     def _request_authorized(self, request: web.Request) -> bool:
         if not self.access_token:
-            return True
+            return False
         candidates = [
             request.headers.get("Authorization") or "",
+            request.headers.get("X-NapCat-Token") or "",
             request.query.get("access_token") or "",
             request.query.get("token") or "",
         ]
         return any(self._check_token(value) for value in candidates)
+
+    @staticmethod
+    def _is_loopback_remote(remote: str) -> bool:
+        host = str(remote or "").strip().lower()
+        if host.startswith("::ffff:"):
+            host = host[7:]
+        return host in {"127.0.0.1", "::1", "localhost"}
+
+    def _ws_request_authorized(self, request: web.Request) -> bool:
+        if self._request_authorized(request):
+            return True
+        return self._is_loopback_remote(request.remote or "")
 
     async def _dispatch_payload(self, payload: Dict[str, Any]) -> Any:
         future = asyncio.run_coroutine_threadsafe(
@@ -146,7 +160,7 @@ class NapCatWebhookServer:
         await self._dispatch_payload(payload)
 
     async def _handle_ws(self, request: web.Request) -> web.StreamResponse:
-        if not self._request_authorized(request):
+        if not self._ws_request_authorized(request):
             return web.json_response({"ok": False, "reason": "unauthorized"}, status=401)
 
         ws = web.WebSocketResponse(heartbeat=25.0, autoping=True, max_msg_size=2 * 1024 * 1024)

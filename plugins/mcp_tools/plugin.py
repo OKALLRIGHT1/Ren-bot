@@ -1,5 +1,6 @@
 import asyncio
 import json
+import re
 from typing import Any, Dict, List
 
 
@@ -33,6 +34,9 @@ class Plugin:
             tool_name = str(parts[0] or "").strip()
             if not tool_name:
                 return "tool_name 不能为空。"
+            allowed, reason = self._is_tool_allowed(tool_name)
+            if not allowed:
+                return f"MCP tool blocked by allowlist: {reason}"
             arguments = self._parse_json_arguments(parts[1] if len(parts) >= 2 else "")
             try:
                 result = await bridge.call_tool(tool_name, arguments=arguments)
@@ -65,6 +69,67 @@ class Plugin:
         if not isinstance(data, dict):
             raise ValueError('JSON 参数必须是对象，例如 {"path": "README.md"}')
         return data
+
+    def _read_setting(self, key: str, default: Any) -> Any:
+        settings = getattr(self, "settings", {}) or {}
+        if not isinstance(settings, dict):
+            return default
+        value = settings.get(key, default)
+        if isinstance(value, dict):
+            return value.get("default", default)
+        return value
+
+    def _read_bool_setting(self, key: str, default: bool) -> bool:
+        value = self._read_setting(key, default)
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            if normalized in {"1", "true", "yes", "on", "enabled"}:
+                return True
+            if normalized in {"0", "false", "no", "off", "disabled"}:
+                return False
+        return bool(default)
+
+    def _read_list_setting(self, key: str) -> set[str]:
+        value = self._read_setting(key, [])
+        if isinstance(value, str):
+            items = re.split(r"[\s,;，；]+", value)
+        elif isinstance(value, list):
+            items = value
+        else:
+            items = []
+        return {str(item).strip() for item in items if str(item).strip()}
+
+    def _remote_server_slug(self, tool_name: str) -> str:
+        parts = str(tool_name or "").strip().split(".", 2)
+        if len(parts) >= 3 and parts[0] == "mcp":
+            return parts[1]
+        return ""
+
+    def _is_tool_allowed(self, tool_name: str) -> tuple[bool, str]:
+        name = str(tool_name or "").strip()
+        if not name:
+            return False, "empty tool_name"
+
+        allowed_tools = self._read_list_setting("allowed_tool_names")
+        if name in allowed_tools:
+            return True, ""
+
+        server_slug = self._remote_server_slug(name)
+        if server_slug:
+            if self._read_bool_setting("allow_all_remote_tools", False):
+                return True, ""
+            if server_slug in self._read_list_setting("allowed_server_names"):
+                return True, ""
+            return (
+                False,
+                f"remote MCP tool `{name}` is not in allowed_server_names or allowed_tool_names",
+            )
+
+        if self._read_bool_setting("allow_all_local_tools", True):
+            return True, ""
+        return False, f"local MCP tool `{name}` is not in allowed_tool_names"
 
     def _format_tools(self, specs: List[Any]) -> str:
         if not specs:

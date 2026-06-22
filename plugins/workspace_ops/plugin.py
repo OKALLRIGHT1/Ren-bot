@@ -458,9 +458,8 @@ class Plugin:
         out = ["待确认变更："]
         for cid, item in self.pending_changes.items():
             target = item["target"].relative_to(self.workspace_root).as_posix()
-            token = str(item.get("confirm_token", ""))
             task_id = str(item.get("task_id", ""))
-            extra = f" | token={token}"
+            extra = ""
             if task_id:
                 extra += f" | task={task_id}"
             out.append(f"- {cid} | {target} | {item.get('time', '')}{extra}")

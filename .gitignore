@@ -38,6 +38,7 @@ Thumbs.db
 .env.*
 !.env.example
 profile.json
+hardware/**/local_secrets.h
 
 # =========================
 # Logs / Runtime

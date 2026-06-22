@@ -8,12 +8,15 @@ import re
 import shutil
 import tempfile
 import uuid
+from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 from services.chat_support import text_utils
 
 
 QQ_REMOTE_SOURCES = {"qq_gateway", "napcat_qq"}
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+GATEWAY_MEDIA_DIR = PROJECT_ROOT / "data" / "outbound" / "gateway_media"
 
 
 def qq_session_label(session_id: str) -> str:
@@ -207,7 +210,13 @@ class GatewaySender:
             temp_root = os.path.realpath(tempfile.gettempdir())
         except Exception:
             temp_root = tempfile.gettempdir()
-        return resolved.startswith(os.path.join(temp_root, ""))
+        try:
+            gateway_media_root = os.path.realpath(str(GATEWAY_MEDIA_DIR))
+        except Exception:
+            gateway_media_root = os.path.abspath(str(GATEWAY_MEDIA_DIR))
+        return resolved.startswith(os.path.join(temp_root, "")) or resolved.startswith(
+            os.path.join(gateway_media_root, "")
+        )
 
     def prepare_image_transport_path(self, path: str) -> tuple[str, str]:
         file_path = str(path or "").strip()
@@ -216,14 +225,20 @@ class GatewaySender:
         if not os.path.isfile(file_path):
             return file_path, ""
         try:
-            file_path.encode("ascii")
+            resolved = os.path.realpath(file_path)
+        except Exception:
+            resolved = os.path.abspath(file_path)
+        try:
+            gateway_media_root = os.path.realpath(str(GATEWAY_MEDIA_DIR))
+        except Exception:
+            gateway_media_root = os.path.abspath(str(GATEWAY_MEDIA_DIR))
+        if resolved.startswith(os.path.join(gateway_media_root, "")):
             return file_path, ""
-        except UnicodeEncodeError:
-            pass
-        temp_dir = os.path.join(tempfile.gettempdir(), "live2d_llm_gateway_media")
-        os.makedirs(temp_dir, exist_ok=True)
+        os.makedirs(gateway_media_root, exist_ok=True)
         suffix = os.path.splitext(file_path)[1] or ".jpg"
-        staged_path = os.path.join(temp_dir, f"gateway_img_{uuid.uuid4().hex}{suffix}")
+        staged_path = os.path.join(
+            gateway_media_root, f"gateway_img_{uuid.uuid4().hex}{suffix}"
+        )
         shutil.copyfile(file_path, staged_path)
         return staged_path, staged_path
 

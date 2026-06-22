@@ -33,6 +33,42 @@ def get_env_json(key: str, default):
         return default
 
 
+def get_env_int(
+    key: str,
+    default: int,
+    min_value: int | None = None,
+    max_value: int | None = None,
+) -> int:
+    raw = os.getenv(key, "")
+    try:
+        value = int(str(raw).strip()) if str(raw).strip() else int(default)
+    except Exception:
+        value = int(default)
+    if min_value is not None:
+        value = max(min_value, value)
+    if max_value is not None:
+        value = min(max_value, value)
+    return value
+
+
+def get_env_float(
+    key: str,
+    default: float,
+    min_value: float | None = None,
+    max_value: float | None = None,
+) -> float:
+    raw = os.getenv(key, "")
+    try:
+        value = float(str(raw).strip()) if str(raw).strip() else float(default)
+    except Exception:
+        value = float(default)
+    if min_value is not None:
+        value = max(min_value, value)
+    if max_value is not None:
+        value = min(max_value, value)
+    return value
+
+
 CHAT_DEBUG_PRINTS = get_env_bool("CHAT_DEBUG_PRINTS", "0")
 
 # ==================== MCP / 外部聊天网关 ====================
@@ -41,7 +77,7 @@ MCP_SERVER_CONFIGS = get_env_json("MCP_SERVER_CONFIGS_JSON", [])
 
 NAPCAT_ENABLED = get_env_bool("NAPCAT_ENABLED", "0")
 NAPCAT_WEBHOOK_HOST = os.getenv("NAPCAT_WEBHOOK_HOST", "127.0.0.1")
-NAPCAT_WEBHOOK_PORT = int(os.getenv("NAPCAT_WEBHOOK_PORT", "8095"))
+NAPCAT_WEBHOOK_PORT = get_env_int("NAPCAT_WEBHOOK_PORT", 8095, 1, 65535)
 NAPCAT_WEBHOOK_PATH = os.getenv("NAPCAT_WEBHOOK_PATH", "/chat/napcat")
 NAPCAT_ACCESS_TOKEN = os.getenv("NAPCAT_ACCESS_TOKEN", "")
 NAPCAT_API_BASE = os.getenv("NAPCAT_API_BASE", "http://127.0.0.1:3000")
@@ -51,18 +87,15 @@ NAPCAT_ALLOW_PRIVATE = get_env_bool("NAPCAT_ALLOW_PRIVATE", "1")
 NAPCAT_ALLOW_GROUP = get_env_bool("NAPCAT_ALLOW_GROUP", "0")
 NAPCAT_GROUP_REQUIRE_AT = get_env_bool("NAPCAT_GROUP_REQUIRE_AT", "1")
 NAPCAT_VOICE_REPLY_ENABLED = get_env_bool("NAPCAT_VOICE_REPLY_ENABLED", "0")
-try:
-    NAPCAT_VOICE_REPLY_PROBABILITY = max(
-        0, min(100, int(os.getenv("NAPCAT_VOICE_REPLY_PROBABILITY", "25")))
-    )
-except Exception:
-    NAPCAT_VOICE_REPLY_PROBABILITY = 25
+NAPCAT_VOICE_REPLY_PROBABILITY = get_env_int(
+    "NAPCAT_VOICE_REPLY_PROBABILITY", 25, 0, 100
+)
 REMOTE_CHAT_UI_APPEND = get_env_bool("REMOTE_CHAT_UI_APPEND", "1")
 
 # ==================== MQTT / 外设状态屏 ====================
 MQTT_DISPLAY_ENABLED = get_env_bool("MQTT_DISPLAY_ENABLED", "0")
 MQTT_DISPLAY_HOST = os.getenv("MQTT_DISPLAY_HOST", "127.0.0.1")
-MQTT_DISPLAY_PORT = int(os.getenv("MQTT_DISPLAY_PORT", "1883"))
+MQTT_DISPLAY_PORT = get_env_int("MQTT_DISPLAY_PORT", 1883, 1, 65535)
 MQTT_DISPLAY_TOPIC = os.getenv("MQTT_DISPLAY_TOPIC", "suzu/display/status")
 
 
@@ -73,10 +106,10 @@ MQTT_DISPLAY_TOPIC = os.getenv("MQTT_DISPLAY_TOPIC", "suzu/display/status")
 GUI_BACKEND = "auto"
 START_MINIMIZED_TO_TRAY = get_env_bool("START_MINIMIZED_TO_TRAY", "0")
 GUI_WS_HOST = os.getenv("GUI_WS_HOST", "127.0.0.1")
-GUI_WS_PORT = int(os.getenv("GUI_WS_PORT", "8096"))
+GUI_WS_PORT = get_env_int("GUI_WS_PORT", 8096, 1, 65535)
 GUI_WS_PATH = os.getenv("GUI_WS_PATH", "/gui")
 GUI_HTTP_HOST = os.getenv("GUI_HTTP_HOST", "127.0.0.1")
-GUI_HTTP_PORT = int(os.getenv("GUI_HTTP_PORT", "8097"))
+GUI_HTTP_PORT = get_env_int("GUI_HTTP_PORT", 8097, 1, 65535)
 GUI_HTTP_PREFIX = os.getenv("GUI_HTTP_PREFIX", "/gui")
 
 # ==================== Live2D 配置 ====================
@@ -97,7 +130,7 @@ TTS_USE_LIVE2D_PLAYER = True  # 是否使用Live2D播放器
 
 # TTS 文本处理
 TTS_SPLIT_LONG_TEXT = get_env_bool("TTS_SPLIT_LONG_TEXT", "1")  # 是否分割长文本
-TTS_CHUNK_CHARS = int(os.getenv("TTS_CHUNK_CHARS", "80"))  # 文本分割的字符数
+TTS_CHUNK_CHARS = get_env_int("TTS_CHUNK_CHARS", 80, 1)  # 文本分割的字符数
 
 # TTS 输出设备
 TTS_OUTPUT_DEVICE = None  # 音频输出设备索引，None为默认设备
@@ -107,50 +140,50 @@ LIP_SYNC_ENABLED = get_env_bool("LIP_SYNC_ENABLED", "0")  # 是否启用口型�
 RHUBARB_PATH = os.getenv(
     "RHUBARB_PATH", "./tools/rhubarb/rhubarb.exe"
 )  # Rhubarb 可执行文件路径
-LIP_SYNC_SMOOTH_WINDOW = int(
-    os.getenv("LIP_SYNC_SMOOTH_WINDOW", "3")
+LIP_SYNC_SMOOTH_WINDOW = get_env_int(
+    "LIP_SYNC_SMOOTH_WINDOW", 3, 1
 )  # 平滑窗口大小（奇数，建议3-5）
-RHUBARB_TIMEOUT_SEC = float(
-    os.getenv("RHUBARB_TIMEOUT_SEC", "25")
+RHUBARB_TIMEOUT_SEC = get_env_float(
+    "RHUBARB_TIMEOUT_SEC", 25.0, 0.1
 )  # Rhubarb 口型分析超时
 
 # ==================== 代码执行器配置 ====================
 CODE_EXECUTOR_ENABLED = get_env_bool("CODE_EXECUTOR_ENABLED", "0")  # 是否启用代码执行器
-CODE_EXECUTOR_MAX_TIME = int(
-    os.getenv("CODE_EXECUTOR_MAX_TIME", "30")
+CODE_EXECUTOR_MAX_TIME = get_env_int(
+    "CODE_EXECUTOR_MAX_TIME", 30, 1
 )  # 最大执行时间（秒）
-CODE_EXECUTOR_MAX_LENGTH = int(
-    os.getenv("CODE_EXECUTOR_MAX_LENGTH", "5000")
+CODE_EXECUTOR_MAX_LENGTH = get_env_int(
+    "CODE_EXECUTOR_MAX_LENGTH", 5000, 1
 )  # 最大代码长度（字符）
-CODE_EXECUTOR_MAX_OUTPUT = int(
-    os.getenv("CODE_EXECUTOR_MAX_OUTPUT", "100")
+CODE_EXECUTOR_MAX_OUTPUT = get_env_int(
+    "CODE_EXECUTOR_MAX_OUTPUT", 100, 1
 )  # 最大输出行数
 
 # ==================== 硬件监控配置 ====================
 SYSTEM_MONITOR_ENABLED = get_env_bool(
     "SYSTEM_MONITOR_ENABLED", "0"
 )  # 是否启用硬件监控后台检查
-SYSTEM_MONITOR_INTERVAL = int(
-    os.getenv("SYSTEM_MONITOR_INTERVAL", "60")
+SYSTEM_MONITOR_INTERVAL = get_env_int(
+    "SYSTEM_MONITOR_INTERVAL", 60, 1
 )  # 监控检查间隔（秒）
 
 # CPU监控阈值
-CPU_USAGE_THRESHOLD = int(os.getenv("CPU_USAGE_THRESHOLD", "80"))  # CPU使用率阈值（%）
-CPU_TEMP_THRESHOLD = int(os.getenv("CPU_TEMP_THRESHOLD", "75"))  # CPU温度阈值（摄氏度）
+CPU_USAGE_THRESHOLD = get_env_int("CPU_USAGE_THRESHOLD", 80, 0, 100)  # CPU使用率阈值（%）
+CPU_TEMP_THRESHOLD = get_env_int("CPU_TEMP_THRESHOLD", 75, 0)  # CPU温度阈值（摄氏度）
 
 # 内存监控阈值
-MEMORY_USAGE_THRESHOLD = int(
-    os.getenv("MEMORY_USAGE_THRESHOLD", "85")
+MEMORY_USAGE_THRESHOLD = get_env_int(
+    "MEMORY_USAGE_THRESHOLD", 85, 0, 100
 )  # 内存使用率阈值（%）
 
 # 磁盘监控阈值
-DISK_USAGE_THRESHOLD = int(
-    os.getenv("DISK_USAGE_THRESHOLD", "90")
+DISK_USAGE_THRESHOLD = get_env_int(
+    "DISK_USAGE_THRESHOLD", 90, 0, 100
 )  # 磁盘使用率阈值（%）
 
 # GPU监控阈值（需要nvidia-ml-py3库）
-GPU_USAGE_THRESHOLD = int(os.getenv("GPU_USAGE_THRESHOLD", "85"))  # GPU使用率阈值（%）
-GPU_TEMP_THRESHOLD = int(os.getenv("GPU_TEMP_THRESHOLD", "80"))  # GPU温度阈值（摄氏度）
+GPU_USAGE_THRESHOLD = get_env_int("GPU_USAGE_THRESHOLD", 85, 0, 100)  # GPU使用率阈值（%）
+GPU_TEMP_THRESHOLD = get_env_int("GPU_TEMP_THRESHOLD", 80, 0)  # GPU温度阈值（摄氏度）
 
 # 获取 config.py 所在的绝对目录路径 (即项目根目录)
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -206,7 +239,14 @@ SCREEN_GLOBAL_COOLDOWN = 180  # 任何主动发言至少间隔 3 分钟
 
 # 久坐提醒配置
 SEDENTARY_REMINDER_MINUTES = 60  # 久坐提醒间隔（分钟）
+ACTIVITY_AGENT_SEDENTARY_BREAK_MINUTES = 5  # 连续休息达到该分钟数后重置久坐窗口
 SEDENTARY_REMINDER_COOLDOWN_MINUTES = 60  # 久坐提醒冷却（分钟）
+SEDENTARY_POPUP_ENABLED = True  # 是否弹出久坐确认窗口
+SEDENTARY_POPUP_TITLE = "久坐提醒"
+SEDENTARY_POPUP_MESSAGE = "已经连续使用 {app_name} {active_minutes} 分钟了，起来活动一下吧。"
+SEDENTARY_POPUP_IMAGE_PATH = ""  # 可填表情包图片/GIF路径，留空则只显示文字占位
+SEDENTARY_POPUP_SNOOZE_MINUTES = 10  # 点击“稍后提醒”后的延迟分钟数
+SEDENTARY_POPUP_AUTO_CLOSE_SECONDS = 20  # 自动关闭秒数，设为0则不自动关闭
 
 # 观察记录容量
 SCREEN_OBSERVATION_MAX_ITEMS = 120  # 观察记录最大条数
@@ -292,7 +332,7 @@ CODEX_BASE_URL = os.getenv("CODEX_BASE_URL", "")
 CODEX_MODEL = os.getenv("CODEX_MODEL", "")
 CODEX_MODEL_KEY = os.getenv("CODEX_MODEL_KEY", "codex-dedicated")
 CODEX_AUTORUN_ENABLED = get_env_bool("CODEX_AUTORUN_ENABLED", "0")
-CODEX_AUTORUN_TIMEOUT_SEC = int(os.getenv("CODEX_AUTORUN_TIMEOUT_SEC", "120"))
+CODEX_AUTORUN_TIMEOUT_SEC = get_env_int("CODEX_AUTORUN_TIMEOUT_SEC", 120, 1)
 # 多条命令使用 ;; 分隔，例如: python -m py_compile core/application.py;;pytest -q
 CODEX_AUTORUN_COMMANDS = get_env_list("CODEX_AUTORUN_COMMANDS", "", sep=";;")
 CODEX_AUTOROLLBACK_ON_FAIL = get_env_bool("CODEX_AUTOROLLBACK_ON_FAIL", "0")

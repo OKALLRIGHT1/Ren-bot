@@ -50,7 +50,7 @@ class SensorReplyService:
 
     async def send_sensor_reply(
         self, reply: str, category: str, count: int, title: str, is_vision: bool
-    ) -> None:
+    ) -> bool:
         extracted_emo, clean_text = self.extract_emo_tag(reply)
         clean_text = self.strip_wrapping_quotes(clean_text)
         original_clean_text = clean_text
@@ -66,10 +66,10 @@ class SensorReplyService:
         ]
         if any(pattern in lowered for pattern in bad_patterns):
             self.logger.warning("⚠️ [Sensor] 视觉吐槽输出疑似复述提示词，已丢弃")
-            return
+            return False
 
         if not clean_text or len(clean_text) < 2:
-            return
+            return False
         clean_text = await self.polish_natural_reply(
             user_text=f"{title} {category}",
             draft_text=clean_text,
@@ -85,7 +85,7 @@ class SensorReplyService:
             clean_text, {"source": "desktop"}, scene="sensor"
         )
         if not clean_text:
-            return
+            return False
         if self.looks_like_sensor_template_reply(clean_text):
             fallback_text = self.prepare_reply_for_output(
                 original_clean_text, {"source": "desktop"}, scene="sensor"
@@ -107,7 +107,7 @@ class SensorReplyService:
                     self.logger.warning(
                         f"⚠️ [Sensor] 吐槽仍像观察报告/助手话术，已跳过本次输出: {preview}"
                     )
-                    return
+                    return False
 
         self.logger.info(f"🤖 [Sensor] 发言: {clean_text[:50]}...")
         self.remember_sensor_reply(clean_text)
@@ -154,3 +154,4 @@ class SensorReplyService:
             f"{tag} {clean_text}",
             meta={"path": "sensor", "emotion": final_emo},
         )
+        return True

@@ -62,6 +62,42 @@ def _normalize_server_slug(name: str) -> str:
     return cleaned or "server"
 
 
+MCP_STDIO_ENV_ALLOWLIST = {
+    "APPDATA",
+    "COMSPEC",
+    "HOME",
+    "LANG",
+    "LC_ALL",
+    "LOCALAPPDATA",
+    "NUMBER_OF_PROCESSORS",
+    "PATH",
+    "PATHEXT",
+    "PROCESSOR_ARCHITECTURE",
+    "PROGRAMDATA",
+    "PROGRAMFILES",
+    "PROGRAMFILES(X86)",
+    "SYSTEMDRIVE",
+    "SYSTEMROOT",
+    "TEMP",
+    "TMP",
+    "USER",
+    "USERNAME",
+    "USERPROFILE",
+    "WINDIR",
+}
+
+
+def _build_stdio_env(config_env: Optional[Dict[str, str]] = None) -> Dict[str, str]:
+    env: Dict[str, str] = {}
+    for key in MCP_STDIO_ENV_ALLOWLIST:
+        if key in os.environ:
+            env[key] = os.environ[key]
+    if isinstance(config_env, dict):
+        for key, value in config_env.items():
+            env[str(key)] = str(value)
+    return env
+
+
 @dataclass(slots=True)
 class MCPToolSpec:
     name: str
@@ -264,7 +300,7 @@ class MCPToolBridge:
             params = StdioServerParameters(
                 command=cfg.command,
                 args=list(cfg.args or []),
-                env={**os.environ, **(cfg.env or {})},
+                env=_build_stdio_env(cfg.env),
                 cwd=cfg.cwd or None,
             )
             client_ctx = stdio_client(params)

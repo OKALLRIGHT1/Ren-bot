@@ -8,7 +8,6 @@ import re
 import asyncio
 import time
 import uuid
-import random  # ✅ 需要导入 random
 from datetime import datetime, timedelta, date
 from typing import Optional, Dict, Any, Awaitable, Callable, List
 
@@ -27,13 +26,27 @@ from modules.reply_effect_tracker import ReplyEffectTracker
 from modules.runtime_settings import load_runtime_settings
 from core.message_source import REMOTE_CHAT_SOURCES, build_output_profile
 from services.chat_support import (
+    active_alert_service,
     diary_service,
     diary_utils,
+    delegate_flow_service,
+    emotion_reply_service,
+    gateway_context_service,
     gateway_sender,
+    hardware_status_service,
+    idle_status_service,
+    input_context,
+    output_coordinator,
+    reply_flow_service,
     reply_style_service,
+    sensor_event_service,
+    sensor_event_guard,
     sensor_reply_service,
     sensor_utils,
+    search_flow_service,
     text_utils,
+    tool_flow_service,
+    tool_result_formatter,
 )
 
 # 引入 Gatekeeper 配置
@@ -334,9 +347,16 @@ class ChatService:
         self._last_tool_triggers_by_session: Dict[str, List[str]] = {}
         self._last_search_topic_by_session: Dict[str, str] = {}
         self._recent_sensor_replies: List[str] = []
-        self._sensor_event_lock: Optional[asyncio.Lock] = None
+        self._sensor_event_lock = asyncio.Lock()
+        self.gateway_context_service = self._create_gateway_context_service()
         self.gateway_sender = self._create_gateway_sender()
+        self.idle_status_service = self._create_idle_status_service()
         self.reply_style_service = self._create_reply_style_service()
+        self.emotion_reply_service = self._create_emotion_reply_service()
+        self.tool_result_formatter = self._create_tool_result_formatter()
+        self.hardware_status_service = self._create_hardware_status_service()
+        self.active_alert_service = self._create_active_alert_service()
+        self.sensor_event_service = self._create_sensor_event_service()
         self.sensor_reply_service = self._create_sensor_reply_service()
         self.diary_service = self._create_diary_service()
 
@@ -348,11 +368,28 @@ class ChatService:
             strip_emo_tags=self._strip_emo_tags_anywhere,
             strip_cmd=self._strip_cmd_anywhere,
             clean_text_for_tts=self._clean_text_for_tts,
-            session_label_fn=self._qq_session_label,
+            session_label_fn=self.gateway_context_service.qq_session_label,
             voice_enabled_getter=lambda: self.gateway_voice_reply_enabled,
             voice_probability_getter=lambda: self.gateway_voice_reply_probability,
             voice_renderer_getter=lambda: self.gateway_voice_renderer,
             remote_sources=QQ_REMOTE_SOURCES,
+        )
+
+    def _create_gateway_context_service(
+        self,
+    ) -> gateway_context_service.GatewayContextService:
+        return gateway_context_service.GatewayContextService(
+            qq_remote_sources=QQ_REMOTE_SOURCES,
+            owner_shared_session_id=OWNER_SHARED_SESSION_ID,
+            owner_shared_local_sources=OWNER_SHARED_LOCAL_SOURCES,
+        )
+
+    def _create_idle_status_service(
+        self,
+    ) -> idle_status_service.IdleStatusService:
+        return idle_status_service.IdleStatusService(
+            event_emit=self.event_bus.emit,
+            debug=self._dbg,
         )
 
     def _create_reply_style_service(
@@ -362,6 +399,76 @@ class ChatService:
             emo_set=self._emo_set,
             emo_tag_re=self._emo_tag_re,
             cmd_re=self._cmd_re,
+        )
+
+    def _create_emotion_reply_service(
+        self,
+    ) -> emotion_reply_service.EmotionReplyService:
+        return emotion_reply_service.EmotionReplyService(
+            app_getter=lambda: getattr(self, "app", None),
+            clean_text_for_tts=self._clean_text_for_tts,
+            strip_emo_tags=self._strip_emo_tags_anywhere,
+            strip_cmd=self._strip_cmd_anywhere,
+            normalize_emo=self._normalize_emo,
+            logger=self.logger,
+        )
+
+    def _create_tool_result_formatter(
+        self,
+    ) -> tool_result_formatter.ToolResultFormatter:
+        return tool_result_formatter.ToolResultFormatter(
+            get_active_character_profile=self._get_active_character_profile,
+            looks_like_upstream_error_reply=self._looks_like_upstream_error_reply,
+            strip_emo_tags=self._strip_emo_tags_anywhere,
+            strip_cmd=self._strip_cmd_anywhere,
+            strip_internal_tags=self._strip_internal_tags,
+            clean_text_for_tts=self._clean_text_for_tts,
+            normalize_qq_reply_style=self._normalize_qq_reply_style,
+            wants_detailed_answer=self._wants_detailed_answer,
+            extract_emo_tag=self._extract_emo_tag,
+            qq_remote_sources=QQ_REMOTE_SOURCES,
+            logger=self.logger,
+        )
+
+    def _create_hardware_status_service(
+        self,
+    ) -> hardware_status_service.HardwareStatusService:
+        return hardware_status_service.HardwareStatusService(
+            plugin_manager_getter=lambda: self.plugin_manager,
+            event_bus=self.event_bus,
+            tool_result_formatter=self.tool_result_formatter,
+            split_gateway_text_parts=gateway_sender.split_gateway_text_parts,
+            emit_assistant_text=self._emit_assistant_text,
+            add_memory_safe=self._add_memory_safe,
+        )
+
+    def _create_active_alert_service(
+        self,
+    ) -> active_alert_service.ActiveAlertService:
+        return active_alert_service.ActiveAlertService(
+            default_persona=DEFAULT_PERSONA,
+            event_bus=self.event_bus,
+            presenter=self.presenter,
+            extract_emo_tag=self._extract_emo_tag,
+            polish_natural_reply=self._polish_natural_reply,
+            apply_character_catchphrase=self._apply_character_catchphrase,
+            logger=self.logger,
+        )
+
+    def _create_sensor_event_service(
+        self,
+    ) -> sensor_event_service.SensorEventService:
+        return sensor_event_service.SensorEventService(
+            screen_sensor_ref_getter=lambda: getattr(self, "screen_sensor_ref", None),
+            format_sensor_observations=sensor_utils.format_sensor_observations,
+            build_sensor_usage_context=sensor_utils.build_sensor_usage_context,
+            build_sensor_interaction_context=self._build_sensor_interaction_context,
+            build_sensor_persona_prompt=self._build_sensor_persona_prompt,
+            format_recent_sensor_reply_block=self._format_recent_sensor_reply_block,
+            build_sensor_spontaneous_style_block=sensor_utils.build_sensor_spontaneous_style_block,
+            build_live2d_self_awareness_hint=self._build_live2d_self_awareness_hint,
+            compress_sensor_text=text_utils.compress_sensor_text,
+            logger=self.logger,
         )
 
     def _create_sensor_reply_service(
@@ -376,7 +483,9 @@ class ChatService:
             polish_natural_reply=self._polish_natural_reply,
             apply_character_catchphrase=self._apply_character_catchphrase,
             prepare_reply_for_output=self._prepare_reply_for_output,
-            looks_like_sensor_template_reply=self._looks_like_sensor_template_reply,
+            looks_like_sensor_template_reply=lambda text: sensor_utils.looks_like_sensor_template_reply(
+                text, clean_text_fn=self._clean_text_for_tts
+            ),
             rescue_sensor_template_reply=self._rescue_sensor_template_reply,
             remember_sensor_reply=self._remember_sensor_reply,
             update_active_time=self._update_active_time,
@@ -696,13 +805,7 @@ class ChatService:
     async def _emit_idle_status(
         self, output_profile: Optional[Dict[str, Any]], reason: str
     ) -> None:
-        live2d_enabled = True
-        if isinstance(output_profile, dict):
-            live2d_enabled = bool(output_profile.get("live2d_enabled", True))
-        if live2d_enabled:
-            await self.event_bus.emit("state.changed", state="idle", reason=reason)
-        else:
-            await self.event_bus.emit("ui.status", text="Idle")
+        await self.idle_status_service.emit_idle_status(output_profile, reason)
 
     def _presenter_output_controls_idle(
         self,
@@ -710,11 +813,8 @@ class ChatService:
         *,
         had_presenter_output: bool,
     ) -> bool:
-        if not had_presenter_output:
-            return False
-        profile = output_profile if isinstance(output_profile, dict) else {}
-        return bool(profile.get("speak", True)) or bool(
-            profile.get("show_bubble", True)
+        return self.idle_status_service.presenter_output_controls_idle(
+            output_profile, had_presenter_output=had_presenter_output
         )
 
     async def _emit_idle_status_when_safe(
@@ -724,18 +824,29 @@ class ChatService:
         reason: str,
         had_presenter_output: bool,
     ) -> None:
-        if self._presenter_output_controls_idle(
-            output_profile, had_presenter_output=had_presenter_output
-        ):
-            self._dbg(
-                f"跳过即时 idle ({reason})，等待 presenter/TTS/气泡 生命周期收尾"
-            )
-            return
-        await self._emit_idle_status(output_profile, reason=reason)
+        await self.idle_status_service.emit_idle_status_when_safe(
+            output_profile,
+            reason=reason,
+            had_presenter_output=had_presenter_output,
+        )
 
     def _dbg(self, message: str):
         if self.debug_enabled:
             self.logger.debug(message)
+
+    def _trace_process(self, stage: str, **fields: Any) -> None:
+        if not self.debug_enabled:
+            return
+        parts = []
+        for key in sorted(fields):
+            value = fields.get(key)
+            if isinstance(value, (list, tuple, set)):
+                value = ",".join(str(item) for item in value)
+            elif isinstance(value, dict):
+                value = ",".join(str(k) for k in sorted(value.keys()))
+            parts.append(f"{key}={value}")
+        suffix = " ".join(parts)
+        self.logger.debug(f"[ProcessTrace] {stage}{(' ' + suffix) if suffix else ''}")
 
     def _build_mcp_tool_prompt(self, max_tools: int = 16) -> str:
         if not self.mcp_bridge:
@@ -773,126 +884,10 @@ class ChatService:
             "[CMD: mcp_tools | list_tools]\n" + "\n".join(lines)
         )
 
-    def _is_qq_source(self, ctx: Optional[Dict[str, Any]]) -> bool:
-        if not isinstance(ctx, dict):
-            return False
-        source = str(ctx.get("source") or "").strip().lower()
-        return source in QQ_REMOTE_SOURCES
-
-    def _qq_session_label(self, session_id: str) -> str:
-        return gateway_sender.qq_session_label(session_id)
-
-    def _reply_effect_identity(self, ctx: Optional[Dict[str, Any]]) -> tuple[str, str]:
-        if not isinstance(ctx, dict):
-            return "", ""
-        channel_meta = ctx.get("channel_meta") if isinstance(ctx.get("channel_meta"), dict) else {}
-        session_id = str(channel_meta.get("session_id") or "").strip()
-        user_id = str(channel_meta.get("user_id") or ctx.get("user_id") or "").strip()
-        if not session_id:
-            session_id = str(ctx.get("session_id") or "").strip()
-        if not session_id:
-            source = str(ctx.get("source") or "local").strip() or "local"
-            session_id = f"local:{source}"
-        return session_id, user_id
-
-    def _conversation_session_key(self, ctx: Optional[Dict[str, Any]]) -> str:
-        session_id, _user_id = self._reply_effect_identity(ctx)
-        return str(session_id or "").strip()
-
-    def _strip_search_followup_fillers(self, text: str) -> str:
-        raw = str(text or "").strip().lower()
-        if not raw:
-            return ""
-        fillers = [
-            "你",
-            "她",
-            "帮我",
-            "帮忙",
-            "麻烦",
-            "先",
-            "再",
-            "一下",
-            "一查",
-            "查一下",
-            "查一查",
-            "查查",
-            "搜一下",
-            "搜一搜",
-            "搜搜",
-            "搜索一下",
-            "查",
-            "搜",
-            "搜索",
-            "联网",
-            "上网",
-            "看看",
-            "给我",
-            "回答我",
-            "回复我",
-            "告诉我",
-            "再回答",
-            "再回复",
-            "再说",
-            "然后回答",
-            "然后告诉我",
-            "之后回答",
-            "后再回答",
-            "好吗",
-            "行吗",
-            "吧",
-        ]
-        cleaned = raw
-        for token in fillers:
-            cleaned = cleaned.replace(token, " ")
-        cleaned = re.sub(r"[\s，。,！!？?：:;；、】【\"'“”‘’()（）\-]+", "", cleaned)
-        return cleaned.strip()
-
-    def _is_generic_search_followup_request(self, text: str) -> bool:
-        raw = str(text or "").strip().lower()
-        if not raw:
-            return False
-        wants_search = any(
-            token in raw
-            for token in ("查", "搜", "搜索", "联网", "上网", "百度", "google", "bing")
-        )
-        if not wants_search:
-            return False
-        if any(token in raw for token in ("http://", "https://", "萌百", "萌娘百科")):
-            return False
-        if any(token in raw for token in ("怎么写", "代码", "文件", ".py", ".md", "\\", "/")):
-            return False
-        has_context_ref = any(
-            token in raw
-            for token in ("上面", "上文", "刚才", "刚刚", "前面", "那个", "这个", "之前", "同上")
-        )
-        has_reply_followup = any(
-            token in raw
-            for token in ("再回答", "再回复", "回答我", "回复我", "告诉我", "然后回答", "然后告诉我")
-        )
-        if not has_context_ref and not has_reply_followup:
-            return False
-        residual = self._strip_search_followup_fillers(raw)
-        if len(residual) >= 8:
-            return False
-        return True
-
-    def _is_search_topic_candidate(self, text: str) -> bool:
-        raw = str(text or "").strip()
-        if not raw or len(raw) < 4:
-            return False
-        lower = raw.lower()
-        if self._is_generic_search_followup_request(raw):
-            return False
-        if raw.startswith(("/", "#", "!", "！")):
-            return False
-        if any(token in lower for token in ("[cmd:", "workspace_ops", "apply_change")):
-            return False
-        if self._looks_structured_reply(raw):
-            return False
-        return True
-
     def _remember_search_topic(self, text: str, ctx: Optional[Dict[str, Any]]) -> None:
-        if not self._is_search_topic_candidate(text):
+        if not text_utils.is_search_topic_candidate(
+            text, looks_structured_reply=self._looks_structured_reply
+        ):
             return
         raw = str(text or "").strip()
         if not (
@@ -900,7 +895,7 @@ class ChatService:
             or any(token in raw for token in ("查", "搜", "搜索", "联网", "上网", "萌百", "链接", "网址"))
         ):
             return
-        session_key = self._conversation_session_key(ctx)
+        session_key = self.gateway_context_service.conversation_session_key(ctx)
         if not session_key:
             return
         self._last_search_topic_by_session[session_key] = raw
@@ -911,7 +906,7 @@ class ChatService:
         store = self._get_memory_store()
         if store is None or not hasattr(store, "list_transcript"):
             return ""
-        session_key = self._conversation_session_key(ctx)
+        session_key = self.gateway_context_service.conversation_session_key(ctx)
         session_scope = "specific" if session_key else "all"
         try:
             rows = store.list_transcript(
@@ -928,7 +923,9 @@ class ChatService:
             content = str((row or {}).get("content") or "").strip()
             if not content or content == current_clean:
                 continue
-            if not self._is_search_topic_candidate(content):
+            if not text_utils.is_search_topic_candidate(
+                content, looks_structured_reply=self._looks_structured_reply
+            ):
                 continue
             return content
         return ""
@@ -937,9 +934,11 @@ class ChatService:
         self, user_text: str, ctx: Optional[Dict[str, Any]]
     ) -> str:
         raw = str(user_text or "").strip()
-        if not self._is_generic_search_followup_request(raw):
+        if not text_utils.is_generic_search_followup_request(raw):
             return ""
-        session_key = self._conversation_session_key(ctx)
+        if text_utils.is_search_retry_correction_request(raw):
+            return raw
+        session_key = self.gateway_context_service.conversation_session_key(ctx)
         if session_key:
             remembered = str(self._last_search_topic_by_session.get(session_key) or "").strip()
             if remembered and remembered != raw:
@@ -958,95 +957,21 @@ class ChatService:
                 content = str(item.get("content") or "").strip()
                 if not content or content == raw:
                     continue
-                if self._is_search_topic_candidate(content):
+                if text_utils.is_search_topic_candidate(
+                    content, looks_structured_reply=self._looks_structured_reply
+                ):
                     return content
         return ""
 
     def _is_searchworthy_question(self, text: str) -> bool:
-        raw = str(text or "").strip()
-        if not raw or len(raw) < 4:
-            return False
-        lower = raw.lower()
-        if any(token in lower for token in ("http://", "https://", ".py", ".md", "workspace", "代码", "文件")):
-            return False
-        if any(
-            token in raw
-            for token in (
-                "最新",
-                "今天",
-                "实时",
-                "新闻",
-                "价格",
-                "行情",
-                "股价",
-                "汇率",
-                "天气",
-                "日期",
-                "时间",
-                "是什么",
-                "是谁",
-                "知不知道",
-                "听说过",
-                "了解",
-                "为什么",
-                "怎么",
-                "如何",
-                "多少",
-                "有没有",
-                "哪部",
-                "哪个",
-                "什么梗",
-            )
-        ):
-            return True
-        if raw.endswith(("?", "？", "吗", "么", "呢")):
-            return True
-        return False
+        return text_utils.is_searchworthy_question(text)
 
     def _looks_like_uncertain_answer(self, text: str) -> bool:
-        raw = str(text or "").strip()
-        if not raw:
-            return False
-        hints = (
-            "我不太确定",
-            "我不确定",
-            "我不知道",
-            "不太清楚",
-            "不清楚",
-            "记不清",
-            "没法确定",
-            "无法确认",
-            "我不太懂",
-            "可能是",
-            "大概是",
-            "好像是",
-            "印象里",
-            "我查不到",
-        )
-        return any(hint in raw for hint in hints)
-
-    async def _run_search_delegate_query(
-        self, *, query: str, ctx: Dict[str, Any]
-    ) -> tuple[bool, str, list[str], list[str]]:
-        clean_query = str(query or "").strip()
-        if not clean_query:
-            return False, "", [], []
-        delegate_ctx = dict(ctx or {})
-        delegate_ctx["delegate_mode"] = True
-        delegate_ctx["allow_read"] = False
-        delegate_ctx["allow_write"] = False
-        delegate_ctx["allow_exec"] = False
-        command = f"[CMD: search | {clean_query}]"
-        return await self.plugin_manager.execute_commands(
-            command,
-            delegate_ctx,
-            allow_tools=True,
-            allowed_types={"delegate"},
-        )
+        return text_utils.looks_like_uncertain_answer(text)
 
     def _observe_reply_effect(self, user_text: str, ctx: Optional[Dict[str, Any]]) -> None:
         try:
-            session_id, user_id = self._reply_effect_identity(ctx)
+            session_id, user_id = self.gateway_context_service.reply_effect_identity(ctx)
             record = self.reply_effect_tracker.observe_user_message(
                 session_id=session_id,
                 user_id=user_id,
@@ -1063,7 +988,7 @@ class ChatService:
 
     def _record_reply_effect(self, reply_text: str, ctx: Optional[Dict[str, Any]], *, source: str = "") -> None:
         try:
-            session_id, user_id = self._reply_effect_identity(ctx)
+            session_id, user_id = self.gateway_context_service.reply_effect_identity(ctx)
             self.reply_effect_tracker.record_reply(
                 session_id=session_id,
                 user_id=user_id,
@@ -1073,29 +998,6 @@ class ChatService:
         except Exception as exc:
             if self.logger:
                 self.logger.debug(f"Reply effect record failed: {exc}")
-
-    def _build_transcript_channel_meta(
-        self, ctx: Optional[Dict[str, Any]]
-    ) -> Dict[str, Any]:
-        if not self._is_qq_source(ctx):
-            return {}
-        channel_meta = (ctx or {}).get("channel_meta") or {}
-        result: Dict[str, Any] = {}
-        for key in (
-            "adapter",
-            "user_id",
-            "sender_name",
-            "message_type",
-            "group_id",
-            "is_owner",
-            "owner_label",
-            "message_id",
-        ):
-            value = channel_meta.get(key)
-            if value in (None, "", [], {}):
-                continue
-            result[key] = value
-        return result
 
     def _day_range_ts(self, date_str: str) -> tuple[int, int]:
         try:
@@ -1218,7 +1120,7 @@ class ChatService:
         self._app_ref = value
 
     async def _sync_qq_user_profile(self, ctx: Optional[Dict[str, Any]]) -> None:
-        if not self._is_qq_source(ctx):
+        if not self.gateway_context_service.is_qq_source(ctx):
             return
         channel_meta = (ctx or {}).get("channel_meta") or {}
         user_id = str(channel_meta.get("user_id") or "").strip()
@@ -1262,7 +1164,7 @@ class ChatService:
             self.logger.warning(f"QQ user profile sync failed: {exc}")
 
     def _build_external_sender_context(self, ctx: Optional[Dict[str, Any]]) -> str:
-        if not self._is_qq_source(ctx):
+        if not self.gateway_context_service.is_qq_source(ctx):
             return ""
         channel_meta = ctx.get("channel_meta") or {}
         sender_name = str(
@@ -1343,17 +1245,7 @@ class ChatService:
         return "\n".join(parts)
 
     def _get_memory_session_id(self, ctx: Optional[Dict[str, Any]]) -> str:
-        if not isinstance(ctx, dict):
-            return ""
-        source = str(ctx.get("source") or "").strip().lower()
-        if source in OWNER_SHARED_LOCAL_SOURCES:
-            return OWNER_SHARED_SESSION_ID
-        if source not in QQ_REMOTE_SOURCES:
-            return ""
-        channel_meta = ctx.get("channel_meta") or {}
-        if bool(channel_meta.get("is_owner")):
-            return OWNER_SHARED_SESSION_ID
-        return str(channel_meta.get("session_id") or "").strip()
+        return self.gateway_context_service.memory_session_id(ctx)
 
     def _wants_detailed_answer(self, text: str) -> bool:
         raw = str(text or "").strip()
@@ -1431,7 +1323,7 @@ class ChatService:
         if tracker is None or not hasattr(tracker, "stats"):
             return ""
         try:
-            session_id, _user_id = self._reply_effect_identity(ctx)
+            session_id, _user_id = self.gateway_context_service.reply_effect_identity(ctx)
             stats = tracker.stats(limit=80, session_id=session_id)
         except Exception:
             return ""
@@ -1545,35 +1437,6 @@ class ChatService:
             replies.remove(clean)
         replies.append(clean)
         self._recent_sensor_replies = replies[-max_items:]
-
-    def _format_sensor_seconds(self, seconds: float | int | None) -> str:
-        return sensor_utils.format_sensor_seconds(seconds)
-
-    def _build_sensor_usage_context(
-        self,
-        *,
-        app_name: str,
-        category: str,
-        count: int,
-        reason: str,
-        app_duration_sec: float | int | None = None,
-        current_stay_sec: float | int | None = None,
-    ) -> str:
-        return sensor_utils.build_sensor_usage_context(
-            app_name=app_name,
-            category=category,
-            count=count,
-            reason=reason,
-            app_duration_sec=app_duration_sec,
-            current_stay_sec=current_stay_sec,
-        )
-
-    def _build_sensor_spontaneous_style_block(
-        self, *, title: str, category: str, count: int, is_vision: bool
-    ) -> str:
-        return sensor_utils.build_sensor_spontaneous_style_block(
-            title=title, category=category, count=count, is_vision=is_vision
-        )
 
     def _load_expression_library_runtime(self) -> Dict[str, Any]:
         runtime: Dict[str, Any] = {}
@@ -1809,6 +1672,7 @@ class ChatService:
                 "- 少评价网页或软件本身，多对“他正在看/正在做这件事”作一句很轻的反应。\n"
                 "- 不要连续输出同一种陈述句；可以用低声问句，但不要复用最近出现过的固定模板。\n"
                 "- 禁止写成“挺实用、步骤详尽、请仔细阅读、需要协助、收获颇丰、至关重要、注意基础”这种助手口吻。\n"
+                "- 不要使用 🌸 或其他装饰 emoji。\n"
                 "- 如果最近几次已经有相似开头、相似句式或相似落点，这次必须换一种说法；不要每次都硬吐槽。"
             )
 
@@ -1910,18 +1774,6 @@ class ChatService:
             positive_keywords=self.POSITIVE_FEEDBACK_KEYWORDS,
         )
 
-    def _looks_like_plain_reaction_text(self, text: str) -> bool:
-        return self.reply_style_service.looks_like_plain_reaction_text(
-            text, wants_detailed_answer=self._wants_detailed_answer
-        )
-
-    def _build_short_reaction(
-        self, user_text: str, ctx: Optional[Dict[str, Any]] = None
-    ) -> tuple[str, str]:
-        return self.reply_style_service.build_short_reaction(
-            user_text, wants_detailed_answer=self._wants_detailed_answer
-        )
-
     def _extract_apply_confirmation(self, user_text: str) -> tuple[bool, str, str]:
         return self.reply_style_service.extract_apply_confirmation(
             user_text,
@@ -1964,44 +1816,15 @@ class ChatService:
         return ""
 
     def _get_current_live2d_emotion(self) -> tuple[str, float]:
-        app = getattr(self, "app", None)
-        emo_ctrl = getattr(app, "emotion_controller", None) if app is not None else None
-        if emo_ctrl is None:
-            return "neutral", 0.3
-        label = str(getattr(emo_ctrl, "current_emotion", "") or "neutral").strip().lower()
-        if not label:
-            label = "neutral"
-        try:
-            intensity = float(getattr(emo_ctrl, "current_intensity", 0.3))
-        except Exception:
-            intensity = 0.3
-        return label, max(0.0, min(1.0, intensity))
+        return self.emotion_reply_service.get_current_live2d_emotion()
 
     def _reply_start_emotion(self, ctx: Optional[Dict[str, Any]] = None) -> tuple[str, float]:
-        if isinstance(ctx, dict):
-            stored = ctx.get("_reply_start_emotion")
-            if isinstance(stored, (list, tuple)) and len(stored) >= 2:
-                label = str(stored[0] or "neutral").strip().lower() or "neutral"
-                try:
-                    intensity = float(stored[1])
-                except Exception:
-                    intensity = 0.3
-                return label, max(0.0, min(1.0, intensity))
-        return self._get_current_live2d_emotion()
+        return self.emotion_reply_service.reply_start_emotion(ctx)
 
     def _build_current_emotion_context(
         self, ctx: Optional[Dict[str, Any]] = None
     ) -> str:
-        label, intensity = self._reply_start_emotion(ctx)
-        return "\n".join(
-            [
-                "【当前Live2D情绪状态】",
-                f"- 当前表情/情绪：{label}，强度约 {intensity:.2f}",
-                "- 回复时把它当作上一秒的情绪状态：可以延续、变淡，也可以根据语境直接改变。",
-                "- 每次回复都必须在正文最开头输出一个情绪标签：<emo=happy|sad|angry|flustered|confused|think|neutral>。",
-                "- 情绪由你根据当前语境判断；不要因为旧表情而机械保持，也不要无理由固定 neutral。",
-            ]
-        )
+        return self.emotion_reply_service.build_current_emotion_context(ctx)
 
     def _build_sensor_persona_prompt(
         self,
@@ -2039,6 +1862,7 @@ class ChatService:
                         "- 可以适当用疑问句或轻反问，让话像顺口接出来的；不要每句都下判断。",
                         "- 禁用句式：挺实用、步骤详尽、请仔细阅读、需要协助、收获颇丰、至关重要、注意基础。",
                         "- 不要照抄固定口癖；每次根据窗口内容换一个落点：疑问、半句吐槽、轻声提醒、短感受都可以。",
+                        "- 不要使用 🌸 或其他装饰 emoji。",
                     ]
                 )
             )
@@ -2531,12 +2355,6 @@ class ChatService:
     def _strip_internal_tags(self, text: str) -> str:
         return self.reply_style_service.strip_internal_tags(text)
 
-    def _compress_sensor_text(self, text: str, max_len: int = 800) -> str:
-        return text_utils.compress_sensor_text(text, max_len=max_len)
-
-    def _format_sensor_observations(self, entries: list, max_items: int = 3) -> str:
-        return sensor_utils.format_sensor_observations(entries, max_items=max_items)
-
     def _extract_emo_tag(self, text):
         """提取情绪标签"""
         return self.reply_style_service.extract_emo_tag(text)
@@ -2544,36 +2362,9 @@ class ChatService:
     async def _infer_reply_emotion_with_llm(
         self, text: str, *, scene: str = "chat"
     ) -> Optional[str]:
-        clean = self._clean_text_for_tts(
-            self._strip_cmd_anywhere(self._strip_emo_tags_anywhere(text or ""))
-        ).strip()
-        if not clean:
-            return None
-        try:
-            from modules.llm import chat_with_ai
-
-            reply = await asyncio.to_thread(
-                chat_with_ai,
-                [
-                    {
-                        "role": "user",
-                        "content": (
-                            "只判断下面这句适合哪个Live2D情绪标签。\n"
-                            "只能输出一个英文标签，不要解释："
-                            "happy/sad/angry/flustered/confused/think/neutral\n"
-                            f"场景：{scene}\n"
-                            f"句子：{clean[:300]}"
-                        ),
-                    }
-                ],
-                task_type="reply_polish",
-                caller="reply_emotion_fallback",
-            )
-            return self._normalize_emo(str(reply or "").strip())
-        except Exception as e:
-            if getattr(self, "logger", None):
-                self.logger.debug(f"情绪兜底判断失败: {e}")
-        return None
+        return await self.emotion_reply_service.infer_reply_emotion_with_llm(
+            text, scene=scene
+        )
 
     def _contains_cmd(self, text: str) -> bool:
         """检查是否包含命令"""
@@ -2651,366 +2442,6 @@ class ChatService:
         )
         return str(m.group(1)).strip() if m else ""
 
-    def _is_market_price_query(self, text: str) -> bool:
-        raw = str(text or "")
-        lower = raw.lower()
-        hints = [
-            "金价",
-            "银价",
-            "油价",
-            "汇率",
-            "指数",
-            "现价",
-            "实时价",
-            "实时价格",
-            "价格",
-            "行情",
-            "price",
-            "quote",
-            "rate",
-            "index",
-            "gold",
-            "usd",
-            "cny",
-            "rmb",
-        ]
-        return any(hint in lower or hint in raw for hint in hints)
-
-    def _has_explicit_market_numbers(self, text: str) -> bool:
-        raw = str(text or "")
-        patterns = [
-            r"\d+(?:\.\d+)?\s*(?:美元/盎司|美元/克|元/克|元/盎司)",
-            r"\d+(?:\.\d+)?\s*(?:USD|CNY|RMB)\b",
-            r"\d+(?:\.\d+)?\s*(?:%|点)\b",
-        ]
-        return any(re.search(pattern, raw, flags=re.IGNORECASE) for pattern in patterns)
-
-    def _is_search_delegate(self, delegate_triggers: list[str], raw_text: str) -> bool:
-        trigger_set = {
-            str(item or "").strip().lower() for item in (delegate_triggers or [])
-        }
-        if trigger_set & {"search", "search_web"}:
-            return True
-        text = str(raw_text or "")
-        return ("搜索结果" in text) or ("Exa@" in text) or ("DuckDuckGo" in text)
-
-    def _parse_search_meta(self, text: str) -> Dict[str, str]:
-        raw = str(text or "")
-        m = re.search(r"\[search_meta\]\s*([^\n]+)", raw, flags=re.IGNORECASE)
-        if not m:
-            return {}
-        line = str(m.group(1) or "").strip()
-        data: Dict[str, str] = {}
-        for part in line.split(";"):
-            if "=" not in part:
-                continue
-            key, value = part.split("=", 1)
-            key = str(key or "").strip().lower()
-            value = str(value or "").strip()
-            if key:
-                data[key] = value
-        return data
-
-    def _parse_web_meta(self, text: str) -> Dict[str, str]:
-        raw = str(text or "")
-        m = re.search(r"\[web_meta\]\s*([^\n]+)", raw, flags=re.IGNORECASE)
-        if not m:
-            return {}
-        line = str(m.group(1) or "").strip()
-        data: Dict[str, str] = {}
-        for part in line.split(";"):
-            if "=" not in part:
-                continue
-            key, value = part.split("=", 1)
-            key = str(key or "").strip().lower()
-            value = str(value or "").strip()
-            if key:
-                data[key] = value
-        return data
-
-    def _parse_moegirl_meta(self, text: str) -> Dict[str, str]:
-        raw = str(text or "")
-        m = re.search(r"\[moegirl_meta\]\s*([^\n]+)", raw, flags=re.IGNORECASE)
-        if not m:
-            return {}
-        line = str(m.group(1) or "").strip()
-        data: Dict[str, str] = {}
-        for part in line.split(";"):
-            if "=" not in part:
-                continue
-            key, value = part.split("=", 1)
-            key = str(key or "").strip().lower()
-            value = str(value or "").strip()
-            if key:
-                data[key] = value
-        return data
-
-    def _search_result_lacks_explicit_fact(self, text: str) -> bool:
-        raw = str(text or "")
-        meta = self._parse_search_meta(raw)
-        if not raw:
-            return True
-        if "未在摘要中发现具体数值" in raw:
-            return True
-        if meta:
-            if (
-                str(meta.get("need_numeric") or "0") == "1"
-                and str(meta.get("has_numbers") or "0") != "1"
-            ):
-                return True
-            if str(meta.get("has_numbers") or "0") == "1":
-                return False
-            if (
-                str(meta.get("has_links") or "0") == "1"
-                or str(meta.get("has_published") or "0") == "1"
-            ):
-                return False
-        if self._has_explicit_market_numbers(raw):
-            return False
-        explicit_markers = [
-            "链接：",
-            "关键数值：",
-            "发布时间",
-            "published",
-            "source:",
-        ]
-        if any(marker.lower() in raw.lower() for marker in explicit_markers):
-            return False
-        return True
-
-    def _web_result_lacks_body(self, text: str) -> bool:
-        meta = self._parse_web_meta(text)
-        if not meta:
-            return False
-        return str(meta.get("has_body") or "0") != "1"
-
-    def _should_fallback_from_moegirl(self, results: list[str]) -> bool:
-        if not results:
-            return True
-        combined = "\n".join(str(item) for item in results if str(item).strip())
-        meta = self._parse_moegirl_meta(combined)
-        status = str(meta.get("status") or "").strip().lower()
-        if status == "not_found":
-            return True
-        if status == "ambiguous" and str(meta.get("has_page") or "0") != "1":
-            return True
-        return False
-
-    async def _run_search_fallback_for_moegirl(
-        self, *, user_text: str, ctx: Dict[str, Any]
-    ) -> tuple[list[str], list[str]]:
-        fallback_ctx = dict(ctx or {})
-        fallback_ctx["delegate_mode"] = True
-        fallback_ctx["allow_read"] = False
-        fallback_ctx["allow_write"] = False
-        fallback_ctx["allow_exec"] = False
-        command = f"[CMD: search | {user_text}]"
-        triggered, _clean, results, used = await self.plugin_manager.execute_commands(
-            command,
-            fallback_ctx,
-            allow_tools=True,
-            allowed_types={"delegate"},
-        )
-        if not triggered:
-            return [], []
-        return results, used
-
-    def _should_use_background_delegate(
-        self,
-        *,
-        route_reason: str,
-        delegate_triggers: list[str],
-        ctx: Optional[Dict[str, Any]],
-    ) -> bool:
-        if not delegate_triggers:
-            return False
-        if str(route_reason or "") == "workspace_read_preferred":
-            return False
-        # 联网搜索这类需要明确结果的委托，不要先回一条“正在查询”
-        if self._is_search_delegate(delegate_triggers, ""):
-            return False
-        source = str((ctx or {}).get("source") or "").strip().lower()
-        return source == "text_input"
-
-    def _looks_like_hardware_status_query(self, text: str) -> bool:
-        raw = str(text or "").strip().lower()
-        if not raw:
-            return False
-        subject_hints = (
-            "硬件",
-            "电脑",
-            "系统",
-            "机器",
-            "主机",
-            "cpu",
-            "gpu",
-            "显卡",
-            "内存",
-            "memory",
-            "磁盘",
-            "硬盘",
-        )
-        status_hints = (
-            "状态",
-            "情况",
-            "占用",
-            "使用率",
-            "负载",
-            "监控",
-            "温度",
-            "temperature",
-            "看一下",
-            "看看",
-            "检查",
-            "怎么样",
-            "热不热",
-            "高不高",
-        )
-        if not any(hint in raw for hint in subject_hints):
-            return False
-        return any(hint in raw for hint in status_hints)
-
-    def _hardware_monitor_action_from_query(self, text: str) -> str:
-        raw = str(text or "").strip().lower()
-        if any(hint in raw for hint in ("gpu", "显卡", "显存")):
-            return "gpu"
-        if any(hint in raw for hint in ("cpu", "处理器")):
-            return "cpu"
-        if any(hint in raw for hint in ("内存", "memory", "ram")):
-            return "memory"
-        if any(hint in raw for hint in ("磁盘", "硬盘", "disk", "空间")):
-            return "disk"
-        if any(hint in raw for hint in ("温度", "temperature", "热不热")):
-            return "temperature"
-        return "check"
-
-    async def _polish_hardware_status_reply(
-        self, *, user_text: str, raw_status: str, ctx: Optional[Dict[str, Any]] = None
-    ) -> str:
-        clean_status = str(raw_status or "").strip()
-        if not clean_status:
-            return "我没拿到硬件状态，监控插件这边没有返回内容。"
-        if self._looks_like_upstream_error_reply(clean_status):
-            return clean_status
-
-        profile = self._get_active_character_profile()
-        char_name = str(profile.get("name") or "当前角色").strip()
-        source = str((ctx or {}).get("source") or "").strip().lower()
-        length_rule = (
-            "QQ里回复，控制在2到4句，别贴完整表格。"
-            if source in QQ_REMOTE_SOURCES
-            else "控制在3到5句，保留关键数字，别贴完整表格。"
-        )
-        messages = [
-            {
-                "role": "system",
-                "content": (
-                    f"你是角色「{char_name}」。现在只负责把系统硬件监控结果整理成自然回复。"
-                    "必须只基于给出的监控结果，不新增诊断，不编造温度或占用。"
-                    "优先说CPU、内存、磁盘、GPU里值得注意的项目；如果整体正常，就简短说正常。"
-                    f"{length_rule} 不要输出Markdown标题，不要输出工具调用过程。"
-                ),
-            },
-            {
-                "role": "user",
-                "content": (
-                    f"用户问题：{str(user_text or '').strip()}\n\n"
-                    f"监控原始结果：\n{clean_status[:4000]}\n\n"
-                    "请整理成最终回复。"
-                ),
-            },
-        ]
-        try:
-            reply = await asyncio.to_thread(
-                chat_with_ai,
-                messages,
-                task_type="default",
-                caller="hardware_status_polish",
-            )
-            polished = self._clean_text_for_tts(
-                self._strip_internal_tags(
-                    self._strip_cmd_anywhere(self._strip_emo_tags_anywhere(reply or ""))
-                )
-            ).strip()
-            if polished and not self._looks_like_upstream_error_reply(polished):
-                if source in QQ_REMOTE_SOURCES:
-                    polished = self._normalize_qq_reply_style(polished)
-                return polished
-        except Exception as exc:
-            if self.logger:
-                self.logger.warning(f"Hardware status polish failed: {exc}")
-        return clean_status
-
-    async def _try_handle_hardware_status_query(
-        self,
-        *,
-        user_text: str,
-        ctx: Dict[str, Any],
-        transcript_meta: Optional[Dict[str, Any]],
-        chat_log_source: str,
-        output_profile: Dict[str, Any],
-        memory_session_id: str = "",
-    ) -> bool:
-        if not self._looks_like_hardware_status_query(user_text):
-            return False
-        if bool((output_profile or {}).get("live2d_enabled", True)):
-            await self.event_bus.emit(
-                "state.changed", state="thinking", reason="hardware_status"
-            )
-        else:
-            await self.event_bus.emit("ui.status", text="Thinking (Tools)...")
-        action = self._hardware_monitor_action_from_query(user_text)
-        command = f"[CMD: check | {action}]"
-        triggered, _clean, results, used = await self.plugin_manager.execute_commands(
-            command,
-            ctx,
-            allow_tools=True,
-            allowed_types={"react"},
-        )
-        if not triggered or not results:
-            return False
-        raw_status = "\n".join(str(item) for item in results if str(item).strip())
-        final_text = await self._polish_hardware_status_reply(
-            user_text=user_text,
-            raw_status=raw_status,
-            ctx=ctx,
-        )
-        reply_parts = gateway_sender.split_gateway_text_parts(final_text)
-        if not reply_parts:
-            reply_parts = [final_text]
-        user_meta = {"path": "hardware_status", "source": chat_log_source, **(transcript_meta or {})}
-        if memory_session_id:
-            user_meta["session_id"] = memory_session_id
-        await self.event_bus.emit("chat.log", role="user", content=user_text, meta=user_meta)
-        await self._add_memory_safe("user", user_text, meta=user_meta)
-        for index, reply_part in enumerate(reply_parts):
-            await self._emit_assistant_text(
-                reply_part,
-                ctx=ctx,
-                emotion="neutral",
-                transcript_meta=transcript_meta,
-                chat_log_source=chat_log_source,
-                output_profile=output_profile,
-                tool=True,
-                interrupt=(index == 0),
-                apply_catchphrase=(index == len(reply_parts) - 1),
-            )
-            if index < len(reply_parts) - 1:
-                await asyncio.sleep(0.25)
-        assistant_meta = {
-            "path": "hardware_status",
-            "source": chat_log_source,
-            "tool": True,
-            "used_triggers": list(used or ["monitor"]),
-            **(transcript_meta or {}),
-        }
-        if memory_session_id:
-            assistant_meta["session_id"] = memory_session_id
-        await self._add_memory_safe(
-            "assistant", "\n".join(reply_parts), meta=assistant_meta
-        )
-        return True
-
     async def _emit_assistant_text(
         self,
         text: str,
@@ -3070,124 +2501,6 @@ class ChatService:
         )
         await self._send_gateway_reply(final_text, ctx, emotion=emotion)
 
-    async def _polish_background_delegate_reply(
-        self,
-        *,
-        user_text: str,
-        ctx: Dict[str, Any],
-        delegate_triggers: list[str],
-        delegate_results: list[str],
-        delegate_clean: str,
-    ) -> tuple[str, str]:
-        raw_text = ""
-        if delegate_results:
-            raw_text = "\n".join(
-                str(item) for item in delegate_results if str(item).strip()
-            )
-        elif delegate_clean:
-            raw_text = str(delegate_clean).strip()
-        if not raw_text:
-            return "后台任务已处理完成。", "neutral"
-
-        prompt = (
-            "你现在是在任务完成后回到对话中汇报结果。"
-            "保持五十铃怜的语气，但只做轻度人格化整理。"
-            "要求：1) 只基于已给出的任务结果；"
-            "2) 不扩展诊断，不脑补未明确提供的信息；"
-            "3) 不展示工具调用过程；"
-            "4) 最多3句话，尽量简短；"
-            "5) 如果结果本身已经很清楚，就直接概述。"
-        )
-        if not self._wants_detailed_answer(user_text):
-            prompt += (
-                " 13) 默认像即时聊天，不要写成说明文或总结报告；"
-                "14) 优先 1 到 2 句短句。"
-            )
-        is_market_query = self._is_market_price_query(user_text)
-        is_search_delegate = self._is_search_delegate(delegate_triggers, raw_text)
-        web_meta = self._parse_web_meta(raw_text)
-        if is_market_query:
-            prompt += (
-                "6) 如果这是价格/行情/汇率/指数类请求，只有在任务结果里明确出现具体数值+单位时才可以引用；"
-                "7) 如果任务结果里没有明确数值，明确说未拿到可靠现价，不要自行补任何数字。"
-            )
-        if is_search_delegate:
-            prompt += (
-                "8) 如果这是联网搜索结果，只能转述结果里已经明确出现的事实；"
-                "9) 不要补充结果中未出现的人名、日期、价格、型号、结论；"
-                "10) 若搜索结果只有摘要或标题，明确说是基于摘要的概述。"
-            )
-        if web_meta:
-            prompt += (
-                "11) 如果这是网页解析结果，优先依据网页标题和正文摘要来概述；"
-                "12) 如果没有提取到可靠正文，就明确说明只拿到了标题或少量页面信息，不要把标题扩写成完整正文。"
-            )
-        trigger_text = (
-            ", ".join(delegate_triggers[:4]) if delegate_triggers else "delegate"
-        )
-        messages = [
-            {"role": "system", "content": prompt},
-            {
-                "role": "user",
-                "content": (
-                    f"原始请求：{user_text}\n"
-                    f"任务类型：{trigger_text}\n"
-                    f"任务结果：\n{raw_text}\n\n"
-                    "请把它整理成一条自然、简短的回灌消息。"
-                ),
-            },
-        ]
-        try:
-            reply = await asyncio.to_thread(
-                chat_with_ai,
-                messages,
-                task_type="default",
-                caller="chat_delegate_finalize",
-            )
-            emo, clean = self._extract_emo_tag(reply or "")
-            polished = self._clean_text_for_tts(
-                self._strip_internal_tags(
-                    self._strip_cmd_anywhere(
-                        self._strip_emo_tags_anywhere(clean or reply or "")
-                    )
-                )
-            ).strip()
-            if polished:
-                if is_market_query and not self._has_explicit_market_numbers(raw_text):
-                    polished = re.sub(
-                        r"\d+(?:\.\d+)?\s*(?:美元/盎司|美元/克|元/克|元/盎司|USD|CNY|RMB|%|点)",
-                        "",
-                        polished,
-                        flags=re.IGNORECASE,
-                    ).strip(" ，,。；;:：")
-                    if not polished or self._has_explicit_market_numbers(polished):
-                        polished = "查到了相关新闻和摘要，但当前结果里没有可靠的现价数字，我不想乱报。"
-                elif is_search_delegate and self._search_result_lacks_explicit_fact(
-                    raw_text
-                ):
-                    polished = "我查到了相关搜索结果，不过当前拿到的主要是标题和摘要，所以我只能先做保守概述，不想把没写明的细节说死。"
-                elif web_meta and self._web_result_lacks_body(raw_text):
-                    polished = "我打开了这个链接，不过目前只稳定拿到了标题或少量页面信息，正文没有可靠提取出来，所以我先不把内容说得太满。"
-                return polished, (emo or "neutral")
-        except Exception:
-            pass
-        if is_market_query and not self._has_explicit_market_numbers(raw_text):
-            return (
-                "查到了相关新闻和摘要，但当前结果里没有可靠的现价数字，我不想乱报。",
-                "neutral",
-            )
-        if is_search_delegate and self._search_result_lacks_explicit_fact(raw_text):
-            return (
-                "我查到了相关搜索结果，不过当前拿到的主要是标题和摘要，所以我只能先做保守概述，不想把没写明的细节说死。",
-                "neutral",
-            )
-        if web_meta and self._web_result_lacks_body(raw_text):
-            return (
-                "我打开了这个链接，不过目前只稳定拿到了标题或少量页面信息，正文没有可靠提取出来，所以我先不把内容说得太满。",
-                "neutral",
-            )
-        return raw_text, "neutral"
-
     async def _run_background_delegate_task(
         self,
         *,
@@ -3216,26 +2529,31 @@ class ChatService:
                 text=user_text,
                 meta={"background": True},
             )
-            (
-                delegate_triggered,
-                delegate_clean,
-                delegate_results,
-                delegate_used,
-            ) = await self._run_delegate_round(
+            delegate_flow_result = await delegate_flow_service.run_delegate_round(
                 user_text=user_text,
                 ctx=ctx,
                 context_messages=context_messages,
                 delegate_triggers=delegate_triggers,
                 task_reasoning=task_reasoning,
+                plugin_manager=self.plugin_manager,
+                chat_with_ai=chat_with_ai,
+                logger=self.logger,
             )
+            delegate_triggered = delegate_flow_result.triggered
+            delegate_clean = delegate_flow_result.clean
+            delegate_results = delegate_flow_result.results
+            delegate_used = delegate_flow_result.used
             if "moegirl_wiki" in set(delegate_used or delegate_triggers):
-                if self._should_fallback_from_moegirl(delegate_results):
+                if self.tool_result_formatter.should_fallback_from_moegirl(
+                    delegate_results
+                ):
                     (
                         fallback_results,
                         fallback_used,
-                    ) = await self._run_search_fallback_for_moegirl(
+                    ) = await search_flow_service.run_search_fallback_for_moegirl(
                         user_text=user_text,
                         ctx=ctx,
+                        plugin_manager=self.plugin_manager,
                     )
                     if fallback_results:
                         merged_results = list(delegate_results or [])
@@ -3292,21 +2610,20 @@ class ChatService:
                 final_text = delegate_clean
             if not final_text:
                 final_text = "后台任务已处理完成。"
-            final_text, final_emo = await self._polish_background_delegate_reply(
+            final_text, final_emo = await self.tool_result_formatter.polish_background_delegate_reply(
                 user_text=user_text,
-                ctx=ctx,
                 delegate_triggers=delegate_triggers,
                 delegate_results=delegate_results,
                 delegate_clean=delegate_clean,
             )
-            await self._emit_assistant_text(
-                final_text,
-                ctx=ctx,
+            await output_coordinator.emit_background_delegate_reply(
+                text=final_text,
                 emotion=final_emo,
+                ctx=ctx,
                 transcript_meta=transcript_meta,
                 chat_log_source=chat_log_source,
                 output_profile=output_profile,
-                tool=True,
+                emit_assistant_text=self._emit_assistant_text,
             )
             self._add_delegate_session_event(
                 "background_reply",
@@ -3332,150 +2649,15 @@ class ChatService:
                 text=str(e),
                 meta={"background": True},
             )
-            await self._emit_assistant_text(
-                f"刚才委托的后台任务失败了：{e}",
-                ctx=ctx,
+            await output_coordinator.emit_background_delegate_reply(
+                text=f"刚才委托的后台任务失败了：{e}",
                 emotion="neutral",
+                ctx=ctx,
                 transcript_meta=transcript_meta,
                 chat_log_source=chat_log_source,
                 output_profile=output_profile,
-                tool=True,
+                emit_assistant_text=self._emit_assistant_text,
             )
-
-    async def _run_workspace_read_shortcut(
-        self, *, user_text: str, ctx: Dict[str, Any]
-    ) -> tuple[bool, str, list[str], list[str]]:
-        path = self._extract_workspace_read_path(user_text)
-        if not path:
-            return False, "", [], []
-        delegate_ctx = dict(ctx or {})
-        delegate_ctx["delegate_mode"] = True
-        delegate_ctx["allow_read"] = True
-        delegate_ctx["allow_write"] = False
-        delegate_ctx["allow_exec"] = False
-        command = f"[CMD: workspace_ops | read_file ||| {path}]"
-        return await self.plugin_manager.execute_commands(
-            command,
-            delegate_ctx,
-            allow_tools=True,
-            allowed_types={"delegate"},
-        )
-
-    async def _run_delegate_round(
-        self,
-        *,
-        user_text: str,
-        ctx: Dict[str, Any],
-        context_messages: list,
-        delegate_triggers: list[str],
-        task_reasoning: str,
-    ) -> tuple[bool, str, list[str], list[str]]:
-        if not delegate_triggers:
-            return False, "", [], []
-
-        delegate_prompt = self.plugin_manager.get_delegate_prompt_for_triggers(
-            list(delegate_triggers), compact=True
-        )
-        if not delegate_prompt:
-            return False, "", [], []
-
-        delegate_ctx = dict(ctx or {})
-        delegate_ctx["delegate_mode"] = True
-        delegate_ctx["allow_read"] = True
-        delegate_ctx["allow_write"] = bool(delegate_ctx.get("allow_write", False))
-        delegate_ctx["allow_exec"] = bool(delegate_ctx.get("allow_exec", False))
-
-        delegate_messages = list(context_messages)
-        delegate_messages.append(
-            {
-                "role": "system",
-                "content": (
-                    "【副脑模式】你当前是任务执行脑，只负责为复杂任务选择并调用委托型工具。"
-                    "不要维持人设聊天，不要安抚，不要寒暄，只输出必要的工具调用或极简任务结论。"
-                    + delegate_prompt
-                ),
-            }
-        )
-        delegate_messages.append(
-            {
-                "role": "user",
-                "content": (
-                    "请判断这条请求是否需要委托型工具。"
-                    "如果需要，严格输出对应的 [CMD: 命令 | 需求说明]；"
-                    "如果不需要，输出一句不超过20字的结论。\n\n"
-                    f"原始请求：{user_text}"
-                ),
-            }
-        )
-
-        try:
-            delegate_reply = await asyncio.to_thread(
-                chat_with_ai,
-                delegate_messages,
-                task_type=task_reasoning,
-                caller="chat_delegate_reasoning",
-            )
-            self.logger.info(f"[Delegate] 副脑原始输出: {repr(delegate_reply)}")
-        except Exception as e:
-            err = str(e or "").strip()
-            lowered = err.lower()
-            if "429" in lowered or "rate limit" in lowered:
-                return (
-                    True,
-                    "",
-                    ["副脑当前请求过多，暂时无法读取文件或执行复杂任务，请稍后再试。"],
-                    [],
-                )
-            return (
-                True,
-                "",
-                [f"副脑执行复杂任务时失败：{err or '未知错误'}"],
-                [],
-            )
-        triggered, clean_text, tool_outputs, used_triggers = (
-            await self.plugin_manager.execute_commands(
-                delegate_reply,
-                delegate_ctx,
-                allow_tools=True,
-                allowed_types={"delegate"},
-            )
-        )
-
-        self.logger.info(
-            f"[Delegate] 副脑结果: reply={repr(delegate_reply[:80])}, "
-            f"triggered={triggered}, used={used_triggers}, outputs={len(tool_outputs)}"
-        )
-
-        # 当 LLM 副脑没有输出 [CMD: ...] 但路由已匹配到委托插件时，
-        # 直接用匹配到的插件执行，避免因 LLM 不遵循格式导致委托失效。
-        # 仅在匹配到单个委托插件时直接调用，多插件歧义时仍依赖 LLM 选择。
-        if not used_triggers and len(delegate_triggers) == 1:
-            trig = delegate_triggers[0]
-            plugin = self.plugin_manager.delegate_map.get(trig)
-            if plugin is not None:
-                plugin_name = getattr(plugin, "name", trig)
-                self.logger.info(
-                    f"[Delegate] LLM未输出CMD，直接调用: {trig} ({plugin_name}), user_text={repr(user_text[:60])}"
-                )
-                try:
-                    runtime_ctx = self.plugin_manager._build_delegate_runtime_context(
-                        delegate_ctx
-                    )
-                    result = await self.plugin_manager._run_with_timeout(
-                        plugin, user_text, runtime_ctx
-                    )
-                    self.logger.info(f"[Delegate] 直接调用结果: {repr(result[:100]) if result else 'None'}")
-                    if result:
-                        tool_outputs.append(result)
-                        used_triggers.append(trig)
-                        triggered = True
-                except Exception as exc:
-                    self.logger.error(f"[Delegate] 直接调用 {trig} 失败: {exc}")
-                    tool_outputs.append(f"【{trig} 错误】{exc}")
-            else:
-                self.logger.warning(f"[Delegate] delegate_map 中找不到 {trig}")
-
-        return triggered, clean_text, tool_outputs, used_triggers
 
     def _update_active_time(self):
         """更新活跃时间戳"""
@@ -3971,8 +3153,14 @@ class ChatService:
         ctx.setdefault("trigger_motion", trigger_motion)
         ctx.setdefault("user_text", user_text)
 
-        input_source = str(ctx.get("source", "unknown") or "unknown").strip()
-        channel_meta = ctx.get("channel_meta") or {}
+        input_ctx = input_context.build_chat_input_context(
+            ctx,
+            is_qq_source=self.gateway_context_service.is_qq_source,
+            get_memory_session_id=self._get_memory_session_id,
+            remote_chat_sources=set(REMOTE_CHAT_SOURCES or set()),
+        )
+        input_source = input_ctx.input_source
+        channel_meta = input_ctx.channel_meta
         if input_source in {"qq_gateway", "napcat_qq"}:
             sender_name = str(
                 channel_meta.get("sender_name")
@@ -3980,7 +3168,9 @@ class ChatService:
                 or "unknown"
             ).strip()
             session_preview = str(channel_meta.get("session_id") or "").strip()
-            session_label = self._qq_session_label(session_preview)
+            session_label = self.gateway_context_service.qq_session_label(
+                session_preview
+            )
             incoming_preview = (
                 str(user_text or "").replace("\r", " ").replace("\n", " ").strip()
             )
@@ -3990,17 +3180,14 @@ class ChatService:
                 f"[QQ-IN][{session_label}][{session_preview or 'unknown'}][from={sender_name}] {incoming_preview}"
             )
         self._observe_reply_effect(user_text, ctx)
-        transcript_channel_meta = self._build_transcript_channel_meta(ctx)
-        has_external_images = bool(channel_meta.get("has_image"))
-        memory_session_id = self._get_memory_session_id(ctx)
+        transcript_channel_meta = input_ctx.transcript_channel_meta
+        has_external_images = input_ctx.has_external_images
+        memory_session_id = input_ctx.memory_session_id
         await self._sync_qq_user_profile(ctx)
-        chat_log_source = input_source if input_source != "unknown" else "chat"
-        output_profile = build_output_profile(str(input_source or "text_input"))
-        live2d_enabled = bool(output_profile.get("live2d_enabled", True))
-        if "codex_mode" in ctx:
-            codex_mode = bool(ctx.get("codex_mode", False))
-        else:
-            codex_mode = input_source == "codex_input"
+        chat_log_source = input_ctx.chat_log_source
+        output_profile = input_ctx.output_profile
+        live2d_enabled = input_ctx.live2d_enabled
+        codex_mode = input_ctx.codex_mode
         ctx["codex_mode"] = codex_mode
         if codex_mode and not str(ctx.get("codex_task_id", "")).strip():
             ctx["codex_task_id"] = uuid.uuid4().hex[:8]
@@ -4020,6 +3207,18 @@ class ChatService:
         ctx["codex_confirm_change_id"] = str(confirm_change_id or "")
         ctx["codex_confirm_token"] = str(confirm_token or "")
         self.logger.debug(f"收到输入: {user_text} (来源: {input_source})")
+        self._trace_process(
+            "entry",
+            source=input_source,
+            chat_log_source=chat_log_source,
+            is_qq=self.gateway_context_service.is_qq_source(ctx),
+            codex_mode=codex_mode,
+            has_external_images=has_external_images,
+            live2d_enabled=live2d_enabled,
+            speak=output_profile.get("speak", True),
+            show_bubble=output_profile.get("show_bubble", True),
+            memory_session=bool(memory_session_id),
+        )
         self.personality.update_state()
 
         if codex_mode:
@@ -4123,6 +3322,9 @@ class ChatService:
                 fallback_text = str(
                     direct_result.get("fallback_text") or "⚠️ 截图已生成，但回发失败了。"
                 )
+                suppress_fallback_reply = bool(
+                    direct_result.get("suppress_fallback_reply")
+                )
                 image_ok = await self._send_gateway_image_reply(
                     image_path,
                     ctx,
@@ -4137,13 +3339,20 @@ class ChatService:
                     (image_caption or success_text) if image_ok else fallback_text
                 )
                 handled_gateway_image = image_ok
-                if not image_ok and str(ctx.get("source") or "").strip().lower() in {
-                    "qq_gateway",
-                    "napcat_qq",
-                }:
+                if (
+                    not image_ok
+                    and not suppress_fallback_reply
+                    and str(ctx.get("source") or "").strip().lower()
+                    in {
+                        "qq_gateway",
+                        "napcat_qq",
+                    }
+                ):
                     await self._send_gateway_reply(
                         direct_reply_text, ctx, emotion="neutral"
                     )
+                    direct_reply_text = ""
+                elif not image_ok and suppress_fallback_reply:
                     direct_reply_text = ""
 
             if direct_reply_text:
@@ -4224,7 +3433,7 @@ class ChatService:
                 raw_stats = getattr(
                     self.screen_sensor_ref, "get_stats_data", lambda: {}
                 )()
-                await self._handle_diary_request(
+                await self.diary_service.handle_diary_request(
                     user_text=user_text,
                     ctx=ctx,
                     output_profile=output_profile,
@@ -4238,7 +3447,7 @@ class ChatService:
         if "总结昨天" in user_text or "补写昨天" in user_text:
             print("📅 [System] 拦截到补写昨天日记请求")
             yesterday = datetime.now().date() - timedelta(days=1)
-            await self._handle_diary_request(
+            await self.diary_service.handle_diary_request(
                 user_text=user_text,
                 ctx=ctx,
                 output_profile=output_profile,
@@ -4261,7 +3470,7 @@ class ChatService:
             if requested_date:
                 print(f"[System] 拦截到指定日期日记请求: {requested_date_str}")
                 is_makeup = requested_date < datetime.now().date()
-                await self._handle_diary_request(
+                await self.diary_service.handle_diary_request(
                     user_text=user_text,
                     ctx=ctx,
                     output_profile=output_profile,
@@ -4284,16 +3493,11 @@ class ChatService:
             feedback_type, feedback_reaction = self._detect_feedback(user_text)
         self._remember_search_topic(user_text, ctx)
 
-        remote_sources = {
-            str(x).strip().lower()
-            for x in set(REMOTE_CHAT_SOURCES or set())
-            if str(x).strip()
-        }
-        direct_chat_sources = {"text_input", "voice", "desktop", "codex_input", *remote_sources}
-        source_key = str(input_source or "").strip().lower()
+        direct_chat_sources = input_ctx.direct_chat_sources
+        source_key = input_ctx.source_key
         should_reply = (
             True
-            if source_key in direct_chat_sources or codex_mode or has_external_images
+            if input_ctx.should_bypass_gatekeeper
             else await self._should_reply(user_text)
         )
         if not should_reply:
@@ -4303,7 +3507,7 @@ class ChatService:
             return
 
         # 轻量任务代理：自动提取待办 / 标记完成
-        if await self._try_handle_hardware_status_query(
+        if await self.hardware_status_service.try_handle_hardware_status_query(
             user_text=user_text,
             ctx=ctx,
             transcript_meta=transcript_channel_meta,
@@ -4399,16 +3603,24 @@ class ChatService:
 
         # --- 路由与 Prompt 构建 ---
         self._dbg(f"进入 LLM 对话/工具流程, Input: {user_text[:50]}...")
-        session_key = self._conversation_session_key(ctx)
+        session_key = self.gateway_context_service.conversation_session_key(ctx)
         last_tool_triggers = list(
             self._last_tool_triggers_by_session.get(session_key) or []
         )
-        followup_search_query = self._resolve_followup_search_query(user_text, ctx)
+        search_decision = search_flow_service.build_initial_search_decision(
+            user_text,
+            ctx,
+            resolve_followup_search_query=self._resolve_followup_search_query,
+        )
+        followup_search_query = search_decision.followup_query
         if followup_search_query:
             self.logger.info(
                 f"[SearchFollowup] 继承上文主题: {followup_search_query[:120]}"
             )
-            route = self.tool_router.route("查一下", last_tool_triggers=["search_web"])
+            route = self.tool_router.route(
+                search_decision.route_text or "查一下",
+                last_tool_triggers=["search_web"],
+            )
         else:
             route = self.tool_router.route(
                 user_text, last_tool_triggers=last_tool_triggers
@@ -4439,6 +3651,17 @@ class ChatService:
                 meta={"route_reason": str(route.reason or "")},
             )
         need_tools = bool(route.need_tools or (codex_mode and effective_triggers))
+        self._trace_process(
+            "route",
+            source=source_key,
+            need_tools=need_tools,
+            route_need_tools=bool(route.need_tools),
+            triggers=effective_triggers,
+            normal_triggers=normal_triggers,
+            delegate_triggers=delegate_triggers,
+            route_reason=str(route.reason or ""),
+            followup_search=bool(followup_search_query),
+        )
         if codex_mode and need_tools:
             self._set_codex_task_state(
                 ctx,
@@ -4449,57 +3672,48 @@ class ChatService:
         task_reasoning = "codex" if codex_mode else "tool_reasoning"
         task_default = "codex" if codex_mode else "default"
 
-        short_reply = ""
-        short_emo = "neutral"
-        if (
-            not need_tools
-            and not effective_triggers
-            and not codex_mode
-            and not has_external_images
-            and not preface_text
-            and source_key in direct_chat_sources
-        ):
-            short_reply, short_emo = self._build_short_reaction(user_text, ctx)
+        plain_direct_chat_candidate = (
+            reply_flow_service.is_plain_direct_chat_candidate(
+                need_tools=need_tools,
+                effective_triggers=effective_triggers,
+                codex_mode=codex_mode,
+                has_external_images=has_external_images,
+                preface_text=preface_text,
+                source_key=source_key,
+                direct_chat_sources=direct_chat_sources,
+            )
+        )
+        short_reaction = reply_flow_service.build_short_reaction(
+            eligible=plain_direct_chat_candidate,
+            user_text=user_text,
+            build_reaction=lambda text: self.reply_style_service.build_short_reaction(
+                text,
+                wants_detailed_answer=self._wants_detailed_answer,
+            ),
+        )
+        short_reply = short_reaction.text
+        short_emo = short_reaction.emotion
 
-        if short_reply:
-            await self._emit_assistant_text(
-                short_reply,
-                ctx=ctx,
-                emotion=short_emo,
-                transcript_meta=transcript_channel_meta,
-                chat_log_source=chat_log_source,
-                output_profile=output_profile,
-                tool=False,
-            )
-            if self.learning:
-                self.learning.record_interaction(
-                    user_text,
-                    short_reply,
-                    short_emo,
-                    feedback_type,
-                    feedback_reaction,
-                )
-            short_meta = {"path": "short_reaction"}
-            if memory_session_id:
-                short_meta["session_id"] = memory_session_id
-            await self._add_memory_safe("user", user_text, meta=short_meta)
-            await self._add_memory_safe("assistant", short_reply, meta=short_meta)
-            await self._emit_idle_status_when_safe(
-                output_profile,
-                reason="short_reaction",
-                had_presenter_output=True,
-            )
+        if await output_coordinator.emit_short_reaction(
+            text=short_reply,
+            emotion=short_emo,
+            user_text=user_text,
+            ctx=ctx,
+            transcript_meta=transcript_channel_meta,
+            chat_log_source=chat_log_source,
+            output_profile=output_profile,
+            feedback_type=feedback_type,
+            feedback_reaction=feedback_reaction,
+            memory_session_id=memory_session_id,
+            learning=self.learning,
+            emit_assistant_text=self._emit_assistant_text,
+            add_memory_safe=self._add_memory_safe,
+            emit_idle_status_when_safe=self._emit_idle_status_when_safe,
+        ):
             return
 
         current_time = datetime.now().strftime("%Y-%m-%d %H:%M")
-        natural_reply_candidate = (
-            not need_tools
-            and not effective_triggers
-            and not codex_mode
-            and not has_external_images
-            and not preface_text
-            and source_key in direct_chat_sources
-        )
+        natural_reply_candidate = plain_direct_chat_candidate
 
         # 历史回溯
         special_context = ""
@@ -4627,87 +3841,72 @@ class ChatService:
                 cleaned_context_messages.append(message)
         context_messages = cleaned_context_messages
 
+        use_non_stream_flow = reply_flow_service.should_use_non_stream_flow(
+            need_tools=need_tools,
+            deferred_tool_flow=deferred_tool_flow,
+            stream_available=chat_with_ai_stream is not None,
+            natural_reply_candidate=natural_reply_candidate,
+        )
+        self._trace_process(
+            "branch",
+            source=source_key,
+            non_stream=use_non_stream_flow,
+            need_tools=need_tools,
+            deferred_tool_flow=deferred_tool_flow,
+            stream_available=chat_with_ai_stream is not None,
+            natural_reply_candidate=natural_reply_candidate,
+            has_external_images=has_external_images,
+            preface=bool(preface_text),
+            codex_mode=codex_mode,
+        )
+
         # =========================================================================
         # 6. 分支 A: ReAct 工具链
         # =========================================================================
-        if (
-            need_tools
-            or deferred_tool_flow
-            or chat_with_ai_stream is None
-            or natural_reply_candidate
-        ):
+        if use_non_stream_flow:
             self._dbg("进入非流式回复/工具流程")
             await self.event_bus.emit("ui.status", text="Thinking (Tools)...")
 
-            first_pass_task = task_reasoning if (need_tools or deferred_tool_flow) else task_default
-            first_pass_caller = (
-                "chat_tool_reasoning" if first_pass_task == task_reasoning else "chat_default_reply"
+            react_first_pass = await tool_flow_service.run_react_first_pass(
+                context_messages=context_messages,
+                ctx=ctx,
+                need_tools=need_tools,
+                deferred_tool_flow=deferred_tool_flow,
+                task_reasoning=task_reasoning,
+                task_default=task_default,
+                plugin_manager=self.plugin_manager,
+                chat_with_ai=chat_with_ai,
+                contains_cmd=self._contains_cmd,
+                strip_cmd_anywhere=self._strip_cmd_anywhere,
             )
-
-            reply1 = await asyncio.to_thread(
-                chat_with_ai,
-                context_messages,
-                task_type=first_pass_task,
-                caller=first_pass_caller,
-            )
-
-            allow_tools = bool(need_tools) or self._contains_cmd(reply1 or "")
-            ret = await self.plugin_manager.execute_commands(
-                reply1,
-                ctx,
-                allow_tools=allow_tools,
-                allowed_types={"react"},
-            )
-            triggered, clean_thought, tool_results, used_triggers = ret
-            if (
-                triggered
-                and used_triggers == ["tool_search"]
-                and tool_results
-            ):
-                context_messages.append(
-                    {
-                        "role": "assistant",
-                        "content": self._strip_cmd_anywhere(reply1 or "").strip() or "我先确认可用工具。",
-                    }
-                )
-                context_messages.append(
-                    {
-                        "role": "system",
-                        "content": "【系统反馈】工具检索结果：\n"
-                        + "\n".join(str(r) for r in tool_results)
-                        + "\n如果确实需要工具，请只输出一个真实工具命令；如果不需要工具，直接简短回答。",
-                    }
-                )
-                reply1b = await asyncio.to_thread(
-                    chat_with_ai,
-                    context_messages,
-                    task_type=task_reasoning,
-                    caller="chat_tool_deferred_reasoning",
-                )
-                ret = await self.plugin_manager.execute_commands(
-                    reply1b,
-                    ctx,
-                    allow_tools=bool(self._contains_cmd(reply1b or "")),
-                    allowed_types={"react"},
-                )
-                triggered, clean_thought, tool_results, used_triggers = ret
-                if not triggered:
-                    clean_thought = reply1b or clean_thought
+            reply1 = react_first_pass.reply
+            triggered = react_first_pass.triggered
+            clean_thought = react_first_pass.clean_thought
+            tool_results = react_first_pass.tool_results
+            used_triggers = react_first_pass.used_triggers
+            context_messages = react_first_pass.context_messages
             forced_search_query = ""
             if not triggered and not tool_results and not delegate_triggers:
-                if followup_search_query:
-                    forced_search_query = followup_search_query
-                elif self._looks_like_uncertain_answer(reply1) and self._is_searchworthy_question(user_text):
-                    forced_search_query = user_text
+                forced_search_query = search_flow_service.choose_forced_search_query(
+                    user_text=user_text,
+                    first_reply=reply1 or "",
+                    followup_query=followup_search_query,
+                    triggered=triggered,
+                    tool_results=tool_results,
+                    delegate_triggers=delegate_triggers,
+                    looks_like_uncertain_answer=self._looks_like_uncertain_answer,
+                    is_searchworthy_question=self._is_searchworthy_question,
+                )
                 if forced_search_query:
                     (
                         search_triggered,
                         search_clean,
                         search_results,
                         search_used,
-                    ) = await self._run_search_delegate_query(
+                    ) = await search_flow_service.run_search_delegate_query(
                         query=forced_search_query,
                         ctx=ctx,
+                        plugin_manager=self.plugin_manager,
                     )
                     if search_clean and not clean_thought:
                         clean_thought = search_clean
@@ -4731,39 +3930,39 @@ class ChatService:
                     triggers=delegate_triggers,
                     text=user_text,
                 )
-                background_delegate = self._should_use_background_delegate(
+                delegate_decision = delegate_flow_service.choose_delegate_execution(
                     route_reason=str(route.reason or ""),
                     delegate_triggers=delegate_triggers,
                     ctx=ctx,
+                    user_text=user_text,
+                    followup_search_query=followup_search_query,
+                    is_search_delegate=self.tool_result_formatter.is_search_delegate,
                 )
-                if followup_search_query and self._is_search_delegate(
-                    delegate_triggers, user_text
-                ):
-                    background_delegate = False
-                    (
-                        delegate_triggered,
-                        delegate_clean,
-                        delegate_results,
-                        delegate_used,
-                    ) = await self._run_search_delegate_query(
-                        query=followup_search_query,
+                background_delegate = delegate_decision.background_delegate
+                delegate_flow_result = await delegate_flow_service.run_delegate_flow(
+                    decision=delegate_decision,
+                    user_text=user_text,
+                    ctx=ctx,
+                    context_messages=context_messages,
+                    delegate_triggers=delegate_triggers,
+                    task_reasoning=task_reasoning,
+                    plugin_manager=self.plugin_manager,
+                    chat_with_ai=chat_with_ai,
+                    extract_workspace_read_path=self._extract_workspace_read_path,
+                    run_search_delegate_query=lambda *, query, ctx: search_flow_service.run_search_delegate_query(
+                        query=query,
                         ctx=ctx,
-                    )
-                elif str(route.reason or "") == "workspace_read_preferred":
-                    (
-                        delegate_triggered,
-                        delegate_clean,
-                        delegate_results,
-                        delegate_used,
-                    ) = await self._run_workspace_read_shortcut(
-                        user_text=user_text,
-                        ctx=ctx,
-                    )
-                elif background_delegate:
-                    delegate_triggered = True
-                    delegate_clean = ""
-                    delegate_results = ["我先在后台处理，完成后再回来告诉你结果。"]
-                    delegate_used = []
+                        plugin_manager=self.plugin_manager,
+                    ),
+                    followup_search_query=followup_search_query,
+                    logger=self.logger,
+                )
+                delegate_triggered = delegate_flow_result.triggered
+                delegate_clean = delegate_flow_result.clean
+                delegate_results = delegate_flow_result.results
+                delegate_used = delegate_flow_result.used
+                background_delegate = delegate_flow_result.background_delegate
+                if background_delegate:
                     self._set_delegate_task_state(
                         ctx,
                         "queued",
@@ -4790,19 +3989,6 @@ class ChatService:
                             chat_log_source=chat_log_source,
                             output_profile=dict(output_profile or {}),
                         )
-                    )
-                else:
-                    (
-                        delegate_triggered,
-                        delegate_clean,
-                        delegate_results,
-                        delegate_used,
-                    ) = await self._run_delegate_round(
-                        user_text=user_text,
-                        ctx=ctx,
-                        context_messages=context_messages,
-                        delegate_triggers=delegate_triggers,
-                        task_reasoning=task_reasoning,
                     )
                 if delegate_clean and not clean_thought:
                     clean_thought = delegate_clean
@@ -4875,188 +4061,104 @@ class ChatService:
                 )
 
             start_emo, start_intensity = self._reply_start_emotion(ctx)
-            final_reply = ""
-            final_emo = start_emo
-            model_emo_seen = False
+            if triggered and tool_results and used_triggers:
+                tool_use_meta = {"path": "tool_use"}
+                if memory_session_id:
+                    tool_use_meta["session_id"] = memory_session_id
+                asyncio.create_task(
+                    self._add_memory_safe(
+                        "assistant",
+                        f"[tool_use] {used_triggers}",
+                        meta=tool_use_meta,
+                    )
+                )
 
             if triggered and tool_results:
-                _, clean1 = self._extract_emo_tag(clean_thought or "")
-                if clean1:
-                    context_messages.append({"role": "assistant", "content": clean1})
-
-                feedback = "\n".join([str(r) for r in tool_results])
-                if used_triggers:
-                    tool_use_meta = {"path": "tool_use"}
-                    if memory_session_id:
-                        tool_use_meta["session_id"] = memory_session_id
-                    asyncio.create_task(
-                        self._add_memory_safe(
-                            "assistant",
-                            f"[tool_use] {used_triggers}",
-                            meta=tool_use_meta,
-                        )
-                    )
-
-                compact_hint = ""
-                if used_triggers:
-                    used_set = {str(t or "").strip().lower() for t in used_triggers}
-                    if used_set & {"claw_email"}:
-                        final_reply = feedback
-                        final_emo = "neutral"
-                        model_emo_seen = True
-                        if len(final_reply) > 1800:
-                            final_reply = final_reply[:1800].rstrip() + "\n..."
-                        compact_hint = "__direct_result__"
-                    elif used_set & {"search", "search_web"}:
-                        compact_hint = "\n请只输出关键信息（<=3条），不要表格，不要展示思考过程，不要输出完整链接。如是行情/价格/汇率/指数问题，尽量给出具体数值+单位+时间；找不到数值就直说未找到。"
-                    elif (
-                        used_set & {"workspace_ops"}
-                        and str(route.reason or "") == "workspace_read_preferred"
-                    ):
-                        compact_hint = "\n请仅基于文件内容回答：先说明这是什么文件、主要做什么；不要延伸诊断用户未明确提出的问题，不要推测故障原因，不要补充与文件内容无直接依据的建议。"
-                if compact_hint != "__direct_result__":
-                    context_messages.append(
-                        {
-                            "role": "system",
-                            "content": f"【系统反馈】工具结果：\n{feedback}{compact_hint}\n请据此回答。",
-                        }
-                    )
-                    reply2 = await asyncio.to_thread(
-                        chat_with_ai,
-                        context_messages,
-                        task_type=task_default,
-                        caller="chat_tool_finalize",
-                    )
-
-                    emo2, clean2 = self._extract_emo_tag(reply2 or "")
-                    final_reply = clean2.strip() or clean1
-                    final_emo = emo2 or start_emo
-                    model_emo_seen = bool(emo2)
-
-                # 尝试追加“分享欲”内容 (工具分支也加了)
-                if CHARACTER_SHARING_ENABLED and compact_hint != "__direct_result__":
-                    sharing = self.personality.try_share()
-                    if sharing:
-                        final_reply = f"{final_reply}\n\n{sharing}"
-
-            else:
-                emo, clean = self._extract_emo_tag(reply1 or "")
-                final_reply = clean.strip() or "…"
-                final_emo = emo or start_emo
-                model_emo_seen = bool(emo)
-                if CHARACTER_SHARING_ENABLED:
-                    sharing = self.personality.try_share()
-                    if sharing:
-                        final_reply += f"\n\n{sharing}"
-
-            final_reply = self._clean_text_for_tts(
-                self._strip_internal_tags(
-                    self._strip_cmd_anywhere(self._strip_emo_tags_anywhere(final_reply))
+                tool_finalize = await tool_flow_service.finalize_tool_reply(
+                    clean_thought=clean_thought,
+                    tool_results=tool_results,
+                    used_triggers=used_triggers,
+                    context_messages=context_messages,
+                    route_reason=str(route.reason or ""),
+                    task_default=task_default,
+                    start_emo=start_emo,
+                    chat_with_ai=chat_with_ai,
+                    extract_emo_tag=self._extract_emo_tag,
+                    character_sharing_enabled=CHARACTER_SHARING_ENABLED,
+                    try_share=self.personality.try_share,
                 )
+                final_reply = tool_finalize.final_reply
+                final_emo = tool_finalize.final_emo
+                model_emo_seen = tool_finalize.model_emo_seen
+                context_messages = tool_finalize.context_messages
+            else:
+                model_finalize = reply_flow_service.finalize_model_reply(
+                    reply=reply1,
+                    start_emo=start_emo,
+                    extract_emo_tag=self._extract_emo_tag,
+                    character_sharing_enabled=CHARACTER_SHARING_ENABLED,
+                    try_share=self.personality.try_share,
+                )
+                final_reply = model_finalize.final_reply
+                final_emo = model_finalize.final_emo
+                model_emo_seen = model_finalize.model_emo_seen
+
+            prepared_reply = await reply_flow_service.prepare_final_reply(
+                final_reply=final_reply,
+                final_emo=final_emo,
+                model_emo_seen=model_emo_seen,
+                natural_reply_candidate=natural_reply_candidate,
+                triggered=triggered,
+                user_text=user_text,
+                ctx=ctx,
+                preface_text=preface_text,
+                clean_text_for_tts=self._clean_text_for_tts,
+                strip_internal_tags=self._strip_internal_tags,
+                strip_cmd_anywhere=self._strip_cmd_anywhere,
+                strip_emo_tags_anywhere=self._strip_emo_tags_anywhere,
+                should_suppress_followup_preface=self._should_suppress_followup_preface,
+                merge_preface_texts=self._merge_preface_texts,
+                polish_natural_reply=self._polish_natural_reply,
+                apply_character_catchphrase=self._apply_character_catchphrase,
+                prepare_reply_for_output=self._prepare_reply_for_output,
+                infer_reply_emotion_with_llm=self._infer_reply_emotion_with_llm,
             )
-            if self._should_suppress_followup_preface(user_text or ""):
-                final_reply = final_reply or preface_text
-            else:
-                final_reply = self._merge_preface_texts(preface_text, final_reply)
-            if natural_reply_candidate and not triggered:
-                final_reply = await self._polish_natural_reply(
-                    user_text=user_text,
-                    draft_text=final_reply,
-                    ctx=ctx,
-                    scene="chat",
-                )
-            final_reply = self._apply_character_catchphrase(final_reply)
-            final_reply = self._prepare_reply_for_output(final_reply, ctx, scene="chat")
-            if final_reply and not model_emo_seen:
-                inferred_emo = await self._infer_reply_emotion_with_llm(
-                    final_reply, scene="chat"
-                )
-                if inferred_emo:
-                    final_emo = inferred_emo
+            final_reply = prepared_reply.text
+            final_emo = prepared_reply.emotion
+            model_emo_seen = prepared_reply.model_emo_seen
 
-            if self.learning:
-                self.learning.record_interaction(
-                    user_text,
-                    final_reply,
-                    final_emo,
-                    feedback_type,
-                    feedback_reaction,
-                )
-
-            if final_reply:
-                self._update_active_time()
-                self._add_codex_session_event(
-                    "assistant_reply",
-                    text=final_reply,
-                    ctx=ctx,
-                    meta={"emotion": final_emo, "tool": True},
-                )
-                assistant_log_meta = {
-                    "tool": True,
-                    "emotion": final_emo,
-                    "source": chat_log_source,
-                    **transcript_channel_meta,
-                }
-                if memory_session_id:
-                    assistant_log_meta["session_id"] = memory_session_id
-                await self.event_bus.emit(
-                    "chat.log",
-                    role="assistant",
-                    content=final_reply,
-                    meta=assistant_log_meta,
-                )
-                if output_profile.get("ui_append", True):
-                    await self.event_bus.emit(
-                        "ui.append", role="assistant", text=final_reply
-                    )
-                if live2d_enabled:
-                    defer_motion = self._presenter_output_controls_idle(
-                        output_profile,
-                        had_presenter_output=True,
-                    )
-                    await self.event_bus.emit(
-                        "live2d.emotion",
-                        emotion=final_emo,
-                        intensity=(
-                            self._sensor_emotion_intensity(final_emo)
-                            if final_emo != start_emo
-                            else start_intensity
-                        ),
-                        prefer_motion=not defer_motion,
-                        reason="model_reply",
-                    )
-                await self.presenter.present(
-                    final_reply,
-                    final_emo,
-                    speak=output_profile.get("speak", True),
-                    show_bubble=output_profile.get("show_bubble", True),
-                )
-                await self._send_gateway_reply(final_reply, ctx, emotion=final_emo)
-                await self._maybe_send_auto_meme_reply(
-                    user_text=user_text,
-                    reply_text=final_reply,
-                    emotion=final_emo,
-                    ctx=ctx,
-                )
-                self._record_reply_effect(final_reply, ctx, source=chat_log_source)
-                await self._record_proactive_followup(proactive_followup)
-                await self._record_task_followup(task_followup)
-                if codex_mode:
-                    self._set_codex_task_state(
-                        ctx, "finalize", summary=final_reply[:200]
-                    )
-
-                # 写入记忆 (ReAct 分支)
-                chat_meta = {"path": "chat"}
-                if memory_session_id:
-                    chat_meta["session_id"] = memory_session_id
-                await self._add_memory_safe("user", user_text, meta=chat_meta)
-                await self._add_memory_safe("assistant", final_reply, meta=chat_meta)
-
-            await self._emit_idle_status_when_safe(
-                output_profile,
-                reason="tool_end",
-                had_presenter_output=bool(final_reply),
+            await output_coordinator.emit_non_stream_reply(
+                final_reply=final_reply,
+                final_emo=final_emo,
+                user_text=user_text,
+                ctx=ctx,
+                output_profile=output_profile,
+                transcript_meta=transcript_channel_meta,
+                chat_log_source=chat_log_source,
+                memory_session_id=memory_session_id,
+                feedback_type=feedback_type,
+                feedback_reaction=feedback_reaction,
+                learning=self.learning,
+                live2d_enabled=live2d_enabled,
+                start_emo=start_emo,
+                start_intensity=start_intensity,
+                codex_mode=codex_mode,
+                proactive_followup=proactive_followup,
+                task_followup=task_followup,
+                event_bus=self.event_bus,
+                presenter=self.presenter,
+                update_active_time=self._update_active_time,
+                add_codex_session_event=self._add_codex_session_event,
+                presenter_output_controls_idle=self._presenter_output_controls_idle,
+                sensor_emotion_intensity=sensor_utils.sensor_emotion_intensity,
+                send_gateway_reply=self._send_gateway_reply,
+                maybe_send_auto_meme_reply=self._maybe_send_auto_meme_reply,
+                record_reply_effect=self._record_reply_effect,
+                record_proactive_followup=self._record_proactive_followup,
+                record_task_followup=self._record_task_followup,
+                set_codex_task_state=self._set_codex_task_state,
+                add_memory_safe=self._add_memory_safe,
+                emit_idle_status_when_safe=self._emit_idle_status_when_safe,
             )
 
         # =========================================================================
@@ -5087,7 +4189,9 @@ class ChatService:
 
             if preface_text:
                 first = True
-                proactive_chunk = f"{preface_text}\n\n"
+                proactive_chunk = reply_flow_service.build_stream_preface_chunk(
+                    preface_text
+                )
                 full_reply += proactive_chunk
                 await self.event_bus.emit(
                     "assistant.stream.feed",
@@ -5113,96 +4217,90 @@ class ChatService:
                     if "[CMD:" in buffer and "]" in buffer:
                         buffer = self._cmd_re.sub("", buffer)
 
-                    if "<" in buffer and ">" in buffer:
-                        m = self._emo_tag_re.search(buffer)
-                        if m:
-                            raw = self._normalize_emo(m.group(1)) or "neutral"
-                            curr_emo = raw
-                            model_emo_seen = True
-                            print(f"🎭 [Stream] 检测到模型情绪标签: {curr_emo}")
-                            if live2d_enabled:
-                                defer_motion = self._presenter_output_controls_idle(
-                                    output_profile,
-                                    had_presenter_output=True,
-                                )
-                                asyncio.create_task(
-                                    self.event_bus.emit(
-                                        "live2d.emotion",
-                                        emotion=curr_emo,
-                                        intensity=self._sensor_emotion_intensity(curr_emo),
-                                        prefer_motion=not defer_motion,
-                                        reason="model_stream_reply",
-                                    )
-                                )
-                            buffer = self._emo_tag_re.sub("", buffer, count=1)
-
-                    if len(buffer) > 15 and any(p in buffer for p in "，。！？,.!?\n"):
-                        safe = self._clean_text_for_tts(
-                            self._strip_cmd_anywhere(
-                                self._strip_emo_tags_anywhere(buffer)
-                            )
-                        )
-                        safe = self._strip_model_catchphrase(safe)
-                        if safe:
-                            full_reply += safe
-                            await self.event_bus.emit(
-                                "assistant.stream.feed",
-                                chunk=safe,
-                                emotion=curr_emo,
-                                speak=output_profile.get("speak", True),
-                                show_bubble=output_profile.get("show_bubble", True),
-                            )
-                            buffer = ""
-
-                # 处理剩余尾巴
-                if buffer:
-                    safe = self._clean_text_for_tts(
-                        self._strip_cmd_anywhere(self._strip_emo_tags_anywhere(buffer))
+                    emotion_tag = reply_flow_service.consume_stream_emotion_tag(
+                        buffer,
+                        emo_tag_re=self._emo_tag_re,
+                        normalize_emo=self._normalize_emo,
                     )
-                    safe = self._strip_model_catchphrase(safe)
-                    if safe:
-                        full_reply += safe
+                    buffer = emotion_tag.buffer
+                    if emotion_tag.found:
+                        curr_emo = emotion_tag.emotion
+                        model_emo_seen = True
+                        print(f"🎭 [Stream] 检测到模型情绪标签: {curr_emo}")
+                        if live2d_enabled:
+                            defer_motion = self._presenter_output_controls_idle(
+                                output_profile,
+                                had_presenter_output=True,
+                            )
+                            asyncio.create_task(
+                                self.event_bus.emit(
+                                    "live2d.emotion",
+                                    emotion=curr_emo,
+                                    intensity=sensor_utils.sensor_emotion_intensity(curr_emo),
+                                    prefer_motion=not defer_motion,
+                                    reason="model_stream_reply",
+                                )
+                            )
+
+                    flushed = reply_flow_service.flush_stream_buffer(
+                        buffer,
+                        clean_text_for_tts=self._clean_text_for_tts,
+                        strip_internal_tags=self._strip_internal_tags,
+                        strip_cmd_anywhere=self._strip_cmd_anywhere,
+                        strip_emo_tags_anywhere=self._strip_emo_tags_anywhere,
+                        strip_model_catchphrase=self._strip_model_catchphrase,
+                    )
+                    if flushed.chunk:
+                        full_reply += flushed.chunk
                         await self.event_bus.emit(
                             "assistant.stream.feed",
-                            chunk=safe,
+                            chunk=flushed.chunk,
                             emotion=curr_emo,
                             speak=output_profile.get("speak", True),
                             show_bubble=output_profile.get("show_bubble", True),
                         )
+                    buffer = flushed.buffer
 
-            except Exception as e:
-                self.logger.error(f"Stream error: {e}")
-
-            if full_reply and CHARACTER_SHARING_ENABLED:
-                sharing = self.personality.try_share()
-                if sharing:
-                    sharing_chunk = f"\n\n{sharing}"
-                    full_reply += sharing_chunk
+                # 处理剩余尾巴
+                flushed = reply_flow_service.flush_stream_buffer(
+                    buffer,
+                    final=True,
+                    clean_text_for_tts=self._clean_text_for_tts,
+                    strip_internal_tags=self._strip_internal_tags,
+                    strip_cmd_anywhere=self._strip_cmd_anywhere,
+                    strip_emo_tags_anywhere=self._strip_emo_tags_anywhere,
+                    strip_model_catchphrase=self._strip_model_catchphrase,
+                )
+                if flushed.chunk:
+                    full_reply += flushed.chunk
                     await self.event_bus.emit(
                         "assistant.stream.feed",
-                        chunk=sharing_chunk,
+                        chunk=flushed.chunk,
                         emotion=curr_emo,
                         speak=output_profile.get("speak", True),
                         show_bubble=output_profile.get("show_bubble", True),
                     )
+                buffer = flushed.buffer
 
-            if full_reply:
-                with_catchphrase = self._apply_character_catchphrase(full_reply)
-                if with_catchphrase != full_reply:
-                    extra_chunk = ""
-                    if with_catchphrase.startswith(full_reply):
-                        extra_chunk = with_catchphrase[len(full_reply) :]
-                    full_reply = with_catchphrase
-                    if extra_chunk:
-                        await self.event_bus.emit(
-                            "assistant.stream.feed",
-                            chunk=extra_chunk,
-                            emotion=curr_emo,
-                            speak=output_profile.get("speak", True),
-                            show_bubble=output_profile.get("show_bubble", True),
-                        )
-                full_reply = self._prepare_reply_for_output(
-                    full_reply, ctx, scene="chat"
+            except Exception as e:
+                self.logger.error(f"Stream error: {e}")
+
+            stream_finalized = reply_flow_service.finalize_stream_reply(
+                full_reply=full_reply,
+                ctx=ctx,
+                character_sharing_enabled=CHARACTER_SHARING_ENABLED,
+                try_share=self.personality.try_share,
+                apply_character_catchphrase=self._apply_character_catchphrase,
+                prepare_reply_for_output=self._prepare_reply_for_output,
+            )
+            full_reply = stream_finalized.text
+            for feed_chunk in stream_finalized.feed_chunks:
+                await self.event_bus.emit(
+                    "assistant.stream.feed",
+                    chunk=feed_chunk,
+                    emotion=curr_emo,
+                    speak=output_profile.get("speak", True),
+                    show_bubble=output_profile.get("show_bubble", True),
                 )
 
             try:
@@ -5227,127 +4325,39 @@ class ChatService:
             except Exception as e:
                 self.logger.warning(f"assistant.stream.end failed: {e}")
 
-            # 🟢 确保只写入一次记忆
-            if full_reply:
-                self._update_active_time()
-
-                # 1. 更新 UI 和 日志
-                self._add_codex_session_event(
-                    "assistant_reply",
-                    text=full_reply,
+            await output_coordinator.emit_stream_reply(
+                full_reply=full_reply,
+                emotion=curr_emo,
+                user_text=user_text,
+                stream_context=output_coordinator.StreamOutputContext(
                     ctx=ctx,
-                    meta={"emotion": curr_emo, "stream": True},
-                )
-                if output_profile.get("ui_append", True):
-                    await self.event_bus.emit(
-                        "ui.append", role="assistant", text=full_reply
-                    )
-                stream_log_meta = {
-                    "stream": True,
-                    "emotion": curr_emo,
-                    "source": chat_log_source,
-                    **transcript_channel_meta,
-                }
-                if memory_session_id:
-                    stream_log_meta["session_id"] = memory_session_id
-                await self.event_bus.emit(
-                    "chat.log",
-                    role="assistant",
-                    content=full_reply,
-                    meta=stream_log_meta,
-                )
-                await self._send_gateway_reply(full_reply, ctx, emotion=curr_emo)
-                await self._maybe_send_auto_meme_reply(
-                    user_text=user_text,
-                    reply_text=full_reply,
-                    emotion=curr_emo,
-                    ctx=ctx,
-                )
-                self._record_reply_effect(full_reply, ctx, source=chat_log_source)
-                await self._record_proactive_followup(proactive_followup)
-                await self._record_task_followup(task_followup)
-
-                # 2. 学习系统
-                if self.learning:
-                    self.learning.record_interaction(
-                        user_text,
-                        full_reply,
-                        curr_emo,
-                        feedback_type,
-                        feedback_reaction,
-                    )
-
-                # 3. 写入数据库 (确保只在这里调用一次)
-                stream_chat_meta = {"path": "chat"}
-                if memory_session_id:
-                    stream_chat_meta["session_id"] = memory_session_id
-                await self._add_memory_safe("user", user_text, meta=stream_chat_meta)
-                await self._add_memory_safe(
-                    "assistant", full_reply, meta=stream_chat_meta
-                )
-                if codex_mode:
-                    self._set_codex_task_state(
-                        ctx, "finalize", summary=full_reply[:200]
-                    )
+                    output_profile=output_profile,
+                    transcript_meta=transcript_channel_meta,
+                    chat_log_source=chat_log_source,
+                    memory_session_id=memory_session_id,
+                    feedback_type=feedback_type,
+                    feedback_reaction=feedback_reaction,
+                    codex_mode=codex_mode,
+                    proactive_followup=proactive_followup,
+                    task_followup=task_followup,
+                ),
+                learning=self.learning,
+                event_bus=self.event_bus,
+                update_active_time=self._update_active_time,
+                add_codex_session_event=self._add_codex_session_event,
+                send_gateway_reply=self._send_gateway_reply,
+                maybe_send_auto_meme_reply=self._maybe_send_auto_meme_reply,
+                record_reply_effect=self._record_reply_effect,
+                record_proactive_followup=self._record_proactive_followup,
+                record_task_followup=self._record_task_followup,
+                set_codex_task_state=self._set_codex_task_state,
+                add_memory_safe=self._add_memory_safe,
+            )
 
     # 🟢 [新增] 主动关怀提醒
     async def send_active_alert(self, app_name: str, minutes: int):
         """处理久坐提醒"""
-        print(f"⏰ [Chat] 收到久坐提醒请求: {app_name} ({minutes}m)")
-
-        # 1. 获取人设
-        base_prompt = DEFAULT_PERSONA
-        try:
-            from modules.character_manager import character_manager
-
-            c = character_manager.get_active_character()
-            if c:
-                base_prompt = c.get("prompt", DEFAULT_PERSONA)
-        except:
-            pass
-
-        # 2. 生成关心的话
-        system_prompt = f"""
-{base_prompt}
-
-【当前情况】
-用户已经在 [{app_name}] 上连续专注了 {minutes} 分钟，一直没动过。
-
-【任务】
-请主动弹窗提醒他休息、喝水或活动一下。
-语气要温柔、体贴，像家人一样。
-字数限制：30字以内。
-"""
-        try:
-            reply = await asyncio.to_thread(
-                chat_with_ai,
-                [{"role": "system", "content": system_prompt}],
-                task_type="default",
-                caller="active_alert",
-            )
-
-            if reply:
-                extracted_emo, clean_reply = self._extract_emo_tag(reply)
-                clean_reply = await self._polish_natural_reply(
-                    user_text=f"{app_name} {minutes}分钟提醒",
-                    draft_text=clean_reply,
-                    ctx={"source": "desktop"},
-                    scene="chat",
-                )
-                clean_reply = self._apply_character_catchphrase(clean_reply)
-                if not clean_reply:
-                    return
-                # 3. 触发弹窗和语音
-                # 发送给 UI 显示弹窗 (需 UI 支持 'ui.popup' 事件，或者直接用 append)
-                await self.event_bus.emit(
-                    "ui.append", role="assistant", text=f"【温馨提醒】{clean_reply}"
-                )
-                await self.presenter.present(
-                    clean_reply, emotion=extracted_emo or "concern", interrupt=True
-                )
-
-        except Exception as e:
-            self.logger.error(f"Active alert failed: {e}")
+        await self.active_alert_service.send_active_alert(app_name, minutes)
 
     # ==================== 屏幕感知事件处理 (完整版：含自我意识+视觉+文本) ====================
 
@@ -5361,14 +4371,12 @@ class ChatService:
         reason: str = "",
         app_duration_sec: float | int | None = None,
         current_stay_sec: float | int | None = None,
-    ):
-        if self._sensor_event_lock is None:
-            self._sensor_event_lock = asyncio.Lock()
+    ) -> bool:
         if self._sensor_event_lock.locked():
             self.logger.info("🛑 [Sensor] 已有屏幕吐槽生成中，跳过本次事件")
-            return
+            return False
         async with self._sensor_event_lock:
-            await self._handle_sensor_event_inner(
+            return await self._handle_sensor_event_inner(
                 window_title,
                 category,
                 count=count,
@@ -5389,298 +4397,48 @@ class ChatService:
         reason: str = "",
         app_duration_sec: float | int | None = None,
         current_stay_sec: float | int | None = None,
-    ):
+    ) -> bool:
         from modules.llm import chat_with_ai, analyze_image
 
-        def clean_garbage(text):
-            if not text:
-                return ""
-            return "".join(ch for ch in text if ch.isprintable())
-
-        clean_title = clean_garbage(window_title)
-        if not clean_title.strip():
-            clean_title = category
-
-        lowered_title = clean_title.lower()
-        if any(
-            bad in lowered_title
-            for bad in ["锁屏", "windows 默认锁屏界面", "live2d agent", "登录"]
-        ):
+        guard = sensor_event_guard.check_sensor_event_guard(
+            window_title=window_title,
+            category=category,
+            app_name=app_name,
+            last_reply_time=self._last_reply_time,
+            min_reply_interval_sec=self._sensor_min_reply_interval_sec,
+        )
+        clean_title = guard.clean_title
+        display_app = guard.display_app
+        if guard.reason == "system_window":
             self.logger.info(f"🛑 [Sensor] 跳过系统/自身界面视觉吐槽 ({clean_title})")
-            return
-
-        display_app = app_name or clean_title
-
-        if time.time() - self._last_reply_time < self._sensor_min_reply_interval_sec:
-            return
+            return False
+        if not guard.allowed:
+            return False
 
         print(
             f"🤖 [Sensor] 观察: {clean_title} ({category}) | App: {display_app} | Count: {count}"
         )
-        # ================= [分支 A] 自我意识 + 近因上下文 =================
-        recent_observation_context = ""
-        try:
-            if hasattr(self, "screen_sensor_ref") and self.screen_sensor_ref:
-                recent_entries = self.screen_sensor_ref.get_recent_observations(3)
-                recent_observation_context = self._format_sensor_observations(
-                    recent_entries, max_items=3
-                )
-        except Exception:
-            recent_observation_context = ""
-
-        sensor_context_parts: List[str] = []
-        usage_context = self._build_sensor_usage_context(
-            app_name=display_app,
+        generation = await self.sensor_event_service.run_event_generation(
+            clean_title=clean_title,
+            display_app=display_app,
             category=category,
             count=count,
             reason=reason,
+            use_vision=use_vision,
+            vision_mode=VISION_MODE,
             app_duration_sec=app_duration_sec,
             current_stay_sec=current_stay_sec,
+            chat_with_ai=chat_with_ai,
+            analyze_image=analyze_image,
         )
-        sensor_context_parts.append(usage_context)
-        if recent_observation_context:
-            sensor_context_parts.append(f"【近期观察】\n{recent_observation_context}")
-        interaction_context = self._build_sensor_interaction_context()
-        if interaction_context:
-            sensor_context_parts.append(interaction_context)
-        context_block = (
-            "\n" + "\n\n".join(sensor_context_parts) + "\n"
-            if sensor_context_parts
-            else ""
+        if not generation.reply:
+            return False
+        reply_category = "self" if generation.branch == "self" else category
+        reply_title = clean_title if generation.branch == "self" else window_title
+        is_vision = generation.branch.startswith("vision")
+        return await self.sensor_reply_service.send_sensor_reply(
+            generation.reply, reply_category, count, reply_title, is_vision
         )
-        sensor_persona_prompt = self._build_sensor_persona_prompt(
-            ctx={"source": "desktop"}, extra_context=context_block
-        )
-        recent_sensor_reply_block = self._format_recent_sensor_reply_block()
-        text_style_block = self._build_sensor_spontaneous_style_block(
-            title=clean_title, category=category, count=count, is_vision=False
-        )
-        vision_style_block = self._build_sensor_spontaneous_style_block(
-            title=clean_title, category=category, count=count, is_vision=True
-        )
-
-        def record_observation(content: str, source: str):
-            sensor_ref = getattr(self, "screen_sensor_ref", None)
-            if not sensor_ref:
-                return
-            add_fn = getattr(sensor_ref, "add_observation", None) or getattr(
-                sensor_ref, "_append_observation", None
-            )
-            if not add_fn:
-                return
-            try:
-                add_fn(
-                    content,
-                    clean_title,
-                    category,
-                    app_name=display_app,
-                    reason=reason,
-                    source=source,
-                )
-            except TypeError:
-                try:
-                    add_fn(content, clean_title, category, display_app, reason, source)
-                except Exception:
-                    return
-            except Exception:
-                return
-
-        if category == "self":
-            if count > 1 and random.random() > 0.7:
-                return
-
-            sys_prompt = f"""{sensor_persona_prompt}
-		     Master 的视线停在【你的】程序窗口({clean_title})。
-		     请打破第四面墙，对他简短说一句话，可以像平常聊天那样轻轻问一句；不要复用最近出现过的固定模板。
-	     【警告】绝不能超过 15 个字！不要加引号。"""
-
-            try:
-                reply = await asyncio.to_thread(
-                    chat_with_ai,
-                    [{"role": "system", "content": sys_prompt}],
-                    task_type="default",
-                    caller="sensor_self_talk",
-                )
-                if reply:
-                    await self._send_sensor_reply(
-                        reply, "self", count, clean_title, False
-                    )
-            except:
-                pass
-            return
-
-        # ================= [分支：看门人 (Gatekeeper) 判断] =================
-        if not use_vision:
-            if count <= 2 and category not in {"self", "work"}:
-                self.logger.info(
-                    f"🛑 [Sensor Gatekeeper] 低强度事件跳过 ({clean_title})"
-                )
-                return
-
-            gk_prompt = f"""
-{context_block}【场景】
-用户刚切换到窗口: [{clean_title}] (分类: {category})，今天第 {count} 次。
-
-【判断任务】
-	你是一个性格高冷、话少、克制的 AI 助手。你不需要对用户的每一次无聊操作做出反应。
-	只有出现以下情况才输出 YES：
-	1. 极度频繁的摸鱼/切屏，适合轻轻点一下。
-	2. 连续高强度工作或停留很久，适合关心、提醒或陪一句。
-	3. 软件名字极其特别，或者你今天第一次看到这个软件。
-
-如果是普通的网页浏览、正常的切回编辑器、毫无亮点的日常办公，请保持高冷，严格输出 NO。
-
-【输出格式】
-仅输出：YES 或 NO
-"""
-            try:
-                gk_decision = await asyncio.to_thread(
-                    chat_with_ai,
-                    [{"role": "user", "content": gk_prompt}],
-                    task_type="gatekeeper",
-                    caller="sensor_gatekeeper",
-                )
-                self.logger.info(
-                    f"⚖️ [Sensor Gatekeeper] 判断是否值得吐槽: {gk_decision.strip()}"
-                )
-
-                if "YES" not in gk_decision.upper():
-                    self.logger.info(
-	                    f"🛑 [Sensor Gatekeeper] 拦截本次纯文本回应 ({clean_title})，保持高冷"
-                    )
-                    return
-            except Exception as e:
-                self.logger.warning(f"⚠️ [Sensor Gatekeeper] 调用失败，默认放行: {e}")
-
-        # ================= [分支 B] 视觉模式 =================
-        if use_vision:
-            try:
-                from modules.vision.capture import take_screenshot_base64
-
-                print("📸 [Sensor] 正在视觉采样...")
-                img_b64 = await asyncio.to_thread(take_screenshot_base64)
-
-                if img_b64:
-	                    # ===== 模式 1：视觉直接回应 =====
-                    if VISION_MODE == "direct":
-                        v_prompt = f"""{sensor_persona_prompt}
-你正贴在用户旁边看他的屏幕(当前活跃窗口: [{clean_title}])。
-【空间自我意识】先判断画面里有没有你的桌面形象、Live2D设置页或角色/动作/表情配置页；如果有，那是在看你自己或用户正在改你。不要把自己的模型当成陌生女孩，也不要把普通网页/群聊里的动漫角色误认成自己。
-		【说话方式】
-		- 像五十铃怜临场低声接话，不写观察报告。
-		- 不强制吐槽；可以关心、提醒、疑问、陪一句，也可以轻轻戳他。
-	- 直接对 Master 说话，多用“你/又/还/这”这种口语。
-	- 可以适当用疑问句或轻反问，不要每次都写成陈述判断。
-		- 不要评价页面“实用/详尽/清晰”，要说他正在看这件事给你的感觉。
-		- 不要复述画面，不要用“屏幕上/画面中/用户正在/我看到/总结”这类解说词。
-	{vision_style_block}
-	{recent_sensor_reply_block}
-			【任务】抓住一个最自然的落点，说一句克制的旁边话；关心、提醒、疑问、轻吐槽都可以。
-	【字数限制】最多 36 个字，1 到 2 句短句。不要加引号，不要动不动关心。
-			【情绪标签】先由你判断这句话该带什么表情；必须在开头加 <emo=happy|sad|angry|flustered|confused|think|neutral>。不要解释标签。"""
-                        reply = await analyze_image(
-                            img_b64, v_prompt, caller="sensor_vision_direct"
-                        )
-
-                        if reply:
-                            record_observation(clean_title, "vision")
-                            await self._send_sensor_reply(
-                                reply, category, count, window_title, True
-                            )
-                            return
-
-	                    # ===== 模式 2：视觉只描述 → 默认模型回应 =====
-                    elif VISION_MODE == "separate":
-                        # 先让视觉模型客观描述，并强制它识别出助手
-                        self_awareness_for_vision = self._build_live2d_self_awareness_hint({"source": "desktop"})
-                        v_desc_prompt = f"""请客观、尽量详细地描述这张截图，供后续角色判断如何和用户搭话。
-重点描述：用户正在使用的软件、窗口标题/页面类型、主要文字、正在做的事情、可能值得关心、提醒、陪伴或轻轻吐槽的异常点。
-可以分条写，但不要编造看不清的内容；不确定就写“不确定”。
-{self_awareness_for_vision}
-【特殊指令】如果你识别到桌面边缘的Live2D形象、Live2D Agent窗口、设置中心、换装页、表情/动作配置页，请明确标记“这是你自己的桌面形象或配置界面”。如果只是网页/群聊/图片主体里的动漫角色，不要标成你。"""
-
-                        description = await analyze_image(
-                            img_b64, v_desc_prompt, caller="sensor_vision_describe"
-                        )
-
-                        if description:
-                            description = self._compress_sensor_text(
-                                description, max_len=800
-                            )
-                            record_observation(description, "vision")
-                            sys_prompt = f"""{sensor_persona_prompt}
-
-【场景】用户当前屏幕内容如下：
-{description}
-
-【重要设定】描述中如果明确提到“AI助手的形象/Live2D形象/你的配置界面/你的模型”，那就是你自己或用户正在改你。普通网页、群聊或图片主体里的动漫角色不一定是你。
-
-	【任务】
-		基于上面的事实，像五十铃怜在旁边当场低声接一句。
-		不强制吐槽；可以关心、提醒、疑问、陪一句，也可以轻轻戳他。
-	可以适当用疑问句或轻反问，不要每次都写成陈述判断。
-		不要评价页面“实用/详尽/清晰”，要说 Master 正在看这件事给你的感觉。
-		不要复述画面，不要总结，不要说“用户正在/屏幕上/画面中/我看到”。
-	{vision_style_block}
-	{recent_sensor_reply_block}
-	【字数限制】最多 36 个字，1 到 2 句短句。不要加引号，不要动不动关心。
-		【情绪标签】先由你判断这句话该带什么表情；必须在开头加 <emo=happy|sad|angry|flustered|confused|think|neutral>。不要解释标签。
-"""
-                            reply = await asyncio.to_thread(
-                                chat_with_ai,
-                                [
-                                    {
-                                        "role": "system",
-                                        "content": sys_prompt,
-                                    },
-                                    {
-                                        "role": "user",
-                                        "content": "现在只输出给我的那一句话。",
-                                    },
-                                ],
-                                task_type="sensor_vision_talk",
-                                caller="sensor_vision_talk",
-                            )
-
-                            if reply:
-                                await self._send_sensor_reply(
-                                    reply, category, count, window_title, True
-                                )
-                                return
-
-            except Exception as e:
-                self.logger.warning(f"Vision failed: {e}")
-
-        # ================= [分支 C] 文本模式 =================
-        sys_prompt = f"""{sensor_persona_prompt}
-
-    用户刚切换到窗口: [{clean_title}] ({category})，这是今天第 {count} 次。
-
-	【任务】像五十铃怜在旁边看见他切窗口一样，直接对 Master 说一句。
-		不强制吐槽；根据使用时长、次数和上下文选择关心、提醒、疑问、陪一句或轻轻戳他。
-		可以适当用疑问句或轻反问，不要每次都写成陈述判断。
-		不要评价页面“实用/详尽/清晰”，要说他正在看这件事给你的感觉。
-		不要总结他的行为，不要说“用户正在/屏幕上/当前窗口显示”。
-	{text_style_block}
-	{recent_sensor_reply_block}
-	【字数限制】最多 36 个字，1 到 2 句短句。用符合你高冷/克制人设的说法表达即可。不要加引号，不要动不动关心。
-		【情绪标签】先由你判断这句话该带什么表情；必须在开头加 <emo=happy|sad|angry|flustered|confused|think|neutral>。不要解释标签。
-	"""
-
-        try:
-            record_observation(clean_title, "text")
-            reply = await asyncio.to_thread(
-                chat_with_ai,
-                [{"role": "system", "content": sys_prompt}],
-                task_type="default",
-                caller="sensor_text_talk",
-            )
-            if reply:
-                await self._send_sensor_reply(
-                    reply, category, count, window_title, False
-                )
-        except Exception as e:
-            self.logger.error(f"Sensor Gen failed: {e}")
 
     # Helper: reset sensor motion after sensor replies.
     async def _reset_sensor_motion_after(
@@ -5694,14 +4452,6 @@ class ChatService:
             await self.event_bus.emit("live2d.go_idle")
         except Exception:
             return
-
-    def _sensor_emotion_intensity(self, emotion: str) -> float:
-        return sensor_utils.sensor_emotion_intensity(emotion)
-
-    def _looks_like_sensor_template_reply(self, text: str) -> bool:
-        return sensor_utils.looks_like_sensor_template_reply(
-            text, clean_text_fn=self._clean_text_for_tts
-        )
 
     async def _rescue_sensor_template_reply(
         self, text: str, *, title: str, category: str
@@ -5735,19 +4485,13 @@ class ChatService:
                     )
                 )
             ).strip()
-            if rescued and not self._looks_like_sensor_template_reply(rescued):
+            if rescued and not sensor_utils.looks_like_sensor_template_reply(
+                rescued, clean_text_fn=self._clean_text_for_tts
+            ):
                 return rescued
         except Exception:
             pass
         return ""
-
-    # Helper: send sensor replies (extract emotion only; no forced rewrite).
-    async def _send_sensor_reply(
-        self, reply: str, category: str, count: int, title: str, is_vision: bool
-    ):
-        await self.sensor_reply_service.send_sensor_reply(
-            reply, category, count, title, is_vision
-        )
 
     # ==================== 音乐感知事件处理 ====================
     async def handle_music_event(self, title: str, artist: str):
@@ -5836,39 +4580,6 @@ class ChatService:
         except Exception as e:
             self.logger.error(f"处理音乐事件失败: {e}")
 
-    async def _emit_diary_failure_reply(
-        self,
-        failure_text: str,
-        ctx: Dict[str, Any],
-        output_profile: Optional[Dict[str, Any]],
-    ) -> None:
-        await self.diary_service.emit_diary_failure_reply(
-            failure_text, ctx, output_profile
-        )
-
-    async def _handle_diary_request(
-        self,
-        *,
-        user_text: str,
-        ctx: Dict[str, Any],
-        output_profile: Optional[Dict[str, Any]],
-        memory_path: str,
-        target_date: Optional[date] = None,
-        report_data: Any = None,
-        raw_stats: Optional[Dict[str, Any]] = None,
-        is_makeup: bool = False,
-    ) -> None:
-        await self.diary_service.handle_diary_request(
-            user_text=user_text,
-            ctx=ctx,
-            output_profile=output_profile,
-            memory_path=memory_path,
-            target_date=target_date,
-            report_data=report_data,
-            raw_stats=raw_stats,
-            is_makeup=is_makeup,
-        )
-
     def _get_runtime_owner_label(self) -> str:
         app = self.app
         if app is None:
@@ -5882,16 +4593,6 @@ class ChatService:
             return str(runtime.get("napcat_owner_label") or "").strip()
         except Exception:
             return ""
-
-    def _resolve_diary_subject_label(self) -> str:
-        return self.diary_service._resolve_diary_subject_label()
-
-    def _find_existing_daily_log_id(
-        self, store: Any, date_str: str, active_char_id: str
-    ) -> str:
-        return self.diary_service._find_existing_daily_log_id(
-            store, date_str, active_char_id
-        )
 
     async def summarize_day(
         self,
@@ -5917,23 +4618,3 @@ class ChatService:
             on_error=lambda exc: print(f"[ChatService] Load day transcript failed: {exc}"),
         )
 
-    def _fetch_day_chat_history(self, date_str: str) -> str:
-        return diary_utils.fetch_day_chat_history(
-            self._load_day_transcript_rows(date_str),
-            date_str,
-            owner_shared_session_id=OWNER_SHARED_SESSION_ID,
-            legacy_owner_private_session_ids=LEGACY_OWNER_PRIVATE_SESSION_IDS,
-            owner_shared_local_sources=OWNER_SHARED_LOCAL_SOURCES,
-            qq_remote_sources=QQ_REMOTE_SOURCES,
-        )
-
-    def _fetch_day_owner_chat_history(self, date_str: str, mode: str = "all") -> str:
-        return diary_utils.fetch_day_owner_chat_history(
-            self._load_day_transcript_rows(date_str),
-            date_str,
-            mode=mode,
-            owner_shared_session_id=OWNER_SHARED_SESSION_ID,
-            legacy_owner_private_session_ids=LEGACY_OWNER_PRIVATE_SESSION_IDS,
-            owner_shared_local_sources=OWNER_SHARED_LOCAL_SOURCES,
-            qq_remote_sources=QQ_REMOTE_SOURCES,
-        )

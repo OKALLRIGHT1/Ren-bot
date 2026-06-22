@@ -15,6 +15,7 @@ from config import (
     PROVIDERS,
     SENSOR_VISION_MODEL,
 )
+from modules.security_redaction import redact_sensitive_text
 from modules.task_registry import check_caller_task
 
 try:
@@ -553,8 +554,9 @@ async def chat_with_ai_stream(
                 )
                 return
             except Exception as e:
-                record_failure(key, method, str(e))
-                print(f"[LLM Stream] 失败: {e} (model={key}, transport={method})")
+                safe_error = redact_sensitive_text(e)
+                record_failure(key, method, safe_error)
+                print(f"[LLM Stream] 失败: {safe_error} (model={key}, transport={method})")
                 _record_metric(
                     {
                         "ts": time.time(),
@@ -564,7 +566,7 @@ async def chat_with_ai_stream(
                         "transport": method,
                         "success": False,
                         "duration_ms": int((time.time() - t0) * 1000),
-                        "error": str(e)[:300],
+                        "error": safe_error[:300],
                     }
                 )
                 if yielded_any:
@@ -672,7 +674,8 @@ def chat_with_ai(
                 )
                 return str(content)
             except Exception as e:
-                record_failure(key, method, str(e))
+                safe_error = redact_sensitive_text(e)
+                record_failure(key, method, safe_error)
                 _record_metric(
                     {
                         "ts": time.time(),
@@ -683,10 +686,10 @@ def chat_with_ai(
                         "transport": method,
                         "success": False,
                         "duration_ms": int((time.time() - t0) * 1000),
-                        "error": str(e)[:300],
+                        "error": safe_error[:300],
                     }
                 )
-                _trace_log(f"[LLM Sync] ❌ 失败: {e} (transport={method}) ({trace})")
+                _trace_log(f"[LLM Sync] ❌ 失败: {safe_error} (transport={method}) ({trace})")
                 continue
 
     return "❌ 系统繁忙，无法连接 AI。"

@@ -7,12 +7,52 @@ import asyncio
 import json
 import os
 import re
+import secrets
 import threading
 import time
 from pathlib import Path
 from typing import Optional, Any, Dict
 from datetime import datetime
 from datetime import timedelta
+from urllib.parse import unquote, urlparse
+
+import config
+
+
+def _read_existing_napcat_token() -> str:
+    search_roots = []
+    env_config = os.getenv("NAPCAT_ONEBOT_CONFIG", "").strip()
+    if env_config:
+        search_roots.append(Path(env_config))
+    search_roots.append(Path(r"D:\tools\napcat"))
+    for root in search_roots:
+        try:
+            paths = [root] if root.is_file() else root.rglob("onebot11_*.json")
+        except Exception:
+            continue
+        for path in paths:
+            try:
+                payload = json.loads(Path(path).read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            clients = []
+            network = payload.get("network")
+            if isinstance(network, dict) and isinstance(
+                network.get("websocketClients"), list
+            ):
+                clients = network.get("websocketClients") or []
+            elif isinstance(payload.get("websocketClients"), list):
+                clients = payload.get("websocketClients") or []
+            for client in clients:
+                if not isinstance(client, dict):
+                    continue
+                url = str(client.get("url") or "")
+                if "8095" not in url:
+                    continue
+                token = str(client.get("token") or "").strip()
+                if token:
+                    return token
+    return ""
 
 try:
     import psutil
@@ -56,6 +96,14 @@ from config import (
     GUI_HTTP_HOST,
     GUI_HTTP_PORT,
     GUI_HTTP_PREFIX,
+    SEDENTARY_REMINDER_MINUTES,
+    SEDENTARY_REMINDER_COOLDOWN_MINUTES,
+    SEDENTARY_POPUP_ENABLED,
+    SEDENTARY_POPUP_TITLE,
+    SEDENTARY_POPUP_MESSAGE,
+    SEDENTARY_POPUP_IMAGE_PATH,
+    SEDENTARY_POPUP_SNOOZE_MINUTES,
+    SEDENTARY_POPUP_AUTO_CLOSE_SECONDS,
     MQTT_DISPLAY_ENABLED,
     MQTT_DISPLAY_HOST,
     MQTT_DISPLAY_PORT,
@@ -103,6 +151,7 @@ from integrations.chat_gateway import (
 )
 from integrations.gui_ws import GuiWebSocketServer
 from integrations.gui_http import GuiHttpServer
+from integrations.gui_access import get_or_create_gui_access_token
 
 try:
     from modules.live2d import go_idle
@@ -295,6 +344,24 @@ class Live2DApplication:
             )
         except Exception:
             expression_max_prompt_items = 4
+
+        def _int_setting(key: str, default: int, minimum: int) -> int:
+            try:
+                value = int(settings.get(key, default) or default)
+            except Exception:
+                value = int(default)
+            return max(int(minimum), value)
+
+        napcat_access_token = str(
+            settings.get("napcat_access_token", NAPCAT_ACCESS_TOKEN) or ""
+        ).strip()
+        if not napcat_access_token:
+            napcat_access_token = _read_existing_napcat_token()
+        if not napcat_access_token:
+            napcat_access_token = secrets.token_urlsafe(32)
+        if str(settings.get("napcat_access_token") or "").strip() != napcat_access_token:
+            settings["napcat_access_token"] = napcat_access_token
+            self._save_runtime_settings(settings)
         return {
             "mcp_enabled": bool(settings.get("mcp_enabled", MCP_ENABLED)),
             "mcp_server_configs": settings.get("mcp_server_configs", MCP_SERVER_CONFIGS)
@@ -313,9 +380,7 @@ class Live2DApplication:
                 settings.get("napcat_webhook_path", NAPCAT_WEBHOOK_PATH)
                 or NAPCAT_WEBHOOK_PATH
             ),
-            "napcat_access_token": str(
-                settings.get("napcat_access_token", NAPCAT_ACCESS_TOKEN) or ""
-            ),
+            "napcat_access_token": napcat_access_token,
             "napcat_api_base": str(
                 settings.get("napcat_api_base", NAPCAT_API_BASE) or NAPCAT_API_BASE
             ),
@@ -384,6 +449,42 @@ class Live2DApplication:
             "expression_library_max_prompt_items": max(
                 1,
                 min(8, expression_max_prompt_items),
+            ),
+            "sedentary_reminder_minutes": _int_setting(
+                "sedentary_reminder_minutes", SEDENTARY_REMINDER_MINUTES, 1
+            ),
+            "sedentary_break_minutes": _int_setting(
+                "sedentary_break_minutes",
+                int(getattr(config, "ACTIVITY_AGENT_SEDENTARY_BREAK_MINUTES", 5)),
+                1,
+            ),
+            "sedentary_cooldown_minutes": _int_setting(
+                "sedentary_cooldown_minutes",
+                SEDENTARY_REMINDER_COOLDOWN_MINUTES,
+                1,
+            ),
+            "sedentary_popup_enabled": bool(
+                settings.get("sedentary_popup_enabled", SEDENTARY_POPUP_ENABLED)
+            ),
+            "sedentary_popup_title": str(
+                settings.get("sedentary_popup_title", SEDENTARY_POPUP_TITLE)
+                or SEDENTARY_POPUP_TITLE
+            ),
+            "sedentary_popup_message": str(
+                settings.get("sedentary_popup_message", SEDENTARY_POPUP_MESSAGE)
+                or SEDENTARY_POPUP_MESSAGE
+            ),
+            "sedentary_popup_image_path": str(
+                settings.get("sedentary_popup_image_path", SEDENTARY_POPUP_IMAGE_PATH)
+                or ""
+            ),
+            "sedentary_popup_snooze_minutes": _int_setting(
+                "sedentary_popup_snooze_minutes", SEDENTARY_POPUP_SNOOZE_MINUTES, 1
+            ),
+            "sedentary_popup_auto_close_seconds": _int_setting(
+                "sedentary_popup_auto_close_seconds",
+                SEDENTARY_POPUP_AUTO_CLOSE_SECONDS,
+                0,
             ),
         }
 
@@ -483,12 +584,168 @@ class Live2DApplication:
         except Exception:
             return []
 
+    async def _select_sedentary_meme_image_path_async(
+        self, app_name: str, active_minutes: int
+    ) -> str:
+        qq_path = await self._select_sedentary_qq_meme_image_path_async(
+            app_name, active_minutes
+        )
+        if qq_path:
+            return qq_path
+
+        plugin = getattr(self.plugin_manager, "plugins", {}).get("meme_pack")
+        if plugin is None or not hasattr(plugin, "select_meme_image_path"):
+            return ""
+        result = await plugin.select_meme_image_path(
+            user_text=(
+                f"久坐提醒：连续使用 {app_name} {active_minutes} 分钟；"
+                "标签：久坐、休息、提醒、伸展、护眼"
+            ),
+            reply_text="起来活动一下吧",
+            emotion="提醒",
+            ctx={"source": "desktop", "reason": "sedentary"},
+            mark_used=False,
+            force_pick=True,
+        )
+        return self._extract_existing_image_path(result)
+
+    async def _select_sedentary_qq_meme_image_path_async(
+        self, app_name: str, active_minutes: int
+    ) -> str:
+        context = {
+            "source": "desktop",
+            "reason": "sedentary",
+            "app_name": str(app_name or "电脑"),
+            "active_minutes": int(active_minutes or 0),
+        }
+        sedentary_user_text = (
+            f"久坐提醒：连续使用 {app_name} {active_minutes} 分钟；"
+            "标签：久坐、休息、提醒、伸展、护眼"
+        )
+        plugins = getattr(self.plugin_manager, "plugins", {}) or {}
+        for plugin in plugins.values():
+            selector = getattr(plugin, "select_qq_meme_image_path", None)
+            if not callable(selector):
+                selector = getattr(plugin, "select_qq_expression_image_path", None)
+            if not callable(selector):
+                continue
+            try:
+                result = selector(
+                    user_text=sedentary_user_text,
+                    reply_text="起来活动一下吧",
+                    emotion="提醒",
+                    ctx=context,
+                    mark_used=False,
+                    force_pick=True,
+                )
+                if asyncio.iscoroutine(result):
+                    result = await result
+            except TypeError:
+                try:
+                    result = selector(app_name, active_minutes)
+                    if asyncio.iscoroutine(result):
+                        result = await result
+                except Exception as exc:
+                    if self.logger:
+                        self.logger.debug(f"[SedentaryMeme] QQ selector failed: {exc}")
+                    continue
+            except Exception as exc:
+                if self.logger:
+                    self.logger.debug(f"[SedentaryMeme] QQ selector failed: {exc}")
+                continue
+            image_path = self._extract_existing_image_path(result)
+            if image_path:
+                return image_path
+
+        gateway = getattr(self, "chat_gateway", None)
+        adapter = None
+        try:
+            adapter = getattr(gateway, "adapters", {}).get("napcat_qq")
+        except Exception:
+            adapter = None
+        selector = getattr(adapter, "select_qq_meme_image_path", None)
+        if callable(selector):
+            try:
+                result = selector(context)
+                if asyncio.iscoroutine(result):
+                    result = await result
+                image_path = self._extract_existing_image_path(result)
+                if image_path:
+                    return image_path
+            except Exception as exc:
+                if self.logger:
+                    self.logger.debug(
+                        f"[SedentaryMeme] NapCat QQ selector failed: {exc}"
+                    )
+        return ""
+
+    def _extract_existing_image_path(self, result: Any) -> str:
+        candidates = []
+        if isinstance(result, str):
+            candidates.append(result)
+        elif isinstance(result, dict):
+            for key in (
+                "image_path",
+                "path",
+                "file_path",
+                "file",
+                "local_path",
+                "url",
+            ):
+                value = result.get(key)
+                if isinstance(value, str):
+                    candidates.append(value)
+            for key in ("data", "item", "asset"):
+                value = result.get(key)
+                if isinstance(value, dict):
+                    nested = self._extract_existing_image_path(value)
+                    if nested:
+                        return nested
+        elif isinstance(result, list):
+            for item in result:
+                nested = self._extract_existing_image_path(item)
+                if nested:
+                    return nested
+
+        for value in candidates:
+            text = str(value or "").strip()
+            if not text or text.startswith(("http://", "https://", "base64://")):
+                continue
+            if text.startswith("file://"):
+                parsed = urlparse(text)
+                text = unquote(parsed.path or "")
+                if parsed.netloc and parsed.netloc not in {"localhost", "127.0.0.1"}:
+                    continue
+                if os.name == "nt" and re.match(r"^/[A-Za-z]:/", text):
+                    text = text[1:]
+            path = Path(text).expanduser()
+            if not path.is_absolute():
+                path = Path.cwd() / path
+            try:
+                path = path.resolve()
+            except Exception:
+                path = path.absolute()
+            if path.is_file():
+                return str(path)
+        return ""
+
+    def select_sedentary_meme_image_path(self, app_name: str, active_minutes: int):
+        if not self.loop:
+            return ""
+        return asyncio.run_coroutine_threadsafe(
+            self._select_sedentary_meme_image_path_async(app_name, active_minutes),
+            self.loop,
+        )
+
     def apply_external_settings(
         self, settings: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
-        external_settings = self._normalize_external_runtime_settings(
-            settings or self._load_runtime_settings()
-        )
+        if isinstance(settings, dict):
+            merged_settings = self._load_runtime_settings()
+            merged_settings.update(settings)
+        else:
+            merged_settings = self._load_runtime_settings()
+        external_settings = self._normalize_external_runtime_settings(merged_settings)
         result = {
             "mcp_enabled": bool(external_settings["mcp_enabled"]),
             "napcat_enabled": bool(external_settings["napcat_enabled"]),
@@ -501,7 +758,70 @@ class Live2DApplication:
             "mcp_tools": [],
             "skill_count": 0,
             "active_skills": [],
+            "sedentary_live_applied": False,
+            "activity_sidecar_restarted": False,
         }
+
+        old_sedentary_runtime = (
+            int(getattr(config, "SEDENTARY_REMINDER_MINUTES", SEDENTARY_REMINDER_MINUTES)),
+            int(
+                getattr(
+                    config,
+                    "ACTIVITY_AGENT_SEDENTARY_BREAK_MINUTES",
+                    5,
+                )
+            ),
+            int(
+                getattr(
+                    config,
+                    "SEDENTARY_REMINDER_COOLDOWN_MINUTES",
+                    SEDENTARY_REMINDER_COOLDOWN_MINUTES,
+                )
+            ),
+        )
+        config.SEDENTARY_REMINDER_MINUTES = int(
+            external_settings["sedentary_reminder_minutes"]
+        )
+        config.ACTIVITY_AGENT_SEDENTARY_BREAK_MINUTES = int(
+            external_settings["sedentary_break_minutes"]
+        )
+        config.SEDENTARY_REMINDER_COOLDOWN_MINUTES = int(
+            external_settings["sedentary_cooldown_minutes"]
+        )
+        config.SEDENTARY_POPUP_ENABLED = bool(
+            external_settings["sedentary_popup_enabled"]
+        )
+        config.SEDENTARY_POPUP_TITLE = str(external_settings["sedentary_popup_title"])
+        config.SEDENTARY_POPUP_MESSAGE = str(
+            external_settings["sedentary_popup_message"]
+        )
+        config.SEDENTARY_POPUP_IMAGE_PATH = str(
+            external_settings["sedentary_popup_image_path"]
+        )
+        config.SEDENTARY_POPUP_SNOOZE_MINUTES = int(
+            external_settings["sedentary_popup_snooze_minutes"]
+        )
+        config.SEDENTARY_POPUP_AUTO_CLOSE_SECONDS = int(
+            external_settings["sedentary_popup_auto_close_seconds"]
+        )
+        screen_sensor = getattr(self, "screen_sensor", None)
+        if screen_sensor is not None:
+            screen_sensor.sedentary_interval_sec = max(
+                60, config.SEDENTARY_REMINDER_MINUTES * 60
+            )
+            screen_sensor.sedentary_cooldown_sec = max(
+                60, config.SEDENTARY_REMINDER_COOLDOWN_MINUTES * 60
+            )
+            old_next_alert = float(
+                getattr(screen_sensor, "next_sedentary_alert_time", 0) or 0
+            )
+            new_next_alert = time.time() + screen_sensor.sedentary_interval_sec
+            screen_sensor.next_sedentary_alert_time = (
+                min(old_next_alert, new_next_alert)
+                if old_next_alert > 0
+                else new_next_alert
+            )
+        result["sedentary_live_applied"] = True
 
         if self.skill_manager is not None:
             self.skill_manager.configure(
@@ -600,6 +920,25 @@ class Live2DApplication:
                 probability=external_settings.get("napcat_voice_reply_probability", 0),
                 renderer=self.render_gateway_voice_reply,
             )
+
+        new_sedentary_runtime = (
+            config.SEDENTARY_REMINDER_MINUTES,
+            config.ACTIVITY_AGENT_SEDENTARY_BREAK_MINUTES,
+            config.SEDENTARY_REMINDER_COOLDOWN_MINUTES,
+        )
+        sidecar = getattr(self, "activity_sidecar", None)
+        if (
+            old_sedentary_runtime != new_sedentary_runtime
+            and sidecar is not None
+            and sidecar.is_running()
+        ):
+            try:
+                sidecar.stop()
+                sidecar.start()
+                result["activity_sidecar_restarted"] = bool(sidecar.is_running())
+            except Exception as exc:
+                if self.logger:
+                    self.logger.warning(f"Rust activity agent restart failed: {exc}")
 
         return result
 
@@ -751,11 +1090,13 @@ class Live2DApplication:
             renderer=self.render_gateway_voice_reply,
         )
 
+        gui_access_token = get_or_create_gui_access_token()
         self.gui_ws_server = GuiWebSocketServer(
             host=initial_external_settings.get("gui_ws_host", GUI_WS_HOST),
             port=initial_external_settings.get("gui_ws_port", GUI_WS_PORT),
             path=initial_external_settings.get("gui_ws_path", GUI_WS_PATH),
             logger=self.logger,
+            access_token=gui_access_token,
         )
         self.gui_ws_server.set_message_handler(self._on_gui_ws_message)
         self.gui_http_server = GuiHttpServer(
@@ -764,8 +1105,16 @@ class Live2DApplication:
             path_prefix=initial_external_settings.get("gui_http_prefix", GUI_HTTP_PREFIX),
             logger=self.logger,
             app_ref=self,
+            access_token=gui_access_token,
         )
-        self.activity_sidecar = ActivitySidecarManager(logger=self.logger)
+        self.activity_sidecar = ActivitySidecarManager(
+            logger=self.logger,
+            endpoint=ActivitySidecarManager.build_endpoint(
+                initial_external_settings.get("gui_http_host", GUI_HTTP_HOST),
+                initial_external_settings.get("gui_http_port", GUI_HTTP_PORT),
+                initial_external_settings.get("gui_http_prefix", GUI_HTTP_PREFIX),
+            ),
+        )
 
         if MusicSensor:
             self.music_sensor = MusicSensor(self.chat_service)
@@ -2419,6 +2768,15 @@ class Live2DApplication:
         self.qt_ui.load_display_state_config = self.load_display_state_config
         self.qt_ui.save_display_state_config = self.save_display_state_config
         self.qt_ui.publish_display_state = self.publish_display_state
+        if self.screen_sensor and hasattr(self.qt_ui, "set_screen_sensor"):
+            self.qt_ui.set_screen_sensor(self.screen_sensor)
+        if self.screen_sensor and hasattr(self.qt_ui, "show_sedentary_popup"):
+            self.screen_sensor.set_sedentary_popup_callback(
+                self.qt_ui.show_sedentary_popup
+            )
+            self.screen_sensor.set_sedentary_meme_selector(
+                self.select_sedentary_meme_image_path
+            )
         self.qt_ui.set_status("Idle")
         try:
             self.logger.info("[RoleSync] 启动时同步当前角色形象")

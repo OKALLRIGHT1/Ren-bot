@@ -15,7 +15,7 @@ def _get_logger():
     """安全获取logger，如果未初始化则返回None"""
     try:
         return get_logger()
-    except:
+    except Exception:
         return None
 
 

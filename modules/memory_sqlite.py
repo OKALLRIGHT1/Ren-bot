@@ -538,42 +538,53 @@ class MemorySQLite:
                 conn.commit()
 
     def list_activity_events(
-        self, *, limit: int = 200, date_str: str = ""
+        self, *, limit: int = 200, date_str: str = "", source: str = ""
     ) -> List[Dict[str, Any]]:
         limit = max(1, min(5000, int(limit)))
         sql = "SELECT * FROM activity_events"
         args: List[Any] = []
+        where_parts: List[str] = []
         if date_str:
-            sql += " WHERE substr(ts_iso,1,10)=?"
+            where_parts.append("substr(ts_iso,1,10)=?")
             args.append(str(date_str))
-        sql += " ORDER BY ts_iso DESC LIMIT ?"
+        source = str(source or "").strip()
+        if source:
+            where_parts.append("source=?")
+            args.append(source)
+        if where_parts:
+            sql += " WHERE " + " AND ".join(where_parts)
+        sql += " ORDER BY rowid DESC LIMIT ?"
         args.append(limit)
         with self._connect() as conn:
             rows = conn.execute(sql, args).fetchall()
         out: List[Dict[str, Any]] = []
         for r in rows:
-            out.append(
-                {
-                    "event_id": r["event_id"],
-                    "ts": r["ts_iso"],
-                    "kind": r["kind"],
-                    "presence": r["presence"],
-                    "app": {
-                        "id": r["app_id"],
-                        "name": r["app_name"],
-                        "pid": r["pid"],
-                    },
-                    "window_title": r["window_title"],
-                    "browser": {
-                        "family": r["browser_family"],
-                        "name": r["browser_name"],
-                        "page_title": r["page_title"],
-                        "url": r["url"],
-                        "domain": r["domain"],
-                    },
-                    "source": r["source"],
-                }
-            )
+            raw_payload = _pj(r["raw_json"], {})
+            item = {
+                "event_id": r["event_id"],
+                "ts": r["ts_iso"],
+                "kind": r["kind"],
+                "presence": r["presence"],
+                "app": {
+                    "id": r["app_id"],
+                    "name": r["app_name"],
+                    "pid": r["pid"],
+                },
+                "window_title": r["window_title"],
+                "browser": {
+                    "family": r["browser_family"],
+                    "name": r["browser_name"],
+                    "page_title": r["page_title"],
+                    "url": r["url"],
+                    "domain": r["domain"],
+                },
+                "source": r["source"],
+            }
+            if isinstance(raw_payload, dict) and isinstance(
+                raw_payload.get("sedentary"), dict
+            ):
+                item["sedentary"] = raw_payload["sedentary"]
+            out.append(item)
         return out
 
     def list_transcript(
@@ -726,6 +737,30 @@ class MemorySQLite:
                 print(f"[MemorySQLite] 删除 transcript 失败: {e}")
                 return False
         return False
+
+    def clear_transcript(self) -> int:
+        """删除全部 transcript 记录，返回删除数量。"""
+        with self._lock:
+            try:
+                with self._connect() as conn:
+                    count_row = conn.execute(
+                        "SELECT COUNT(1) AS c FROM transcript"
+                    ).fetchone()
+                    count = int(count_row["c"] if count_row else 0)
+                    conn.execute("DELETE FROM transcript")
+                    conn.commit()
+                self._audit(
+                    "clear",
+                    "transcript",
+                    None,
+                    {"count": count},
+                    None,
+                    note="clear transcript",
+                )
+                return count
+            except Exception as e:
+                print(f"[MemorySQLite] 清空 transcript 失败: {e}")
+                return -1
 
     # ---------- profile ----------
     def get_profile(self) -> Dict[str, Any]:
@@ -1045,6 +1080,31 @@ class MemorySQLite:
             "created_at": r["created_at"],
             "updated_at": r["updated_at"],
         }
+
+    def delete_item(self, item_id: str) -> bool:
+        item_id = (item_id or "").strip()
+        if not item_id:
+            return False
+        before = self.get_item(item_id)
+        if before is None:
+            return False
+        with self._lock:
+            try:
+                with self._connect() as conn:
+                    conn.execute("DELETE FROM memory_items WHERE id=?", (item_id,))
+                    conn.commit()
+            except Exception as e:
+                print(f"[MemorySQLite] 删除 memory_items 失败: {e}")
+                return False
+        self._audit(
+            "delete",
+            "memory_items",
+            item_id,
+            before,
+            None,
+            note="delete memory item",
+        )
+        return True
 
     def list_items(
         self,
@@ -1592,6 +1652,31 @@ class MemorySQLite:
             "created_at": r["created_at"],
             "updated_at": r["updated_at"],
         }
+
+    def delete_episode(self, ep_id: str) -> bool:
+        ep_id = (ep_id or "").strip()
+        if not ep_id:
+            return False
+        before = self.get_episode(ep_id)
+        if before is None:
+            return False
+        with self._lock:
+            try:
+                with self._connect() as conn:
+                    conn.execute("DELETE FROM episodes WHERE id=?", (ep_id,))
+                    conn.commit()
+            except Exception as e:
+                print(f"[MemorySQLite] 删除 episodes 失败: {e}")
+                return False
+        self._audit(
+            "delete",
+            "episodes",
+            ep_id,
+            before,
+            None,
+            note="delete episode",
+        )
+        return True
 
     def list_episodes(
         self,

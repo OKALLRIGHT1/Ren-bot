@@ -335,6 +335,16 @@ def get_panel_styles() -> str:
             font-size: 11px;
             margin-left: 8px;
         }}
+        QLabel#workSessionLabel {{
+            color: {p["text_secondary"]};
+            background: {p["bg_soft"]};
+            border: 1px solid {p["border"]};
+            border-radius: 8px;
+            padding: 2px 8px;
+            font-size: 11px;
+            font-weight: 600;
+            margin-left: 8px;
+        }}
         QPushButton#windowCtl {{
             background: transparent;
             color: {p["border_strong"]};
