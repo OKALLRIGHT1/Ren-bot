@@ -128,6 +128,17 @@ TTS_RETURN_IDLE = get_env_bool("TTS_RETURN_IDLE", "1")  # TTS完成后是否返�
 TTS_IDLE_EMO = os.getenv("TTS_IDLE_EMO", "idle")  # 空闲状态对应的情绪标签
 TTS_USE_LIVE2D_PLAYER = True  # 是否使用Live2D播放器
 
+IDLE_RANDOM_MOTION_ENABLED = get_env_bool("IDLE_RANDOM_MOTION_ENABLED", "1")
+IDLE_RANDOM_MOTION_EMO = os.getenv("IDLE_RANDOM_MOTION_EMO", "idle_random")
+IDLE_RANDOM_MIN_SECONDS = get_env_float("IDLE_RANDOM_MIN_SECONDS", 90.0, 5.0)
+IDLE_RANDOM_MAX_SECONDS = get_env_float("IDLE_RANDOM_MAX_SECONDS", 240.0, 5.0)
+IDLE_RANDOM_MIN_IDLE_SECONDS = get_env_float(
+    "IDLE_RANDOM_MIN_IDLE_SECONDS", 30.0, 0.0
+)
+IDLE_RANDOM_RETURN_IDLE_SECONDS = get_env_float(
+    "IDLE_RANDOM_RETURN_IDLE_SECONDS", 4.0, 0.0
+)
+
 # TTS 文本处理
 TTS_SPLIT_LONG_TEXT = get_env_bool("TTS_SPLIT_LONG_TEXT", "1")  # 是否分割长文本
 TTS_CHUNK_CHARS = get_env_int("TTS_CHUNK_CHARS", 80, 1)  # 文本分割的字符数
@@ -303,7 +314,7 @@ SCREEN_SMART_DEBOUNCE = True
 
 # ==================== 情绪系统配置 ====================
 # LLM 情绪标签列表
-EMO_LABELS = ["neutral", "happy", "sad", "angry", "flustered", "confused"]
+EMO_LABELS = ["neutral", "happy", "sad", "angry", "shy", "flustered", "confused"]
 THINK_MOTION_ENABLED = True
 THINK_MOTION_NAME = "think"
 MOTION_MAPPING = {
@@ -318,10 +329,12 @@ EMO_TO_LIVE2D = {
     "happy": {"type": 0, "mtn": "Motion:motion_100", "exp": 1},
     "sad": {"type": 0, "mtn": "Motion:motion_100", "exp": 3},
     "angry": {"type": 0, "mtn": "Motion:motion_200", "exp": 2},
+    "shy": {"type": 0, "mtn": "Motion:motion_300", "exp": 5},
     "flustered": {"type": 0, "mtn": "Motion:motion_300", "exp": 5},
     "confused": {"type": 0, "mtn": "Motion:motion_400", "exp": 4},
     "think": {"type": 0, "mtn": "Motion:motion_001", "exp": 0},  # 思考动作
     "idle": {"type": 0, "mtn": "Motion:motion_000", "exp": 0},
+    "idle_random": {"type": 0, "mtn": "Motion:motion_001", "exp": 0},
     "music": {"type": 0, "mtn": "Motion:motion_001", "exp": 1},
 }
 
@@ -470,7 +483,7 @@ MEMORY_SETTINGS = {
 # 1. 通用系统规则 (格式 + 工具) - 所有角色共用
 SYSTEM_RULES_PROMPT = """
 【输出格式规范】
-- 每次回复必须在正文最开头加一个情绪标签：<emo=happy|sad|angry|flustered|confused|think|neutral>
+- 每次回复必须在正文最开头加一个情绪标签：<emo=happy|sad|angry|shy|flustered|confused|think|neutral>
 - 只允许 <emo=xxx>，禁止使用 <neutral> / <happy> 等简写。
 - 严禁提及自己是 AI，不要跳出角色设定。
 - 请使用【用户档案】中记录的名称来称呼用户。
@@ -525,7 +538,7 @@ PERSONA_PROMPT = f"{DEFAULT_PERSONA}\n{SYSTEM_RULES_PROMPT}"
 # 不解释多余内容。请始终保持角色一致性，不要提及自己是 AI，也不要跳出角色设定。
 # 请使用【用户档案】中记录的名称来称呼用户。
 # 【输出格式】
-# - 你可以在回复开头加情绪标签：<emo=happy|sad|angry|flustered|confused|neutral>
+# - 你可以在回复开头加情绪标签：<emo=happy|sad|angry|shy|flustered|confused|neutral>
 # - 只允许 <emo=xxx>，禁止使用 <neutral> / <happy> 等简写。
 # - 只有当系统消息里出现【本轮可用工具】或【可用工具能力】时，你才可以调用工具。
 # - 调用工具时：只输出一行或多行工具指令，每行一个，格式严格：[CMD: trigger | args]
@@ -623,7 +636,7 @@ PERSONA_PROMPT_JSON = r"""
 - 你必须只输出一个 JSON 对象，且 protocol 字段必须为 live2d-assistant.v1
 - 禁止输出任何 markdown、解释文字、代码块标记
 - JSON 里必须包含 response.say.text（你要说的话）
-- 你可以用 response.emotion.label 指定情绪（happy/sad/angry/confused/flustered/neutral/think/idle）
+- 你可以用 response.emotion.label 指定情绪（happy/sad/angry/confused/shy/flustered/neutral/think/idle）
 - 你可以用 response.live2d.motion 指定动作名（字符串），或 response.live2d.actions[] 做动作队列
 - 你必须在 memory.write.assistant_said 中写入你本轮自己说过的关键承诺/计划/自我描述（如果没有就给空数组）
 - 当对话形成一个小阶段时，在 memory.write.episode_summary 中写一个简短总结（title/summary/tags）
