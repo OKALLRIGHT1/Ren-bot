@@ -15,6 +15,10 @@ if sys.platform.startswith('win'):
         pass
 
 import config
+from core.single_instance import SingleInstanceLock
+
+
+ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
 
 # 设置Qt插件路径（必须在导入任何Qt模块之前）
 pyside6_path = os.path.join(
@@ -49,6 +53,10 @@ from core.application import Live2DApplication
 
 def main():
     """应用主函数"""
+    lock = SingleInstanceLock(ROOT_DIR, "core")
+    if not lock.acquire():
+        print("⚠️ [核心程序] 已有 Live2D-Suzu 核心实例在运行，本次启动已退出。")
+        return
     config.load_custom_models()
     app = Live2DApplication()
     import __main__

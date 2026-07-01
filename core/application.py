@@ -71,6 +71,8 @@ from config import (
     VOICE_NAME,
     GUI_BACKEND,
     TTS_RATE,
+    TTS_SPLIT_LONG_TEXT,
+    TTS_CHUNK_CHARS,
     EMO_TO_LIVE2D,
     LIP_SYNC_ENABLED,
     RHUBARB_PATH,
@@ -97,6 +99,9 @@ from config import (
     GUI_HTTP_PORT,
     GUI_HTTP_PREFIX,
     SEDENTARY_REMINDER_MINUTES,
+    ACTIVITY_AGENT_AUTOSTART,
+    ACTIVITY_AGENT_BINARY_PATH,
+    ACTIVITY_AGENT_PERSISTENT,
     SEDENTARY_REMINDER_COOLDOWN_MINUTES,
     SEDENTARY_POPUP_ENABLED,
     SEDENTARY_POPUP_TITLE,
@@ -131,6 +136,7 @@ from modules.live2d import (
 
 # 导出ChatService（在chat_service.py中定义）
 from services.chat_service import ChatService
+from services.chat_support.text_splitter import split_chat_text_parts
 
 # [新增] 尝试导入屏幕感知模块 (容错处理)
 try:
@@ -163,6 +169,10 @@ try:
     from modules.music_sensor import MusicSensor
 except ImportError:
     MusicSensor = None
+
+
+def split_local_bubble_text_parts(text: str) -> list[str]:
+    return split_chat_text_parts(text, max_len=TTS_CHUNK_CHARS)
 
 
 class Live2DApplication:
@@ -465,6 +475,9 @@ class Live2DApplication:
             ),
             "sedentary_popup_enabled": bool(
                 settings.get("sedentary_popup_enabled", SEDENTARY_POPUP_ENABLED)
+            ),
+            "sedentary_status_visible": bool(
+                settings.get("sedentary_status_visible", True)
             ),
             "sedentary_popup_title": str(
                 settings.get("sedentary_popup_title", SEDENTARY_POPUP_TITLE)
@@ -1042,6 +1055,8 @@ class Live2DApplication:
             log_each_utterance=True,
             bubble_sender=_bubble_to_event,
             go_idle_fn=_tts_go_idle_to_event,
+            split_long_default=TTS_SPLIT_LONG_TEXT,
+            chunk_chars_default=TTS_CHUNK_CHARS,
             state_machine=self.state_machine,
             enable_lip_sync=LIP_SYNC_ENABLED,
             rhubarb_path=RHUBARB_PATH,
@@ -1066,6 +1081,7 @@ class Live2DApplication:
         self.mcp_bridge = MCPToolBridge()
         self.chat_gateway = ChatGateway()
         self.chat_gateway.on_message(self._handle_external_chat_message)
+        self.chat_gateway.on_notice(self._handle_external_chat_notice)
         initial_external_settings = self._load_external_runtime_settings()
         self.apply_external_settings(initial_external_settings)
 
@@ -1114,6 +1130,8 @@ class Live2DApplication:
                 initial_external_settings.get("gui_http_port", GUI_HTTP_PORT),
                 initial_external_settings.get("gui_http_prefix", GUI_HTTP_PREFIX),
             ),
+            binary_path=ACTIVITY_AGENT_BINARY_PATH,
+            persistent=ACTIVITY_AGENT_PERSISTENT,
         )
 
         if MusicSensor:
@@ -1835,15 +1853,26 @@ class Live2DApplication:
                     self.logger.debug(f"Text lip sync fallback skipped: {exc}")
                     duration_ms = estimate_bubble_display_ms(text)
                     bubble_seq = self._silent_bubble_seq
-                await self.event_bus.emit(
-                    Events.UI_BUBBLE,
-                    text=text,
-                    emotion=emotion,
-                    duration_ms=duration_ms,
-                )
+                bubble_parts = split_local_bubble_text_parts(text) or [text]
+                per_part_ms = max(1200, int(duration_ms / max(1, len(bubble_parts))))
+
+                async def _emit_silent_bubbles(seq: int):
+                    for part in bubble_parts:
+                        if seq != self._silent_bubble_seq:
+                            return
+                        await self.event_bus.emit(
+                            Events.UI_BUBBLE,
+                            text=part,
+                            emotion=emotion,
+                            duration_ms=per_part_ms,
+                        )
+                        await asyncio.sleep(max(0.35, per_part_ms / 1000.0 + 0.08))
+
+                asyncio.create_task(_emit_silent_bubbles(bubble_seq))
                 if duration_ms and duration_ms > 0:
                     async def _idle_after_silent_bubble(delay_ms: int, seq: int):
-                        await asyncio.sleep(max(0.35, delay_ms / 1000.0 + 0.18))
+                        total_delay = len(bubble_parts) * (per_part_ms / 1000.0 + 0.08)
+                        await asyncio.sleep(max(0.35, total_delay + 0.18))
                         if seq != self._silent_bubble_seq:
                             return
                         if self.state_machine.state != AgentState.SPEAKING:
@@ -2253,15 +2282,18 @@ class Live2DApplication:
                 except Exception as exc:
                     if self.logger:
                         self.logger.error(f"GUI HTTP start failed: {exc}")
-            try:
-                self.activity_sidecar.start()
-            except Exception as exc:
-                if self.logger:
-                    self.logger.warning(f"Rust activity agent start failed: {exc}")
+            if ACTIVITY_AGENT_AUTOSTART:
+                try:
+                    self.activity_sidecar.start()
+                except Exception as exc:
+                    if self.logger:
+                        self.logger.warning(f"Rust activity agent start failed: {exc}")
+            elif self.logger:
+                self.logger.info("🦀 Rust activity agent 由 Live2D 端常驻采集，主程序不再自动拉起")
             if self.activity_sidecar and self.activity_sidecar.is_running():
-                self.logger.info("🦀 当前采集模式: Rust 优先")
+                self.logger.info("🦀 当前采集模式: Rust sidecar")
             else:
-                self.logger.info("🐍 当前采集模式: Python fallback")
+                self.logger.info("🦀 当前采集模式: Live2D 上报 / Python fallback")
 
             # 5. 启动屏幕感知（Rust sidecar 运行时，关闭 Python 本地采集线程）
             if self.screen_sensor:
@@ -2273,6 +2305,12 @@ class Live2DApplication:
                         )
                         self.logger.info(
                             "🦀 启动 ScreenSensor 监控线程（Rust 事件消费模式）"
+                        )
+                        self.screen_sensor.start(self.loop)
+                    elif not ACTIVITY_AGENT_AUTOSTART:
+                        self.screen_sensor.use_rust_events_only = True
+                        self.logger.info(
+                            "🦀 Live2D 活动上报模式已启用，关闭 Python 本地窗口轮询"
                         )
                         self.screen_sensor.start(self.loop)
                     else:
@@ -2368,6 +2406,12 @@ class Live2DApplication:
                 **(event.metadata or {}),
             },
         )
+
+    async def _handle_external_chat_notice(self, event):
+        service = getattr(self, "chat_service", None)
+        if service is None or not hasattr(service, "handle_external_chat_notice"):
+            return
+        await service.handle_external_chat_notice(event)
 
     def on_gui_change_costume(self, path: str, config: dict):
         """GUI换装回调"""
@@ -2908,7 +2952,7 @@ class EventPresenter:
         self.event_bus = event_bus
         # 容错清理：防止模型输出非标准情绪标签被 TTS 读出来
         self._emo_tag_any_re = re.compile(
-            r"<\s*/?\s*(?:emo(?:tion)?|happy|sad|angry|flustered|confused|neutral|think|idle)\b[^>]*>",
+            r"<\s*/?\s*(?:emo(?:tion)?|happy|sad|angry|shy|flustered|confused|neutral|think|idle)\b[^>]*>",
             flags=re.IGNORECASE,
         )
 

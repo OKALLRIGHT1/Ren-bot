@@ -45,6 +45,7 @@ except ImportError:
 
 WORK_SESSION_EVENT_LIMIT = 1200
 WORK_SESSION_RESTART_BRIDGE_SEC = 15 * 60
+WORK_SESSION_MAX_RUST_PAYLOAD_MINUTES = 12 * 60
 SEDENTARY_SESSION_APP_NAME = "电脑"
 SEDENTARY_SESSION_CATEGORY = "computer_active"
 
@@ -168,6 +169,52 @@ class ScreenSensor:
         except Exception as exc:
             self.logger.warning(f"[Screen] 久坐提醒弹窗触发失败: {exc}")
 
+    def _trigger_sedentary_alert(
+        self,
+        *,
+        now_ts: float,
+        alert_app_name: str,
+        active_minutes: int,
+        app_name: str,
+        category: str,
+        full_title: str,
+        source: str,
+        log_label: str,
+    ) -> bool:
+        if (
+            self._last_alert_app == alert_app_name
+            and now_ts - self._last_alert_time <= self.sedentary_cooldown_sec
+        ):
+            return False
+
+        is_dnd_active = getattr(config, "DND_MODE", False)
+        self._last_alert_app = alert_app_name
+        self._last_alert_time = now_ts
+        self.next_sedentary_alert_time = now_ts + self.sedentary_cooldown_sec
+
+        if is_dnd_active:
+            self.logger.info(f"🔕 [Active] 免打扰生效，跳过{log_label}: {alert_app_name}")
+            return True
+
+        self.logger.info(
+            f"⏰[Active] {log_label}: {alert_app_name} ({active_minutes} min)"
+        )
+        self.add_observation(
+            f"{log_label}：连续活跃 {active_minutes} 分钟",
+            full_title,
+            category,
+            app_name=app_name,
+            reason="sedentary",
+            source=source,
+        )
+        self._show_sedentary_popup(alert_app_name, active_minutes)
+        if self._loop:
+            asyncio.run_coroutine_threadsafe(
+                self.chat_service.send_active_alert(alert_app_name, active_minutes),
+                self._loop,
+            )
+        return True
+
     def _debug_log(self, message: str):
         if self.debug_verbose:
             self.logger.info(message)
@@ -290,9 +337,15 @@ class ScreenSensor:
             store = get_memory_store()
             if not store:
                 return []
-            return store.list_activity_events(
-                limit=limit, date_str=self._stats_date_key(), source="rust-agent"
+            events: List[Dict[str, Any]] = []
+            for source in ("rust-agent", "live2d-tauri"):
+                events.extend(
+                    store.list_activity_events(limit=limit, source=source)
+                )
+            events.sort(
+                key=lambda item: self._parse_rust_event_ts(item), reverse=True
             )
+            return events[: max(1, int(limit))]
         except Exception:
             return []
 
@@ -385,35 +438,58 @@ class ScreenSensor:
         if active_minutes <= 0:
             active_minutes = self._sedentary_alert_minutes(event_ts)
         alert_app_name = SEDENTARY_SESSION_APP_NAME
-
-        is_dnd_active = getattr(config, "DND_MODE", False)
-        if is_dnd_active:
-            self.logger.info(
-                f"🔕 [Active] 免打扰生效，跳过 Rust 久坐弹窗: {alert_app_name}"
-            )
-            self._last_alert_app = alert_app_name
-            self._last_alert_time = event_ts
-            return
-
-        self.logger.info(
-            f"⏰[Active] Rust 久坐事件触发弹窗: {alert_app_name} ({active_minutes} min)"
-        )
-        self._last_alert_app = alert_app_name
-        self._last_alert_time = event_ts
-        self.add_observation(
-            f"Rust 久坐提醒触发：连续活跃 {active_minutes} 分钟",
-            full_title,
-            category,
+        self._trigger_sedentary_alert(
+            now_ts=event_ts,
+            alert_app_name=alert_app_name,
+            active_minutes=active_minutes,
             app_name=app_name,
-            reason="sedentary",
+            category=category,
+            full_title=full_title,
             source="rust-agent",
+            log_label="Rust 久坐事件触发弹窗",
         )
-        self._show_sedentary_popup(alert_app_name, active_minutes)
-        if self._loop:
-            asyncio.run_coroutine_threadsafe(
-                self.chat_service.send_active_alert(alert_app_name, active_minutes),
-                self._loop,
-            )
+
+    def _maybe_trigger_rust_sample_sedentary_alert(
+        self,
+        *,
+        now_ts: float,
+        event_ts: float,
+        app_name: str,
+        category: str,
+        full_title: str,
+        payload: Dict[str, Any],
+    ) -> bool:
+        if self.sedentary_interval_sec <= 0:
+            return False
+        if self._rust_payload_confirms_sedentary_break(payload):
+            return False
+
+        try:
+            payload_minutes = int(payload.get("active_minutes") or 0)
+        except Exception:
+            payload_minutes = 0
+        if not self._rust_sedentary_payload_is_trustworthy(payload_minutes):
+            payload_minutes = 0
+
+        if now_ts < self.next_sedentary_alert_time and (
+            payload_minutes * 60 < self.sedentary_interval_sec
+        ):
+            return False
+
+        active_minutes = max(payload_minutes, self._sedentary_alert_minutes(now_ts))
+        if active_minutes <= 0:
+            return False
+
+        return self._trigger_sedentary_alert(
+            now_ts=now_ts,
+            alert_app_name=SEDENTARY_SESSION_APP_NAME,
+            active_minutes=active_minutes,
+            app_name=app_name,
+            category=category,
+            full_title=full_title,
+            source="rust-agent",
+            log_label="Rust 活动快照补触发久坐弹窗",
+        )
 
     def _sedentary_alert_minutes(self, now_ts: Optional[float] = None) -> int:
         session = self.get_current_work_session(now_ts=now_ts)
@@ -543,6 +619,14 @@ class ScreenSensor:
                     self.daily_durations[app_name] = self.daily_durations.get(
                         app_name, 0.0
                     ) + sample_seconds
+                self._maybe_trigger_rust_sample_sedentary_alert(
+                    now_ts=now_ts,
+                    event_ts=event_ts,
+                    app_name=app_name,
+                    category=cat,
+                    full_title=full_title,
+                    payload=payload,
+                )
                 stay_minutes = max(
                     0, int((event_ts - self.current_window_start_time) / 60)
                 )
@@ -621,8 +705,14 @@ class ScreenSensor:
     def _rust_payload_looks_restarted(
         self, *, events: List[Dict[str, Any]], newest_ts: float, newest_minutes: int
     ) -> bool:
+        newest_source = (
+            str((events[0] or {}).get("source") or "rust-agent").strip() or "rust-agent"
+        )
         bridge_sec = float(WORK_SESSION_RESTART_BRIDGE_SEC)
         for item in events[1:]:
+            item_source = str(item.get("source") or "rust-agent").strip() or "rust-agent"
+            if item_source != newest_source:
+                continue
             event_ts = self._parse_rust_event_ts(item)
             if event_ts <= 0:
                 continue
@@ -640,6 +730,9 @@ class ScreenSensor:
             if previous_minutes > newest_minutes + 1:
                 return True
         return False
+
+    def _rust_sedentary_payload_is_trustworthy(self, active_minutes: int) -> bool:
+        return 0 < active_minutes <= WORK_SESSION_MAX_RUST_PAYLOAD_MINUTES
 
     def _sedentary_break_seconds(self) -> float:
         try:
@@ -677,10 +770,11 @@ class ScreenSensor:
         source: str,
         app_name: str = "",
         category: str = "",
+        replace: bool = False,
     ) -> None:
         start_ts = float(start_ts or time.time())
         current_start = float(getattr(self, "sedentary_session_start_ts", 0.0) or 0.0)
-        if current_start <= 0 or start_ts < current_start:
+        if replace or current_start <= 0 or start_ts < current_start:
             self.sedentary_session_start_ts = start_ts
         self.sedentary_session_source = source
         self.sedentary_session_app_name = str(app_name or SEDENTARY_SESSION_APP_NAME)
@@ -737,22 +831,26 @@ class ScreenSensor:
         app_name = SEDENTARY_SESSION_APP_NAME
         sedentary_payload = newest.get("sedentary")
         local_source = "rust-local" if source == "rust-agent" else "python-local"
+        preserve_existing_session_start = False
         if source == "rust-agent" and isinstance(sedentary_payload, dict):
             try:
                 rust_active_minutes = int(sedentary_payload.get("active_minutes") or 0)
             except Exception:
                 rust_active_minutes = 0
-            if rust_active_minutes > 0:
+            if self._rust_sedentary_payload_is_trustworthy(rust_active_minutes):
                 active_seconds = rust_active_minutes * 60
                 current_start = float(
                     getattr(self, "sedentary_session_start_ts", 0.0) or 0.0
                 )
                 current_seconds = max(0.0, now_ts - current_start) if current_start > 0 else 0.0
+                restarted_payload = False
                 if current_seconds > active_seconds + 120 and self._rust_payload_looks_restarted(
                     events=events,
                     newest_ts=newest_ts,
                     newest_minutes=rust_active_minutes,
                 ):
+                    restarted_payload = True
+                    preserve_existing_session_start = True
                     pass
                 else:
                     self._ensure_sedentary_session(
@@ -760,6 +858,7 @@ class ScreenSensor:
                         source="rust-sedentary",
                         app_name=app_name,
                         category=cat,
+                        replace=not restarted_payload,
                     )
                     return {
                         "active_seconds": active_seconds,
@@ -862,11 +961,21 @@ class ScreenSensor:
                 start_ts = fallback_start_ts
 
         active_seconds = max(0.0, now_ts - start_ts)
+        current_start = float(getattr(self, "sedentary_session_start_ts", 0.0) or 0.0)
+        replace_stale_start = bool(
+            not preserve_existing_session_start
+            and
+            current_start > 0
+            and start_ts > current_start
+            and start_ts - current_start
+            >= max(break_seconds, float(WORK_SESSION_RESTART_BRIDGE_SEC))
+        )
         self._ensure_sedentary_session(
             start_ts=start_ts,
             source=local_source,
             app_name=app_name,
             category=cat,
+            replace=replace_stale_start,
         )
         return self._build_sedentary_session(
             now_ts=now_ts, source=local_source, app_name=app_name, category=cat
@@ -901,6 +1010,26 @@ class ScreenSensor:
             return python_session
 
         start_ts = float(self.current_window_start_time or now)
+        max_fallback_age_sec = max(
+            self._sedentary_break_seconds(), float(WORK_SESSION_RESTART_BRIDGE_SEC)
+        )
+        if start_ts <= 0 or now - start_ts > max_fallback_age_sec:
+            self.current_window_start_time = now
+            self._reset_sedentary_session(
+                reset_ts=now,
+                source="rust-local"
+                if getattr(self, "use_rust_events_only", False)
+                else "python-local",
+                app_name=SEDENTARY_SESSION_APP_NAME,
+                category=SEDENTARY_SESSION_CATEGORY,
+            )
+            return self._empty_sedentary_session(
+                source="rust-local"
+                if getattr(self, "use_rust_events_only", False)
+                else "python-local",
+                app_name=SEDENTARY_SESSION_APP_NAME,
+                category=SEDENTARY_SESSION_CATEGORY,
+            )
         self._ensure_sedentary_session(
             start_ts=start_ts,
             source="rust-local"

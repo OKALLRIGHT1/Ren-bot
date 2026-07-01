@@ -5,7 +5,7 @@ import requests
 
 from PySide6 import QtWidgets, QtCore, QtGui
 from modules.character_manager import character_manager, DEFAULT_EMOTION_KEYS
-from modules.live2d import MODEL_DEFAULT_MOTION
+from modules.live2d import MODEL_DEFAULT_MOTION, STOP_MOTION
 
 try:
     from modules.gui.styles import get_ui_palette
@@ -1120,6 +1120,7 @@ class CharacterEditorWidget(QtWidgets.QWidget):
 
         self.combo_motion.clear()
         self.combo_motion.addItem("模型默认姿态 / 刚打开状态", MODEL_DEFAULT_MOTION)
+        self.combo_motion.addItem("停止动作 / 不播放动作", STOP_MOTION)
         if self._current_motion_options:
             for item in self._current_motion_options:
                 name = str(item.get("name") or "").strip()

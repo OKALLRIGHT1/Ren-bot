@@ -3,12 +3,13 @@ import re
 
 
 class StreamSentenceBuffer:
-    def __init__(self, min_chars=10):
+    def __init__(self, min_chars=10, max_chars=None):
         self.buffer = ""
         self.min_chars = min_chars
+        self.max_chars = max_chars
         # 分隔符：句号、感叹号、问号、分号、换行，包括中英文
-        # 增加逗号可以降低延迟，但在 GPT-SoVITS 上可能导致语气破碎，建议根据模型调整
-        self.separators = re.compile(r'([。！？!?\n;；]+)')
+        self.separators = re.compile(r"([。！？!?\n;；]+)")
+        self.soft_separators = re.compile(r"([，,、]+)")
 
     def feed(self, chunk: str):
         """
@@ -35,6 +36,27 @@ class StreamSentenceBuffer:
             # 可以选择暂时不发，防止碎片化语音。这里简单起见，只要非空就发。
             if sentence:
                 yield sentence
+
+        max_chars = int(self.max_chars or 0)
+        if max_chars <= 0 or len(self.buffer) < max_chars:
+            return
+
+        while len(self.buffer) >= max_chars:
+            split_at = self._find_soft_split(max_chars)
+            sentence = self.buffer[:split_at].strip()
+            self.buffer = self.buffer[split_at:]
+            if sentence:
+                yield sentence
+            if len(self.buffer) < max_chars:
+                break
+
+    def _find_soft_split(self, max_chars: int) -> int:
+        soft_split = 0
+        for match in self.soft_separators.finditer(self.buffer[:max_chars]):
+            soft_split = match.end()
+        if soft_split >= self.min_chars:
+            return soft_split
+        return max_chars
 
     def close(self):
         """

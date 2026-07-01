@@ -59,8 +59,9 @@ except Exception:
         "请客观详细描述这张QQ图片的内容，并提取其中可用于回复的关键信息。"
     )
 
-from .base import BaseChatAdapter, ChatMessageEvent
+from .base import BaseChatAdapter, ChatMessageEvent, ChatNoticeEvent
 from .components import component, components_to_dicts
+from services.chat_support.qq_card_links import extract_qq_card_links
 
 
 class NapCatOneBotAdapter(BaseChatAdapter):
@@ -336,6 +337,10 @@ class NapCatOneBotAdapter(BaseChatAdapter):
             if self_id and qq == self_id:
                 return ""
             return f"@{qq}" if qq else ""
+        if seg_type == "json":
+            links = extract_qq_card_links(data)
+            if links:
+                return " ".join(links)
         placeholders = {
             "image": "[图片]",
             "face": "[表情]",
@@ -411,6 +416,8 @@ class NapCatOneBotAdapter(BaseChatAdapter):
                     reply_payload = self._extract_reply_segment(seg)
                     if reply_payload:
                         reply_meta = reply_payload
+                elif seg_type == "json":
+                    parts.extend(extract_qq_card_links(seg.get("data") or {}))
                 text = self._segment_to_text(seg, self_id)
                 if text:
                     parts.append(text)
@@ -577,6 +584,63 @@ class NapCatOneBotAdapter(BaseChatAdapter):
             skip_http_fallback=skip_http_fallback,
         )
 
+    def normalize_notice(self, payload: Dict[str, Any]) -> Optional[ChatNoticeEvent]:
+        if str(payload.get("post_type") or "").strip().lower() != "notice":
+            return None
+        notice_type = str(payload.get("notice_type") or "").strip().lower()
+        user_id = str(payload.get("user_id") or "").strip()
+        if not user_id:
+            return None
+        session_id = f"private:{user_id}"
+        if notice_type in {"friend_recall", "private_recall"}:
+            message_id = str(
+                payload.get("message_id")
+                or payload.get("msg_id")
+                or payload.get("id")
+                or ""
+            ).strip()
+            if not message_id:
+                return None
+            return ChatNoticeEvent(
+                source="qq_gateway",
+                channel="qq",
+                event_type="qq_private_recall",
+                user_id=user_id,
+                session_id=session_id,
+                metadata={
+                    "adapter": "napcat_qq",
+                    "notice_type": notice_type,
+                    "message_id": message_id,
+                    "raw": payload,
+                },
+            )
+        if notice_type in {"input_status", "typing", "private_input_status"}:
+            status = str(
+                payload.get("status")
+                or payload.get("event")
+                or payload.get("state")
+                or payload.get("sub_type")
+                or ""
+            ).strip().lower()
+            is_typing = status in {"typing", "input", "start", "1", "true", "yes"}
+            if not status and "is_typing" in payload:
+                is_typing = bool(payload.get("is_typing"))
+            return ChatNoticeEvent(
+                source="qq_gateway",
+                channel="qq",
+                event_type="qq_private_typing",
+                user_id=user_id,
+                session_id=session_id,
+                metadata={
+                    "adapter": "napcat_qq",
+                    "notice_type": notice_type,
+                    "is_typing": is_typing,
+                    "status": status,
+                    "raw": payload,
+                },
+            )
+        return None
+
     def normalize_event(self, payload: Dict[str, Any]) -> Optional[ChatMessageEvent]:
         post_type = str(payload.get("post_type") or "")
         message_type = str(payload.get("message_type") or "")
@@ -585,6 +649,7 @@ class NapCatOneBotAdapter(BaseChatAdapter):
             payload, self_id
         )
         components = self._extract_message_components(payload, self_id)
+        qq_card_links = extract_qq_card_links(payload.get("message"))
         if post_type != "message" or not raw_message:
             return None
 
@@ -641,6 +706,8 @@ class NapCatOneBotAdapter(BaseChatAdapter):
                 "file_count": len(files),
                 "reply": reply_meta,
                 "components": components,
+                "qq_card_links": qq_card_links,
+                "has_links": bool(qq_card_links),
                 "image_vision_enabled": self.image_vision_enabled,
                 "image_prompt": self.image_prompt,
                 "filter_mode": self.filter_mode,
@@ -675,6 +742,53 @@ class NapCatOneBotAdapter(BaseChatAdapter):
             return result
         normalized = self._normalize_history_item(session_id, raw_item)
         result["item"] = normalized
+        return result
+
+    def _extract_forward_items(self, response: Any) -> List[Dict[str, Any]]:
+        data = response.get("data") if isinstance(response, dict) else response
+        if isinstance(data, dict):
+            raw_items = data.get("messages") or data.get("items") or data.get("list") or []
+        elif isinstance(data, list):
+            raw_items = data
+        else:
+            raw_items = []
+        items: List[Dict[str, Any]] = []
+        for raw in raw_items:
+            if not isinstance(raw, dict):
+                continue
+            sender = raw.get("sender") if isinstance(raw.get("sender"), dict) else {}
+            sender_name = str(
+                sender.get("card") or sender.get("nickname") or raw.get("user_id") or ""
+            ).strip()
+            text, images, _files, _reply = self._extract_message_payload(
+                raw, str(raw.get("self_id") or "")
+            )
+            if text or images:
+                items.append(
+                    {
+                        "sender_name": sender_name or "unknown",
+                        "text": text,
+                        "images": images,
+                    }
+                )
+        return items
+
+    async def fetch_forward_message(
+        self, session_id: str, forward_id: str, **kwargs: Any
+    ) -> Any:
+        fid = str(forward_id or "").strip()
+        if not fid:
+            return {"ok": False, "reason": "empty_forward_id", "session_id": session_id}
+        result = await self._send_action(
+            session_id,
+            "get_forward_msg",
+            {"message_id": fid},
+            timeout=float(kwargs.get("timeout") or 10),
+        )
+        if not isinstance(result, dict) or not result.get("ok"):
+            return result
+        items = self._extract_forward_items(result.get("response"))
+        result["items"] = items
         return result
 
     async def send_text(self, session_id: str, text: str, **kwargs: Any) -> Any:

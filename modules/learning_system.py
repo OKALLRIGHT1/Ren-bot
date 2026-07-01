@@ -405,6 +405,7 @@ class LearningSystem:
             "happy": "humor",
             "sad": "emotional",
             "angry": "patience",
+            "shy": "emotional",
             "flustered": "emotional",
             "confused": "curiosity",
             "neutral": "politeness"

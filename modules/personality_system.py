@@ -239,7 +239,7 @@ class EmotionContinuity:
         emotion_groups = {
             "positive": ["happy", "excited"],
             "negative": ["sad", "angry", "worried"],
-            "neutral": ["neutral", "calm", "gentle", "flustered", "confused", "think"]
+            "neutral": ["neutral", "calm", "gentle", "shy", "flustered", "confused", "think"]
         }
         
         # 找到两个情绪所属的组

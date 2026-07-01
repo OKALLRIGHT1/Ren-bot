@@ -11,10 +11,19 @@ from integrations.gui_access import get_or_create_gui_access_token
 class ActivitySidecarManager:
     DEFAULT_ENDPOINT = "http://127.0.0.1:8097/gui/activity-ingest"
 
-    def __init__(self, logger=None, endpoint: str = ""):
+    def __init__(
+        self,
+        logger=None,
+        endpoint: str = "",
+        binary_path: str = "",
+        persistent: bool = False,
+    ):
         self.logger = logger
         self.process: Optional[subprocess.Popen] = None
         self.endpoint = str(endpoint or "").strip() or self.DEFAULT_ENDPOINT
+        self.binary_path = str(binary_path or "").strip()
+        self.persistent = bool(persistent)
+        self.attached_pid: Optional[int] = None
         self._log_file = None
 
     @staticmethod
@@ -31,6 +40,8 @@ class ActivitySidecarManager:
         return f"http://{host_value}:{int(port)}{prefix_value}/activity-ingest"
 
     def _binary_path(self) -> Path:
+        if self.binary_path:
+            return Path(self.binary_path).expanduser()
         root = Path(__file__).resolve().parent.parent
         return (
             root
@@ -51,6 +62,15 @@ class ActivitySidecarManager:
         if self.process and self.process.poll() is not None:
             self.process = None
             self._close_log_file()
+        if self.persistent:
+            existing_pid = self._find_existing_process_id()
+            if existing_pid:
+                self.attached_pid = existing_pid
+                if self.logger:
+                    self.logger.info(
+                        f"Rust activity agent 已在运行，复用常驻进程 pid={existing_pid}"
+                    )
+                return True
 
         env = os.environ.copy()
         env["ACTIVITY_AGENT_ENDPOINT"] = self.endpoint
@@ -90,6 +110,7 @@ class ActivitySidecarManager:
                 stdout=log_file,
                 stderr=log_file,
             )
+            self.attached_pid = None
             if self.logger:
                 self.logger.info(
                     f"Rust activity agent 已启动: {binary} endpoint={env.get('ACTIVITY_AGENT_ENDPOINT')}"
@@ -108,7 +129,38 @@ class ActivitySidecarManager:
             return False
 
     def is_running(self) -> bool:
-        return bool(self.process and self.process.poll() is None)
+        if self.process and self.process.poll() is None:
+            return True
+        if self.attached_pid:
+            return self._pid_is_running(self.attached_pid)
+        return False
+
+    def _find_existing_process_id(self) -> Optional[int]:
+        binary = str(self._binary_path()).strip().lower()
+        if not binary:
+            return None
+        try:
+            import psutil
+        except Exception:
+            return None
+        for proc in psutil.process_iter(["pid", "exe", "name"]):
+            try:
+                exe = str(proc.info.get("exe") or "").strip().lower()
+                if exe and exe == binary:
+                    return int(proc.info["pid"])
+            except Exception:
+                continue
+        return None
+
+    def _pid_is_running(self, pid: int) -> bool:
+        try:
+            import psutil
+        except Exception:
+            return False
+        try:
+            return psutil.pid_exists(int(pid))
+        except Exception:
+            return False
 
     def _close_log_file(self):
         if not self._log_file:
@@ -122,8 +174,14 @@ class ActivitySidecarManager:
     def stop(self):
         proc = self.process
         self.process = None
+        self.attached_pid = None
         if not proc:
             self._close_log_file()
+            return
+        if self.persistent:
+            self._close_log_file()
+            if self.logger:
+                self.logger.info("Rust activity agent 保持常驻，主程序退出不停止")
             return
         try:
             proc.terminate()

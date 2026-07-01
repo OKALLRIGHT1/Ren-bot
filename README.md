@@ -1,26 +1,38 @@
 # Live2D-Suzu
 
-Live2D-Suzu 是一个本地运行的 Live2D 桌面助手。它把 Live2D 形象、语音合成、长期记忆、QQ/NapCat 接入、插件工具、MCP 工具和屏幕/活动感知整合到一个可配置的桌面程序里。
+Live2D-Suzu 是一个本地运行的 AI 桌面助手项目。它以 Live2D 桌面形象为前端，把对话、语音、长期记忆、QQ/NapCat 接入、插件工具、信息源查询、邮件、音乐、截图、桌面活动感知和久坐提醒整合到一个可配置的本地程序里。
 
-项目偏向个人桌面陪伴与自动化助手，不只是简单聊天壳。
+这个项目的目标不是做一个简单聊天窗口，而是让一个本地角色能够在桌面上长期陪伴、响应消息、调用工具、记住上下文，并通过 Live2D 形象、语音和动作表现出来。
 
-## 功能概览
+## 主要功能
 
-- Live2D 桌面形象、气泡、表情、动作、口型同步。
-- 角色系统：角色提示词、服装、动作映射、TTS 配置、QQ 昵称和头像。
-- 情绪到 Live2D 动作映射，支持一个情绪配置多个动作随机播放。
-- 空闲随机动作：空闲一段时间后自动播放 `idle_random`，再回到 `idle`。
-- 模型默认姿态：动作映射里可以选择“模型默认姿态 / 刚打开状态”。
-- GPT-SoVITS / Edge TTS 路由。
-- QQ / NapCat 网关：私聊、群聊、图片理解、语音回复、远程命令。
-- 插件系统：支持 direct / react / observe / delegate 类型插件。
-- Agent Mail、音乐、信息源、截图、应用控制、技能运行等插件能力。
-- 本地记忆、每日总结、表达学习、知识库检索。
-- 可选 Rust/Live2D sidecar 活动采集，用于久坐提醒和桌面状态判断。
+- Live2D 桌面形象：气泡、表情、动作、口型同步、换装和模型预览。
+- 角色系统：角色提示词、服装、默认动作映射、TTS、QQ 昵称和头像配置。
+- 情绪动作映射：根据回复情绪触发 Live2D 表情和动作，支持一个情绪配置多个动作随机播放。
+- 空闲动作：空闲一段时间后随机播放动作，并自动回到 idle 状态。
+- 语音合成：支持 GPT-SoVITS、Edge TTS 等路由方式。
+- QQ / NapCat 接入：支持私聊、群聊、图片理解、语音回复和主人远程指令。
+- 插件系统：邮件、音乐、信息源、截图、应用控制、网页读取、技能运行等能力可通过插件扩展。
+- Agent 工具调用：主程序可以按权限调用本地工具，并对高风险操作做确认。
+- 本地记忆：支持长期记忆、每日总结、表达学习和知识库检索。
+- 桌面活动感知：可配合 Rust / Live2D sidecar 采集活动状态，用于久坐提醒和桌面状态判断。
+- 设置中心：常用配置可在 GUI 中调整，减少手动改配置文件。
+
+## 项目结构
+
+```text
+core/          应用启动、生命周期、GUI/QQ/MCP/传感器初始化
+services/      对话主流程、工具调用、回复输出和辅助服务
+modules/       Live2D、TTS、记忆、GUI、插件管理等基础模块
+plugins/       插件目录
+integrations/  QQ 网关、GUI HTTP/WS、外部系统适配
+data/          运行时配置、角色数据、状态数据和本地缓存
+tests/         自动化测试
+```
 
 ## 快速开始
 
-推荐 Python 3.10+。
+推荐使用 Python 3.10+。
 
 ```bash
 conda create -n live2d-llm python=3.10
@@ -29,112 +41,88 @@ pip install -r requirements.txt
 python boot.py
 ```
 
-如果希望程序异常退出后自动拉起，用守护模式：
+如果希望程序异常退出后自动拉起，可以使用守护入口：
 
 ```bash
 python main.py
 ```
 
-Windows 下也可以使用根目录里的启动器或打包后的 `Live2D-Suzu.exe`。
+Windows 下也可以使用根目录中的启动脚本或打包后的可执行文件启动。
 
-## Live2D 前端
+## Live2D 桌面端
 
-桌面 Live2D 前端在相邻目录：
+Live2D 桌面端可以作为独立程序运行，也可以和主程序通信。启动 Live2D 桌面端后，主程序会通过本地 WebSocket 连接它，用于发送气泡文本、表情、动作、TTS 状态和久坐提醒等事件。
 
-```text
-D:\Desktop\live2d-suzu\live2d-only
-```
+常见使用方式：
 
-主程序通过 WebSocket 和 Live2D 前端通信。启动 Live2D 前端后，主程序会自动扫描常用端口并连接。
+1. 先启动 Live2D 桌面端。
+2. 再启动主程序。
+3. 在设置中心选择角色、模型、服装、动作映射和语音配置。
+
+如果只需要桌面形象和基础久坐提醒，Live2D 桌面端也可以独立运行。
 
 ## 常用配置
 
-- `.env`：放 API Key、端口、模型服务地址等本机私密配置。
+- `.env`：本机私密配置，例如 API Key、端口、模型服务地址。
 - `data/runtime_settings.json`：GUI 保存的运行时设置。
 - `data/characters.json`：角色、服装、动作映射、TTS、QQ 档案。
-- `plugins/*/config.json`：插件配置。
-- `config.py`：默认值和旧代码兼容层，后续新增配置优先不要再塞进这里。
+- `plugins/*/config.json`：各插件自己的配置。
+- `config.py`：默认值和旧配置兼容层。
 
-空闲随机动作可用 `.env` 覆盖：
+不要把真实密钥提交到仓库。发布前请检查 `.env`、日志、缓存和本地数据库是否被误加入版本控制。
 
-```env
-IDLE_RANDOM_MOTION_ENABLED=1
-IDLE_RANDOM_MIN_SECONDS=90
-IDLE_RANDOM_MAX_SECONDS=240
-IDLE_RANDOM_MIN_IDLE_SECONDS=30
-IDLE_RANDOM_RETURN_IDLE_SECONDS=4
-```
+## 角色与动作
 
-## 动作映射说明
+角色编辑器中可以为每个角色和服装配置 Live2D 动作映射。动作映射支持：
 
-角色编辑器里可以把情绪映射到 Live2D 动作。
+- 每个情绪选择一个或多个动作。
+- 多动作随机播放。
+- 停止动作。
+- 使用模型刚加载时的默认姿态。
+- 为不同服装设置不同动作覆盖。
 
-优先级：
+动作优先级为：
 
 ```text
-服装 emotion_map > 角色 default_emotion_map > 模型自动推导 > config.EMO_TO_LIVE2D
+服装映射 > 角色默认映射 > 模型自动推导 > 全局默认映射
 ```
 
-特殊动作：
+## QQ 与插件
 
-```text
-__model_default__
-```
+QQ 接入主要通过 NapCat / OneBot 网关。插件可以提供命令、自然语言工具调用、观察事件和后台委托能力。
 
-GUI 中显示为“模型默认姿态 / 刚打开状态”。它会复用模型加载后默认播放的启动动作，适合用作 `idle` 或 `neutral`。
+常见插件能力包括：
 
-## QQ / 插件 / MCP
-
-QQ 接入主要通过 NapCat / OneBot 网关。插件可以提供命令、自然语言工具调用、观察型事件和委托任务。MCP 可作为外部工具入口接入。
-
-常见插件包括：
-
-- 邮件收发与回复
-- 音乐播放和点歌
-- 信息源查询
+- 查询和发送邮件
+- 点歌和音乐播放
+- 天气、日报和其他信息源查询
+- 截图、文件浏览和网页读取
 - 应用控制和远程重启
-- 截图与文件浏览
-- 技能运行时
+- 本地技能运行
+
+涉及发送邮件、安装能力、修改配置、删除数据、远程重启等高风险操作时，建议保持确认流程开启。
 
 ## 开发验证
 
 常用检查：
 
 ```bash
-python -m py_compile modules\live2d.py modules\emotion_controller.py
+python -m pytest
+python -m py_compile main.py boot.py
+```
+
+只验证 Live2D 动作和角色编辑相关逻辑：
+
+```bash
 python -m pytest tests\test_live2d_motion_candidates.py tests\test_character_editor_preview.py
 ```
 
-如果修改前端：
+如果修改了 Live2D 桌面端前端，请在对应前端目录运行：
 
 ```bash
-cd D:\Desktop\live2d-suzu\live2d-only
 npm run build
 ```
 
-## 目录结构
+## 说明
 
-```text
-core/          应用启动、事件总线、GUI/QQ/MCP/传感器初始化
-services/      对话主链路和拆分后的辅助服务
-modules/       Live2D、TTS、记忆、GUI、插件管理等基础模块
-plugins/       插件目录
-integrations/  QQ 网关、GUI HTTP/WS、外部系统适配
-data/          运行时配置、角色、状态和本地数据
-docs/          维护记录和专题文档
-tests/         自动化测试
-```
-
-## 维护说明
-
-- 不要硬编码密钥，使用 `.env` 或 GUI 配置。
-- 新增 GUI 可调项优先写入 `data/runtime_settings.json`。
-- 角色、服装和动作映射优先写入 `data/characters.json`。
-- 插件配置留在插件自己的 `config.json`。
-- `config.py` 只保留默认值和兼容导出。
-
-配置收束和默认姿态方案记录见：
-
-```text
-docs/config-consolidation-and-live2d-default-pose.md
-```
+这是一个偏个人化、本地化的桌面助手项目。部分功能依赖本机环境、第三方模型服务、NapCat、TTS 服务或外部 API。首次运行前建议先完成基础模型、语音、QQ 和插件配置，再逐步开启远程控制、邮件和 MCP 等高权限能力。

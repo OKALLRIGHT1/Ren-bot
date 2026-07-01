@@ -30,6 +30,7 @@ _CURRENT_COSTUME_CONFIG = {}
 _CURRENT_COSTUME_EMOTION_MAP = {}
 _CURRENT_COSTUME_MODEL_PATH = ""
 MODEL_DEFAULT_MOTION = "__model_default__"
+STOP_MOTION = "__stop_motion__"
 
 
 def _get_logger():

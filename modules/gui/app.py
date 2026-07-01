@@ -32,6 +32,7 @@ from modules.gui.sedentary_popup import (
     build_sedentary_popup_options,
     show_sedentary_popup_dialog,
 )
+from modules.runtime_settings import load_runtime_settings
 from modules.character_manager import character_manager
 
 # 引入配置
@@ -134,6 +135,13 @@ class QtChatTrayApp(QtCore.QObject):
         self._last_panel_size = QtCore.QSize(604, 156)
         self._current_mode_name = "Companion"
         self._wake_enabled = False
+        try:
+            self._work_session_status_visible = bool(
+                load_runtime_settings().get("sedentary_status_visible", True)
+            )
+        except Exception:
+            self._work_session_status_visible = True
+        self._current_costume_path = ""
         self._current_costume_name = "未设定"
 
         # --- ASR 占位符 ---
@@ -193,6 +201,14 @@ class QtChatTrayApp(QtCore.QObject):
         self.refresh_work_session_status()
 
     def apply_external_settings(self, settings: Optional[dict] = None):
+        if isinstance(settings, dict) and "sedentary_status_visible" in settings:
+            self._work_session_status_visible = bool(
+                settings.get("sedentary_status_visible", True)
+            )
+            if hasattr(self, "_lbl_work_session"):
+                self._lbl_work_session.setVisible(self._work_session_status_visible)
+            if self._work_session_status_visible:
+                self.refresh_work_session_status()
         if callable(self.on_apply_external_settings_callback):
             return self.on_apply_external_settings_callback(settings or {})
         return {}
@@ -484,6 +500,10 @@ class QtChatTrayApp(QtCore.QObject):
         self.refresh_work_session_status()
 
     def refresh_work_session_status(self) -> None:
+        if not getattr(self, "_work_session_status_visible", True):
+            if hasattr(self, "_lbl_work_session"):
+                self._lbl_work_session.setVisible(False)
+            return
         label = WORK_SESSION_EMPTY_LABEL
         tooltip = ""
         try:
@@ -675,6 +695,11 @@ class QtChatTrayApp(QtCore.QObject):
         self._settings_dialog.show()
         self._settings_dialog.raise_()
         self._settings_dialog.activateWindow()
+        if hasattr(self._settings_dialog, "ensure_on_screen"):
+            self._settings_dialog.ensure_on_screen()
+            QtCore.QTimer.singleShot(0, self._settings_dialog.ensure_on_screen)
+            QtCore.QTimer.singleShot(80, self._settings_dialog.ensure_on_screen)
+            QtCore.QTimer.singleShot(240, self._settings_dialog.ensure_on_screen)
 
     def _on_console_clicked(self):
         if not self._console_dialog:
@@ -816,6 +841,7 @@ class QtChatTrayApp(QtCore.QObject):
 
         safe_cfg = cfg if isinstance(cfg, dict) else {}
         self._external_costume_callback(path, safe_cfg)
+        self._current_costume_path = str(path or "")
         self._current_costume_name = costume_name or self._resolve_costume_name(path)
         self._refresh_character_status()
 

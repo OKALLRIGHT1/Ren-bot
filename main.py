@@ -12,102 +12,11 @@ if sys.platform.startswith('win'):
 import subprocess
 import time
 import os
-import atexit
-import hashlib
-
-if os.name == "nt":
-    import ctypes
-    from ctypes import wintypes
+from core.single_instance import SingleInstanceLock
 
 # 定义重启暗号 (如果在程序里 sys.exit(100)，守护进程就会立刻重启而不等待)
 RESTART_EXIT_CODE = 100
-LOCK_FILE_PATH = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), "data", "live2d_suzu_main.lock"
-)
-_LOCK_HANDLE = None
-
-if os.name == "nt":
-    _KERNEL32 = ctypes.WinDLL("kernel32", use_last_error=True)
-    _KERNEL32.CreateMutexW.argtypes = (
-        wintypes.LPVOID,
-        wintypes.BOOL,
-        wintypes.LPCWSTR,
-    )
-    _KERNEL32.CreateMutexW.restype = wintypes.HANDLE
-    _KERNEL32.CloseHandle.argtypes = (wintypes.HANDLE,)
-    _KERNEL32.CloseHandle.restype = wintypes.BOOL
-    _ERROR_ALREADY_EXISTS = 183
-
-
-def _lock_name() -> str:
-    root = os.path.dirname(os.path.abspath(__file__)).lower()
-    digest = hashlib.sha1(root.encode("utf-8")).hexdigest()
-    return f"Local\\Live2D_Suzu_Main_{digest}"
-
-
-def acquire_single_instance_lock():
-    """Prevent multiple watchdog processes from managing the same workspace."""
-    global _LOCK_HANDLE
-    if os.name == "nt":
-        handle = _KERNEL32.CreateMutexW(None, True, _lock_name())
-        if not handle:
-            return None
-        if ctypes.get_last_error() == _ERROR_ALREADY_EXISTS:
-            _KERNEL32.CloseHandle(handle)
-            return None
-        _LOCK_HANDLE = handle
-        atexit.register(release_single_instance_lock, handle)
-        return handle
-
-    os.makedirs(os.path.dirname(LOCK_FILE_PATH), exist_ok=True)
-    lock_file = open(LOCK_FILE_PATH, "a+", encoding="utf-8")
-    try:
-        import fcntl
-
-        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except OSError:
-        lock_file.close()
-        return None
-    try:
-        lock_file.seek(0)
-        lock_file.truncate()
-        lock_file.write(str(os.getpid()))
-        lock_file.flush()
-    except OSError:
-        try:
-            import fcntl
-
-            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
-        except Exception:
-            pass
-        lock_file.close()
-        return None
-    atexit.register(release_single_instance_lock, lock_file)
-    return lock_file
-
-
-def release_single_instance_lock(lock_file):
-    global _LOCK_HANDLE
-    if os.name == "nt":
-        try:
-            if lock_file:
-                _KERNEL32.CloseHandle(lock_file)
-        except Exception:
-            pass
-        if lock_file == _LOCK_HANDLE:
-            _LOCK_HANDLE = None
-        return
-
-    try:
-        import fcntl
-
-        fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
-    except Exception:
-        pass
-    try:
-        lock_file.close()
-    except Exception:
-        pass
+ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
 
 def run_worker():
     """启动子进程运行 boot.py"""
@@ -127,8 +36,8 @@ def run_worker():
     return process.returncode
 
 def main():
-    lock_file = acquire_single_instance_lock()
-    if lock_file is None:
+    lock = SingleInstanceLock(ROOT_DIR, "watchdog")
+    if not lock.acquire():
         print("⚠️ [守护进程] 已有 Live2D-Suzu 实例在运行，本次启动已退出。")
         return
 
