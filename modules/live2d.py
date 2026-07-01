@@ -2,6 +2,7 @@
 import asyncio
 import json
 import os
+import random
 import websockets
 from typing import Optional
 
@@ -27,6 +28,8 @@ from core.logger import get_logger
 
 _CURRENT_COSTUME_CONFIG = {}
 _CURRENT_COSTUME_EMOTION_MAP = {}
+_CURRENT_COSTUME_MODEL_PATH = ""
+MODEL_DEFAULT_MOTION = "__model_default__"
 
 
 def _get_logger():
@@ -230,12 +233,167 @@ async def _send_to_models(msg: int, msg_id: int, data_builder, max_retries: int 
 # ==========================================
 
 
+def _normalize_motion_name(raw_motion_name: str) -> str:
+    name = str(raw_motion_name or "").strip()
+    if not name:
+        return ""
+    if ":" in name:
+        return name
+    return f"Motion:{name}"
+
+
+def _motion_name_from_file(file_name: str) -> str:
+    raw = str(file_name or "").replace("\\", "/").strip()
+    if not raw:
+        return ""
+    name = raw.rsplit("/", 1)[-1]
+    lowered = name.lower()
+    for suffix in [".motion3.json", ".mtn"]:
+        if lowered.endswith(suffix):
+            return name[: -len(suffix)].strip()
+    if "." in name:
+        name = name.rsplit(".", 1)[0]
+    return name.strip()
+
+
+def _is_generic_motion_group(group_name: str) -> bool:
+    group = str(group_name or "").strip().lower()
+    return group in {"", "motion", "motions", "idle", "tapbody"}
+
+
+def _iter_motion_groups(raw_motion_refs):
+    if isinstance(raw_motion_refs, dict):
+        for group_name, items in raw_motion_refs.items():
+            if isinstance(items, list):
+                yield str(group_name), items
+        return
+    if isinstance(raw_motion_refs, list):
+        yield "Motion", raw_motion_refs
+
+
+def resolve_model_default_motion(model_path: Optional[str] = None) -> Optional[str]:
+    path = str(model_path or _CURRENT_COSTUME_MODEL_PATH or "").strip()
+    if not path:
+        return None
+    abs_path = os.path.abspath(path)
+    try:
+        with open(abs_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception:
+        return None
+
+    refs = data.get("FileReferences", {}) if isinstance(data, dict) else {}
+    motion_refs = refs.get("Motions", {}) if isinstance(refs, dict) else {}
+    if motion_refs:
+        groups = list(_iter_motion_groups(motion_refs))
+        group_names = [name for name, _ in groups]
+        selected_name = (
+            next((name for name in group_names if name.lower() == "idle"), "")
+            or next((name for name in group_names if name.lower() == "motion"), "")
+            or (group_names[0] if group_names else "")
+        )
+        for group_name, motion_items in groups:
+            if group_name != selected_name or not motion_items:
+                continue
+            first = motion_items[0]
+            if isinstance(first, dict):
+                file_name = str(first.get("File") or first.get("file") or "").strip()
+                raw_name = (
+                    first.get("Name")
+                    or first.get("name")
+                    or first.get("mtn")
+                    or _motion_name_from_file(file_name)
+                )
+            else:
+                raw_name = _motion_name_from_file(str(first)) or str(first)
+            motion_name = str(raw_name or "").strip()
+            return _normalize_motion_name(motion_name or f"{group_name}:0")
+
+    legacy_motions = data.get("motions", {}) if isinstance(data, dict) else {}
+    groups = list(_iter_motion_groups(legacy_motions))
+    if not groups:
+        return None
+    group_names = [name for name, _ in groups]
+    selected_name = (
+        next((name for name in group_names if name.lower() == "idle"), "")
+        or next((name for name in group_names if name.lower() == "motion"), "")
+        or group_names[0]
+    )
+    for group_name, motion_items in groups:
+        if group_name != selected_name or not motion_items:
+            continue
+        first = motion_items[0]
+        if isinstance(first, dict):
+            file_name = str(first.get("file") or first.get("File") or "").strip()
+            raw_name = first.get("name") or first.get("Name") or first.get("mtn")
+            if not raw_name and not _is_generic_motion_group(group_name):
+                raw_name = group_name
+            if not raw_name:
+                raw_name = _motion_name_from_file(file_name)
+        else:
+            raw_name = (
+                group_name
+                if not _is_generic_motion_group(group_name)
+                else _motion_name_from_file(str(first)) or str(first)
+            )
+        motion_name = str(raw_name or "").strip()
+        if not motion_name:
+            return None
+        return (
+            motion_name
+            if ":" in motion_name
+            else f"{str(group_name or '').strip()}:{motion_name}"
+        )
+    return None
+
+
 async def play_motion(mtn: str, motion_type: int = 0):
+    motion_name = str(mtn or "").strip()
+    if motion_name == MODEL_DEFAULT_MOTION:
+        motion_name = resolve_model_default_motion() or ""
+        if not motion_name:
+            return
     await _send_to_models(
         msg=13200,
         msg_id=2,
-        data_builder=lambda mid: {"id": mid, "type": int(motion_type), "mtn": str(mtn)},
+        data_builder=lambda mid: {"id": mid, "type": int(motion_type), "mtn": motion_name},
     )
+
+
+def pick_motion_candidate(cfg, rng=None):
+    if not isinstance(cfg, dict):
+        if isinstance(cfg, str) and cfg.strip():
+            return {"mtn": cfg.strip(), "type": 0}
+        return None
+
+    choices = cfg.get("motions")
+    valid = []
+    if isinstance(choices, list):
+        for item in choices:
+            if isinstance(item, dict):
+                mtn = str(item.get("mtn") or "").strip()
+                if not mtn:
+                    continue
+                try:
+                    motion_type = int(item.get("type", cfg.get("type", 0)) or 0)
+                except Exception:
+                    motion_type = 0
+                valid.append({"mtn": mtn, "type": motion_type})
+            elif isinstance(item, str) and item.strip():
+                valid.append({"mtn": item.strip(), "type": int(cfg.get("type", 0) or 0)})
+
+    if valid:
+        picker = rng if rng is not None else random
+        return picker.choice(valid)
+
+    mtn = str(cfg.get("mtn") or "").strip()
+    if not mtn:
+        return None
+    try:
+        motion_type = int(cfg.get("type", 0) or 0)
+    except Exception:
+        motion_type = 0
+    return {"mtn": mtn, "type": motion_type}
 
 
 async def set_expression(exp_value):
@@ -307,8 +465,9 @@ async def change_costume(model_path: str, config: dict = None):
     abs_path = abs_path.replace("\\", "/")
 
     safe_cfg = config if isinstance(config, dict) else {}
-    global _CURRENT_COSTUME_CONFIG, _CURRENT_COSTUME_EMOTION_MAP
+    global _CURRENT_COSTUME_CONFIG, _CURRENT_COSTUME_EMOTION_MAP, _CURRENT_COSTUME_MODEL_PATH
     _CURRENT_COSTUME_CONFIG = safe_cfg
+    _CURRENT_COSTUME_MODEL_PATH = abs_path
     _CURRENT_COSTUME_EMOTION_MAP = (
         safe_cfg.get("emotion_map", {})
         if isinstance(safe_cfg.get("emotion_map", {}), dict)
@@ -397,8 +556,9 @@ async def trigger_emotion(emotion: Optional[str]) -> bool:
         _get_logger().warning(f"[Live2D Emotion] 未找到情绪配置: emotion={emo}")
         return False
     exp = cfg.get("exp", None)
-    mtn = cfg.get("mtn", None)
-    mtype = int(cfg.get("type", 0) or 0)
+    motion = pick_motion_candidate(cfg)
+    mtn = motion.get("mtn") if motion else None
+    mtype = motion.get("type", 0) if motion else 0
     _get_logger().info(
         f"[Live2D Emotion] emotion={emo} source={source} exp={exp} mtn={mtn} type={mtype}"
     )

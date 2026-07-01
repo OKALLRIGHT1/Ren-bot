@@ -1,6 +1,7 @@
 # modules/emotion_controller.py
 from __future__ import annotations
 import asyncio
+import random
 import time
 from dataclasses import dataclass
 from typing import Dict, Optional, Tuple, Any
@@ -29,6 +30,8 @@ class EmotionController:
         self.last_activity: float = time.time()  # 上次互动时间
 
         self._lock = asyncio.Lock()
+        self._decay_task: Optional[asyncio.Task] = None
+        self._idle_random_task: Optional[asyncio.Task] = None
 
         # 🔴 [删除] 下面这行代码，不要在 init 里启动任务！
         # asyncio.create_task(self._decay_loop())
@@ -37,7 +40,10 @@ class EmotionController:
     def start(self, loop):
         """启动后台衰减循环"""
         # 使用传入的 loop 创建任务，这比 asyncio.create_task 更稳定
-        loop.create_task(self._decay_loop())
+        if self._decay_task is None or self._decay_task.done():
+            self._decay_task = loop.create_task(self._decay_loop())
+        if self._idle_random_task is None or self._idle_random_task.done():
+            self._idle_random_task = loop.create_task(self._idle_random_loop())
 
     def mark_activity(self, why: str = "") -> None:
         """标记有活动发生（防止衰减）"""
@@ -75,6 +81,42 @@ class EmotionController:
             print(f"📉 [Emotion] 情绪自然衰减: {self.current_emotion} -> neutral")
             await self._apply_emotion("neutral", 0.3, prefer_motion=False)
 
+    async def _idle_random_loop(self):
+        """Play occasional idle-only motions without changing the current emotion."""
+        try:
+            import config
+        except Exception:
+            config = object()
+
+        if not bool(getattr(config, "IDLE_RANDOM_MOTION_ENABLED", True)):
+            return
+
+        min_seconds = float(getattr(config, "IDLE_RANDOM_MIN_SECONDS", 90.0) or 90.0)
+        max_seconds = float(getattr(config, "IDLE_RANDOM_MAX_SECONDS", 240.0) or 240.0)
+        min_idle = float(getattr(config, "IDLE_RANDOM_MIN_IDLE_SECONDS", 30.0) or 30.0)
+        return_delay = float(
+            getattr(config, "IDLE_RANDOM_RETURN_IDLE_SECONDS", 4.0) or 4.0
+        )
+        emotion = str(
+            getattr(config, "IDLE_RANDOM_MOTION_EMO", "idle_random") or "idle_random"
+        )
+
+        min_seconds = max(5.0, min_seconds)
+        max_seconds = max(min_seconds, max_seconds)
+        min_idle = max(0.0, min_idle)
+        return_delay = max(0.0, return_delay)
+
+        while True:
+            await asyncio.sleep(random.uniform(min_seconds, max_seconds))
+            if self.agent_state != AgentState.IDLE:
+                continue
+            if time.time() - self.last_activity < min_idle:
+                continue
+            await self.play_idle_random_once(
+                emotion=emotion,
+                return_idle_delay=return_delay,
+            )
+
     async def _apply_emotion(self, emo: str, intensity: float, prefer_motion: Optional[bool]):
         async with self._lock:
             # 记录状态
@@ -110,8 +152,8 @@ class EmotionController:
                     pass
 
             # 2. 触发动作 (Motion)
-            mtn = cfg.get("mtn")
-            if mtn:
+            motion = live2d.pick_motion_candidate(cfg)
+            if motion:
                 should_play = False
                 # Keep think motion only in THINKING state.
                 think_motion_blocked = (emo == "think" and self.agent_state != AgentState.THINKING)
@@ -122,7 +164,9 @@ class EmotionController:
 
                 if should_play:
                     try:
-                        await live2d.play_motion(mtn, motion_type=int(cfg.get("type", 0)))
+                        await live2d.play_motion(
+                            motion["mtn"], motion_type=int(motion.get("type", 0))
+                        )
                     except Exception:
                         pass
 
@@ -139,11 +183,46 @@ class EmotionController:
         if not cfg:
             return
 
-        mtn = cfg.get("mtn")
-        if not mtn:
+        motion = live2d.pick_motion_candidate(cfg)
+        if not motion:
             return
 
         try:
-            await live2d.play_motion(str(mtn), motion_type=int(cfg.get("type", 0)))
+            await live2d.play_motion(
+                str(motion["mtn"]), motion_type=int(motion.get("type", 0))
+            )
         except Exception:
             pass
+
+    async def play_idle_random_once(
+        self,
+        emotion: str = "idle_random",
+        return_idle_delay: float = 4.0,
+    ) -> bool:
+        """Play one idle-random motion, then return motion track to idle."""
+        if self.agent_state != AgentState.IDLE:
+            return False
+
+        cfg = live2d.resolve_emotion_config(emotion, self.mapping)
+        if not cfg:
+            return False
+
+        motion = live2d.pick_motion_candidate(cfg)
+        if not motion:
+            return False
+
+        try:
+            await live2d.play_motion(
+                str(motion["mtn"]), motion_type=int(motion.get("type", 0))
+            )
+        except Exception:
+            return False
+
+        delay = max(0.0, float(return_idle_delay or 0.0))
+        if delay > 0:
+            await asyncio.sleep(delay)
+
+        if self.agent_state == AgentState.IDLE:
+            await self.maybe_enter_idle()
+
+        return True

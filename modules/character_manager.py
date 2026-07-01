@@ -12,10 +12,12 @@ DEFAULT_EMOTION_KEYS = [
     "happy",
     "sad",
     "angry",
+    "shy",
     "flustered",
     "confused",
     "think",
     "idle",
+    "idle_random",
     "music",
 ]
 
@@ -30,10 +32,12 @@ EMOTION_MOTION_PREFERENCES = {
     "happy": ["smile04", "smile03", "smile01", "motion_100"],
     "sad": ["sad01", "cry03", "cry01", "motion_100"],
     "angry": ["angry01", "angry03", "angry02", "motion_200"],
+    "shy": ["shame01", "shame02", "odoodo01", "motion_300"],
     "flustered": ["shame01", "shame02", "odoodo01", "motion_300"],
     "confused": ["surprised02", "surprised01", "thinking01", "motion_400"],
     "think": ["thinking01", "thinking02", "motion_001"],
     "idle": ["idle01", "nf03", "motion_000", "motion_001"],
+    "idle_random": ["idle02", "idle03", "nf01", "smile01", "motion_001"],
     "music": ["smile04", "smile03", "motion_100"],
 }
 
@@ -148,6 +152,64 @@ def _derive_emotion_map_from_model(model_path: str) -> dict[str, dict[str, Any]]
     return derived
 
 
+def _normalize_emotion_payload(cfg: Optional[dict]) -> Optional[dict[str, Any]]:
+    if not isinstance(cfg, dict):
+        return None
+
+    raw_motions = cfg.get("motions")
+    motions = []
+    if isinstance(raw_motions, list):
+        for item in raw_motions:
+            if isinstance(item, dict):
+                motion_mtn = str(item.get("mtn") or "").strip()
+                if not motion_mtn:
+                    continue
+                try:
+                    motion_type = int(item.get("type", cfg.get("type", 0)) or 0)
+                except Exception:
+                    motion_type = 0
+                candidate = {"mtn": motion_mtn, "type": motion_type}
+            else:
+                motion_mtn = str(item or "").strip()
+                if not motion_mtn:
+                    continue
+                try:
+                    motion_type = int(cfg.get("type", 0) or 0)
+                except Exception:
+                    motion_type = 0
+                candidate = {"mtn": motion_mtn, "type": motion_type}
+            if candidate not in motions:
+                motions.append(candidate)
+
+    mtn = str(cfg.get("mtn") or "").strip()
+    if not mtn and not motions:
+        return None
+
+    exp = cfg.get("exp")
+    try:
+        exp = int(exp) if exp is not None and str(exp).strip() != "" else None
+    except Exception:
+        exp = None
+
+    try:
+        type_val = int(cfg.get("type", 0) or 0)
+    except Exception:
+        type_val = 0
+
+    if motions:
+        primary = motions[0]
+        payload: dict[str, Any] = {
+            "mtn": primary["mtn"],
+            "type": int(primary.get("type", type_val) or 0),
+            "motions": motions,
+        }
+    else:
+        payload = {"mtn": mtn, "type": type_val}
+    if exp is not None:
+        payload["exp"] = exp
+    return payload
+
+
 class CharacterManager:
     def __init__(self):
         self.data = {"active_id": None, "characters": {}}
@@ -206,6 +268,22 @@ class CharacterManager:
         characters = self.data.setdefault("characters", {})
 
         for _, char_data in characters.items():
+            aliases = char_data.get("aliases") or []
+            if isinstance(aliases, str):
+                aliases = [line.strip() for line in aliases.splitlines() if line.strip()]
+                changed = True
+            elif not isinstance(aliases, list):
+                aliases = []
+                changed = True
+            normalized_aliases = []
+            for alias in aliases:
+                value = str(alias or "").strip()
+                if value and value not in normalized_aliases:
+                    normalized_aliases.append(value)
+            if char_data.get("aliases") != normalized_aliases:
+                char_data["aliases"] = normalized_aliases
+                changed = True
+
             costumes = char_data.get("costumes") or {}
             normalized = {}
 
@@ -233,6 +311,16 @@ class CharacterManager:
             current_costume = char_data.get("current_costume")
             if current_costume not in normalized:
                 char_data["current_costume"] = next(iter(normalized.keys()), None)
+                changed = True
+
+            default_emotion_map = char_data.get("default_emotion_map")
+            if not isinstance(default_emotion_map, dict):
+                source_costume = (char_data.get("current_costume") or next(iter(normalized.keys()), None))
+                source_cfg = normalized.get(source_costume) if source_costume else None
+                default_emotion_map = self._build_default_emotion_map_from_costume(
+                    source_cfg
+                )
+                char_data["default_emotion_map"] = default_emotion_map
                 changed = True
 
             tts_cfg = char_data.get("tts_config") or {}
@@ -304,7 +392,9 @@ class CharacterManager:
 
         self.data["characters"][char_id] = {
             "name": name,
+            "aliases": [],
             "prompt": prompt,
+            "default_emotion_map": {},
             "catchphrase": deepcopy(DEFAULT_CATCHPHRASE_CONFIG),
             "costumes": {},
             "tts_config": {
@@ -398,17 +488,80 @@ class CharacterManager:
         if not char:
             return {}
         costume = (char.get("costumes") or {}).get(costume_name) or {}
+        character_map = char.get("default_emotion_map")
+        if not isinstance(character_map, dict):
+            character_map = {}
         emotion_map = costume.get("emotion_map")
         if not isinstance(emotion_map, dict):
             emotion_map = {}
         model_path = str(costume.get("path") or "").strip()
         derived_map = _derive_emotion_map_from_model(model_path)
         runtime_map = deepcopy(derived_map)
+        runtime_map.update(deepcopy(character_map))
         runtime_map.update(deepcopy(emotion_map))
         return {
             "emotion_map": runtime_map,
             "derived_emotion_keys": sorted(derived_map.keys()),
+            "character_default_emotion_keys": sorted(character_map.keys()),
+            "costume_override_emotion_keys": sorted(emotion_map.keys()),
         }
+
+    def _build_default_emotion_map_from_costume(self, costume_cfg: Any) -> dict[str, Any]:
+        if not isinstance(costume_cfg, dict):
+            return {}
+        result = _derive_emotion_map_from_model(str(costume_cfg.get("path") or ""))
+        overrides = costume_cfg.get("emotion_map")
+        if isinstance(overrides, dict):
+            result.update(deepcopy(overrides))
+        return result
+
+    def set_character_emotion_default(
+        self, char_id: str, emotion: str, cfg: Optional[dict]
+    ) -> bool:
+        char = self.get_character(char_id)
+        if not char:
+            return False
+        emo = (emotion or "").strip().lower()
+        if not emo:
+            return False
+
+        emotion_map = char.setdefault("default_emotion_map", {})
+        if not isinstance(emotion_map, dict):
+            emotion_map = {}
+            char["default_emotion_map"] = emotion_map
+
+        payload = _normalize_emotion_payload(cfg)
+        if payload is None:
+            emotion_map.pop(emo, None)
+        else:
+            emotion_map[emo] = payload
+        self.save()
+        return True
+
+    def generate_character_default_emotion_map(
+        self, char_id: str, costume_name: Optional[str] = None
+    ) -> bool:
+        char = self.get_character(char_id)
+        if not char:
+            return False
+        costumes = char.get("costumes") or {}
+        if not isinstance(costumes, dict) or not costumes:
+            char["default_emotion_map"] = {}
+            self.save()
+            return True
+
+        source_name = costume_name if costume_name in costumes else char.get("current_costume")
+        if source_name not in costumes:
+            source_name = next(iter(costumes.keys()), None)
+        source_cfg = costumes.get(source_name) if source_name else None
+        if not isinstance(source_cfg, dict):
+            return False
+
+        char["default_emotion_map"] = self._build_default_emotion_map_from_costume(
+            source_cfg
+        )
+        self.save()
+        return True
 
     def set_costume_emotion_override(
         self, char_id: str, costume_name: str, emotion: str, cfg: Optional[dict]
@@ -430,33 +583,11 @@ class CharacterManager:
             emotion_map = {}
             costume["emotion_map"] = emotion_map
 
-        if not cfg:
+        payload = _normalize_emotion_payload(cfg)
+        if payload is None:
             emotion_map.pop(emo, None)
             self.save()
             return True
-
-        mtn = (cfg.get("mtn") or "").strip()
-        exp = cfg.get("exp")
-        type_val = cfg.get("type", 0)
-
-        if not mtn:
-            emotion_map.pop(emo, None)
-            self.save()
-            return True
-
-        try:
-            exp = int(exp) if exp is not None and str(exp).strip() != "" else None
-        except Exception:
-            exp = None
-
-        try:
-            type_val = int(type_val)
-        except Exception:
-            type_val = 0
-
-        payload = {"mtn": mtn, "type": type_val}
-        if exp is not None:
-            payload["exp"] = exp
 
         emotion_map[emo] = payload
         self.save()

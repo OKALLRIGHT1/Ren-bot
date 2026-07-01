@@ -5,6 +5,7 @@ import requests
 
 from PySide6 import QtWidgets, QtCore, QtGui
 from modules.character_manager import character_manager, DEFAULT_EMOTION_KEYS
+from modules.live2d import MODEL_DEFAULT_MOTION
 
 try:
     from modules.gui.styles import get_ui_palette
@@ -190,6 +191,7 @@ class CharacterEditorWidget(QtWidgets.QWidget):
         self.current_costume_name = None
         self._current_motion_options = []
         self._current_expression_options = []
+        self._selected_motion_candidates = []
 
         self.setStyleSheet(get_character_editor_styles_v2())
         self._init_ui()
@@ -224,6 +226,8 @@ class CharacterEditorWidget(QtWidgets.QWidget):
         btn_add_char.setObjectName("charPrimary")
         btn_add_char.clicked.connect(self._add_character)
 
+        # 允许列表缩小，避免其 minimumSizeHint 顶住外层对话框高度
+        self.char_list.setMinimumHeight(0)
         left_layout.addWidget(self.char_list, 1)
         left_layout.addWidget(btn_add_char)
 
@@ -295,6 +299,11 @@ class CharacterEditorWidget(QtWidgets.QWidget):
         self.edit_name = QtWidgets.QLineEdit()
         self.edit_name.textChanged.connect(self._save_current_char)
         form.addRow("角色名称:", self.edit_name)
+        self.edit_aliases = QtWidgets.QPlainTextEdit()
+        self.edit_aliases.setMaximumHeight(72)
+        self.edit_aliases.setPlaceholderText("每行一个别名，例如：祥子、小祥")
+        self.edit_aliases.textChanged.connect(self._save_current_char)
+        form.addRow("别名:", self.edit_aliases)
         layout.addLayout(form)
 
         layout.addWidget(QtWidgets.QLabel("人设提示词 (System Prompt):"))
@@ -509,6 +518,8 @@ class CharacterEditorWidget(QtWidgets.QWidget):
         self.costume_list = QtWidgets.QListWidget()
         self.costume_list.itemDoubleClicked.connect(self._wear_selected_costume)
         self.costume_list.currentItemChanged.connect(self._on_costume_changed)
+        # 允许列表缩小，避免其 minimumSizeHint 顶住外层对话框高度
+        self.costume_list.setMinimumHeight(0)
         left_layout.addWidget(self.costume_list, 1)
 
         btn_wear = QtWidgets.QPushButton("👕 立即换穿")
@@ -526,6 +537,12 @@ class CharacterEditorWidget(QtWidgets.QWidget):
         btn_action_row.addWidget(btn_import, 1)
         btn_action_row.addWidget(btn_del_cos, 1)
         left_layout.addLayout(btn_action_row)
+
+        btn_generate_role_default = QtWidgets.QPushButton("设为角色默认来源")
+        btn_generate_role_default.clicked.connect(
+            self._generate_character_default_from_current_costume
+        )
+        left_layout.addWidget(btn_generate_role_default)
 
         self.lbl_costume_summary = QtWidgets.QLabel("未加载模型")
         self.lbl_costume_summary.setObjectName("charHint")
@@ -552,6 +569,8 @@ class CharacterEditorWidget(QtWidgets.QWidget):
             QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows
         )
         self.emo_table.itemSelectionChanged.connect(self._on_emotion_selection_changed)
+        # 允许表格缩小，避免其 minimumSizeHint 顶住外层对话框高度
+        self.emo_table.setMinimumHeight(0)
         right_layout.addWidget(self.emo_table, 1)
 
         self.edit_mapping_group = QtWidgets.QGroupBox("编辑选中情绪映射")
@@ -565,6 +584,8 @@ class CharacterEditorWidget(QtWidgets.QWidget):
 
         form_grid = QtWidgets.QGridLayout()
         form_grid.setSpacing(6)
+        # 让动作/表情下拉框所在列可伸缩，窄宽时让位于右侧固定宽度按钮，避免重叠
+        form_grid.setColumnStretch(1, 1)
 
         form_grid.addWidget(QtWidgets.QLabel("动作 (Motion):"), 0, 0)
         self.combo_motion = QtWidgets.QComboBox()
@@ -572,14 +593,32 @@ class CharacterEditorWidget(QtWidgets.QWidget):
 
         btn_preview_motion = QtWidgets.QPushButton("▶ 预览")
         btn_preview_motion.clicked.connect(self._preview_selected_motion)
-        btn_preview_motion.setFixedWidth(64)
+        btn_preview_motion.setMinimumWidth(64)
+        btn_preview_motion.setMaximumWidth(64)
         form_grid.addWidget(btn_preview_motion, 0, 2)
+
+        btn_add_motion_candidate = QtWidgets.QPushButton("+ 候选")
+        btn_add_motion_candidate.clicked.connect(self._add_motion_candidate)
+        btn_add_motion_candidate.setMinimumWidth(72)
+        btn_add_motion_candidate.setMaximumWidth(72)
+        form_grid.addWidget(btn_add_motion_candidate, 0, 3)
 
         form_grid.addWidget(QtWidgets.QLabel("动作类型:"), 1, 0)
         self.combo_motion_type = QtWidgets.QComboBox()
         self.combo_motion_type.addItem("普通 (0)", 0)
         self.combo_motion_type.addItem("闲置 (1)", 1)
-        form_grid.addWidget(self.combo_motion_type, 1, 1, 1, 2)
+        form_grid.addWidget(self.combo_motion_type, 1, 1, 1, 3)
+
+        form_grid.addWidget(QtWidgets.QLabel("候选动作:"), 4, 0)
+        self.motion_candidates_list = QtWidgets.QListWidget()
+        self.motion_candidates_list.setMaximumHeight(72)
+        form_grid.addWidget(self.motion_candidates_list, 4, 1, 1, 2)
+
+        btn_remove_motion_candidate = QtWidgets.QPushButton("移除")
+        btn_remove_motion_candidate.clicked.connect(self._remove_motion_candidate)
+        btn_remove_motion_candidate.setMinimumWidth(72)
+        btn_remove_motion_candidate.setMaximumWidth(72)
+        form_grid.addWidget(btn_remove_motion_candidate, 4, 3)
 
         form_grid.addWidget(QtWidgets.QLabel("表情 (Expr):"), 2, 0)
         self.combo_expression = QtWidgets.QComboBox()
@@ -587,12 +626,18 @@ class CharacterEditorWidget(QtWidgets.QWidget):
 
         btn_preview_expr = QtWidgets.QPushButton("▶ 预览")
         btn_preview_expr.clicked.connect(self._preview_selected_expression)
-        btn_preview_expr.setFixedWidth(64)
+        btn_preview_expr.setMinimumWidth(64)
+        btn_preview_expr.setMaximumWidth(64)
         form_grid.addWidget(btn_preview_expr, 2, 2)
 
         edit_layout.addLayout(form_grid)
 
         btn_save_row = QtWidgets.QHBoxLayout()
+        self.btn_save_character_map = QtWidgets.QPushButton("保存到角色默认")
+        self.btn_save_character_map.setObjectName("charPrimary")
+        self.btn_save_character_map.clicked.connect(
+            self._apply_dropdown_to_character_default
+        )
         self.btn_save_map = QtWidgets.QPushButton("✅ 保存映射")
         self.btn_save_map.setObjectName("charPrimary")
         self.btn_save_map.clicked.connect(self._apply_dropdown_to_selected_emotion)
@@ -601,6 +646,7 @@ class CharacterEditorWidget(QtWidgets.QWidget):
         self.btn_clear_map.setObjectName("charDanger")
         self.btn_clear_map.clicked.connect(self._clear_selected_emotion_override)
 
+        btn_save_row.addWidget(self.btn_save_character_map, 1)
         btn_save_row.addWidget(self.btn_save_map, 1)
         btn_save_row.addWidget(self.btn_clear_map, 1)
         edit_layout.addLayout(btn_save_row)
@@ -643,6 +689,7 @@ class CharacterEditorWidget(QtWidgets.QWidget):
             return
 
         self.edit_name.blockSignals(True)
+        self.edit_aliases.blockSignals(True)
         self.edit_prompt.blockSignals(True)
         self.catchphrase_enabled.blockSignals(True)
         self.catchphrase_text.blockSignals(True)
@@ -652,6 +699,14 @@ class CharacterEditorWidget(QtWidgets.QWidget):
         self.qq_profile_avatar.blockSignals(True)
 
         self.edit_name.setText(data.get("name", ""))
+        aliases = data.get("aliases") or []
+        if isinstance(aliases, str):
+            aliases_text = aliases
+        elif isinstance(aliases, list):
+            aliases_text = "\n".join(str(item) for item in aliases if str(item).strip())
+        else:
+            aliases_text = ""
+        self.edit_aliases.setPlainText(aliases_text)
         self.edit_prompt.setPlainText(data.get("prompt", ""))
         catchphrase_cfg = data.get("catchphrase") or {}
         self.catchphrase_enabled.setChecked(bool(catchphrase_cfg.get("enabled", False)))
@@ -689,6 +744,7 @@ class CharacterEditorWidget(QtWidgets.QWidget):
         self.tts_status.setPlainText("")
 
         self.edit_name.blockSignals(False)
+        self.edit_aliases.blockSignals(False)
         self.edit_prompt.blockSignals(False)
         self.catchphrase_enabled.blockSignals(False)
         self.catchphrase_text.blockSignals(False)
@@ -732,6 +788,11 @@ class CharacterEditorWidget(QtWidgets.QWidget):
             return
         data = self.mgr.get_character(self.current_char_id)
         data["name"] = self.edit_name.text()
+        data["aliases"] = [
+            line.strip()
+            for line in self.edit_aliases.toPlainText().splitlines()
+            if line.strip()
+        ]
         data["prompt"] = self.edit_prompt.toPlainText()
         data["catchphrase"] = {
             "enabled": bool(self.catchphrase_enabled.isChecked()),
@@ -1006,13 +1067,17 @@ class CharacterEditorWidget(QtWidgets.QWidget):
                         motion_name = (
                             str(raw_name).strip() if raw_name else f"{group_name}:{idx}"
                         )
+                        preview_mtn = motion_name
+                        group_text = str(group_name or "").strip()
+                        if group_text and ":" not in preview_mtn:
+                            preview_mtn = f"{group_text}:{preview_mtn}"
                         motions.append(
                             {
                                 "name": motion_name,
                                 "raw_name": str(raw_name).strip()
                                 if raw_name
                                 else motion_name,
-                                "preview_mtn": motion_name,
+                                "preview_mtn": preview_mtn,
                                 "group": group_name,
                                 "index": int(idx),
                             }
@@ -1054,6 +1119,7 @@ class CharacterEditorWidget(QtWidgets.QWidget):
         )
 
         self.combo_motion.clear()
+        self.combo_motion.addItem("模型默认姿态 / 刚打开状态", MODEL_DEFAULT_MOTION)
         if self._current_motion_options:
             for item in self._current_motion_options:
                 name = str(item.get("name") or "").strip()
@@ -1063,9 +1129,6 @@ class CharacterEditorWidget(QtWidgets.QWidget):
                 preview_name = raw_name or name
                 label = f"{preview_name} [{group}]" if group else preview_name
                 self.combo_motion.addItem(label, preview_mtn or name)
-        else:
-            self.combo_motion.addItem("(未解析到动作)", "")
-
         self.combo_expression.clear()
         if self._current_expression_options:
             for item in self._current_expression_options:
@@ -1076,24 +1139,112 @@ class CharacterEditorWidget(QtWidgets.QWidget):
         else:
             self.combo_expression.addItem("(未解析到表情)", None)
 
-    def _resolve_emotion_row(self, emotion: str, overrides: dict):
+    def _resolve_emotion_row(
+        self,
+        emotion: str,
+        derived_map: dict,
+        character_map: dict,
+        costume_map: dict,
+    ):
         default_cfg = (
             EMO_TO_LIVE2D.get(emotion, {}) if isinstance(EMO_TO_LIVE2D, dict) else {}
         )
-        override_cfg = overrides.get(emotion, {}) if isinstance(overrides, dict) else {}
+        cfg = default_cfg if isinstance(default_cfg, dict) else {}
+        source = "global"
+        derived_cfg = derived_map.get(emotion, {}) if isinstance(derived_map, dict) else {}
+        if isinstance(derived_cfg, dict) and derived_cfg.get("mtn"):
+            cfg = derived_cfg
+            source = "derived"
+        character_cfg = (
+            character_map.get(emotion, {}) if isinstance(character_map, dict) else {}
+        )
+        if isinstance(character_cfg, dict) and (
+            character_cfg.get("mtn") or character_cfg.get("motions")
+        ):
+            cfg = character_cfg
+            source = "character"
+        costume_cfg = costume_map.get(emotion, {}) if isinstance(costume_map, dict) else {}
+        if isinstance(costume_cfg, dict) and (
+            costume_cfg.get("mtn") or costume_cfg.get("motions")
+        ):
+            cfg = costume_cfg
+            source = "costume"
 
-        if isinstance(override_cfg, dict) and override_cfg.get("mtn"):
-            mtn = str(override_cfg.get("mtn", ""))
-            exp = override_cfg.get("exp", "")
-            source = "服装覆盖"
+        if isinstance(cfg, dict) and cfg.get("motions"):
+            mtn = self._format_motion_candidates(self._normalize_motion_candidates(cfg))
         else:
-            mtn = (
-                str(default_cfg.get("mtn", "")) if isinstance(default_cfg, dict) else ""
-            )
-            exp = default_cfg.get("exp", "") if isinstance(default_cfg, dict) else ""
-            source = "默认"
-
+            mtn = str(cfg.get("mtn", "")) if isinstance(cfg, dict) else ""
+        exp = cfg.get("exp", "") if isinstance(cfg, dict) else ""
         return mtn, "" if exp is None else str(exp), source
+
+    def _normalize_motion_candidates(self, cfg: dict):
+        if not isinstance(cfg, dict):
+            return []
+        candidates = []
+        raw = cfg.get("motions")
+        if isinstance(raw, list):
+            for item in raw:
+                if isinstance(item, dict):
+                    mtn = str(item.get("mtn") or "").strip()
+                    type_val = item.get("type", cfg.get("type", 0))
+                else:
+                    mtn = str(item or "").strip()
+                    type_val = cfg.get("type", 0)
+                if not mtn:
+                    continue
+                try:
+                    type_val = int(type_val or 0)
+                except Exception:
+                    type_val = 0
+                candidate = {"mtn": mtn, "type": type_val}
+                if candidate not in candidates:
+                    candidates.append(candidate)
+        if not candidates:
+            mtn = str(cfg.get("mtn") or "").strip()
+            if mtn:
+                try:
+                    type_val = int(cfg.get("type", 0) or 0)
+                except Exception:
+                    type_val = 0
+                candidates.append({"mtn": mtn, "type": type_val})
+        return candidates
+
+    def _format_motion_candidates(self, candidates):
+        if not candidates:
+            return ""
+        return "\n".join(
+            f"{item.get('mtn', '')} (type={int(item.get('type', 0) or 0)})"
+            for item in candidates
+            if item.get("mtn")
+        )
+
+    def _refresh_motion_candidates_list(self):
+        if not hasattr(self, "motion_candidates_list"):
+            return
+        self.motion_candidates_list.clear()
+        for item in self._selected_motion_candidates:
+            self.motion_candidates_list.addItem(
+                f"{item.get('mtn', '')} (type={int(item.get('type', 0) or 0)})"
+            )
+
+    def _add_motion_candidate(self):
+        mtn = str(self.combo_motion.currentData() or "").strip()
+        if not mtn:
+            return
+        candidate = {
+            "mtn": mtn,
+            "type": int(self.combo_motion_type.currentData() or 0),
+        }
+        if candidate not in self._selected_motion_candidates:
+            self._selected_motion_candidates.append(candidate)
+        self._refresh_motion_candidates_list()
+
+    def _remove_motion_candidate(self):
+        row = self.motion_candidates_list.currentRow()
+        if row < 0 or row >= len(self._selected_motion_candidates):
+            return
+        self._selected_motion_candidates.pop(row)
+        self._refresh_motion_candidates_list()
 
     def _refresh_costume_detail_ui(self):
         if not self.current_char_id or not self.current_costume_name:
@@ -1108,9 +1259,14 @@ class CharacterEditorWidget(QtWidgets.QWidget):
         char = self.mgr.get_character(self.current_char_id) or {}
         costume = (char.get("costumes") or {}).get(self.current_costume_name) or {}
         model_path = costume.get("path", "")
-        overrides = (
+        costume_map = (
             costume.get("emotion_map", {})
             if isinstance(costume.get("emotion_map", {}), dict)
+            else {}
+        )
+        character_map = (
+            char.get("default_emotion_map", {})
+            if isinstance(char.get("default_emotion_map", {}), dict)
             else {}
         )
 
@@ -1128,11 +1284,29 @@ class CharacterEditorWidget(QtWidgets.QWidget):
             f"• 表情数量: {len(expr_labels)} 个"
         )
         self._refresh_preview_options(motions, expressions)
+        runtime_cfg = self.mgr.get_costume_runtime_config(
+            self.current_char_id, self.current_costume_name
+        )
+        runtime_map = (
+            runtime_cfg.get("emotion_map", {})
+            if isinstance(runtime_cfg.get("emotion_map", {}), dict)
+            else {}
+        )
+        derived_keys = set(runtime_cfg.get("derived_emotion_keys") or [])
+        character_keys = set(runtime_cfg.get("character_default_emotion_keys") or [])
+        costume_keys = set(runtime_cfg.get("costume_override_emotion_keys") or [])
+        derived_map = {
+            key: value
+            for key, value in runtime_map.items()
+            if key in derived_keys and key not in character_keys and key not in costume_keys
+        }
 
         rows = list(DEFAULT_EMOTION_KEYS)
         self.emo_table.setRowCount(len(rows))
         for row, emo in enumerate(rows):
-            mtn, exp, source = self._resolve_emotion_row(emo, overrides)
+            mtn, exp, source = self._resolve_emotion_row(
+                emo, derived_map, character_map, costume_map
+            )
             self.emo_table.setItem(row, 0, QtWidgets.QTableWidgetItem(emo))
             self.emo_table.setItem(row, 1, QtWidgets.QTableWidgetItem(mtn))
             self.emo_table.setItem(row, 2, QtWidgets.QTableWidgetItem(exp))
@@ -1166,10 +1340,14 @@ class CharacterEditorWidget(QtWidgets.QWidget):
         emo = self._selected_emotion()
         if not emo:
             self.lbl_selected_emo.setText("请在上方列表中选择一个情绪")
+            self.btn_save_character_map.setEnabled(False)
             self.btn_save_map.setEnabled(False)
             self.btn_clear_map.setEnabled(False)
+            self._selected_motion_candidates = []
+            self._refresh_motion_candidates_list()
             return
 
+        self.btn_save_character_map.setEnabled(True)
         self.btn_save_map.setEnabled(True)
         self.btn_clear_map.setEnabled(True)
         self.lbl_selected_emo.setText(f"当前选中情绪: {emo.upper()}")
@@ -1184,31 +1362,51 @@ class CharacterEditorWidget(QtWidgets.QWidget):
         mtn_str = mtn_cell.text().strip() if mtn_cell else ""
         exp_str = exp_cell.text().strip() if exp_cell else ""
 
-        # Update motion selection
-        if mtn_str:
+        selected_mtn = mtn_str
+        selected_type = 0
+        if self.current_char_id and self.current_costume_name:
+            char = self.mgr.get_character(self.current_char_id) or {}
+            costume = (char.get("costumes") or {}).get(self.current_costume_name) or {}
+            costume_map = costume.get("emotion_map", {})
+            character_map = char.get("default_emotion_map", {})
+            costume_cfg = costume_map.get(emo, {}) if isinstance(costume_map, dict) else {}
+            character_cfg = (
+                character_map.get(emo, {}) if isinstance(character_map, dict) else {}
+            )
+            override_cfg = (
+                costume_cfg
+                if isinstance(costume_cfg, dict)
+                and (costume_cfg.get("mtn") or costume_cfg.get("motions"))
+                else character_cfg
+            )
+            self._selected_motion_candidates = self._normalize_motion_candidates(
+                override_cfg if isinstance(override_cfg, dict) else {}
+            )
+            self._refresh_motion_candidates_list()
+            if self._selected_motion_candidates:
+                selected_mtn = str(self._selected_motion_candidates[0].get("mtn") or "")
+                selected_type = int(self._selected_motion_candidates[0].get("type", 0) or 0)
+            elif isinstance(override_cfg, dict):
+                selected_type = int(override_cfg.get("type", 0) or 0)
+
+        if selected_mtn:
             idx = -1
             for i in range(self.combo_motion.count()):
-                if self.combo_motion.itemData(i) == mtn_str:
+                if self.combo_motion.itemData(i) == selected_mtn:
                     idx = i
                     break
             if idx < 0:
-                idx = self.combo_motion.findText(mtn_str)
+                idx = self.combo_motion.findText(selected_mtn)
             if idx >= 0:
                 self.combo_motion.setCurrentIndex(idx)
         else:
             self.combo_motion.setCurrentIndex(0)
 
-        # Update motion type selection from database override
-        if self.current_char_id and self.current_costume_name:
-            char = self.mgr.get_character(self.current_char_id) or {}
-            costume = (char.get("costumes") or {}).get(self.current_costume_name) or {}
-            overrides = costume.get("emotion_map", {})
-            type_val = overrides.get(emo, {}).get("type", 0)
-            idx = self.combo_motion_type.findData(type_val)
-            if idx >= 0:
-                self.combo_motion_type.setCurrentIndex(idx)
-            else:
-                self.combo_motion_type.setCurrentIndex(0)
+        idx = self.combo_motion_type.findData(selected_type)
+        if idx >= 0:
+            self.combo_motion_type.setCurrentIndex(idx)
+        else:
+            self.combo_motion_type.setCurrentIndex(0)
 
         # Update expression selection
         if exp_str:
@@ -1259,11 +1457,14 @@ class CharacterEditorWidget(QtWidgets.QWidget):
             )
             return
         motion_type = int(self.combo_motion_type.currentData() or 0)
-        delay_ms = 450 if self._load_selected_costume_for_preview() else 0
-        QtCore.QTimer.singleShot(
-            delay_ms,
-            lambda: self.main_app.preview_motion(motion_name, motion_type),
-        )
+        reloaded = self._load_selected_costume_for_preview()
+        for delay_ms in self._preview_retry_delays(reloaded):
+            QtCore.QTimer.singleShot(
+                delay_ms,
+                lambda name=motion_name, type_=motion_type: self.main_app.preview_motion(
+                    name, type_
+                ),
+            )
 
     def _preview_selected_expression(self):
         if not self.main_app or not hasattr(self.main_app, "preview_expression"):
@@ -1274,11 +1475,26 @@ class CharacterEditorWidget(QtWidgets.QWidget):
                 self, "提示", "该表情未识别到 exp ID，无法直接预览。"
             )
             return
-        delay_ms = 450 if self._load_selected_costume_for_preview() else 0
-        QtCore.QTimer.singleShot(
-            delay_ms,
-            lambda: self.main_app.preview_expression(exp_value),
-        )
+        reloaded = self._load_selected_costume_for_preview()
+        for delay_ms in self._preview_retry_delays(reloaded):
+            QtCore.QTimer.singleShot(
+                delay_ms,
+                lambda value=exp_value: self.main_app.preview_expression(value),
+            )
+
+    def _preview_retry_delays(self, reloaded: bool):
+        if reloaded:
+            return (700, 1400, 2200)
+        return (0,)
+
+    def _normalize_preview_model_path(self, path: str) -> str:
+        raw = str(path or "").strip().replace("\\", "/")
+        if not raw:
+            return ""
+        try:
+            return os.path.normcase(os.path.abspath(raw)).replace("\\", "/")
+        except Exception:
+            return raw.lower()
 
     def _load_selected_costume_for_preview(self) -> bool:
         if (
@@ -1292,6 +1508,11 @@ class CharacterEditorWidget(QtWidgets.QWidget):
         costume = (char.get("costumes") or {}).get(self.current_costume_name) or {}
         path = str(costume.get("path") or "").strip()
         if not path:
+            return False
+        current_path = getattr(self.main_app, "_current_costume_path", "")
+        if self._normalize_preview_model_path(current_path) == self._normalize_preview_model_path(
+            path
+        ):
             return False
         cfg = self.mgr.get_costume_runtime_config(
             self.current_char_id, self.current_costume_name
@@ -1317,10 +1538,13 @@ class CharacterEditorWidget(QtWidgets.QWidget):
             QtWidgets.QMessageBox.warning(self, "无效输入", "当前动作为空，无法应用。")
             return
 
+        motion_type = int(self.combo_motion_type.currentData() or 0)
         payload = {
             "mtn": mtn,
-            "type": int(self.combo_motion_type.currentData() or 0),
+            "type": motion_type,
         }
+        if len(self._selected_motion_candidates) > 1:
+            payload["motions"] = [dict(item) for item in self._selected_motion_candidates]
         exp_value = self.combo_expression.currentData()
         if exp_value is not None:
             if isinstance(exp_value, str) and exp_value.strip():
@@ -1336,6 +1560,40 @@ class CharacterEditorWidget(QtWidgets.QWidget):
         if current_row >= 0:
             self.emo_table.setCurrentCell(current_row, 0)
 
+    def _apply_dropdown_to_character_default(self):
+        if not self.current_char_id:
+            return
+        emo = self._selected_emotion()
+        if not emo:
+            QtWidgets.QMessageBox.information(
+                self, "Info", "Select an emotion first."
+            )
+            return
+
+        mtn = str(self.combo_motion.currentData() or "").strip()
+        if not mtn:
+            QtWidgets.QMessageBox.warning(self, "Invalid", "Motion is empty.")
+            return
+
+        payload = {
+            "mtn": mtn,
+            "type": int(self.combo_motion_type.currentData() or 0),
+        }
+        if len(self._selected_motion_candidates) > 1:
+            payload["motions"] = [dict(item) for item in self._selected_motion_candidates]
+        exp_value = self.combo_expression.currentData()
+        if exp_value is not None:
+            if isinstance(exp_value, str) and exp_value.strip():
+                payload["exp"] = exp_value.strip()
+            else:
+                payload["exp"] = int(exp_value)
+
+        self.mgr.set_character_emotion_default(self.current_char_id, emo, payload)
+        current_row = self.emo_table.currentRow()
+        self._refresh_costume_detail_ui()
+        if current_row >= 0:
+            self.emo_table.setCurrentCell(current_row, 0)
+
     def _clear_selected_emotion_override(self):
         if not self.current_char_id or not self.current_costume_name:
             return
@@ -1346,9 +1604,33 @@ class CharacterEditorWidget(QtWidgets.QWidget):
             )
             return
 
-        self.mgr.set_costume_emotion_override(
-            self.current_char_id, self.current_costume_name, emo, None
+        char = self.mgr.get_character(self.current_char_id) or {}
+        costume = (char.get("costumes") or {}).get(self.current_costume_name) or {}
+        costume_map = costume.get("emotion_map", {})
+        if isinstance(costume_map, dict) and emo in costume_map:
+            self.mgr.set_costume_emotion_override(
+                self.current_char_id, self.current_costume_name, emo, None
+            )
+        else:
+            self.mgr.set_character_emotion_default(self.current_char_id, emo, None)
+        self._selected_motion_candidates = []
+        self._refresh_motion_candidates_list()
+        current_row = self.emo_table.currentRow()
+        self._refresh_costume_detail_ui()
+        if current_row >= 0:
+            self.emo_table.setCurrentCell(current_row, 0)
+
+    def _generate_character_default_from_current_costume(self):
+        if not self.current_char_id or not self.current_costume_name:
+            return
+        ok = self.mgr.generate_character_default_emotion_map(
+            self.current_char_id, self.current_costume_name
         )
+        if not ok:
+            QtWidgets.QMessageBox.warning(
+                self, "Invalid", "Cannot generate defaults from this costume."
+            )
+            return
         current_row = self.emo_table.currentRow()
         self._refresh_costume_detail_ui()
         if current_row >= 0:
