@@ -42,6 +42,26 @@ def test_character_manager_saves_multiple_motion_candidates(tmp_path, monkeypatc
     assert saved["exp"] == 3
 
 
+def test_character_manager_adds_default_user_address(tmp_path, monkeypatch):
+    monkeypatch.setattr(character_manager_module, "DATA_FILE", str(tmp_path / "characters.json"))
+    mgr = CharacterManager()
+    mgr.data = {
+        "active_id": "tomori",
+        "characters": {
+            "tomori": {
+                "name": "tomori",
+                "prompt": "",
+                "costumes": {"casual": {"path": "model.json", "emotion_map": {}}},
+                "current_costume": "casual",
+            }
+        },
+    }
+
+    mgr._normalize_schema()
+
+    assert mgr.data["characters"]["tomori"]["user_address"] == "Master"
+
+
 def test_character_default_emotion_map_overrides_model_derivation(tmp_path, monkeypatch):
     monkeypatch.setattr(character_manager_module, "DATA_FILE", str(tmp_path / "characters.json"))
     monkeypatch.setattr(

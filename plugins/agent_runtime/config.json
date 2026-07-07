@@ -1,0 +1,35 @@
+{
+    "name": "Agent 运行时",
+    "trigger": "agent_runtime",
+    "llm_command": "agent_runtime",
+    "type": "direct",
+    "aliases": [
+        "agent 自检",
+        "agent 工具列表",
+        "agent 能力列表",
+        "agent 安装计划",
+        "agent 位置",
+        "代码在哪",
+        "项目目录在哪",
+        "agent runtime",
+        "agent tools",
+        "agent health"
+    ],
+    "description": "查看轻量 AgentRuntime 的工具目录、MCP 状态，并生成受控能力安装计划。不会直接执行安装或写配置。",
+    "example_arg": "/agent 自检",
+    "timeout_sec": 6,
+    "tool_examples": [
+        "/agent 自检",
+        "/agent 工具列表",
+        "/agent 位置",
+        "/agent 安装计划 weather"
+    ],
+    "access_control": {
+        "allow_local": true,
+        "allow_remote_qq": true,
+        "allow_qq_owner": true,
+        "allow_qq_others": false,
+        "allow_group_without_at": false
+    },
+    "settings": {}
+}

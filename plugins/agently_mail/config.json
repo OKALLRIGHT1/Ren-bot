@@ -1,0 +1,75 @@
+{
+    "name": "Agent Mail",
+    "trigger": "agently_mail",
+    "llm_command": "agently_mail",
+    "type": "direct",
+    "aliases": [
+        "agently_mail",
+        "邮件",
+        "邮箱",
+        "收件箱",
+        "最近邮件",
+        "查邮件",
+        "读邮件",
+        "发邮件",
+        "回邮件",
+        "转发邮件"
+    ],
+    "description": "通过本机 agently-cli 查询、读取、搜索和按确认流程发送邮件。",
+    "example_arg": "最近邮件",
+    "timeout_sec": 150,
+    "version": "0.1.0",
+    "settings": {
+        "cli_path": {
+            "type": "text",
+            "label": "agently-cli 路径",
+            "description": "默认使用全局 npm 安装的 Agent Mail CLI。",
+            "default": "C:\\Users\\Gengar\\AppData\\Roaming\\npm\\agently-cli.cmd"
+        },
+        "default_limit": {
+            "type": "number",
+            "label": "默认邮件数量",
+            "description": "列出最近邮件时默认返回多少封。",
+            "default": 10,
+            "min": 1,
+            "max": 20
+        },
+        "max_body_chars": {
+            "type": "number",
+            "label": "正文最大展示字符",
+            "description": "读取邮件正文时最多展示多少字符。",
+            "default": 2400,
+            "min": 300,
+            "max": 8000
+        },
+        "request_timeout_sec": {
+            "type": "number",
+            "label": "CLI 超时秒数",
+            "description": "每次调用 agently-cli 最多等待多久。",
+            "default": 20,
+            "min": 5,
+            "max": 60
+        },
+        "intent_timeout_sec": {
+            "type": "number",
+            "label": "草稿生成超时秒数",
+            "description": "自然语言发信/回信时，等待模型生成邮件草稿的最长时间。",
+            "default": 120,
+            "min": 5,
+            "max": 180
+        }
+    },
+    "tool_examples": [
+        "最近邮件",
+        "搜索邮件 账单",
+        "读邮件 msg_xxx",
+        "发邮件 to=a@example.com subject=主题 body=正文"
+    ],
+    "access_control": {
+        "allow_local": true,
+        "allow_remote_qq": true,
+        "allow_qq_owner": true,
+        "allow_qq_others": false,
+        "allow_group_without_at": false
+    }
+}

@@ -1,0 +1,67 @@
+{
+  "name": "萌娘百科查询",
+  "trigger": "moegirl_wiki",
+  "llm_command": "moegirl_lookup",
+  "aliases": [
+    "萌百",
+    "萌娘百科",
+    "moegirl",
+    "查萌百",
+    "萌娘百科查询"
+  ],
+  "type": "delegate",
+  "description": "查询萌娘百科词条、角色、作品、术语，并返回主词条与相关语境。",
+  "example_arg": "初音未来是谁",
+  "timeout_sec": 15,
+  "settings": {
+    "timeout_seconds": {
+      "type": "number",
+      "label": "请求超时(秒)",
+      "description": "调用萌娘百科 API 的超时时间",
+      "default": 10,
+      "min": 3,
+      "max": 60
+    },
+    "cache_ttl_seconds": {
+      "type": "number",
+      "label": "缓存秒数",
+      "description": "同类查询缓存时长",
+      "default": 300,
+      "min": 0,
+      "max": 3600
+    },
+    "prefer_exact_title": {
+      "type": "bool",
+      "label": "优先精确标题",
+      "description": "优先把精确标题命中的词条视为可信主词条",
+      "default": true
+    },
+    "prefer_generator_search": {
+      "type": "bool",
+      "label": "优先 generator 搜索",
+      "description": "优先使用 generator=search，失败再回退 opensearch",
+      "default": true
+    },
+    "max_candidates": {
+      "type": "number",
+      "label": "候选词条上限",
+      "description": "歧义词返回的候选数量上限",
+      "default": 5,
+      "min": 1,
+      "max": 10
+    },
+    "cookie_string": {
+      "type": "secret",
+      "label": "萌娘百科 Cookie",
+      "description": "可选，默认匿名访问",
+      "default": ""
+    }
+  },
+  "access_control": {
+    "allow_local": true,
+    "allow_remote_qq": true,
+    "allow_qq_owner": true,
+    "allow_qq_others": true,
+    "allow_group_without_at": false
+  }
+}

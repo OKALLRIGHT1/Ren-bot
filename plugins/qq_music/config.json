@@ -1,0 +1,136 @@
+{
+    "name": "QQ点歌",
+    "trigger": "qq_music",
+    "llm_command": "qq_music",
+    "type": "direct",
+    "aliases": [
+        "点歌",
+        "qq点歌",
+        "QQ点歌",
+        "来首歌",
+        "放首歌",
+        "播首歌",
+        "听歌"
+    ],
+    "description": "通过多平台音乐网关搜索歌曲，默认先搜 QQ 音乐，搜不到再回退网易云，并直接以 QQ 语音形式回发。",
+    "example_arg": "点歌 晴天",
+    "timeout_sec": 90,
+    "version": "1.1.0",
+    "settings": {
+        "base_url": {
+            "type": "text",
+            "label": "API Base URL",
+            "description": "接口根地址，例如 https://api.example.com",
+            "default": "https://gateway.karpov.cn"
+        },
+        "api_key": {
+            "type": "secret",
+            "label": "API Key",
+            "description": "可留空，改用环境变量 QQMUSIC_API_KEY",
+            "default": ""
+        },
+        "session_cookie": {
+            "type": "secret",
+            "label": "Session Cookie",
+            "description": "如果该网关实际依赖网页登录态，可在这里填完整 Cookie 字符串，例如 sid=...; csrf_token=...",
+            "default": ""
+        },
+        "default_quality": {
+            "type": "text",
+            "label": "默认音质",
+            "description": "建议使用 MP3_320 作为 QQ 语音默认格式；如接口支持也可改成 FLAC。",
+            "default": "MP3_320"
+        },
+        "provider_order": {
+            "type": "text",
+            "label": "搜索源顺序",
+            "description": "按顺序尝试的音乐源，逗号分隔。支持 qqmusic, netease, kugou。",
+            "default": "qqmusic,netease"
+        },
+        "fallback_to_netease": {
+            "type": "bool",
+            "label": "QQ 失败回退网易云",
+            "description": "当首选 QQ 音乐没搜到候选歌曲时，自动回退到网易云再搜一次。",
+            "default": true
+        },
+        "search_page_size": {
+            "type": "number",
+            "label": "搜索返回数量",
+            "description": "每次搜索从接口拉取的候选歌曲数量。",
+            "default": 8,
+            "min": 1,
+            "max": 20
+        },
+        "request_timeout_sec": {
+            "type": "number",
+            "label": "请求超时(秒)",
+            "description": "搜索、取直链、下载音频时的单次请求超时。",
+            "default": 12,
+            "min": 5,
+            "max": 120
+        },
+        "cache_subdir": {
+            "type": "text",
+            "label": "缓存目录",
+            "description": "相对项目根目录的缓存子目录，用于暂存下载后的音频。",
+            "default": "audio_cache/qq_music"
+        },
+        "cache_ttl_hours": {
+            "type": "number",
+            "label": "缓存保留小时数",
+            "description": "超过该时长的旧音频缓存会在下次点歌时自动清理。",
+            "default": 23,
+            "min": 1,
+            "max": 168
+        },
+        "comment_after_send": {
+            "type": "bool",
+            "label": "语音后补一句点评",
+            "description": "点歌成功并发出 QQ 语音后，再基于歌曲资料和歌词发一条简短评价。",
+            "default": true
+        },
+        "comment_defer_until_voice": {
+            "type": "bool",
+            "label": "先放歌后点评",
+            "description": "开启后先把 QQ 语音发出去，再在后台生成并补发点评。",
+            "default": true
+        },
+        "comment_dispatch_delay_sec": {
+            "type": "number",
+            "label": "点评发送延迟(秒)",
+            "description": "语音发出后等待多久再开始补发点评。",
+            "default": 2,
+            "min": 0,
+            "max": 15
+        },
+        "comment_use_llm": {
+            "type": "bool",
+            "label": "点评使用 LLM",
+            "description": "开启后优先按当前人设生成点评；失败或超时会自动退回本地短评。",
+            "default": true
+        },
+        "comment_timeout_sec": {
+            "type": "number",
+            "label": "点评超时(秒)",
+            "description": "点评生成最多等待多久，超时后立即回退到本地短评。",
+            "default": 30,
+            "min": 1,
+            "max": 60
+        },
+        "comment_lyric_lines": {
+            "type": "number",
+            "label": "点评用歌词行数",
+            "description": "生成点评时最多引用多少行歌词进行摘要。",
+            "default": 2,
+            "min": 1,
+            "max": 4
+        }
+    },
+    "access_control": {
+        "allow_local": false,
+        "allow_remote_qq": true,
+        "allow_qq_owner": true,
+        "allow_qq_others": false,
+        "allow_group_without_at": false
+    }
+}

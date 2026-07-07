@@ -3,10 +3,13 @@ import base64
 import json
 import logging
 import os
+import re
 import tempfile
 import uuid
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
+
+from services.capability_manager import ToolCapability, ToolCapabilityMatch
 
 try:
     import aiohttp
@@ -24,6 +27,28 @@ class Plugin:
         self._config: Dict[str, Any] = {}
         self._settings: Dict[str, Any] = {}
         self.reload_config()
+
+    def get_capabilities(self):
+        return [
+            ToolCapability(
+                id="qq_draw.generate_image_cmd",
+                plugin="qq_draw",
+                trigger_mode="command_only",
+                match=self._match_draw_command,
+                check_available=self._check_available,
+                description="通过 /画图 或 /画画 生成图片",
+                examples=["/画图 一只猫", "/画画 雨天的街道"],
+            )
+        ]
+
+    def _check_available(self, ctx: Dict[str, Any]) -> Dict[str, Any]:
+        self.reload_config()
+        if self._resolve_api_key():
+            return {"available": True}
+        return {
+            "available": False,
+            "reason": "missing_secret: qq_draw.api_key",
+        }
 
     def reload_config(self):
         try:
@@ -86,6 +111,22 @@ class Plugin:
     ) -> bool:
         text = str(user_text or "").strip()
         return any(text.startswith(prefix) for prefix in COMMAND_PREFIXES)
+
+    def _match_draw_command(
+        self, text: str, ctx: Dict[str, Any]
+    ) -> Optional[ToolCapabilityMatch]:
+        raw = str(text or "").strip()
+        prompt = self._extract_prompt(raw)
+        if not prompt:
+            return None
+        return ToolCapabilityMatch(
+            capability_id="qq_draw.generate_image_cmd",
+            plugin="qq_draw",
+            score=1.0,
+            args={"prompt": prompt},
+            raw_text=raw,
+            reason="draw_command_prefix",
+        )
 
     def _extract_prompt(self, text: str) -> str:
         raw = str(text or "").strip()
@@ -307,6 +348,76 @@ class Plugin:
                     return None
         return None
 
+    def _pick_image_url_from_text(self, text: str) -> str:
+        raw = str(text or "").strip()
+        if not raw:
+            return ""
+        try:
+            parsed = json.loads(raw)
+        except Exception:
+            parsed = None
+        if parsed is not None:
+            candidate = self._pick_image_url_from_result(parsed)
+            if candidate:
+                return candidate
+
+        markdown_urls = re.findall(r"!\[[^\]]*\]\((https?://[^)\s]+)\)", raw)
+        if markdown_urls:
+            return markdown_urls[-1].strip()
+
+        urls = re.findall(r"https?://[^\s<>()\"']+", raw)
+        if urls:
+            return urls[-1].rstrip("，。,.!！?？;；")
+        return ""
+
+    def _iter_nested_values(self, value: Any, *, max_depth: int = 6):
+        if max_depth <= 0:
+            return
+        if isinstance(value, dict):
+            for item in value.values():
+                yield item
+                yield from self._iter_nested_values(item, max_depth=max_depth - 1)
+        elif isinstance(value, list):
+            for item in value:
+                yield item
+                yield from self._iter_nested_values(item, max_depth=max_depth - 1)
+
+    def _pick_nested_image_url(self, result: Any) -> str:
+        urls: list[str] = []
+        for value in self._iter_nested_values(result):
+            if isinstance(value, str):
+                candidate = self._pick_image_url_from_text(value)
+                if candidate:
+                    urls.append(candidate)
+            elif isinstance(value, dict):
+                candidate = value.get("url") or value.get("image_url")
+                if isinstance(candidate, str) and candidate.strip():
+                    urls.append(candidate.strip())
+                elif isinstance(candidate, dict):
+                    nested = candidate.get("url") or candidate.get("image_url")
+                    if isinstance(nested, str) and nested.strip():
+                        urls.append(nested.strip())
+        return urls[-1] if urls else ""
+
+    def _iter_choice_contents(self, payload: Dict[str, Any]):
+        choices = payload.get("choices")
+        if not isinstance(choices, list):
+            return
+        for choice in choices:
+            if not isinstance(choice, dict):
+                continue
+            for holder_key in ("message", "delta"):
+                holder = choice.get(holder_key)
+                if not isinstance(holder, dict):
+                    continue
+                content = holder.get("content")
+                if isinstance(content, str) and content.strip():
+                    yield content
+                elif isinstance(content, list):
+                    for part in content:
+                        if isinstance(part, dict):
+                            yield part
+
     def _pick_image_url_from_result(self, result: Any) -> str:
         if isinstance(result, dict):
             for key in ("image_url", "url"):
@@ -335,7 +446,25 @@ class Plugin:
                         candidate = source.get("url") or source.get("image_url")
                         if isinstance(candidate, str) and candidate.strip():
                             return candidate.strip()
-        return ""
+            for content in self._iter_choice_contents(result):
+                if isinstance(content, str):
+                    candidate = self._pick_image_url_from_text(content)
+                    if candidate:
+                        return candidate
+                elif isinstance(content, dict):
+                    candidate = content.get("url") or content.get("image_url")
+                    if isinstance(candidate, str) and candidate.strip():
+                        return candidate.strip()
+                    if isinstance(candidate, dict):
+                        nested = candidate.get("url") or candidate.get("image_url")
+                        if isinstance(nested, str) and nested.strip():
+                            return nested.strip()
+                    source = content.get("source")
+                    if isinstance(source, dict):
+                        candidate = source.get("url") or source.get("image_url")
+                        if isinstance(candidate, str) and candidate.strip():
+                            return candidate.strip()
+        return self._pick_nested_image_url(result)
 
     def _pick_image_bytes_from_result(self, result: Any) -> Optional[bytes]:
         direct = self._extract_image_bytes(result)
@@ -371,7 +500,28 @@ class Plugin:
                 candidate = self._extract_image_bytes(structured)
                 if candidate:
                     return candidate
+            for content in self._iter_choice_contents(result):
+                candidate = self._extract_image_bytes(content)
+                if candidate:
+                    return candidate
+            for value in self._iter_nested_values(result):
+                candidate = self._extract_image_bytes(value)
+                if candidate:
+                    return candidate
         return None
+
+    def _format_no_image_result(self, result: Any) -> str:
+        try:
+            summary = json.dumps(result, ensure_ascii=False, default=str)
+        except Exception:
+            summary = repr(result)
+        if len(summary) > 500:
+            summary = summary[:500].rstrip() + "..."
+        return (
+            "生图接口已返回结果，但当前插件没解析出图片。"
+            "目前支持 base64、图片 URL、OpenAI data[]、chat choices[] 等常见结构。"
+            f"返回摘要：{summary}"
+        )
 
     def _extract_sse_payloads(self, text: str) -> list:
         payloads = []
@@ -718,17 +868,7 @@ class Plugin:
                     return f"图片地址已返回，但下载失败：{exc}"
 
         if not image_bytes:
-            if isinstance(result, dict):
-                text_hint = str(result.get("text") or "").strip()
-                if text_hint:
-                    return (
-                        "生图接口已返回内容，但当前没有拿到图片或图片链接。"
-                        f"返回文本摘要：{text_hint[:180]}"
-                    )
-            return (
-                "生图接口已返回结果，但当前插件没解析出图片。"
-                "目前支持 base64 字段 image_base64 / base64 / data / b64_json，或返回图片 URL。"
-            )
+            return self._format_no_image_result(result)
 
         try:
             image_path = await asyncio.to_thread(self._save_temp_image, image_bytes)

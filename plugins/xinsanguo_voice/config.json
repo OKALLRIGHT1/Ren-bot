@@ -1,0 +1,61 @@
+{
+  "name": "新三国语音",
+  "trigger": "xinsanguo_voice",
+  "llm_command": "xinsanguo_voice",
+  "type": "direct",
+  "aliases": [
+    "新三国",
+    "三国语音",
+    "三国玩梗"
+  ],
+  "description": "识别新三国经典台词关键词并回发对应音频文件。",
+  "example_arg": "不可能",
+  "timeout_sec": 6,
+  "settings": {
+    "enable_group_only": {
+      "type": "bool",
+      "label": "仅群聊触发",
+      "description": "开启后私聊不会自动匹配台词",
+      "default": true
+    },
+    "random_select": {
+      "type": "bool",
+      "label": "随机选择语音",
+      "description": "一条消息匹配多个关键词时只随机发一个",
+      "default": true
+    },
+    "session_cooldown_enabled": {
+      "type": "bool",
+      "label": "启用会话冷却",
+      "description": "同一会话触发后进入统一冷却期，避免频繁刷语音",
+      "default": true
+    },
+    "session_cooldown_seconds": {
+      "type": "number",
+      "label": "会话冷却秒数",
+      "description": "同一会话再次自动触发前需要等待的秒数",
+      "default": 600,
+      "min": 10,
+      "max": 7200
+    },
+    "audio_subdir": {
+      "type": "text",
+      "label": "音频目录名",
+      "description": "相对插件目录的音频子目录，默认 data/sound",
+      "default": "data/sound"
+    },
+    "rules_file": {
+      "type": "text",
+      "label": "规则文件名",
+      "description": "相对插件目录的规则文件路径",
+      "default": "rules.json"
+    }
+  },
+  "access_control": {
+    "allow_local": true,
+    "allow_remote_qq": true,
+    "allow_qq_owner": true,
+    "allow_qq_others": true,
+    "allow_group_without_at": true
+  }
+}

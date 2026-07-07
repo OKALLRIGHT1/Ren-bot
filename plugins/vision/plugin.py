@@ -1,6 +1,8 @@
 import asyncio
+from typing import Optional
 
 from modules.vision.capture import take_camera_photo_base64, take_screenshot_base64
+from services.capability_manager import ToolCapability, ToolCapabilityMatch
 
 
 SCREEN_HINTS = (
@@ -33,6 +35,39 @@ REMOTE_SEND_HINTS = (
 
 
 class Plugin:
+    def get_capabilities(self):
+        return [
+            ToolCapability(
+                id="vision.screen",
+                plugin="vision",
+                trigger_mode="natural",
+                match=lambda text, ctx: self._match_mode(text, "screen"),
+                description="Capture and inspect the current screen.",
+                examples=["帮我看看屏幕", "分析一下当前截图"],
+            ),
+            ToolCapability(
+                id="vision.camera",
+                plugin="vision",
+                trigger_mode="natural",
+                match=lambda text, ctx: self._match_mode(text, "camera"),
+                description="Capture and inspect the camera image.",
+                examples=["看看摄像头", "拍一张照片"],
+            ),
+        ]
+
+    def _match_mode(self, text: str, expected_mode: str) -> Optional[ToolCapabilityMatch]:
+        raw = str(text or "").strip()
+        if self._detect_mode(raw) != expected_mode:
+            return None
+        return ToolCapabilityMatch(
+            capability_id=f"vision.{expected_mode}",
+            plugin="vision",
+            score=0.9,
+            args={"mode": expected_mode},
+            raw_text=raw,
+            reason=f"vision_{expected_mode}_intent",
+        )
+
     def _detect_mode(self, args: str) -> str:
         text = str(args or "").strip()
         lower = text.lower()

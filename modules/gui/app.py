@@ -20,14 +20,6 @@ from modules.gui.styles import (
 )
 from modules.gui.utils import resolve_icon, set_dot_status, classify_status
 from modules.gui.widgets.ball import DraggableBall
-from modules.gui.dialogs.plugin_manager import PluginManagerDialog
-from modules.gui.dialogs.settings import SettingsDialog
-from modules.gui.dialogs.knowledge_manager import KnowledgeManagerDialog
-from modules.gui.dialogs.status_screen_manager import StatusScreenManagerDialog
-from modules.gui.dialogs.codex_assistant import CodexAssistantDialog
-from modules.gui.dialogs.console_log import ConsoleLogDialog
-from modules.gui.dialogs.expression_library_manager import ExpressionLibraryManagerDialog
-from modules.gui.dialogs.meme_manager import MemeManagerDialog
 from modules.gui.sedentary_popup import (
     build_sedentary_popup_options,
     show_sedentary_popup_dialog,
@@ -63,6 +55,8 @@ def format_work_session_label(session: Optional[dict]) -> str:
     except Exception:
         active_seconds = 0
     if active_minutes <= 0 and active_seconds <= 0:
+        if str(session.get("state") or "").strip().lower() == "resting":
+            return "久坐时间 0 分钟"
         if session.get("source"):
             return "久坐时间 采集中"
         return ""
@@ -92,6 +86,7 @@ class _Bridge(QtCore.QObject):
     sig_toggle_gui = QtCore.Signal()
     sig_send_text = QtCore.Signal(str)
     sig_sedentary_popup = QtCore.Signal(str, int, str, object)
+    sig_refresh_work_session = QtCore.Signal()
 
 
 class QtChatTrayApp(QtCore.QObject):
@@ -162,6 +157,7 @@ class QtChatTrayApp(QtCore.QObject):
         self._bridge.sig_toggle_gui.connect(self.toggle_show_hide)
         self._bridge.sig_send_text.connect(self._send_text_from_asr)
         self._bridge.sig_sedentary_popup.connect(self._show_sedentary_popup_ui)
+        self._bridge.sig_refresh_work_session.connect(self.refresh_work_session_status)
 
         # --- 构建 UI ---
         self._win = self._build_window()
@@ -483,6 +479,9 @@ class QtChatTrayApp(QtCore.QObject):
         self.screen_sensor = screen_sensor
         self.refresh_work_session_status()
 
+    def request_work_session_status_refresh(self) -> None:
+        self._bridge.sig_refresh_work_session.emit()
+
     def refresh_work_session_status(self) -> None:
         label = WORK_SESSION_EMPTY_LABEL
         tooltip = ""
@@ -670,6 +669,8 @@ class QtChatTrayApp(QtCore.QObject):
 
     def _on_settings_clicked(self):
         if not self._settings_dialog:
+            from modules.gui.dialogs.settings import SettingsDialog
+
             self._settings_dialog = SettingsDialog(parent=None, main_app=self)
         self._refresh_character_status()
         self._settings_dialog.show()
@@ -678,6 +679,8 @@ class QtChatTrayApp(QtCore.QObject):
 
     def _on_console_clicked(self):
         if not self._console_dialog:
+            from modules.gui.dialogs.console_log import ConsoleLogDialog
+
             self._console_dialog = ConsoleLogDialog(parent=None)
         self._console_dialog.showNormal()
         self._console_dialog.raise_()
@@ -903,6 +906,8 @@ class QtChatTrayApp(QtCore.QObject):
 
     def _on_codex_clicked(self):
         if not self._codex_dialog:
+            from modules.gui.dialogs.codex_assistant import CodexAssistantDialog
+
             # 独立窗口，避免受主窗口 Tool/隐藏状态影响
             self._codex_dialog = CodexAssistantDialog(
                 parent=None, on_submit=self._on_codex_submit

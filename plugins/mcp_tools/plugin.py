@@ -1,7 +1,9 @@
 import asyncio
 import json
 import re
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
+
+from services.capability_manager import ToolCapability, ToolCapabilityMatch
 
 
 class Plugin:
@@ -11,6 +13,80 @@ class Plugin:
         "调用已接入的本地/远程 MCP 工具。参数格式：action ||| tool_name ||| JSON参数。"
     )
     example_arg = "list_tools"
+
+    _DEFAULT_DOMAIN_BRANDS = ["麦当劳", "mcd", "mcdonald", "麦乐送"]
+    _DEFAULT_DOMAIN_ACTIONS = [
+        "查",
+        "查一下",
+        "查询",
+        "看",
+        "看一下",
+        "领",
+        "领取",
+        "获取",
+        "优惠",
+        "优惠券",
+        "会员券",
+        "券",
+        "折扣",
+        "活动",
+    ]
+    _DEFAULT_WEB_SEARCH_OVERRIDE = [
+        "联网",
+        "上网",
+        "网页",
+        "百度",
+        "google",
+        "bing",
+        "搜索",
+    ]
+
+    def get_capabilities(self):
+        return [
+            ToolCapability(
+                id="mcp_tools.domain_call",
+                plugin="mcp_tools",
+                trigger_mode="natural",
+                match=self._match_domain_call,
+                description="Route configured domain/brand requests to MCP tools.",
+                examples=["查一下麦当劳优惠券"],
+            )
+        ]
+
+    def _match_domain_call(
+        self, text: str, ctx: Dict[str, Any]
+    ) -> Optional[ToolCapabilityMatch]:
+        raw = str(text or "").strip()
+        lowered = raw.lower()
+        if not raw or not self._read_bool_setting("intent_route_enabled", True):
+            return None
+        brand_keywords = self._normalize_keywords(
+            self._read_setting("intent_route_brand_keywords", self._DEFAULT_DOMAIN_BRANDS)
+        )
+        action_keywords = self._normalize_keywords(
+            self._read_setting("intent_route_action_keywords", self._DEFAULT_DOMAIN_ACTIONS)
+        )
+        web_search_keywords = self._normalize_keywords(
+            self._read_setting(
+                "intent_route_web_search_override_keywords",
+                self._DEFAULT_WEB_SEARCH_OVERRIDE,
+            )
+        )
+        if not brand_keywords or not action_keywords:
+            return None
+        if any(keyword in lowered for keyword in web_search_keywords):
+            return None
+        if not any(keyword in lowered for keyword in brand_keywords):
+            return None
+        if not any(keyword in lowered for keyword in action_keywords):
+            return None
+        return ToolCapabilityMatch(
+            capability_id="mcp_tools.domain_call",
+            plugin="mcp_tools",
+            score=0.9,
+            raw_text=raw,
+            reason="mcp_domain_intent",
+        )
 
     async def run(self, args: str, ctx: Dict[str, Any]) -> str:
         if not bool((ctx or {}).get("delegate_mode", False)):
@@ -93,13 +169,24 @@ class Plugin:
 
     def _read_list_setting(self, key: str) -> set[str]:
         value = self._read_setting(key, [])
+        return set(self._normalize_keywords(value))
+
+    def _normalize_keywords(self, value: Any) -> List[str]:
         if isinstance(value, str):
-            items = re.split(r"[\s,;，；]+", value)
+            text = value.replace("，", ",").replace("、", ",").replace("|", ",")
+            items = [
+                item.strip().lower()
+                for line in text.splitlines()
+                for item in re.split(r"[\s,;；]+", line)
+                if item.strip()
+            ]
         elif isinstance(value, list):
-            items = value
+            items = [str(item).strip().lower() for item in value if str(item).strip()]
+        elif isinstance(value, (tuple, set)):
+            items = [str(item).strip().lower() for item in value if str(item).strip()]
         else:
             items = []
-        return {str(item).strip() for item in items if str(item).strip()}
+        return list(dict.fromkeys(items))
 
     def _remote_server_slug(self, tool_name: str) -> str:
         parts = str(tool_name or "").strip().split(".", 2)

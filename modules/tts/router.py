@@ -8,17 +8,31 @@ from modules.tts.edge import EdgeTTS
 from modules.state_machine import AgentStateMachine, AgentState
 from modules.tts.stream_utils import StreamSentenceBuffer
 from modules.live2d import stop_sound, estimate_bubble_display_ms  # 需要引入停止函数
+from services.chat_support.text_splitter import split_chat_text_parts
 
 try:
     from modules.llm import chat_with_ai
 except ImportError:
     chat_with_ai = None
 
-try:
-    from modules.tts.gptsovits import GPTSoVITSTTS
-except Exception as e:
-    print(f"⚠️ [TTS] GPT-SoVITS 模块导入失败: {e}")
-    GPTSoVITSTTS = None
+_GPTSOVITS_CLASS = None
+_GPTSOVITS_IMPORT_ATTEMPTED = False
+
+
+def _load_gptsovits_class(verbose: bool = False):
+    global _GPTSOVITS_CLASS, _GPTSOVITS_IMPORT_ATTEMPTED
+    if _GPTSOVITS_IMPORT_ATTEMPTED:
+        return _GPTSOVITS_CLASS
+    _GPTSOVITS_IMPORT_ATTEMPTED = True
+    try:
+        from modules.tts.gptsovits import GPTSoVITSTTS
+
+        _GPTSOVITS_CLASS = GPTSoVITSTTS
+    except Exception as e:
+        _GPTSOVITS_CLASS = None
+        if verbose:
+            print(f"⚠️ [TTS] GPT-SoVITS 模块导入失败: {e}")
+    return _GPTSOVITS_CLASS
 
 try:
     from config import TTS_AUTO_TRANSLATE
@@ -47,44 +61,7 @@ class AudioItem:
 
 
 def _split_text(text: str, max_chars: int) -> list[str]:
-    t = (text or "").strip()
-    if not t:
-        return []
-    parts = re.split(r"(\n+|[。！？!?；;])", t)
-    buf, segs = [], []
-    for p in parts:
-        if not p:
-            continue
-        buf.append(p)
-        if re.fullmatch(r"\n+|[。！？!?；;]", p):
-            s = "".join(buf).strip()
-            if s:
-                segs.append(s)
-            buf = []
-    tail = "".join(buf).strip()
-    if tail:
-        segs.append(tail)
-
-    merged = []
-    cur = ""
-    for s in segs:
-        if len(cur) + len(s) <= max_chars:
-            cur += s
-        else:
-            if cur.strip():
-                merged.append(cur.strip())
-            cur = s
-    if cur.strip():
-        merged.append(cur.strip())
-
-    final = []
-    for s in merged:
-        if len(s) <= max_chars:
-            final.append(s)
-        else:
-            for i in range(0, len(s), max_chars):
-                final.append(s[i : i + max_chars].strip())
-    return [x for x in final if x]
+    return split_chat_text_parts(text, max_len=max_chars)
 
 
 class TTSRouter:
@@ -131,22 +108,6 @@ class TTSRouter:
 
         self.gpt = None
         self._active = "edge"
-
-        if GPTSoVITSTTS is not None:
-            try:
-                self.gpt = GPTSoVITSTTS(
-                    enable_lip_sync=self.enable_lip_sync,
-                    rhubarb_path=self.rhubarb_path,
-                    lip_sync_smooth_window=self.lip_sync_smooth_window,
-                )
-                if not getattr(self.gpt, "ready", False):
-                    self.gpt = None
-            except Exception as e:
-                if self.verbose:
-                    print(f"⚠️ [TTS] GPT-SoVITS 初始化失败: {e}")
-                self.gpt = None
-
-        self._active = "gpt" if self.gpt else "edge"
         self.role_tts_config = {}
 
         self._q: asyncio.Queue[SpeakItem] = asyncio.Queue()  # 文本队列
@@ -159,17 +120,20 @@ class TTSRouter:
         self._current_stream_id = 0
         self._stream_buffer: Optional[StreamSentenceBuffer] = None
         self._emo_tag_any_re = re.compile(
-            r"<\s*/?\s*(?:emo(?:tion)?|happy|sad|angry|flustered|confused|neutral|think|idle)\b[^>]*>",
+            r"<\s*/?\s*(?:emo(?:tion)?|happy|sad|angry|shy|flustered|confused|neutral|think|idle)\b[^>]*>",
             flags=re.IGNORECASE,
         )
         self._cmd_re = re.compile(r"\[CMD:.*?\]", flags=re.DOTALL)
         self.enabled = True
 
     def _ensure_gpt_instance(self):
-        if self.gpt is not None or GPTSoVITSTTS is None:
+        if self.gpt is not None:
+            return
+        gptsovits_cls = _load_gptsovits_class(verbose=self.verbose)
+        if gptsovits_cls is None:
             return
         try:
-            self.gpt = GPTSoVITSTTS(
+            self.gpt = gptsovits_cls(
                 enable_lip_sync=self.enable_lip_sync,
                 rhubarb_path=self.rhubarb_path,
                 lip_sync_smooth_window=self.lip_sync_smooth_window,
@@ -362,7 +326,9 @@ Output:
                 pass
             self._audio_q.task_done()
 
-        self._stream_buffer = StreamSentenceBuffer()
+        self._stream_buffer = StreamSentenceBuffer(
+            max_chars=self.chunk_chars_default if self.split_long_default else None
+        )
         if self.verbose:
             print(f"🌊 [TTS] 流式会话开始 ID={self._current_stream_id}")
 
@@ -465,8 +431,8 @@ Output:
                     continue
 
                 segments = [item.text]
-                if item.split_long and len(item.text) > item.chunk_chars:
-                    segments = _split_text(item.text, item.chunk_chars)
+                if item.split_long:
+                    segments = _split_text(item.text, item.chunk_chars) or [item.text]
 
                 for idx, seg in enumerate(segments):
                     if self._interrupt_event.is_set():

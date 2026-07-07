@@ -1,0 +1,22 @@
+{
+    "name": "主程序控制",
+    "trigger": "app_control",
+    "llm_command": "app_control",
+    "type": "direct",
+    "aliases": [
+        "/重启",
+        "/远程重启",
+        "/restart"
+    ],
+    "description": "通过受权限控制的指令重启主程序。",
+    "example_arg": "/重启",
+    "timeout_sec": 3,
+    "version": "1.0.0",
+    "access_control": {
+        "allow_local": true,
+        "allow_remote_qq": true,
+        "allow_qq_owner": true,
+        "allow_qq_others": false,
+        "allow_group_without_at": false
+    }
+}

@@ -1,0 +1,112 @@
+{
+    "name": "邮件助手",
+    "trigger": "claw_email",
+    "llm_command": "claw_email",
+    "type": "direct",
+    "aliases": [
+        "/邮件",
+        "/邮箱",
+        "/email",
+        "/查邮件",
+        "/看邮件",
+        "/邮件诊断",
+        "/发邮件",
+        "/邮件摘要",
+        "/邮件总结"
+    ],
+    "description": "管理 claw.163.com 邮箱：查看邮件列表、读取邮件内容、发送/回复邮件、搜索邮件、获取邮件摘要。",
+    "example_arg": "list ||| INBOX ||| 10",
+    "timeout_sec": 30,
+    "version": "1.0.0",
+    "access_control": {
+        "allow_local": true,
+        "allow_remote_qq": true,
+        "allow_qq_owner": true,
+        "allow_qq_others": false,
+        "allow_group_without_at": false
+    },
+    "settings": {
+        "cli_path": {
+            "type": "text",
+            "label": "mail-cli 路径",
+            "description": "@clawemail/mail-cli 可执行文件的绝对路径。留空则自动在 node_modules 中查找。",
+            "default": ""
+        },
+        "account": {
+            "type": "text",
+            "label": "邮箱账号",
+            "description": "首次登录时传给 mail-cli auth login --user 的邮箱地址，例如 user@claw.163.com。",
+            "default": "komari@claw.163.com"
+        },
+        "profile": {
+            "type": "text",
+            "label": "mail-cli Profile",
+            "description": "已在 mail-cli 配置中存在的 profile 名。留空则使用 mail-cli 默认 profile；不要把邮箱地址填到这里，除非你的 profile 名就是邮箱地址。",
+            "default": ""
+        },
+        "auth_token": {
+            "type": "secret",
+            "label": "Claw API Key",
+            "description": "ClawEmail 控制台 API Keys 页面复制的 ck_live_...，用于 mail-cli auth apikey set 和 Agent 邮箱操作。",
+            "default": ""
+        },
+        "enable_notifications": {
+            "type": "bool",
+            "label": "启用新邮件通知",
+            "description": "开启后会在收到新邮件时通过 QQ 推送通知。",
+            "default": true
+        },
+        "notification_check_interval_sec": {
+            "type": "number",
+            "label": "通知检查间隔(秒)",
+            "description": "后台轮询新邮件的间隔。",
+            "default": 120,
+            "min": 30,
+            "max": 600
+        },
+        "notification_target_sessions": {
+            "type": "list",
+            "item_type": "text",
+            "label": "通知推送目标会话",
+            "description": "填 session_id，例如 private:123456。",
+            "default": [
+                "private:1132824061"
+            ]
+        },
+        "summary_folders": {
+            "type": "list",
+            "item_type": "text",
+            "label": "摘要文件夹",
+            "description": "生成邮件摘要时扫描的文件夹列表。",
+            "default": [
+                "1"
+            ]
+        },
+        "default_folder": {
+            "type": "text",
+            "label": "默认收件箱 ID",
+            "description": "默认查邮件使用的文件夹 ID。clawemail 当前收件箱通常是 1；可通过 /邮件诊断 或 folders 查看实际 ID。",
+            "default": "1"
+        },
+        "max_list_count": {
+            "type": "number",
+            "label": "默认列出数量",
+            "description": "列出邮件时的默认数量。",
+            "default": 8,
+            "min": 1,
+            "max": 50
+        },
+        "daily_summary_enabled": {
+            "type": "bool",
+            "label": "纳入每日总结",
+            "description": "开启后邮件摘要会作为每日总结的数据源之一。",
+            "default": true
+        },
+        "daily_summary_time": {
+            "type": "text",
+            "label": "每日邮件摘要时间",
+            "description": "HH:MM 格式，每日自动生成邮件摘要的时间。",
+            "default": "09:00"
+        }
+    }
+}

@@ -17,11 +17,24 @@ class ChatMessageEvent:
     metadata: Dict[str, Any] = field(default_factory=dict)
 
 
+@dataclass(slots=True)
+class ChatNoticeEvent:
+    source: str
+    channel: str
+    event_type: str
+    user_id: str
+    session_id: str
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+
 class BaseChatAdapter:
     name = "base"
 
     def normalize_event(self, payload: Dict[str, Any]) -> Optional[ChatMessageEvent]:
         raise NotImplementedError
+
+    def normalize_notice(self, payload: Dict[str, Any]) -> Optional[ChatNoticeEvent]:
+        return None
 
     async def send_text(self, session_id: str, text: str, **kwargs: Any) -> Any:
         raise NotImplementedError
@@ -46,6 +59,7 @@ class ChatGateway:
     def __init__(self):
         self.adapters: Dict[str, BaseChatAdapter] = {}
         self._message_handlers: List[Callable[[ChatMessageEvent], Awaitable[None]]] = []
+        self._notice_handlers: List[Callable[[ChatNoticeEvent], Awaitable[None]]] = []
         self.deduplicator = MessageDeduplicator()
         self.outbound_tracker = OutboundTracker()
 
@@ -55,12 +69,20 @@ class ChatGateway:
     def on_message(self, handler: Callable[[ChatMessageEvent], Awaitable[None]]) -> None:
         self._message_handlers.append(handler)
 
+    def on_notice(self, handler: Callable[[ChatNoticeEvent], Awaitable[None]]) -> None:
+        self._notice_handlers.append(handler)
+
     async def dispatch_incoming(self, adapter_name: str, payload: Dict[str, Any]) -> Optional[ChatMessageEvent]:
         adapter = self.adapters.get(adapter_name)
         if not adapter:
             raise KeyError(f"Unknown adapter: {adapter_name}")
         event = adapter.normalize_event(payload)
         if not event:
+            notice = adapter.normalize_notice(payload)
+            if not notice:
+                return None
+            for handler in self._notice_handlers:
+                await handler(notice)
             return None
         if self.deduplicator.is_duplicate(self._dedupe_key(adapter_name, event)):
             return None
@@ -185,3 +207,37 @@ class ChatGateway:
         if not adapter:
             raise KeyError(f"Unknown adapter: {adapter_name}")
         return await adapter.fetch_recent_history(session_id, **kwargs)
+
+    async def fetch_message_by_id(
+        self, adapter_name: str, session_id: str, message_id: str, **kwargs: Any
+    ) -> Any:
+        adapter = self.adapters.get(adapter_name)
+        if not adapter:
+            raise KeyError(f"Unknown adapter: {adapter_name}")
+        fetcher = getattr(adapter, "fetch_message_by_id", None)
+        if not callable(fetcher):
+            return {
+                "ok": False,
+                "reason": "fetch_message_by_id_unsupported",
+                "adapter": adapter_name,
+                "session_id": session_id,
+                "message_id": message_id,
+            }
+        return await fetcher(session_id, message_id, **kwargs)
+
+    async def fetch_forward_message(
+        self, adapter_name: str, session_id: str, forward_id: str, **kwargs: Any
+    ) -> Any:
+        adapter = self.adapters.get(adapter_name)
+        if not adapter:
+            raise KeyError(f"Unknown adapter: {adapter_name}")
+        fetcher = getattr(adapter, "fetch_forward_message", None)
+        if not callable(fetcher):
+            return {
+                "ok": False,
+                "reason": "fetch_forward_message_unsupported",
+                "adapter": adapter_name,
+                "session_id": session_id,
+                "forward_id": forward_id,
+            }
+        return await fetcher(session_id, forward_id, **kwargs)

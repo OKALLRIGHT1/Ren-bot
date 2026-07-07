@@ -1,0 +1,18 @@
+{
+  "name": "live2d-llm",
+  "version": "1.0.0",
+  "description": "一个可本地运行、可接 QQ、可挂插件、可连 MCP 的 Live2D 桌面助手主干。",
+  "main": "index.js",
+  "directories": {
+    "doc": "docs"
+  },
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@clawemail/mail-cli": "^0.2.4"
+  }
+}

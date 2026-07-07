@@ -1,0 +1,24 @@
+{
+  "name": "副脑任务状态",
+  "trigger": "delegate_status",
+  "llm_command": "delegate_status",
+  "type": "direct",
+  "aliases": [
+    "副脑任务",
+    "副脑状态",
+    "委托任务",
+    "委托状态",
+    "最近副脑任务",
+    "最近委托任务"
+  ],
+  "description": "查看最近的副脑委托任务，或根据任务ID查看详情。",
+  "example_arg": "副脑任务",
+  "timeout_sec": 6,
+  "access_control": {
+    "allow_local": true,
+    "allow_remote_qq": true,
+    "allow_qq_owner": true,
+    "allow_qq_others": false,
+    "allow_group_without_at": false
+  }
+}

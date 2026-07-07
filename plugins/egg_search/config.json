@@ -1,0 +1,37 @@
+{
+  "name": "洛克王国世界查蛋器",
+  "trigger": "egg_search",
+  "llm_command": "egg_search",
+  "type": "direct",
+  "aliases": [
+    "/egg",
+    "/egg_reload"
+  ],
+  "description": "输入尺寸和重量，返回匹配的精灵种类。",
+  "example_arg": "/egg 0.04 0.057",
+  "timeout_sec": 10,
+  "version": "1.0.0",
+  "access_control": {
+    "allow_local": true,
+    "allow_remote_qq": true,
+    "allow_qq_owner": true,
+    "allow_qq_others": true,
+    "allow_group_without_at": true
+  },
+  "settings": {
+    "data_path": {
+      "type": "text",
+      "label": "数据文件路径",
+      "description": "精灵蛋查询数据 JSON 文件路径。",
+      "default": "data/egg_data.json"
+    },
+    "result_limit": {
+      "type": "number",
+      "label": "最多显示条数",
+      "description": "命中结果过多时最多展示多少条。",
+      "default": 50,
+      "min": 1,
+      "max": 200
+    }
+  }
+}

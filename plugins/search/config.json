@@ -21,7 +21,7 @@
         "web",
         "query"
     ],
-    "type": "react",
+    "type": "delegate",
     "description": "联网搜索插件，优先使用 Grok 代理做提示式联网检索；也兼容 Exa，并可在失败时回退到 DDG。",
     "example_arg": "今天北京天气",
     "timeout_sec": 20,

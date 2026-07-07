@@ -10,48 +10,14 @@ import config
 from PySide6 import QtCore, QtGui, QtWidgets
 
 
-from modules.gui.dialogs.character_editor import CharacterEditorWidget
-
-from modules.gui.dialogs.plugin_manager import PluginManagerDialog
-
-from modules.gui.dialogs.memory_editor import MemoryEditorDialog
-
-from modules.gui.dialogs.knowledge_manager import KnowledgeManagerDialog
-
-from modules.gui.dialogs.expression_library_manager import ExpressionLibraryManagerDialog
-
-from modules.gui.dialogs.meme_manager import MemeManagerDialog
-
-from modules.gui.dialogs.model_routing_overview import ModelRoutingOverviewDialog
-
-from modules.gui.dialogs.status_screen_manager import StatusScreenManagerDialog
-
-from modules.gui.dialogs.screen_app_rules import ScreenAppRulesDialog
-
 from modules.gui.styles import (
     THEMES,
     get_settings_styles,
     get_ui_palette,
     get_current_theme_name,
 )
-from modules.gui.sedentary_popup import (
-    build_sedentary_popup_options,
-    show_sedentary_popup_dialog,
-)
-
-
-def select_sedentary_preview_image_path(main_app, app_name: str, active_minutes: int) -> str:
-    backend = getattr(main_app, "app", main_app)
-    selector = getattr(backend, "select_sedentary_meme_image_path", None)
-    if not callable(selector):
-        return ""
-    try:
-        result = selector(app_name, active_minutes)
-        if hasattr(result, "result"):
-            result = result.result(timeout=8)
-        return str(result or "")
-    except Exception:
-        return ""
+from modules.gui.settings_pages.sedentary_page import SedentarySettingsPage
+from modules.gui.settings_pages.info_sources_page import InfoSourcesSettingsPage
 
 
 try:
@@ -108,14 +74,6 @@ try:
         NAPCAT_WEBHOOK_PORT,
         PROVIDERS,
         REMOTE_CHAT_UI_APPEND,
-        SEDENTARY_REMINDER_MINUTES,
-        SEDENTARY_REMINDER_COOLDOWN_MINUTES,
-        SEDENTARY_POPUP_ENABLED,
-        SEDENTARY_POPUP_TITLE,
-        SEDENTARY_POPUP_MESSAGE,
-        SEDENTARY_POPUP_IMAGE_PATH,
-        SEDENTARY_POPUP_SNOOZE_MINUTES,
-        SEDENTARY_POPUP_AUTO_CLOSE_SECONDS,
     )
 
 except ImportError:
@@ -1283,6 +1241,8 @@ class QQUserProfileEditDialog(QtWidgets.QDialog):
 
 
 class SettingsDialog(QtWidgets.QDialog):
+    SCREEN_MARGIN = 8
+
     def __init__(self, parent=None, main_app=None):
         super().__init__(parent)
 
@@ -1308,12 +1268,12 @@ class SettingsDialog(QtWidgets.QDialog):
         if screen:
             avail = screen.availableGeometry()
             width = min(1040, int(avail.width() * 0.9))
-            height = min(760, int(avail.height() * 0.9))
+            height = min(620, int(avail.height() * 0.82))
             self.resize(width, height)
         else:
-            self.resize(1040, 760)
+            self.resize(1040, 620)
 
-        self.setMinimumSize(720, 460)
+        self.setMinimumSize(600, 320)
 
         self.setSizeGripEnabled(True)
 
@@ -1344,6 +1304,11 @@ class SettingsDialog(QtWidgets.QDialog):
                 "nav": "🧩 高级 · 插件工具",
                 "title": "插件工具",
                 "desc": "进入插件管理器，查看启停状态、兼容入口和插件配置。",
+            },
+            {
+                "nav": "🔌 高级 · 信息源 API",
+                "title": "信息源 API",
+                "desc": "管理 ALAPI 接口 JSON，支持手填、从说明生成草稿、测试并保存。",
             },
             {
                 "nav": "📚 高级 · 知识库",
@@ -1499,6 +1464,8 @@ class SettingsDialog(QtWidgets.QDialog):
 
         self._safe_init_page(self._init_plugin_page, "插件工具")
 
+        self._safe_init_page(self._init_info_sources_page, "信息源 API")
+
         self._safe_init_page(self._init_knowledge_page, "知识库")
 
         self._safe_init_page(self._init_expression_library_page, "表达学习库")
@@ -1523,6 +1490,37 @@ class SettingsDialog(QtWidgets.QDialog):
 
         self._refresh_page_header(0)
 
+    def ensure_on_screen(self):
+        screen = (
+            QtGui.QGuiApplication.screenAt(QtGui.QCursor.pos())
+            or QtWidgets.QApplication.primaryScreen()
+        )
+        if not screen:
+            return
+        frame = self.frameGeometry()
+        geo = self.geometry()
+        avail = screen.availableGeometry().adjusted(
+            self.SCREEN_MARGIN,
+            self.SCREEN_MARGIN,
+            -self.SCREEN_MARGIN,
+            -self.SCREEN_MARGIN,
+        )
+        max_x = max(avail.left(), avail.right() - frame.width())
+        max_y = max(avail.top(), avail.bottom() - frame.height())
+        target_frame_x = min(max(frame.x(), avail.left()), max_x)
+        target_frame_y = min(max(frame.y(), avail.top()), max_y)
+        dx = target_frame_x - frame.x()
+        dy = target_frame_y - frame.y()
+        if dx or dy:
+            self.move(geo.x() + dx, geo.y() + dy)
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self.ensure_on_screen()
+        QtCore.QTimer.singleShot(0, self.ensure_on_screen)
+        QtCore.QTimer.singleShot(80, self.ensure_on_screen)
+        QtCore.QTimer.singleShot(240, self.ensure_on_screen)
+
     def _on_tab_changed(self, row):
         if 0 <= row < self.stack.count():
             self.stack.setCurrentIndex(row)
@@ -1538,6 +1536,11 @@ class SettingsDialog(QtWidgets.QDialog):
             self.raise_()
 
             self.activateWindow()
+
+            self.ensure_on_screen()
+            QtCore.QTimer.singleShot(0, self.ensure_on_screen)
+            QtCore.QTimer.singleShot(80, self.ensure_on_screen)
+            QtCore.QTimer.singleShot(240, self.ensure_on_screen)
 
     def _refresh_page_header(self, row: int):
         if not (0 <= row < len(self._tab_meta)):
@@ -1635,176 +1638,26 @@ class SettingsDialog(QtWidgets.QDialog):
     # ---------- Sedentary ----------
 
     def _init_sedentary_page(self):
-        state = self._load_gateway_settings()
         page = QtWidgets.QWidget()
         layout = QtWidgets.QVBoxLayout(page)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(12)
-
-        form_group = QtWidgets.QGroupBox("久坐判定")
-        form = QtWidgets.QFormLayout(form_group)
-        form.setLabelAlignment(QtCore.Qt.AlignmentFlag.AlignRight)
-        form.setHorizontalSpacing(12)
-        form.setVerticalSpacing(10)
-
-        self.sedentary_enabled = QtWidgets.QCheckBox("启用久坐弹窗")
-        self.sedentary_enabled.setChecked(bool(state["sedentary_popup_enabled"]))
-        form.addRow("弹窗:", self.sedentary_enabled)
-
-        self.sedentary_reminder_minutes = QtWidgets.QSpinBox()
-        self.sedentary_reminder_minutes.setRange(1, 720)
-        self.sedentary_reminder_minutes.setSuffix(" 分钟")
-        self.sedentary_reminder_minutes.setValue(int(state["sedentary_reminder_minutes"]))
-        form.addRow("提醒间隔:", self.sedentary_reminder_minutes)
-
-        self.sedentary_break_minutes = QtWidgets.QSpinBox()
-        self.sedentary_break_minutes.setRange(1, 120)
-        self.sedentary_break_minutes.setSuffix(" 分钟")
-        self.sedentary_break_minutes.setValue(int(state["sedentary_break_minutes"]))
-        form.addRow("休息重置:", self.sedentary_break_minutes)
-
-        self.sedentary_cooldown_minutes = QtWidgets.QSpinBox()
-        self.sedentary_cooldown_minutes.setRange(1, 720)
-        self.sedentary_cooldown_minutes.setSuffix(" 分钟")
-        self.sedentary_cooldown_minutes.setValue(int(state["sedentary_cooldown_minutes"]))
-        form.addRow("提醒冷却:", self.sedentary_cooldown_minutes)
-
-        popup_group = QtWidgets.QGroupBox("弹窗内容")
-        popup_form = QtWidgets.QFormLayout(popup_group)
-        popup_form.setLabelAlignment(QtCore.Qt.AlignmentFlag.AlignRight)
-        popup_form.setHorizontalSpacing(12)
-        popup_form.setVerticalSpacing(10)
-
-        self.sedentary_popup_title = QtWidgets.QLineEdit(state["sedentary_popup_title"])
-        popup_form.addRow("标题:", self.sedentary_popup_title)
-
-        self.sedentary_popup_message = QtWidgets.QPlainTextEdit()
-        self.sedentary_popup_message.setPlainText(state["sedentary_popup_message"])
-        self.sedentary_popup_message.setMinimumHeight(90)
-        popup_form.addRow("正文模板:", self.sedentary_popup_message)
-
-        self.sedentary_popup_image_path = QtWidgets.QLineEdit(
-            state["sedentary_popup_image_path"]
-        )
-        btn_pick = QtWidgets.QPushButton("选择")
-        btn_pick.clicked.connect(self._pick_sedentary_popup_image)
-        image_row = QtWidgets.QWidget()
-        image_layout = QtWidgets.QHBoxLayout(image_row)
-        image_layout.setContentsMargins(0, 0, 0, 0)
-        image_layout.addWidget(self.sedentary_popup_image_path, 1)
-        image_layout.addWidget(btn_pick)
-        popup_form.addRow("默认图片:", image_row)
-
-        self.sedentary_snooze_minutes = QtWidgets.QSpinBox()
-        self.sedentary_snooze_minutes.setRange(1, 240)
-        self.sedentary_snooze_minutes.setSuffix(" 分钟")
-        self.sedentary_snooze_minutes.setValue(
-            int(state["sedentary_popup_snooze_minutes"])
-        )
-        popup_form.addRow("稍后提醒:", self.sedentary_snooze_minutes)
-
-        self.sedentary_auto_close_seconds = QtWidgets.QSpinBox()
-        self.sedentary_auto_close_seconds.setRange(0, 3600)
-        self.sedentary_auto_close_seconds.setSuffix(" 秒")
-        self.sedentary_auto_close_seconds.setSpecialValueText("不自动关闭")
-        self.sedentary_auto_close_seconds.setValue(
-            int(state["sedentary_popup_auto_close_seconds"])
-        )
-        popup_form.addRow("自动关闭:", self.sedentary_auto_close_seconds)
-
-        hint = QtWidgets.QLabel(
-            "正文模板可使用 {app_name} 和 {active_minutes}。保存后 Python 侧立即生效；Rust 久坐判定参数需要重启程序或重启采集 sidecar 后完全生效。"
-        )
-        hint.setWordWrap(True)
-        hint.setStyleSheet("color:#6B7280;")
-
-        footer = QtWidgets.QHBoxLayout()
-        footer.addStretch()
-        btn_preview = QtWidgets.QPushButton("预览弹窗")
-        btn_preview.clicked.connect(self._preview_sedentary_popup)
-        btn_save = QtWidgets.QPushButton("保存并应用")
-        btn_save.setObjectName("primaryAction")
-        btn_save.clicked.connect(self._save_sedentary_settings)
-        footer.addWidget(btn_preview)
-        footer.addWidget(btn_save)
-
-        layout.addWidget(form_group)
-        layout.addWidget(popup_group)
-        layout.addWidget(hint)
-        layout.addLayout(footer)
-        layout.addStretch()
+        widget = SedentarySettingsPage(main_app=self.main_app)
+        widget.setMinimumSize(0, 0)
+        scroll = self._wrap_in_scroll_area(widget)
+        layout.addWidget(scroll, 1)
         self.stack.addWidget(page)
 
-    def _collect_sedentary_settings(self):
-        return {
-            "sedentary_reminder_minutes": int(self.sedentary_reminder_minutes.value()),
-            "sedentary_break_minutes": int(self.sedentary_break_minutes.value()),
-            "sedentary_cooldown_minutes": int(self.sedentary_cooldown_minutes.value()),
-            "sedentary_popup_enabled": self.sedentary_enabled.isChecked(),
-            "sedentary_popup_title": self.sedentary_popup_title.text().strip()
-            or SEDENTARY_POPUP_TITLE,
-            "sedentary_popup_message": self.sedentary_popup_message.toPlainText().strip()
-            or SEDENTARY_POPUP_MESSAGE,
-            "sedentary_popup_image_path": self.sedentary_popup_image_path.text().strip(),
-            "sedentary_popup_snooze_minutes": int(self.sedentary_snooze_minutes.value()),
-            "sedentary_popup_auto_close_seconds": int(
-                self.sedentary_auto_close_seconds.value()
-            ),
-        }
+    # ---------- Info Sources ----------
 
-    def _pick_sedentary_popup_image(self):
-        path, _ = QtWidgets.QFileDialog.getOpenFileName(
-            self,
-            "选择久坐提醒图片",
-            self.sedentary_popup_image_path.text().strip() or os.getcwd(),
-            "Images (*.png *.jpg *.jpeg *.gif *.webp);;All Files (*)",
-        )
-        if path:
-            self.sedentary_popup_image_path.setText(path)
-
-    def _preview_sedentary_popup(self):
-        values = self._collect_sedentary_settings()
-        app_name = "电脑"
-        active_minutes = int(values["sedentary_reminder_minutes"])
-        image_path = select_sedentary_preview_image_path(
-            self.main_app, app_name, active_minutes
-        )
-        cfg = type("SedentaryPreviewConfig", (), {})()
-        cfg.SEDENTARY_POPUP_ENABLED = True
-        cfg.SEDENTARY_POPUP_TITLE = values["sedentary_popup_title"]
-        cfg.SEDENTARY_POPUP_MESSAGE = values["sedentary_popup_message"]
-        cfg.SEDENTARY_POPUP_IMAGE_PATH = values["sedentary_popup_image_path"]
-        cfg.SEDENTARY_POPUP_SNOOZE_MINUTES = values["sedentary_popup_snooze_minutes"]
-        cfg.SEDENTARY_POPUP_AUTO_CLOSE_SECONDS = values[
-            "sedentary_popup_auto_close_seconds"
-        ]
-        options = build_sedentary_popup_options(
-            cfg,
-            app_name=app_name,
-            active_minutes=active_minutes,
-            image_path_override=image_path,
-        )
-        show_sedentary_popup_dialog(self, options)
-
-    def _save_sedentary_settings(self):
-        new_settings = self._collect_sedentary_settings()
-        update_runtime_settings(new_settings)
-        apply_result = {}
-        if getattr(self.main_app, "apply_external_settings", None):
-            try:
-                apply_result = self.main_app.apply_external_settings(new_settings) or {}
-            except Exception as exc:
-                apply_result = {"error": str(exc)}
-        if apply_result.get("error"):
-            QtWidgets.QMessageBox.warning(
-                self, "久坐提醒", f"配置已保存，但应用失败：{apply_result['error']}"
-            )
-            return
-        QtWidgets.QMessageBox.information(
-            self,
-            "久坐提醒",
-            "配置已保存。Rust 久坐判定参数会在下次重启采集 sidecar 后完全生效。",
-        )
+    def _init_info_sources_page(self):
+        page = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout(page)
+        layout.setContentsMargins(0, 0, 0, 0)
+        widget = InfoSourcesSettingsPage()
+        widget.setMinimumSize(0, 0)
+        scroll = self._wrap_in_scroll_area(widget)
+        layout.addWidget(scroll, 1)
+        self.stack.addWidget(page)
 
     # ---------- Provider ----------
 
@@ -1845,7 +1698,8 @@ class SettingsDialog(QtWidgets.QDialog):
 
         layout.addWidget(self.prov_table)
 
-        self.stack.addWidget(page)
+        scroll = self._wrap_in_scroll_area(page)
+        self.stack.addWidget(scroll)
 
         self._refresh_prov_table()
 
@@ -2055,7 +1909,7 @@ class SettingsDialog(QtWidgets.QDialog):
 
         self.llm_table.verticalHeader().setVisible(False)
 
-        self.llm_table.setMinimumHeight(300)
+        self.llm_table.setMinimumHeight(0)
 
         self.llm_table.setMaximumHeight(380)
 
@@ -2234,7 +2088,8 @@ class SettingsDialog(QtWidgets.QDialog):
 
         layout.addWidget(llm_action_bar, 0)
 
-        self.stack.addWidget(page)
+        scroll = self._wrap_in_scroll_area(page)
+        self.stack.addWidget(scroll)
 
         self._refresh_llm_table()
 
@@ -2364,6 +2219,8 @@ class SettingsDialog(QtWidgets.QDialog):
             self._refresh_router()
 
     def _open_routing_overview(self):
+        from modules.gui.dialogs.model_routing_overview import ModelRoutingOverviewDialog
+
         if not hasattr(self, "_routing_overview_dlg") or self._routing_overview_dlg is None:
             self._routing_overview_dlg = ModelRoutingOverviewDialog(self)
         else:
@@ -2454,7 +2311,8 @@ class SettingsDialog(QtWidgets.QDialog):
 
         self.dep_rows = []
 
-        self.stack.addWidget(page)
+        scroll = self._wrap_in_scroll_area(page)
+        self.stack.addWidget(scroll)
 
         self._refresh_dependency_rows()
 
@@ -2576,10 +2434,6 @@ class SettingsDialog(QtWidgets.QDialog):
         self._ui_color_labels = {}
         self._ui_color_previews = {}
 
-        scroll = QtWidgets.QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
-
         body = QtWidgets.QWidget()
         body_layout = QtWidgets.QVBoxLayout(body)
         body_layout.setContentsMargins(0, 0, 0, 0)
@@ -2661,8 +2515,7 @@ class SettingsDialog(QtWidgets.QDialog):
         add_color_row(codex_console_form, "标签", "console_codex.label")
 
         body_layout.addStretch()
-        scroll.setWidget(body)
-        layout.addWidget(scroll, 1)
+        layout.addWidget(body, 1)
 
         theme_action_card = QtWidgets.QGroupBox("快速主题选择")
         theme_action_layout = QtWidgets.QHBoxLayout(theme_action_card)
@@ -2694,7 +2547,8 @@ class SettingsDialog(QtWidgets.QDialog):
         footer.addWidget(btn_save)
         layout.addLayout(footer)
 
-        self.stack.addWidget(page)
+        scroll = self._wrap_in_scroll_area(page)
+        self.stack.addWidget(scroll)
         self._refresh_color_inputs()
 
     def _on_theme_apply_clicked(self):
@@ -2917,53 +2771,6 @@ class SettingsDialog(QtWidgets.QDialog):
             ),
             "remote_chat_ui_append": bool(
                 runtime.get("remote_chat_ui_append", REMOTE_CHAT_UI_APPEND)
-            ),
-            "sedentary_reminder_minutes": int(
-                runtime.get("sedentary_reminder_minutes", SEDENTARY_REMINDER_MINUTES)
-                or SEDENTARY_REMINDER_MINUTES
-            ),
-            "sedentary_break_minutes": int(
-                runtime.get(
-                    "sedentary_break_minutes",
-                    getattr(config, "ACTIVITY_AGENT_SEDENTARY_BREAK_MINUTES", 5),
-                )
-                or 5
-            ),
-            "sedentary_cooldown_minutes": int(
-                runtime.get(
-                    "sedentary_cooldown_minutes",
-                    SEDENTARY_REMINDER_COOLDOWN_MINUTES,
-                )
-                or SEDENTARY_REMINDER_COOLDOWN_MINUTES
-            ),
-            "sedentary_popup_enabled": bool(
-                runtime.get("sedentary_popup_enabled", SEDENTARY_POPUP_ENABLED)
-            ),
-            "sedentary_popup_title": str(
-                runtime.get("sedentary_popup_title", SEDENTARY_POPUP_TITLE)
-                or SEDENTARY_POPUP_TITLE
-            ),
-            "sedentary_popup_message": str(
-                runtime.get("sedentary_popup_message", SEDENTARY_POPUP_MESSAGE)
-                or SEDENTARY_POPUP_MESSAGE
-            ),
-            "sedentary_popup_image_path": str(
-                runtime.get("sedentary_popup_image_path", SEDENTARY_POPUP_IMAGE_PATH)
-                or ""
-            ),
-            "sedentary_popup_snooze_minutes": int(
-                runtime.get(
-                    "sedentary_popup_snooze_minutes",
-                    SEDENTARY_POPUP_SNOOZE_MINUTES,
-                )
-                or SEDENTARY_POPUP_SNOOZE_MINUTES
-            ),
-            "sedentary_popup_auto_close_seconds": int(
-                runtime.get(
-                    "sedentary_popup_auto_close_seconds",
-                    SEDENTARY_POPUP_AUTO_CLOSE_SECONDS,
-                )
-                or SEDENTARY_POPUP_AUTO_CLOSE_SECONDS
             ),
         }
 
@@ -4649,7 +4456,7 @@ class SettingsDialog(QtWidgets.QDialog):
 
         self.gateway_mcp_table.setAlternatingRowColors(True)
 
-        self.gateway_mcp_table.setMinimumHeight(190)
+        self.gateway_mcp_table.setMinimumHeight(0)
 
         self.gateway_mcp_table.horizontalHeader().setStretchLastSection(False)
 
@@ -5310,7 +5117,7 @@ class SettingsDialog(QtWidgets.QDialog):
 
         self.gateway_qq_profile_table.setAlternatingRowColors(True)
 
-        self.gateway_qq_profile_table.setMinimumHeight(230)
+        self.gateway_qq_profile_table.setMinimumHeight(0)
 
         self.gateway_qq_profile_table.horizontalHeader().setStretchLastSection(False)
 
@@ -5408,19 +5215,39 @@ class SettingsDialog(QtWidgets.QDialog):
         scroll.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
         scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         scroll.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        # 关键：阻止被包裹控件的大 minimumSizeHint 顶住外层对话框高度。
+        # setMinimumSize(0,0) 只清显式最小值，不覆盖 minimumSizeHint()；
+        # 而 QStackedWidget 取所有页 minimumSizeHint 的最大值，会把窗口高度顶死。
+        # 给外层 scroll 纵向设 Ignored 策略，布局将忽略其 minimumSizeHint，
+        # 滚动区即可真正压缩，超出部分由滚动条兜底。内部 widget 则使用 Preferred 策略
+        # 以展现其完整的 natural/minimumSizeHint 高度，避免内部元素被挤压重叠。
+        widget.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Preferred,
+            QtWidgets.QSizePolicy.Policy.Preferred,
+        )
+        scroll.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Preferred,
+            QtWidgets.QSizePolicy.Policy.Ignored,
+        )
         scroll.setWidget(widget)
+        scroll.setMinimumSize(0, 0)
         return scroll
 
     def _init_costume_page(self):
+        from modules.gui.dialogs.character_editor import CharacterEditorWidget
+
         page = QtWidgets.QWidget()
         layout = QtWidgets.QVBoxLayout(page)
         layout.setContentsMargins(0, 0, 0, 0)
         widget = CharacterEditorWidget(self.main_app)
         widget.setMinimumSize(0, 0)
-        layout.addWidget(widget, 1)
+        scroll = self._wrap_in_scroll_area(widget)
+        layout.addWidget(scroll, 1)
         self.stack.addWidget(page)
 
     def _init_plugin_page(self):
+        from modules.gui.dialogs.plugin_manager import PluginManagerDialog
+
         page = QtWidgets.QWidget()
         layout = QtWidgets.QVBoxLayout(page)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -5458,15 +5285,25 @@ class SettingsDialog(QtWidgets.QDialog):
         self.stack.addWidget(page)
 
     def _init_knowledge_page(self):
+        from modules.gui.dialogs.knowledge_manager import KnowledgeManagerDialog
+
         self._add_embedded_dialog_page(KnowledgeManagerDialog, "知识库")
 
     def _init_expression_library_page(self):
+        from modules.gui.dialogs.expression_library_manager import (
+            ExpressionLibraryManagerDialog,
+        )
+
         self._add_embedded_dialog_page(ExpressionLibraryManagerDialog, "表达学习库")
 
     def _init_meme_page(self):
+        from modules.gui.dialogs.meme_manager import MemeManagerDialog
+
         self._add_embedded_dialog_page(MemeManagerDialog, "表情包库")
 
     def _init_memory_page(self):
+        from modules.gui.dialogs.memory_editor import MemoryEditorDialog
+
         page = QtWidgets.QWidget()
         layout = QtWidgets.QVBoxLayout(page)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -5477,7 +5314,11 @@ class SettingsDialog(QtWidgets.QDialog):
         self.stack.addWidget(page)
 
     def _init_status_screen_page(self):
+        from modules.gui.dialogs.status_screen_manager import StatusScreenManagerDialog
+
         self._add_embedded_dialog_page(StatusScreenManagerDialog, "状态屏")
 
     def _init_screen_app_rules_page(self):
+        from modules.gui.dialogs.screen_app_rules import ScreenAppRulesDialog
+
         self._add_embedded_dialog_page(ScreenAppRulesDialog, "应用识别")

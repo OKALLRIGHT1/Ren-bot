@@ -369,6 +369,29 @@ class MemorySQLite:
 
             conn.execute(
                 """
+                CREATE TABLE IF NOT EXISTS activity_latest (
+                    source TEXT PRIMARY KEY,
+                    event_id TEXT NOT NULL,
+                    ts_iso TEXT NOT NULL,
+                    kind TEXT NOT NULL,
+                    presence TEXT,
+                    app_id TEXT,
+                    app_name TEXT,
+                    pid INTEGER,
+                    window_title TEXT,
+                    browser_family TEXT,
+                    browser_name TEXT,
+                    page_title TEXT,
+                    url TEXT,
+                    domain TEXT,
+                    raw_json TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
+
+            conn.execute(
+                """
                 CREATE TABLE IF NOT EXISTS expression_patterns (
                     id TEXT PRIMARY KEY,
                     character_name TEXT NOT NULL DEFAULT '',
@@ -500,13 +523,33 @@ class MemorySQLite:
                 )
                 conn.commit()
 
-    def add_activity_event(self, event: Dict[str, Any]) -> None:
+    def _activity_event_values(self, event: Dict[str, Any]) -> Tuple[Any, ...]:
         event_id = str(event.get("event_id") or uuid.uuid4().hex).strip()
         ts_iso = str(event.get("ts") or _now_iso()).strip()
         kind = str(event.get("kind") or "activity_sample").strip()
         presence = str(event.get("presence") or "").strip()
         app = event.get("app") if isinstance(event.get("app"), dict) else {}
         browser = event.get("browser") if isinstance(event.get("browser"), dict) else {}
+        return (
+            event_id,
+            ts_iso,
+            kind,
+            presence,
+            str(app.get("id") or ""),
+            str(app.get("name") or ""),
+            int(app.get("pid") or 0),
+            str(event.get("window_title") or ""),
+            str(browser.get("family") or ""),
+            str(browser.get("name") or ""),
+            str(browser.get("page_title") or ""),
+            str(browser.get("url") or ""),
+            str(browser.get("domain") or ""),
+            str(event.get("source") or "rust-agent"),
+            _j(event),
+        )
+
+    def add_activity_event(self, event: Dict[str, Any]) -> None:
+        values = self._activity_event_values(event)
         with self._lock:
             with self._connect() as conn:
                 conn.execute(
@@ -517,25 +560,91 @@ class MemorySQLite:
                       url, domain, source, raw_json
                     ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                     """,
+                    values,
+                )
+                conn.commit()
+
+    def upsert_activity_latest(self, event: Dict[str, Any]) -> None:
+        values = self._activity_event_values(event)
+        source = str(event.get("source") or "rust-agent").strip() or "rust-agent"
+        with self._lock:
+            with self._connect() as conn:
+                conn.execute(
+                    """
+                    INSERT OR REPLACE INTO activity_latest(
+                      source, event_id, ts_iso, kind, presence, app_id, app_name, pid,
+                      window_title, browser_family, browser_name, page_title,
+                      url, domain, raw_json, updated_at
+                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    """,
                     (
-                        event_id,
-                        ts_iso,
-                        kind,
-                        presence,
-                        str(app.get("id") or ""),
-                        str(app.get("name") or ""),
-                        int(app.get("pid") or 0),
-                        str(event.get("window_title") or ""),
-                        str(browser.get("family") or ""),
-                        str(browser.get("name") or ""),
-                        str(browser.get("page_title") or ""),
-                        str(browser.get("url") or ""),
-                        str(browser.get("domain") or ""),
-                        str(event.get("source") or "rust-agent"),
-                        _j(event),
+                        source,
+                        values[0],
+                        values[1],
+                        values[2],
+                        values[3],
+                        values[4],
+                        values[5],
+                        values[6],
+                        values[7],
+                        values[8],
+                        values[9],
+                        values[10],
+                        values[11],
+                        values[12],
+                        values[14],
+                        _now_iso(),
                     ),
                 )
                 conn.commit()
+
+    def ingest_activity_event(self, event: Dict[str, Any]) -> Dict[str, bool]:
+        self.upsert_activity_latest(event)
+        kind = str(event.get("kind") or "activity_sample").strip().lower()
+        historized = kind != "activity_sample"
+        if historized:
+            self.add_activity_event(event)
+        return {"latest": True, "historized": historized}
+
+    def _activity_row_to_dict(self, r: sqlite3.Row) -> Dict[str, Any]:
+        raw_payload = _pj(r["raw_json"], {})
+        item = {
+            "event_id": r["event_id"],
+            "ts": r["ts_iso"],
+            "kind": r["kind"],
+            "presence": r["presence"],
+            "app": {
+                "id": r["app_id"],
+                "name": r["app_name"],
+                "pid": r["pid"],
+            },
+            "window_title": r["window_title"],
+            "browser": {
+                "family": r["browser_family"],
+                "name": r["browser_name"],
+                "page_title": r["page_title"],
+                "url": r["url"],
+                "domain": r["domain"],
+            },
+            "source": r["source"],
+        }
+        if isinstance(raw_payload, dict) and isinstance(
+            raw_payload.get("sedentary"), dict
+        ):
+            item["sedentary"] = raw_payload["sedentary"]
+        return item
+
+    def get_latest_activity_event(self, *, source: str = "") -> Optional[Dict[str, Any]]:
+        source = str(source or "").strip()
+        sql = "SELECT * FROM activity_latest"
+        args: List[Any] = []
+        if source:
+            sql += " WHERE source=?"
+            args.append(source)
+        sql += " ORDER BY ts_iso DESC LIMIT 1"
+        with self._connect() as conn:
+            row = conn.execute(sql, args).fetchone()
+        return self._activity_row_to_dict(row) if row else None
 
     def list_activity_events(
         self, *, limit: int = 200, date_str: str = "", source: str = ""
@@ -557,35 +666,7 @@ class MemorySQLite:
         args.append(limit)
         with self._connect() as conn:
             rows = conn.execute(sql, args).fetchall()
-        out: List[Dict[str, Any]] = []
-        for r in rows:
-            raw_payload = _pj(r["raw_json"], {})
-            item = {
-                "event_id": r["event_id"],
-                "ts": r["ts_iso"],
-                "kind": r["kind"],
-                "presence": r["presence"],
-                "app": {
-                    "id": r["app_id"],
-                    "name": r["app_name"],
-                    "pid": r["pid"],
-                },
-                "window_title": r["window_title"],
-                "browser": {
-                    "family": r["browser_family"],
-                    "name": r["browser_name"],
-                    "page_title": r["page_title"],
-                    "url": r["url"],
-                    "domain": r["domain"],
-                },
-                "source": r["source"],
-            }
-            if isinstance(raw_payload, dict) and isinstance(
-                raw_payload.get("sedentary"), dict
-            ):
-                item["sedentary"] = raw_payload["sedentary"]
-            out.append(item)
-        return out
+        return [self._activity_row_to_dict(r) for r in rows]
 
     def list_transcript(
         self,

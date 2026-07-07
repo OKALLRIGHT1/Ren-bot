@@ -1,0 +1,43 @@
+{
+  "name": "用户文件助手",
+  "trigger": "user_files",
+  "llm_command": "user_files",
+  "type": "direct",
+  "aliases": [
+    "用户文件",
+    "文件助手",
+    "下载目录",
+    "文档目录",
+    "桌面文件",
+    "user_files"
+  ],
+  "description": "读取和受控写入白名单用户目录。支持 roots/list/read/write/move，不支持删除。",
+  "example_arg": "read ||| downloads ||| note.txt",
+  "timeout_sec": 20,
+  "tool_examples": [
+    "帮我看看下载目录里的 a.txt",
+    "user_files list ||| downloads ||| .",
+    "user_files read ||| documents ||| notes.txt"
+  ],
+  "access_control": {
+    "allow_local": true,
+    "allow_remote_qq": true,
+    "allow_qq_owner": true,
+    "allow_qq_others": false,
+    "allow_group_without_at": false
+  },
+  "settings": {
+    "custom_roots": {
+      "default": [],
+      "description": "额外允许的目录，例如 [{\"name\":\"work\",\"path\":\"D:/Work\"}]。"
+    },
+    "max_read_chars": {
+      "default": 8000,
+      "description": "单次读取最大字符数。"
+    },
+    "max_list_items": {
+      "default": 80,
+      "description": "单次列目录最大条目数。"
+    }
+  }
+}

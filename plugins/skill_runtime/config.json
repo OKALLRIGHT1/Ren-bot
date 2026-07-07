@@ -1,0 +1,33 @@
+{
+  "name": "技能运行时",
+  "trigger": "skill_runtime",
+  "llm_command": "skill_runtime",
+  "type": "direct",
+  "aliases": [
+    "技能列表",
+    "当前技能",
+    "重载技能",
+    "启用技能",
+    "停用技能",
+    "禁用技能",
+    "关闭技能系统",
+    "开启技能系统",
+    "skill list",
+    "skill current",
+    "skill reload",
+    "skill enable",
+    "skill disable",
+    "skill on",
+    "skill off"
+  ],
+  "description": "管理运行时 Skill 系统，支持列出、启用、停用、重载兼容 SKILL.md 的技能目录。",
+  "example_arg": "启用技能 imagegen",
+  "timeout_sec": 8,
+  "access_control": {
+    "allow_local": true,
+    "allow_remote_qq": true,
+    "allow_qq_owner": true,
+    "allow_qq_others": false,
+    "allow_group_without_at": false
+  }
+}

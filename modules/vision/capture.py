@@ -19,14 +19,18 @@ except Exception:
     pyautogui = None
 
 try:
-    import cv2
-except Exception:
-    cv2 = None
-
-try:
     import pygetwindow as gw
 except Exception:
     gw = None
+
+
+def _load_cv2():
+    try:
+        import cv2
+
+        return cv2
+    except Exception:
+        return None
 
 
 def encode_image_to_base64(image: Image.Image, format="JPEG") -> str:
@@ -234,6 +238,7 @@ def take_camera_photo_base64(camera_index=0) -> str:
     """
     cap = None
     try:
+        cv2 = _load_cv2()
         if cv2 is None:
             print("❌ [Vision] 摄像头依赖 cv2 未安装")
             return None

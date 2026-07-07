@@ -4,28 +4,18 @@ import asyncio
 import json
 import re
 import os
-import random  # ✅ [新增] 引入随机模块
-import uuid
+import random  # 鉁?[鏂板] 寮曞叆闅忔満妯″潡
 
-try:
-    import pygetwindow as gw
-
-    _PYGETWINDOW_OK = True
-except Exception:
-    gw = None
-    _PYGETWINDOW_OK = False
 from datetime import datetime
 from typing import Optional, Dict, Tuple, List, Any
 
 import config
-from modules.llm import chat_with_ai
 from modules.screen_app_registry import ScreenAppRegistry
 
 from config import (
     SCREEN_SENSOR_ENABLED,
     SCREEN_SENSOR_INTERVAL,
     SCREEN_DEBUG_VERBOSE,
-    WINDOW_IGNORE_KEYWORDS,
     SCREEN_SMART_DEBOUNCE,
     SCREEN_REACTION_COOLDOWN,
     SCREEN_GLOBAL_COOLDOWN,
@@ -45,28 +35,17 @@ except ImportError:
 
 WORK_SESSION_EVENT_LIMIT = 1200
 WORK_SESSION_RESTART_BRIDGE_SEC = 15 * 60
+WORK_SESSION_MAX_RUST_PAYLOAD_MINUTES = 12 * 60
+LIVE2D_ACTIVITY_SOURCE = "live2d-tauri"
+LIVE2D_SEDENTARY_SOURCE = "live2d-sedentary"
 SEDENTARY_SESSION_APP_NAME = "电脑"
 SEDENTARY_SESSION_CATEGORY = "computer_active"
 
 
-import ctypes
-import os
 
 
-# 定义 Windows 结构体，用于检测键鼠空闲时间
-class LASTINPUTINFO(ctypes.Structure):
-    _fields_ = [("cbSize", ctypes.c_uint), ("dwTime", ctypes.c_uint)]
 
 
-def get_idle_duration() -> float:
-    """获取系统空闲时间（秒）"""
-    if os.name == "nt":
-        lastInputInfo = LASTINPUTINFO()
-        lastInputInfo.cbSize = ctypes.sizeof(lastInputInfo)
-        if ctypes.windll.user32.GetLastInputInfo(ctypes.byref(lastInputInfo)):
-            millis = ctypes.windll.kernel32.GetTickCount() - lastInputInfo.dwTime
-            return millis / 1000.0
-    return 0.0
 
 
 class ScreenSensor:
@@ -77,7 +56,7 @@ class ScreenSensor:
         self._thread: Optional[threading.Thread] = None
         self._loop = None
 
-        # 状态记录
+        # 鐘舵€佽褰?
         self.last_window_title = ""
         self.last_app_name = ""
         self.last_category = None
@@ -85,16 +64,16 @@ class ScreenSensor:
         self.category_reaction_times = {}
 
         # [新增] 时长监控相关变量
-        self.current_window_start_time = time.time()  # 当前窗口开始聚焦的时间
-        self.next_duration_trigger_time = 0  # 下一次触发吐槽的时间点
-        self.DURATION_TRIGGER_THRESHOLD = 20 * 60  # 阈值：连续 20 分钟没切屏触发一次
+        self.current_window_start_time = time.time()  # 褰撳墠绐楀彛寮€濮嬭仛鐒︾殑鏃堕棿
+        self.next_duration_trigger_time = 0  # 涓嬩竴娆¤Е鍙戝悙妲界殑鏃堕棿鐐?
+        self.DURATION_TRIGGER_THRESHOLD = 20 * 60  # 闃堝€硷細杩炵画 20 鍒嗛挓娌″垏灞忚Е鍙戜竴娆?
 
-        # 数据文件
+        # 鏁版嵁鏂囦欢
         self.stats_file = "./data/sensor_stats.json"
 
-        # 核心数据
+        # 鏍稿績鏁版嵁
         self.daily_counts: Dict[str, int] = {}
-        # 用来存时长 (单位: 秒)
+        # 鐢ㄦ潵瀛樻椂闀?(鍗曚綅: 绉?
         self.daily_durations: Dict[str, float] = {}
         self.app_cache: Dict[str, List[str]] = {}
         self.current_day = self._today_key()
@@ -111,23 +90,25 @@ class ScreenSensor:
             300, int(SEDENTARY_REMINDER_COOLDOWN_MINUTES) * 60
         )
         self.next_sedentary_alert_time = time.time() + self.sedentary_interval_sec
-        self.sedentary_session_start_ts = self.current_window_start_time
-        self.sedentary_session_source = "python-local"
+        self.sedentary_session_start_ts = 0.0
+        self.sedentary_session_source = LIVE2D_ACTIVITY_SOURCE
         self.sedentary_session_app_name = ""
         self.sedentary_session_category = ""
 
         self._load_stats()
         self._last_alert_app = None
         self._last_alert_time = 0
+        self._sedentary_startup_grace_until = time.time() + 120.0
         self.use_rust_events_only = True
         self._last_rust_event_id = ""
         self._last_rust_debug_key = ""
         self._last_rust_debug_at = 0.0
         self._last_rust_sample_ts = 0.0
         self._last_rust_event_seen_at = 0.0
-        self._last_python_event_error_at = 0.0
+        self._last_rust_stale_log_at = 0.0
         self._sedentary_popup_callback = None
         self._sedentary_meme_selector = None
+        self._sedentary_popup_in_flight = False
         self.debug_verbose = bool(SCREEN_DEBUG_VERBOSE)
 
     def set_sedentary_popup_callback(self, callback):
@@ -140,8 +121,12 @@ class ScreenSensor:
         callback = self._sedentary_popup_callback
         if not callable(callback):
             return
+        if self._sedentary_popup_in_flight:
+            return
+        self._sedentary_popup_in_flight = True
 
         def _on_result(result: str) -> None:
+            now = time.time()
             if result == "snooze":
                 try:
                     snooze_minutes = int(
@@ -149,7 +134,13 @@ class ScreenSensor:
                     )
                 except Exception:
                     snooze_minutes = 10
-                self.next_sedentary_alert_time = time.time() + max(1, snooze_minutes) * 60
+                delay_sec = max(1, snooze_minutes) * 60
+            else:
+                delay_sec = max(60.0, float(self.sedentary_cooldown_sec or 0))
+            self.next_sedentary_alert_time = now + delay_sec
+            self._last_alert_time = now
+            self._last_alert_app = SEDENTARY_SESSION_APP_NAME
+            self._sedentary_popup_in_flight = False
 
         try:
             image_path = ""
@@ -163,10 +154,65 @@ class ScreenSensor:
                         result = future
                     image_path = str(result or "")
                 except Exception as exc:
-                    self.logger.warning(f"[Screen] 久坐表情包选择失败: {exc}")
+                    self.logger.warning(f"[Screen] 涔呭潗琛ㄦ儏鍖呴€夋嫨澶辫触: {exc}")
             callback(app_name, active_minutes, image_path, _on_result)
         except Exception as exc:
-            self.logger.warning(f"[Screen] 久坐提醒弹窗触发失败: {exc}")
+            self._sedentary_popup_in_flight = False
+            self.logger.warning(f"[Screen] 涔呭潗鎻愰啋寮圭獥瑙﹀彂澶辫触: {exc}")
+
+    def _trigger_sedentary_alert(
+        self,
+        *,
+        now_ts: float,
+        alert_app_name: str,
+        active_minutes: int,
+        app_name: str,
+        category: str,
+        full_title: str,
+        source: str,
+        log_label: str,
+    ) -> bool:
+        if (
+            self._last_alert_app == alert_app_name
+            and now_ts - self._last_alert_time <= self.sedentary_cooldown_sec
+        ):
+            return False
+        if self._sedentary_popup_in_flight:
+            return False
+
+        is_dnd_active = getattr(config, "DND_MODE", False)
+        self._last_alert_app = alert_app_name
+        self._last_alert_time = now_ts
+        self.next_sedentary_alert_time = now_ts + self.sedentary_cooldown_sec
+
+        if now_ts < float(getattr(self, "_sedentary_startup_grace_until", 0.0) or 0.0):
+            self.logger.info(
+                f"⏰[Active] 启动宽限期内跳过{log_label}: {alert_app_name} ({active_minutes} min)"
+            )
+            return True
+
+        if is_dnd_active:
+            self.logger.info(f"馃敃 [Active] 鍏嶆墦鎵扮敓鏁堬紝璺宠繃{log_label}: {alert_app_name}")
+            return True
+
+        self.logger.info(
+            f"鈴癧Active] {log_label}: {alert_app_name} ({active_minutes} min)"
+        )
+        self.add_observation(
+            f"{log_label}锛氳繛缁椿璺?{active_minutes} 鍒嗛挓",
+            full_title,
+            category,
+            app_name=app_name,
+            reason="sedentary",
+            source=source,
+        )
+        self._show_sedentary_popup(alert_app_name, active_minutes)
+        if self._loop:
+            asyncio.run_coroutine_threadsafe(
+                self.chat_service.send_active_alert(alert_app_name, active_minutes),
+                self._loop,
+            )
+        return True
 
     def _debug_log(self, message: str):
         if self.debug_verbose:
@@ -208,24 +254,25 @@ class ScreenSensor:
     def start(self, loop):
         if not SCREEN_SENSOR_ENABLED:
             return
-        if not _PYGETWINDOW_OK and not getattr(self, "use_rust_events_only", False):
-            self.logger.warning("[ScreenSensor] pygetwindow 未安装，屏幕感知已禁用")
+        self.use_rust_events_only = True
+        self._loop = loop
+        if self.running and self._thread and self._thread.is_alive():
+            self.logger.info("[ScreenSensor] monitor thread already running; reused")
             return
         self.restore_recent_work_session()
-        self._loop = loop
         self.running = True
         self._thread = threading.Thread(target=self._monitor_loop, daemon=True)
         self._thread.start()
-        self.logger.info("👀 [ScreenSensor] 启动完成 (含每日总结 + 视觉查岗)")
+        self.logger.info("馃憖 [ScreenSensor] 鍚姩瀹屾垚 (鍚瘡鏃ユ€荤粨 + 瑙嗚鏌ュ矖)")
 
     def stop(self):
         self.running = False
         if self._thread:
             self._thread.join(timeout=2.0)
 
-    # ==================== 数据接口 ====================
+    # ==================== 鏁版嵁鎺ュ彛 ====================
     def get_formatted_report(self) -> str:
-        """生成今日数据的格式化文本 (含时长/分类/观察摘要)"""
+        """鐢熸垚浠婃棩鏁版嵁鐨勬牸寮忓寲鏂囨湰 (鍚椂闀?鍒嗙被/瑙傚療鎽樿)"""
         rust_lines = self._format_rust_events_summary(limit=10)
         if not self.daily_counts and not self.daily_durations and not rust_lines:
             return "（今日尚无任何屏幕活动记录）"
@@ -238,11 +285,11 @@ class ScreenSensor:
 
         total_seconds = sum(self.daily_durations.values())
         total_hours = total_seconds / 3600.0
-        lines.append(f"【今日屏幕活动统计】(活跃时长: {total_hours:.1f}小时)")
+        lines.append(f"[今日屏幕活动统计] 活跃时长: {total_hours:.1f} 小时")
 
         category_totals = self._compute_category_totals()
         if category_totals:
-            lines.append("【按分类】")
+            lines.append("[按分类]")
             for cat, seconds in sorted(
                 category_totals.items(), key=lambda x: x[1], reverse=True
             ):
@@ -250,21 +297,21 @@ class ScreenSensor:
                     continue
                 lines.append(f"- {cat}: {self._format_duration(seconds)}")
 
-        lines.append("【按应用】")
+        lines.append("[按应用]")
         for app, duration_sec in sorted_apps:
             count = self.daily_counts.get(app, 0)
             time_str = self._format_duration(duration_sec)
-            lines.append(f"- {app}: {time_str} ({count}次)")
+            lines.append(f"- {app}: {time_str} ({count} 次)")
 
         obs_lines = self._format_compact_observations(
             self.observation_entries, limit=10
         )
         if obs_lines:
-            lines.append("【今日观察摘要】")
+            lines.append("[今日观察摘要]")
             lines.extend(obs_lines)
 
         if self.activity_segments:
-            lines.append("【最近活动切片】")
+            lines.append("[最近活动切片]")
             recent_segments = self.activity_segments[-5:]
             for seg in recent_segments:
                 start = seg.get("start_time", "--:--")
@@ -278,7 +325,7 @@ class ScreenSensor:
                     lines.append(f"- {start}-{end} {cat} ({dur})")
 
         if rust_lines:
-            lines.append("【Rust 活动事件】")
+            lines.append("[Live2D 活动事件]")
             lines.extend(rust_lines)
 
         return "\n".join(lines)
@@ -290,24 +337,28 @@ class ScreenSensor:
             store = get_memory_store()
             if not store:
                 return []
-            return store.list_activity_events(
-                limit=limit, date_str=self._stats_date_key(), source="rust-agent"
+            events: List[Dict[str, Any]] = []
+            if hasattr(store, "get_latest_activity_event"):
+                latest = store.get_latest_activity_event(source=LIVE2D_ACTIVITY_SOURCE)
+                if latest:
+                    events.append(latest)
+            events.extend(store.list_activity_events(
+                limit=limit, source=LIVE2D_ACTIVITY_SOURCE
+            ))
+            deduped: List[Dict[str, Any]] = []
+            seen_ids = set()
+            for item in events:
+                event_id = str(item.get("event_id") or "").strip()
+                if event_id and event_id in seen_ids:
+                    continue
+                if event_id:
+                    seen_ids.add(event_id)
+                deduped.append(item)
+            events = deduped
+            events.sort(
+                key=lambda item: self._parse_rust_event_ts(item), reverse=True
             )
-        except Exception:
-            return []
-
-    def _recent_activity_events(
-        self, limit: int = 120, source: str = ""
-    ) -> List[Dict[str, Any]]:
-        if not get_memory_store:
-            return []
-        try:
-            store = get_memory_store()
-            if not store:
-                return []
-            return store.list_activity_events(
-                limit=limit, date_str=self._stats_date_key(), source=source
-            )
+            return events[: max(1, int(limit))]
         except Exception:
             return []
 
@@ -332,46 +383,42 @@ class ScreenSensor:
             self.use_rust_events_only = True
         return True
 
-    def _record_python_activity_event(
-        self, *, kind: str, app_name: str, title: str, now_ts: float
-    ) -> None:
-        if not get_memory_store:
+    def _warn_rust_events_stale(self, now_ts: float) -> None:
+        if now_ts - self._last_rust_stale_log_at < 60.0:
             return
-        recent_rust_events = self._recent_rust_events(limit=1)
-        if recent_rust_events:
-            rust_ts = self._parse_rust_event_ts(recent_rust_events[0])
-            max_rust_age = max(30.0, float(SCREEN_SENSOR_INTERVAL) * 3.0)
-            if rust_ts > 0 and now_ts - rust_ts <= max_rust_age:
-                return
-        try:
-            store = get_memory_store()
-            if not store:
-                return
-            store.add_activity_event(
-                {
-                    "event_id": f"python-screen-{uuid.uuid4()}",
-                    "ts": datetime.fromtimestamp(now_ts).isoformat(),
-                    "kind": str(kind or "activity_sample"),
-                    "presence": "active",
-                    "app": {
-                        "id": str(app_name or title or "python-screen-sensor"),
-                        "name": str(app_name or title or "Unknown"),
-                        "pid": 0,
-                    },
-                    "window_title": str(title or ""),
-                    "browser": {},
-                    "source": "python-screen-sensor",
-                }
-            )
-        except Exception as exc:
-            now = time.time()
-            if now - self._last_python_event_error_at > 60:
-                self._last_python_event_error_at = now
-                self.logger.warning(f"[Screen] Python activity event save failed: {exc}")
+        self._last_rust_stale_log_at = now_ts
+        self.logger.warning(
+            "[Screen] Live2D activity events stale; waiting for live2d-tauri source"
+        )
+
+    def _is_ignored_rust_screen_event(
+        self, *, app_name: str, title: str, kind: str
+    ) -> bool:
+        text = f"{app_name} {title}".strip().lower()
+        if not text:
+            return True
+        if kind not in {"foreground_changed", "activity_sample"}:
+            return False
+        ignored_exact = {
+            "none",
+            "unknown",
+            "program manager",
+            "no foreground window (idle)",
+        }
+        app_key = str(app_name or "").strip().lower()
+        title_key = str(title or "").strip().lower()
+        if app_key in ignored_exact or title_key in ignored_exact:
+            return True
+        ignored_markers = (
+            "no foreground window",
+            "foreground window (idle)",
+        )
+        return any(marker in text for marker in ignored_markers)
 
     def _handle_rust_sedentary_alert(
         self,
         *,
+        now_ts: float,
         event_ts: float,
         app_name: str,
         category: str,
@@ -383,37 +430,60 @@ class ScreenSensor:
         except Exception:
             active_minutes = 0
         if active_minutes <= 0:
-            active_minutes = self._sedentary_alert_minutes(event_ts)
-        alert_app_name = SEDENTARY_SESSION_APP_NAME
-
-        is_dnd_active = getattr(config, "DND_MODE", False)
-        if is_dnd_active:
-            self.logger.info(
-                f"🔕 [Active] 免打扰生效，跳过 Rust 久坐弹窗: {alert_app_name}"
-            )
-            self._last_alert_app = alert_app_name
-            self._last_alert_time = event_ts
             return
-
-        self.logger.info(
-            f"⏰[Active] Rust 久坐事件触发弹窗: {alert_app_name} ({active_minutes} min)"
-        )
-        self._last_alert_app = alert_app_name
-        self._last_alert_time = event_ts
-        self.add_observation(
-            f"Rust 久坐提醒触发：连续活跃 {active_minutes} 分钟",
-            full_title,
-            category,
+        alert_app_name = SEDENTARY_SESSION_APP_NAME
+        self._trigger_sedentary_alert(
+            now_ts=now_ts,
+            alert_app_name=alert_app_name,
+            active_minutes=active_minutes,
             app_name=app_name,
-            reason="sedentary",
-            source="rust-agent",
+            category=category,
+            full_title=full_title,
+            source=LIVE2D_ACTIVITY_SOURCE,
+            log_label="Rust 涔呭潗浜嬩欢瑙﹀彂寮圭獥",
         )
-        self._show_sedentary_popup(alert_app_name, active_minutes)
-        if self._loop:
-            asyncio.run_coroutine_threadsafe(
-                self.chat_service.send_active_alert(alert_app_name, active_minutes),
-                self._loop,
-            )
+
+    def _maybe_trigger_rust_sample_sedentary_alert(
+        self,
+        *,
+        now_ts: float,
+        event_ts: float,
+        app_name: str,
+        category: str,
+        full_title: str,
+        payload: Dict[str, Any],
+    ) -> bool:
+        if self.sedentary_interval_sec <= 0:
+            return False
+        if self._rust_payload_confirms_sedentary_break(payload):
+            return False
+
+        try:
+            payload_minutes = int(payload.get("active_minutes") or 0)
+        except Exception:
+            payload_minutes = 0
+        if not self._rust_sedentary_payload_is_trustworthy(payload_minutes):
+            payload_minutes = 0
+
+        if now_ts < self.next_sedentary_alert_time and (
+            payload_minutes * 60 < self.sedentary_interval_sec
+        ):
+            return False
+
+        active_minutes = payload_minutes
+        if active_minutes <= 0:
+            return False
+
+        return self._trigger_sedentary_alert(
+            now_ts=now_ts,
+            alert_app_name=SEDENTARY_SESSION_APP_NAME,
+            active_minutes=active_minutes,
+            app_name=app_name,
+            category=category,
+            full_title=full_title,
+            source=LIVE2D_ACTIVITY_SOURCE,
+            log_label="Live2D sedentary payload alert",
+        )
 
     def _sedentary_alert_minutes(self, now_ts: Optional[float] = None) -> int:
         session = self.get_current_work_session(now_ts=now_ts)
@@ -429,8 +499,7 @@ class ScreenSensor:
             active_seconds = 0
         if active_seconds > 0:
             return max(1, int(active_seconds // 60))
-        now = float(now_ts or time.time())
-        return max(0, int((now - self.current_window_start_time) / 60))
+        return 0
 
     def _format_rust_events_summary(self, limit: int = 12) -> List[str]:
         events = self._recent_rust_events(limit=limit)
@@ -476,27 +545,50 @@ class ScreenSensor:
             title = str(latest.get("window_title") or "").strip()
             domain = str((((latest.get("browser") or {}).get("domain")) or "")).strip()
             full_title = title or domain or app
+            if self._is_ignored_rust_screen_event(
+                app_name=app,
+                title=full_title,
+                kind=kind,
+            ):
+                self._last_rust_event_id = event_id
+                continue
             cat, app_name = self._analyze_window_context(
                 app=app, title=title, domain=domain
             )
             self._remember_app_category(app_name, cat)
             payload = latest.get("sedentary") if isinstance(latest.get("sedentary"), dict) else {}
+            payload_minutes = 0
+            active_seconds = 0
             if self._rust_payload_confirms_sedentary_break(payload):
                 self._reset_sedentary_session(
                     reset_ts=event_ts,
-                    source="rust-local",
+                    source=LIVE2D_ACTIVITY_SOURCE,
                     app_name=app_name,
                     category=cat,
                 )
             else:
+                try:
+                    payload_minutes = (
+                        int(payload.get("active_minutes") or 0)
+                        if isinstance(payload, dict)
+                        else 0
+                    )
+                except Exception:
+                    payload_minutes = 0
+                if not self._rust_sedentary_payload_is_trustworthy(payload_minutes):
+                    payload_minutes = 0
+                active_seconds = payload_minutes * 60
+            if payload_minutes > 0:
                 self._ensure_sedentary_session(
-                    start_ts=event_ts,
-                    source="rust-local",
+                    start_ts=max(0.0, event_ts - active_seconds),
+                    source=LIVE2D_SEDENTARY_SOURCE,
                     app_name=app_name,
                     category=cat,
+                    replace=True,
                 )
             if kind == "sedentary_alert":
                 self._handle_rust_sedentary_alert(
+                    now_ts=now_ts,
                     event_ts=event_ts,
                     app_name=app_name,
                     category=cat,
@@ -519,15 +611,22 @@ class ScreenSensor:
                     self._last_rust_debug_at = now_ts
 
             if kind == "foreground_changed":
-                self.daily_counts[app_name] = self.daily_counts.get(app_name, 0) + 1
+                previous_app_name = str(getattr(self, "last_app_name", "") or "").strip()
+                app_switched = not previous_app_name or previous_app_name != app_name
+                if app_switched:
+                    self.daily_counts[app_name] = self.daily_counts.get(app_name, 0) + 1
                 self.last_window_title = full_title
                 self.last_app_name = app_name
                 self.last_category = cat
-                self.current_window_start_time = event_ts
-                self.next_duration_trigger_time = event_ts + (20 * 60)
+                if app_switched:
+                    self.current_window_start_time = event_ts
+                    self.next_duration_trigger_time = event_ts + (20 * 60)
                 self._last_rust_sample_ts = event_ts
+                if not app_switched:
+                    self._last_rust_event_id = event_id
+                    continue
                 self._last_alert_app = None
-                self._debug_log("🦀 [Screen] Rust 事件按切屏逻辑尝试触发吐槽")
+                self._debug_log("馃 [Screen] Rust 浜嬩欢鎸夊垏灞忛€昏緫灏濊瘯瑙﹀彂鍚愭Ы")
                 self._try_trigger_reaction(
                     full_title,
                     cat,
@@ -535,7 +634,7 @@ class ScreenSensor:
                     app_name,
                     reason="switch",
                     app_duration_sec=self.daily_durations.get(app_name, 0.0),
-                    current_stay_sec=max(0.0, event_ts - self.current_window_start_time),
+                    current_stay_sec=0.0,
                 )
             elif kind == "activity_sample":
                 sample_seconds = self._rust_sample_seconds(event_ts, now_ts)
@@ -549,7 +648,7 @@ class ScreenSensor:
                 if event_ts >= self.next_duration_trigger_time:
                     self.next_duration_trigger_time = event_ts + (20 * 60)
                     self._debug_log(
-                        f"🦀 [Screen] Rust 事件按停留逻辑尝试触发吐槽: stay={stay_minutes}min"
+                        f"馃 [Screen] Rust 浜嬩欢鎸夊仠鐣欓€昏緫灏濊瘯瑙﹀彂鍚愭Ы: stay={stay_minutes}min"
                     )
                     self._try_trigger_reaction(
                         full_title,
@@ -566,10 +665,10 @@ class ScreenSensor:
     def _format_duration(self, seconds: float) -> str:
         seconds = float(seconds or 0.0)
         if seconds < 60:
-            return f"{int(seconds)}秒"
+            return f"{int(seconds)} 秒"
         if seconds < 3600:
-            return f"{int(seconds / 60)}分钟"
-        return f"{seconds / 3600:.1f}小时"
+            return f"{int(seconds / 60)} 分钟"
+        return f"{seconds / 3600:.1f} 小时"
 
     def _rust_event_is_active(self, item: Dict[str, Any]) -> bool:
         presence = str(item.get("presence") or "").strip().lower()
@@ -621,8 +720,14 @@ class ScreenSensor:
     def _rust_payload_looks_restarted(
         self, *, events: List[Dict[str, Any]], newest_ts: float, newest_minutes: int
     ) -> bool:
+        newest_source = (
+            str((events[0] or {}).get("source") or "rust-agent").strip() or "rust-agent"
+        )
         bridge_sec = float(WORK_SESSION_RESTART_BRIDGE_SEC)
         for item in events[1:]:
+            item_source = str(item.get("source") or "rust-agent").strip() or "rust-agent"
+            if item_source != newest_source:
+                continue
             event_ts = self._parse_rust_event_ts(item)
             if event_ts <= 0:
                 continue
@@ -641,6 +746,9 @@ class ScreenSensor:
                 return True
         return False
 
+    def _rust_sedentary_payload_is_trustworthy(self, active_minutes: int) -> bool:
+        return 0 < active_minutes <= WORK_SESSION_MAX_RUST_PAYLOAD_MINUTES
+
     def _sedentary_break_seconds(self) -> float:
         try:
             return max(
@@ -652,15 +760,19 @@ class ScreenSensor:
             return 5 * 60.0
 
     def _empty_sedentary_session(
-        self, *, source: str, app_name: str = "", category: str = ""
+        self, *, source: str, app_name: str = "", category: str = "", state: str = ""
     ) -> Dict[str, Any]:
-        return {
+        session = {
             "active_seconds": 0,
             "active_minutes": 0,
             "app_name": str(app_name or SEDENTARY_SESSION_APP_NAME),
             "category": str(category or SEDENTARY_SESSION_CATEGORY),
             "source": source,
         }
+        state = str(state or "").strip()
+        if state:
+            session["state"] = state
+        return session
 
     def _reset_sedentary_session(
         self, *, reset_ts: float, source: str, app_name: str = "", category: str = ""
@@ -677,10 +789,11 @@ class ScreenSensor:
         source: str,
         app_name: str = "",
         category: str = "",
+        replace: bool = False,
     ) -> None:
         start_ts = float(start_ts or time.time())
         current_start = float(getattr(self, "sedentary_session_start_ts", 0.0) or 0.0)
-        if current_start <= 0 or start_ts < current_start:
+        if replace or current_start <= 0 or start_ts < current_start:
             self.sedentary_session_start_ts = start_ts
         self.sedentary_session_source = source
         self.sedentary_session_app_name = str(app_name or SEDENTARY_SESSION_APP_NAME)
@@ -718,177 +831,122 @@ class ScreenSensor:
     def _current_sedentary_session_from_events(
         self, now_ts: float, events: List[Dict[str, Any]], source: str
     ) -> Optional[Dict[str, Any]]:
-        if not events:
+        live2d_events = [
+            item
+            for item in events
+            if str(item.get("source") or "").strip() == LIVE2D_ACTIVITY_SOURCE
+        ]
+        if not live2d_events:
             return None
 
-        newest = events[0]
+        newest = live2d_events[0]
         newest_ts = self._parse_rust_event_ts(newest)
         max_resume_gap_sec = max(60.0, float(SCREEN_SENSOR_INTERVAL) * 60.0)
         if newest_ts <= 0 or now_ts - newest_ts > max_resume_gap_sec:
+            self._reset_sedentary_session(
+                reset_ts=now_ts,
+                source=LIVE2D_ACTIVITY_SOURCE,
+                app_name=SEDENTARY_SESSION_APP_NAME,
+                category=SEDENTARY_SESSION_CATEGORY,
+            )
             return None
 
-        latest_app = str(((newest.get("app") or {}).get("name") or "")).strip()
-        latest_title = str(newest.get("window_title") or "").strip()
-        latest_domain = str((((newest.get("browser") or {}).get("domain")) or "")).strip()
-        if not (latest_app or latest_title or latest_domain):
-            return None
-
-        cat = SEDENTARY_SESSION_CATEGORY
         app_name = SEDENTARY_SESSION_APP_NAME
+        cat = SEDENTARY_SESSION_CATEGORY
         sedentary_payload = newest.get("sedentary")
-        local_source = "rust-local" if source == "rust-agent" else "python-local"
-        if source == "rust-agent" and isinstance(sedentary_payload, dict):
-            try:
-                rust_active_minutes = int(sedentary_payload.get("active_minutes") or 0)
-            except Exception:
-                rust_active_minutes = 0
-            if rust_active_minutes > 0:
-                active_seconds = rust_active_minutes * 60
-                current_start = float(
-                    getattr(self, "sedentary_session_start_ts", 0.0) or 0.0
-                )
-                current_seconds = max(0.0, now_ts - current_start) if current_start > 0 else 0.0
-                if current_seconds > active_seconds + 120 and self._rust_payload_looks_restarted(
-                    events=events,
-                    newest_ts=newest_ts,
-                    newest_minutes=rust_active_minutes,
-                ):
-                    pass
-                else:
-                    self._ensure_sedentary_session(
-                        start_ts=max(0.0, now_ts - active_seconds),
-                        source="rust-sedentary",
-                        app_name=app_name,
-                        category=cat,
-                    )
-                    return {
-                        "active_seconds": active_seconds,
-                        "active_minutes": rust_active_minutes,
-                        "app_name": app_name,
-                        "category": cat,
-                        "source": "rust-sedentary",
-                    }
         if self._rust_payload_confirms_sedentary_break(sedentary_payload):
             self._reset_sedentary_session(
                 reset_ts=newest_ts,
-                source=local_source,
+                source=LIVE2D_ACTIVITY_SOURCE,
                 app_name=app_name,
                 category=cat,
             )
-            return self._build_sedentary_session(
-                now_ts=now_ts, source=local_source, app_name=app_name, category=cat
+            return self._empty_sedentary_session(
+                source=LIVE2D_ACTIVITY_SOURCE,
+                app_name=app_name,
+                category=cat,
+                state="resting",
             )
 
-        max_event_gap_sec = max(120.0, float(SCREEN_SENSOR_INTERVAL) * 12.0)
-        break_seconds = self._sedentary_break_seconds()
+        try:
+            active_minutes = int((sedentary_payload or {}).get("active_minutes") or 0)
+        except Exception:
+            active_minutes = 0
+        if not self._rust_sedentary_payload_is_trustworthy(active_minutes):
+            self._reset_sedentary_session(
+                reset_ts=newest_ts,
+                source=LIVE2D_ACTIVITY_SOURCE,
+                app_name=app_name,
+                category=cat,
+            )
+            return self._empty_sedentary_session(
+                source=LIVE2D_ACTIVITY_SOURCE,
+                app_name=app_name,
+                category=cat,
+            )
 
-        newest_is_active = self._rust_event_is_active(newest)
-        current_rest_start_ts: Optional[float] = None
-        previous_ts = newest_ts
-        if not newest_is_active:
-            for item in events:
-                event_ts = self._parse_rust_event_ts(item)
-                if event_ts <= 0:
-                    break
-                if previous_ts - event_ts > max_event_gap_sec:
-                    break
-                if self._rust_event_is_active(item):
-                    break
-                current_rest_start_ts = event_ts
-                previous_ts = event_ts
-            if (
-                current_rest_start_ts is not None
-                and now_ts - current_rest_start_ts >= break_seconds
-            ):
-                active_seconds = 0.0
-                return {
-                    "active_seconds": int(active_seconds),
-                    "active_minutes": int(active_seconds // 60),
-                    "app_name": app_name,
-                    "category": cat,
-                    "source": local_source,
-                }
-
-        start_ts = newest_ts
-        previous_ts = newest_ts
-        rest_end_ts: Optional[float] = None
-        rest_start_ts: Optional[float] = None
-        hit_event_gap = False
-        for item in events:
-            event_ts = self._parse_rust_event_ts(item)
-            if event_ts <= 0:
-                break
-            if previous_ts - event_ts > max_event_gap_sec:
-                gap_seconds = previous_ts - event_ts
-                if gap_seconds >= max(
-                    break_seconds, float(WORK_SESSION_RESTART_BRIDGE_SEC)
-                ):
-                    self._reset_sedentary_session(
-                        reset_ts=previous_ts,
-                        source=local_source,
-                        app_name=app_name,
-                        category=cat,
-                    )
-                    return self._empty_sedentary_session(
-                        source=local_source, app_name=app_name, category=cat
-                    )
-                try:
-                    current_idle_sec = float(get_idle_duration())
-                except Exception:
-                    current_idle_sec = break_seconds
-                if current_idle_sec >= break_seconds:
-                    hit_event_gap = True
-                    break
-            if self._rust_event_is_active(item):
-                if (
-                    rest_end_ts is not None
-                    and rest_start_ts is not None
-                    and rest_end_ts - rest_start_ts >= break_seconds
-                ):
-                    break
-                rest_end_ts = None
-                rest_start_ts = None
-                start_ts = event_ts
-            else:
-                if rest_end_ts is None:
-                    rest_end_ts = event_ts
-                rest_start_ts = event_ts
-                start_ts = event_ts
-            previous_ts = event_ts
-
-        if hit_event_gap and not newest_is_active:
-            fallback_start_ts = float(self.current_window_start_time or 0.0)
-            if fallback_start_ts > 0 and fallback_start_ts < start_ts:
-                start_ts = fallback_start_ts
-
-        active_seconds = max(0.0, now_ts - start_ts)
+        active_seconds = active_minutes * 60
         self._ensure_sedentary_session(
-            start_ts=start_ts,
-            source=local_source,
+            start_ts=max(0.0, now_ts - active_seconds),
+            source=LIVE2D_SEDENTARY_SOURCE,
             app_name=app_name,
             category=cat,
+            replace=True,
         )
-        return self._build_sedentary_session(
-            now_ts=now_ts, source=local_source, app_name=app_name, category=cat
-        )
+        return {
+            "active_seconds": active_seconds,
+            "active_minutes": active_minutes,
+            "app_name": app_name,
+            "category": cat,
+            "source": LIVE2D_SEDENTARY_SOURCE,
+        }
 
     def _current_rust_sedentary_session(
         self, now_ts: float
     ) -> Optional[Dict[str, Any]]:
         return self._current_sedentary_session_from_events(
-            now_ts, self._recent_rust_events(limit=WORK_SESSION_EVENT_LIMIT), "rust-agent"
+            now_ts,
+            self._recent_rust_events(limit=WORK_SESSION_EVENT_LIMIT),
+            LIVE2D_ACTIVITY_SOURCE,
         )
 
-    def _current_python_sedentary_session(
+    def _latest_live2d_payload_session(
         self, now_ts: float
     ) -> Optional[Dict[str, Any]]:
-        return self._current_sedentary_session_from_events(
-            now_ts,
-            self._recent_activity_events(
-                limit=WORK_SESSION_EVENT_LIMIT, source="python-screen-sensor"
-            ),
-            "python-screen-sensor",
+        events = self._recent_rust_events(limit=1)
+        if not events:
+            return None
+        latest = events[0]
+        if str(latest.get("source") or "").strip() != LIVE2D_ACTIVITY_SOURCE:
+            return None
+        event_ts = self._parse_rust_event_ts(latest)
+        max_resume_gap_sec = max(60.0, float(SCREEN_SENSOR_INTERVAL) * 60.0)
+        if event_ts <= 0 or now_ts - event_ts > max_resume_gap_sec:
+            return None
+        payload = latest.get("sedentary")
+        if self._rust_payload_confirms_sedentary_break(payload):
+            return None
+        try:
+            active_minutes = int((payload or {}).get("active_minutes") or 0)
+        except Exception:
+            active_minutes = 0
+        if not self._rust_sedentary_payload_is_trustworthy(active_minutes):
+            return None
+        active_seconds = active_minutes * 60
+        self._ensure_sedentary_session(
+            start_ts=max(0.0, now_ts - active_seconds),
+            source=LIVE2D_SEDENTARY_SOURCE,
+            app_name=SEDENTARY_SESSION_APP_NAME,
+            category=SEDENTARY_SESSION_CATEGORY,
+            replace=True,
         )
+        return {
+            "active_seconds": active_seconds,
+            "active_minutes": active_minutes,
+            "app_name": SEDENTARY_SESSION_APP_NAME,
+            "category": SEDENTARY_SESSION_CATEGORY,
+            "source": LIVE2D_SEDENTARY_SOURCE,
+        }
 
     def get_current_work_session(self, now_ts: Optional[float] = None) -> Dict[str, Any]:
         now = float(now_ts or time.time())
@@ -896,94 +954,33 @@ class ScreenSensor:
         if rust_session:
             return rust_session
 
-        python_session = self._current_python_sedentary_session(now)
-        if python_session:
-            return python_session
+        latest_payload_session = self._latest_live2d_payload_session(now)
+        if latest_payload_session:
+            return latest_payload_session
 
-        start_ts = float(self.current_window_start_time or now)
-        self._ensure_sedentary_session(
-            start_ts=start_ts,
-            source="rust-local"
-            if getattr(self, "use_rust_events_only", False)
-            else "python-local",
+        self._reset_sedentary_session(
+            reset_ts=now,
+            source=LIVE2D_ACTIVITY_SOURCE,
             app_name=SEDENTARY_SESSION_APP_NAME,
             category=SEDENTARY_SESSION_CATEGORY,
         )
-        active_seconds = max(0.0, now - start_ts)
-        return self._build_sedentary_session(
-            now_ts=now,
-            source="rust-local"
-            if getattr(self, "use_rust_events_only", False)
-            else "python-local",
+        return self._empty_sedentary_session(
+            source=LIVE2D_ACTIVITY_SOURCE,
             app_name=SEDENTARY_SESSION_APP_NAME,
             category=SEDENTARY_SESSION_CATEGORY,
         )
 
     def restore_recent_work_session(self, now_ts: Optional[float] = None) -> bool:
         now = float(now_ts or time.time())
-        events = self._recent_rust_events(limit=120)
-        if not events:
-            return False
-
-        newest = events[0]
-        newest_ts = self._parse_rust_event_ts(newest)
-        max_resume_gap_sec = max(60.0, float(SCREEN_SENSOR_INTERVAL) * 60.0)
-        if newest_ts <= 0 or now - newest_ts > max_resume_gap_sec:
-            return False
-
-        latest_app = str(((newest.get("app") or {}).get("name") or "")).strip()
-        latest_title = str(newest.get("window_title") or "").strip()
-        latest_domain = str((((newest.get("browser") or {}).get("domain")) or "")).strip()
-        if not (latest_app or latest_title or latest_domain):
-            return False
-
-        start_ts = newest_ts
-        previous_ts = newest_ts
-        max_event_gap_sec = max(120.0, float(SCREEN_SENSOR_INTERVAL) * 12.0)
-        break_seconds = self._sedentary_break_seconds()
-        rest_end_ts: Optional[float] = None
-        rest_start_ts: Optional[float] = None
-        for item in events[1:]:
-            event_ts = self._parse_rust_event_ts(item)
-            if event_ts <= 0:
-                break
-            gap_seconds = previous_ts - event_ts
-            if gap_seconds > max_event_gap_sec and gap_seconds >= max(
-                break_seconds, float(WORK_SESSION_RESTART_BRIDGE_SEC)
-            ):
-                break
-            if self._rust_event_is_active(item):
-                if (
-                    rest_end_ts is not None
-                    and rest_start_ts is not None
-                    and rest_end_ts - rest_start_ts >= break_seconds
-                ):
-                    break
-                rest_end_ts = None
-                rest_start_ts = None
-                start_ts = event_ts
-            else:
-                if rest_end_ts is None:
-                    rest_end_ts = event_ts
-                rest_start_ts = event_ts
-                start_ts = event_ts
-            previous_ts = event_ts
-
-        cat, app_name = self._describe_window_for_work_session(
-            app=latest_app, title=latest_title, domain=latest_domain
-        )
-        self.current_window_start_time = start_ts
-        self.last_window_title = latest_title or latest_domain or latest_app
-        self.last_app_name = app_name
-        self.last_category = cat
-        self._ensure_sedentary_session(
-            start_ts=start_ts,
-            source="rust-local",
-            app_name=SEDENTARY_SESSION_APP_NAME,
-            category=SEDENTARY_SESSION_CATEGORY,
-        )
-        self._last_rust_event_seen_at = newest_ts
-        return True
+        latest_events = self._recent_rust_events(limit=1)
+        if latest_events:
+            latest = latest_events[0]
+            self._last_rust_event_id = str(latest.get("event_id") or "").strip()
+            latest_ts = self._parse_rust_event_ts(latest)
+            if latest_ts > 0:
+                self._last_rust_event_seen_at = latest_ts
+        session = self._current_rust_sedentary_session(now)
+        return bool(session and session.get("source") == LIVE2D_SEDENTARY_SOURCE)
 
     def _parse_clock_to_minutes(self, value: str) -> Optional[int]:
         text_val = str(value or "").strip()
@@ -1005,7 +1002,7 @@ class ScreenSensor:
                 continue
             cat = self.app_category_map.get(app_name)
             if not cat:
-                if "离开" in app_name or "idle" in app_name.lower():
+                if "绂诲紑" in app_name or "idle" in app_name.lower():
                     cat = "away"
                 else:
                     cat = "other"
@@ -1177,7 +1174,7 @@ class ScreenSensor:
 
             window_title = (
                 str(raw_entry.get("window_title") or raw_entry.get("app") or "").strip()
-                or "当前窗口"
+                or "褰撳墠绐楀彛"
             )
             time_text = str(raw_entry.get("time") or "").strip() or "--:--"
             entry_minutes = self._parse_clock_to_minutes(time_text)
@@ -1261,6 +1258,7 @@ class ScreenSensor:
         return list(self.observation_entries[-limit:])
 
     def get_stats_data(self) -> Dict[str, Any]:
+        self._sanitize_stats()
         return {
             "date": self._stats_date_key(),
             "summary_text": self.get_formatted_report(),
@@ -1296,7 +1294,7 @@ class ScreenSensor:
             else:
                 if not stored_date:
                     self.logger.warning(
-                        "⚠️ [ScreenSensor] 发现缺少 date 的旧版统计缓存，已忽略其每日数据以避免串天。"
+                        "[ScreenSensor] Ignored legacy stats cache without date"
                     )
                 self.current_day = self._today_key()
                 self.daily_counts = {}
@@ -1310,12 +1308,103 @@ class ScreenSensor:
                 ]
             if len(self.activity_segments) > self.max_segments:
                 self.activity_segments = self.activity_segments[-self.max_segments :]
+            self._sanitize_stats()
         except Exception:
             pass
+
+    def _is_polluted_stats_key(self, value: Any) -> bool:
+        text = str(value or "").strip()
+        if not text:
+            return True
+        lowered = text.lower()
+        ignored_exact = {
+            "none",
+            "unknown",
+            "system",
+            "program manager",
+            "no foreground window (idle)",
+            "no foreground window (active)",
+            "no foreground window (locked)",
+            "python",
+            "python.exe",
+            "live2d",
+            "live2d-suzu",
+            "live2d agent",
+        }
+        if lowered in ignored_exact:
+            return True
+        ignored_markers = (
+            "no foreground window",
+            "python-screen-sensor",
+            "app=python.exe",
+            "live2d-suzu",
+            "live2d agent",
+            "restart confirm",
+            "idle",
+        )
+        return any(marker in lowered or marker in text for marker in ignored_markers)
+
+    def _sanitize_stats(self) -> None:
+        self.daily_counts = {
+            str(app): count
+            for app, count in dict(self.daily_counts or {}).items()
+            if not self._is_polluted_stats_key(app)
+        }
+        self.daily_durations = {
+            str(app): seconds
+            for app, seconds in dict(self.daily_durations or {}).items()
+            if not self._is_polluted_stats_key(app)
+        }
+
+        cleaned_cache: Dict[str, List[str]] = {}
+        for key, value in dict(self.app_cache or {}).items():
+            display_name = ""
+            if isinstance(value, list) and value:
+                display_name = str(value[0] or "")
+            if self._is_polluted_stats_key(key) or self._is_polluted_stats_key(display_name):
+                continue
+            cleaned_cache[str(key)] = value
+        self.app_cache = cleaned_cache
+
+        cleaned_categories: Dict[str, str] = {}
+        for app, category in dict(self.app_category_map or {}).items():
+            if self._is_polluted_stats_key(app):
+                continue
+            cleaned_categories[str(app)] = str(category or "other")
+        self.app_category_map = cleaned_categories
+
+        cleaned_observations = []
+        for entry in list(self.observation_entries or []):
+            if not isinstance(entry, dict):
+                cleaned_observations.append(entry)
+                continue
+            app = entry.get("app") or entry.get("app_name") or ""
+            title = entry.get("window_title") or entry.get("title") or ""
+            source = entry.get("source") or ""
+            if (
+                self._is_polluted_stats_key(app)
+                or self._is_polluted_stats_key(title)
+                or self._is_polluted_stats_key(source)
+            ):
+                continue
+            cleaned_observations.append(entry)
+        self.observation_entries = cleaned_observations
+
+        cleaned_segments = []
+        for segment in list(self.activity_segments or []):
+            if not isinstance(segment, dict):
+                cleaned_segments.append(segment)
+                continue
+            app = segment.get("app") or segment.get("app_name") or ""
+            if self._is_polluted_stats_key(app):
+                continue
+            cleaned_segments.append(segment)
+        self.activity_segments = cleaned_segments
 
     def _save_stats(self):
         try:
             os.makedirs(os.path.dirname(self.stats_file), exist_ok=True)
+            self._sanitize_stats()
             if len(self.observation_entries) > self.max_observations:
                 self.observation_entries = self.observation_entries[
                     -self.max_observations :
@@ -1343,15 +1432,16 @@ class ScreenSensor:
             pass
 
     def _sync_to_db(self):
-        """将屏幕统计数据同步到 SQLite 数据库"""
+        # Sync screen stats to SQLite.
         if not get_memory_store:
             return
         try:
+            self._sanitize_stats()
             store = get_memory_store()
             if store:
                 stats_date = self._stats_date_key()
 
-                # 计算总时长 (小时)
+                # 璁＄畻鎬绘椂闀?(灏忔椂)
                 total_seconds = sum(self.daily_durations.values())
                 total_hours = total_seconds / 3600.0
 
@@ -1371,114 +1461,8 @@ class ScreenSensor:
 
                 store.save_daily_screen_stats(stats_date, data_to_save)
         except Exception as e:
-            self.logger.error(f"❌ 屏幕数据同步 DB 失败: {e}")
+            self.logger.error(f"鉂?灞忓箷鏁版嵁鍚屾 DB 澶辫触: {e}")
 
-    def _get_active_window_info(self):
-        """
-        获取当前活动窗口，并检测是否为全屏状态
-        返回: (窗口标题: str, 是否全屏: bool)
-        """
-        if self.use_rust_events_only and self._recent_rust_events(limit=1):
-            return None, False
-        if gw is None:
-            return None, False
-        try:
-            win = gw.getActiveWindow()
-            if win:
-                t = win.title.strip()
-                for kw in WINDOW_IGNORE_KEYWORDS:
-                    if kw.lower() in t.lower():
-                        return None, False
-
-                # 🟢 检测是否全屏
-                is_fullscreen = False
-                if os.name == "nt":
-                    # 获取主屏幕分辨率
-                    screen_width = ctypes.windll.user32.GetSystemMetrics(0)
-                    screen_height = ctypes.windll.user32.GetSystemMetrics(1)
-                    # 容差：无边框全屏游戏可能会比分辨率大一点，或者正好等于
-                    if win.width >= screen_width and win.height >= screen_height:
-                        is_fullscreen = True
-
-                return t, is_fullscreen
-        except Exception:
-            pass
-        return None, False
-
-    def _get_user_context(self) -> str:
-        """从 SQLite 读取用户画像(Profile)，辅助窗口分类"""
-        if not get_memory_store:
-            return ""
-
-        try:
-            store = get_memory_store()
-            if not store:
-                return ""
-
-            # 使用 memory_sqlite.py 中定义的 get_profile 方法
-            # 它会返回 {'name':..., 'likes':..., 'dislikes':..., 'notes':...}
-            p = store.get_profile()
-
-            likes = p.get("likes", [])
-            # 兼容处理: 如果是新版字典结构 {'music':[], 'games':[]}，转为列表
-            if isinstance(likes, dict):
-                flat_likes = []
-                for k, v in likes.items():
-                    if isinstance(v, list):
-                        flat_likes.extend(v)
-                likes = flat_likes
-
-            # 截取前 10 个喜好，避免 Prompt 太长
-            likes_str = ", ".join([str(x) for x in likes[:10]])
-
-            # 也可以读取 notes 获取职业信息，这里简单处理
-            return f"用户喜好/职业关键词: {likes_str}"
-        except Exception as e:
-            self.logger.error(f"读取 Profile 失败: {e}")
-            return ""
-
-    def _ask_ai_to_classify(self, title: str) -> Tuple[str, str]:
-        # 1. 获取用户背景 (例如：用户喜欢 Coding，那么 VSCode 就是 Work/Coding 而不是 Other)
-        user_ctx = self._get_user_context()
-
-        self.logger.info(f"🧠 [Screen] 询问 AI: {title}")
-
-        prompt = f"""
-        任务：分析当前活动窗口的类别。
-        窗口标题："{title}"
-        用户背景：{user_ctx}
-
-        可选分类：
-        - coding (编程, IDE, 终端, 技术文档)
-        - gaming (游戏, Steam)
-        - video (视频, 直播)
-        - social (社交, 聊天)
-        - work (办公, 文档, 会议)
-        - design (设计, 画图)
-        - browser (通用浏览)
-        - other (其他)
-
-        规则：
-        1. 参考用户背景。如果用户是程序员，IDE属于coding；如果用户是画师，PS属于design。
-        2. 绝对禁止输出代码块。
-        3. 仅输出 JSON 格式：{{"app": "软件简称", "cat": "分类代码"}}
-        """
-        try:
-            # 使用 summary 路由，避免与 gatekeeper 抢占同一调用队列
-            resp = chat_with_ai(
-                [{"role": "user", "content": prompt}],
-                task_type="screen_classify",
-                caller="screen_classify",
-            )
-
-            # 提取 JSON
-            match = re.search(r"\{.*?\}", resp, re.DOTALL)
-            if match:
-                d = json.loads(match.group(0))
-                return d.get("app", "Unknown"), d.get("cat", "other")
-        except Exception:
-            pass
-        return title, "other"
 
     def _analyze_window_context(self, *, app: str = "", title: str = "", domain: str = ""):
         app = str(app or "").strip()
@@ -1496,78 +1480,40 @@ class ScreenSensor:
             self.app_cache[cache_key] = [app_name, rule.category]
             self._save_stats()
             self._debug_log(
-                f"🧭 [Screen] 应用规则命中: {rule.name} app={app} title={title[:60]} domain={domain} cat={rule.category}"
+                f"馃Л [Screen] 搴旂敤瑙勫垯鍛戒腑: {rule.name} app={app} title={title[:60]} domain={domain} cat={rule.category}"
             )
             return rule.category, app_name
 
-        return self._analyze_window(title or domain or app)
-
-    def _analyze_window(self, title: str):
-        # 1. 查缓存
-        if title in self.app_cache:
-            c = self.app_cache[title]
-            return c[1], c[0]
-
-        match = self.app_registry.match(title=title)
-        if match:
-            rule = match.rule
-            app_name = rule.display_name or title or "Unknown"
-            self.app_cache[title] = [app_name, rule.category]
+        text = f"{title} {domain} {app}".strip()
+        text_lower = text.lower()
+        if "youtube" in text_lower:
+            app_name = title.split(" - YouTube")[0].strip() if title else domain or app
+            app_name = f"YouTube: {app_name}" if app_name else "YouTube"
+            self.app_cache[cache_key] = [app_name, "video"]
             self._save_stats()
-            self._debug_log(
-                f"🧭 [Screen] 应用规则命中: {rule.name} title={str(title or '')[:60]} cat={rule.category}"
-            )
-            return rule.category, app_name
-
-        title_lower = title.lower()
-
-        # =================================================
-        # 🟢 [新增] 浏览器/视频感知 (Browser Awareness)
-        # =================================================
-        # Chrome/Edge 的标题通常是 "视频标题 - YouTube - Google Chrome"
-
-        if " - youtube" in title_lower:
-            # 提取视频标题
-            video_title = title.split(" - YouTube")[0].strip()
-            # 归类为 video，但 App 名直接用视频标题，方便 AI 识别
-            # 存入缓存时，key 是完整标题，value 是 [处理后的标题, 分类]
-            fake_app_name = f"YouTube: {video_title}"
-            self.app_cache[title] = [fake_app_name, "video"]
+            return "video", app_name
+        if "bilibili" in text_lower:
+            app_name = title.split(" - Bilibili")[0].strip() if title else domain or app
+            app_name = f"Bilibili: {app_name}" if app_name else "Bilibili"
+            self.app_cache[cache_key] = [app_name, "video"]
             self._save_stats()
-            return "video", fake_app_name
-
-        if " - bilibili" in title_lower:
-            video_title = title.split(" - Bilibili")[0].strip()
-            fake_app_name = f"B站: {video_title}"
-            self.app_cache[title] = [fake_app_name, "video"]
-            self._save_stats()
-            return "video", fake_app_name
-
-        # =================================================
-        # 🟢 [新增] 优先检测是否是“我自己”
-        # =================================================
+            return "video", app_name
         for self_t in SELF_WINDOW_TITLES:
-            # 只要包含关键词即可 (比如 "Live2D Agent" 包含 "L2D" 或完整匹配)
-            if self_t.lower() in title_lower:
-                # 存入缓存，分类标记为 "self"
-                self.app_cache[title] = [title, "self"]
+            if self_t and self_t.lower() in text_lower:
+                app_name = app or title or domain or "Live2D"
+                self.app_cache[cache_key] = [app_name, "self"]
                 self._save_stats()
-                return "self", title
-        # =================================================
+                return "self", app_name
 
-        # 2. AI 分类 (兜底)
-        if len(title) > 2:
-            app, cat = self._ask_ai_to_classify(title)
-            self.app_cache[title] = [app, cat]
-            self._save_stats()
-            return cat, app
-
-        return "other", title
+        app_name = app or title or domain or "unknown"
+        self.app_cache[cache_key] = [app_name, "other"]
+        self._save_stats()
+        return "other", app_name
 
     def _check_daily_reset(self):
         today = self._today_key()
         if today != self.current_day:
-            self.logger.info("📅 新的一天，开始结算昨日数据...")
+            self.logger.info("馃搮 鏂扮殑涓€澶╋紝寮€濮嬬粨绠楁槰鏃ユ暟鎹?..")
 
             previous_day = self._stats_date_key()
             has_activity = bool(
@@ -1589,7 +1535,7 @@ class ScreenSensor:
 
             if has_activity and not diary_done:
                 self.logger.info(
-                    f"📦 [Screen] 跨天切日，昨日({previous_day})统计已保留，等待统一补录器归档日记。"
+                    f"[Screen] Preserved stats for {previous_day}; waiting for diary archiver"
                 )
 
             self.daily_counts.clear()
@@ -1601,262 +1547,29 @@ class ScreenSensor:
             self._save_stats()
 
     def _monitor_loop(self):
-        """后台监控循环 (终极版：时间轴修正 + 挂机检测 + 精准免打扰)"""
-        import config  # 放到循环内或顶部均可
-
+        # Consume Live2D/Tauri activity events; no local window polling fallback.
         rust_started_at = time.time()
         self._last_rust_event_seen_at = self._last_rust_event_seen_at or rust_started_at
         stale_threshold_sec = max(90.0, float(SCREEN_SENSOR_INTERVAL) * 12.0)
-
-        if getattr(self, "use_rust_events_only", False):
-            self.logger.info(
-                "🦀 [Screen] Rust sidecar 已启用，跳过 Python 本地窗口监控循环"
-            )
-            while self.running:
-                try:
-                    time.sleep(2)
-                    self._check_daily_reset()
-                    now_ts = time.time()
-                    if self._should_use_rust_events_now(
-                        now_ts=now_ts, stale_threshold_sec=stale_threshold_sec
-                    ):
-                        self._process_rust_events_for_reaction(now_ts)
-                    elif _PYGETWINDOW_OK:
-                        self.logger.warning(
-                            "[Screen] Rust activity events stale; switching to Python window polling"
-                        )
-                        self.use_rust_events_only = False
-                        break
-                    self._save_stats()
-                except Exception as e:
-                    self.logger.error(f"🦀 [Screen] Rust 模式循环异常: {e}")
-            if not self.running:
-                return
-
-        # 如果初始化时没加，这里做个兜底防报错
-        if not hasattr(self, "is_afk"):
-            self.is_afk = False
-            self.AFK_THRESHOLD_SEC = 300
-
-        last_tick_time = time.time()
+        self.logger.info(
+            "[Screen] Live2D activity source enabled; Python window polling disabled"
+        )
 
         while self.running:
             try:
-                time.sleep(SCREEN_SENSOR_INTERVAL)
-
-                now = time.time()
-                elapsed = now - last_tick_time
-                last_tick_time = now
-
-                # 1. 休眠/卡顿溢出保护
-                if elapsed > SCREEN_SENSOR_INTERVAL * 3:
-                    self.logger.info(
-                        f"💤 [Screen] 检测到系统休眠苏醒 (跳过 {elapsed:.1f}s)"
-                    )
-                    self.current_window_start_time = now
-                    self.next_duration_trigger_time = (
-                        now + self.DURATION_TRIGGER_THRESHOLD
-                    )
-                    self.next_sedentary_alert_time = now + self.sedentary_interval_sec
-                    elapsed = SCREEN_SENSOR_INTERVAL
-
+                time.sleep(2)
                 self._check_daily_reset()
-
+                now_ts = time.time()
                 if self._should_use_rust_events_now(
-                    now_ts=now, stale_threshold_sec=stale_threshold_sec
+                    now_ts=now_ts, stale_threshold_sec=stale_threshold_sec
                 ):
-                    self._process_rust_events_for_reaction(now)
-                    self._save_stats()
-                    continue
-
-                # 2. 获取窗口与全屏状态
-                current_title, is_fullscreen = self._get_active_window_info()
-
-                # 3. 锁屏/无窗口保护
-                if not current_title:
-                    self.current_window_start_time = now
-                    self.next_duration_trigger_time = (
-                        now + self.DURATION_TRIGGER_THRESHOLD
-                    )
-                    self.next_sedentary_alert_time = now + self.sedentary_interval_sec
-                    continue
-
-                # 4. 分析分类
-                cat, app = self._analyze_window(current_title)
-                self._remember_app_category(app, cat)
-
-                # 🟢 [核心修复] 精准免打扰逻辑：手动开启，或者 (处于全屏 且 必须是打游戏/看视频)
-                is_dnd_active = getattr(config, "DND_MODE", False) or (
-                    is_fullscreen and cat in ["gaming", "video"]
-                )
-
-                # ========================================================
-                # 5. 动态挂机检测
-                # ========================================================
-                if (is_fullscreen and cat in ["gaming", "video"]) or cat == "video":
-                    current_afk_threshold = (
-                        7200  # 全屏游戏/视频，或普通视频：容忍 2 小时不动
-                    )
-                elif cat == "gaming":
-                    current_afk_threshold = 1800  # 普通窗口游戏：容忍 30 分钟不动
+                    self._process_rust_events_for_reaction(now_ts)
                 else:
-                    current_afk_threshold = (
-                        self.AFK_THRESHOLD_SEC
-                    )  # 普通办公：容忍 5 分钟不动
-
-                idle_sec = get_idle_duration()
-
-                if idle_sec > current_afk_threshold:
-                    if not self.is_afk:
-                        self.logger.info(
-                            f"🚶 [Screen] 离开电脑 (空闲 {int(idle_sec)}s，当前阈值 {current_afk_threshold}s)"
-                        )
-                        self.is_afk = True
-                        if self.last_app_name:
-                            self._append_activity_segment(
-                                self.last_app_name,
-                                self.last_category or "other",
-                                self.current_window_start_time,
-                                now,
-                                reason="afk",
-                            )
-
-                    self.current_window_start_time = now
-                    self.next_duration_trigger_time = (
-                        now + self.DURATION_TRIGGER_THRESHOLD
-                    )
-                    self.next_sedentary_alert_time = now + self.sedentary_interval_sec
-                    self.daily_durations["[离开电脑]"] = (
-                        self.daily_durations.get("[离开电脑]", 0.0) + elapsed
-                    )
-                    self._save_stats()
-                    continue
-
-                elif self.is_afk:
-                    self.logger.info("🏃 [Screen] 用户回来了！")
-                    self.is_afk = False
-                    self.current_window_start_time = now
-                    self.next_duration_trigger_time = (
-                        now + self.DURATION_TRIGGER_THRESHOLD
-                    )
-                    self.next_sedentary_alert_time = now + self.sedentary_interval_sec
-                # ========================================================
-
-                # 6. 正常累加当前软件时长
-                self.daily_durations[app] = self.daily_durations.get(app, 0.0) + elapsed
-
-                is_switch = app != self.last_app_name
-                self._record_python_activity_event(
-                    kind="foreground_changed" if is_switch else "activity_sample",
-                    app_name=app,
-                    title=current_title,
-                    now_ts=now,
-                )
-
-                if is_switch:
-                    # ========== 场景A: 切换窗口 ==========
-                    if self.last_app_name:
-                        self._append_activity_segment(
-                            self.last_app_name,
-                            self.last_category or "other",
-                            self.current_window_start_time,
-                            now,
-                            reason="switch",
-                        )
-                    self.last_window_title = current_title
-                    self.last_app_name = app
-                    self.last_category = cat
-
-                    self.current_window_start_time = now
-                    self.next_duration_trigger_time = (
-                        now + self.DURATION_TRIGGER_THRESHOLD
-                    )
-                    self._last_alert_app = None
-
-                    self.daily_counts[app] = self.daily_counts.get(app, 0) + 1
-                    self._save_stats()
-
-                    # 🟢 使用统一的精准免打扰拦截
-                    if is_dnd_active:
-                        self.logger.info(f"🔕 [Screen] 免打扰生效，静默记录切换: {app}")
-                    else:
-                        count = self.daily_counts[app]
-                        self._try_trigger_reaction(
-                            current_title,
-                            cat,
-                            count,
-                            app,
-                            reason="switch",
-                            app_duration_sec=self.daily_durations.get(app, 0.0),
-                            current_stay_sec=max(0.0, now - self.current_window_start_time),
-                        )
-
-                else:
-                    # ========== 场景B: 停留 ==========
-                    self._save_stats()
-                    stay_minutes = self._sedentary_alert_minutes(now)
-
-                    # 久坐提醒 (基于下一次触发时间戳)
-                    if (
-                        self.sedentary_interval_sec > 0
-                        and now >= self.next_sedentary_alert_time
-                    ):
-                        if (
-                            self._last_alert_app != app
-                            or (now - self._last_alert_time)
-                            > self.sedentary_cooldown_sec
-                        ):
-                            if is_dnd_active:
-                                self.logger.info(
-                                    f"🔕 [Active] 免打扰生效，跳过久坐语音: {app}"
-                                )
-                                self._last_alert_app = app
-                                self._last_alert_time = now
-                            else:
-                                self.logger.info(
-                                    f"⏰[Active] 触发久坐提醒: {app} ({stay_minutes} min)"
-                                )
-                                self._last_alert_app = app
-                                self._last_alert_time = now
-                                self._show_sedentary_popup(
-                                    SEDENTARY_SESSION_APP_NAME, stay_minutes
-                                )
-                                if self._loop:
-                                    asyncio.run_coroutine_threadsafe(
-                                        self.chat_service.send_active_alert(
-                                            SEDENTARY_SESSION_APP_NAME, stay_minutes
-                                        ),
-                                        self._loop,
-                                    )
-                        self.next_sedentary_alert_time = (
-                            now + self.sedentary_cooldown_sec
-                        )
-
-                    monitor_cats = ["gaming", "video", "coding", "work", "design"]
-                    if cat in monitor_cats:
-                        if now > self.next_duration_trigger_time:
-                            self.next_duration_trigger_time = now + (30 * 60)
-                            if is_dnd_active:
-                                self.logger.info(
-                                    f"🔕 [Screen] 免打扰生效，跳过沉浸查岗: <{app}>"
-                                )
-                            else:
-                                self.logger.info(f"⏳ [Screen] 沉浸时长触发: <{app}>")
-                                count = self.daily_counts.get(app, 1)
-                                self._try_trigger_reaction(
-                                    current_title,
-                                    cat,
-                                    count,
-                                    app,
-                                    reason="duration",
-                                    app_duration_sec=self.daily_durations.get(app, 0.0),
-                                    current_stay_sec=max(0.0, now - self.current_window_start_time),
-                                )
-
+                    self._warn_rust_events_stale(now_ts)
+                self._save_stats()
             except Exception as e:
-                self.logger.error(f"ScreenSensor error: {e}")
-                time.sleep(SCREEN_SENSOR_INTERVAL)
-                last_tick_time = time.time()
+                self.logger.error(f"[Screen] Live2D activity loop error: {e}")
+
 
     def _try_trigger_reaction(
         self,
@@ -1870,8 +1583,8 @@ class ScreenSensor:
     ):
         now = time.time()
 
-        # 1. 基础冷却检查 (全局防刷屏)
-        # 如果刚说完话不到 10 秒 (SCREEN_GLOBAL_COOLDOWN)，绝对闭嘴
+        # 1. 鍩虹鍐峰嵈妫€鏌?(鍏ㄥ眬闃插埛灞?
+        # 濡傛灉鍒氳瀹岃瘽涓嶅埌 10 绉?(SCREEN_GLOBAL_COOLDOWN)锛岀粷瀵归棴鍢?
         if now - self.last_reaction_time < SCREEN_GLOBAL_COOLDOWN:
             debug_key = f"global:{app_name}:{reason}"
             if (
@@ -1885,8 +1598,8 @@ class ScreenSensor:
                 self._last_rust_debug_at = now
             return
 
-        # 2. 智能防刷屏 (针对 switch 事件)
-        # 这里的目的是：不要切太快，而不是限制“不说话”
+        # 2. 鏅鸿兘闃插埛灞?(閽堝 switch 浜嬩欢)
+        # 杩欓噷鐨勭洰鐨勬槸锛氫笉瑕佸垏澶揩锛岃€屼笉鏄檺鍒垛€滀笉璇磋瘽鈥?
         if reason == "switch" and SCREEN_SMART_DEBOUNCE:
             cd = SCREEN_REACTION_COOLDOWN
             # 只有当频率极高时才增加冷却，平时尽量放行
@@ -1895,7 +1608,7 @@ class ScreenSensor:
             if count > 20:
                 cd *= 4
 
-            # 如果还在分类冷却期内，直接跳过 (这是为了防止 ChatService 压力过大)
+            # 濡傛灉杩樺湪鍒嗙被鍐峰嵈鏈熷唴锛岀洿鎺ヨ烦杩?(杩欐槸涓轰簡闃叉 ChatService 鍘嬪姏杩囧ぇ)
             if now - self.category_reaction_times.get(category, 0) < cd:
                 debug_key = f"cat_cd:{app_name}:{category}:{reason}:{cd}"
                 if (
@@ -1909,7 +1622,7 @@ class ScreenSensor:
                     self._last_rust_debug_at = now
                 return
 
-            # 只有极高频次才进行概率静音
+            # 鍙湁鏋侀珮棰戞鎵嶈繘琛屾鐜囬潤闊?
             should_talk = True
             if count > 20 and count % 10 != 0:
                 should_talk = False
@@ -1920,7 +1633,7 @@ class ScreenSensor:
                     or (now - self._last_rust_debug_at) > 20
                 ):
                     self._debug_log(
-                        f"🛑 [ScreenDebug] 高频切换静音，跳过吐槽: app={app_name} count={count}"
+                        f"馃洃 [ScreenDebug] 楂橀鍒囨崲闈欓煶锛岃烦杩囧悙妲? app={app_name} count={count}"
                     )
                     self._last_rust_debug_key = debug_key
                     self._last_rust_debug_at = now
@@ -1944,16 +1657,16 @@ class ScreenSensor:
                 return
 
         # ============================================================
-        # 3. 核心修改：视觉判定逻辑分离
-        # 默认：只是普通文本观察 (use_vision = False)
+        # 3. 鏍稿績淇敼锛氳瑙夊垽瀹氶€昏緫鍒嗙
+        # 榛樿锛氬彧鏄櫘閫氭枃鏈瀵?(use_vision = False)
         # ============================================================
         use_vision = False
 
-        # 场景 A: 沉浸时长触发 (reason="duration")
-        # 既然看了这么久没动，大概率是有内容的，强制视觉查岗
+        # 鍦烘櫙 A: 娌夋蹈鏃堕暱瑙﹀彂 (reason="duration")
+        # 鏃㈢劧鐪嬩簡杩欎箞涔呮病鍔紝澶ф鐜囨槸鏈夊唴瀹圭殑锛屽己鍒惰瑙夋煡宀?
         if reason == "duration":
             use_vision = True
-            self.logger.info(f"📸 [Sensor] 触发视觉查岗 (原因: 长时间停留)")
+            self.logger.info(f"馃摳 [Sensor] 瑙﹀彂瑙嗚鏌ュ矖 (鍘熷洜: 闀挎椂闂村仠鐣?")
 
         # 场景 B: 切换触发 (reason="switch") -> 掷骰子决定是否升级为视觉
         else:
@@ -1967,7 +1680,7 @@ class ScreenSensor:
                 "other",
             ]
 
-            # 只有在这些分类下，才有概率“升级”为截图
+            # 鍙湁鍦ㄨ繖浜涘垎绫讳笅锛屾墠鏈夋鐜団€滃崌绾р€濅负鎴浘
             if category in interesting_cats:
                 base_prob = 0.15
                 prob_boost = count * 0.05
@@ -1980,17 +1693,17 @@ class ScreenSensor:
                         f"🎲 [Sensor] 运气爆棚！升级为视觉查岗 (概率: {final_prob:.2f})"
                     )
                 else:
-                    # 没摇中，仅作为普通文本事件处理
-                    # self.logger.info(f"🎲 [Sensor] 只是普通观察 (未触发视觉)")
+                    # 娌℃憞涓紝浠呬綔涓烘櫘閫氭枃鏈簨浠跺鐞?
+                    # self.logger.info(f"馃幉 [Sensor] 鍙槸鏅€氳瀵?(鏈Е鍙戣瑙?")
                     pass
 
         self.logger.info(
-            f"👀 [Screen] 触发 ChatService: {app_name} | Vision: {use_vision}"
+            f"馃憖 [Screen] 瑙﹀彂 ChatService: {app_name} | Vision: {use_vision}"
         )
 
-        # 4. 执行发送
-        # 无论 use_vision 是 True 还是 False，都发送给 ChatService
-        # - True  -> ChatService 调用 Smart Model (看图+吐槽)
+        # 4. 鎵ц鍙戦€?
+        # 鏃犺 use_vision 鏄?True 杩樻槸 False锛岄兘鍙戦€佺粰 ChatService
+        # - True  -> ChatService 璋冪敤 Smart Model (鐪嬪浘+鍚愭Ы)
         # - False -> ChatService 调用 Gatekeeper (判断是否无聊 -> 决定是否吐槽)
         if self._loop and self._loop.is_running():
             if app_duration_sec is None:
@@ -2036,7 +1749,7 @@ class ScreenSensor:
             return
         if not sent:
             self._debug_log(
-                f"🛑 [ScreenDebug] ChatService 未实际吐槽，不进入冷却: app={app_name} cat={category} reason={reason}"
+                f"馃洃 [ScreenDebug] ChatService 鏈疄闄呭悙妲斤紝涓嶈繘鍏ュ喎鍗? app={app_name} cat={category} reason={reason}"
             )
             return
         self.last_reaction_time = reaction_time

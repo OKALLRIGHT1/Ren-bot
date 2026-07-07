@@ -1,0 +1,20 @@
+{
+  "name": "Info Gateway",
+  "trigger": "info_gateway",
+  "llm_command": "info_gateway",
+  "type": "react",
+  "aliases": ["/api", "/info", "/信息源"],
+  "direct_command_aliases": ["/api", "/info", "/信息源"],
+  "description": "Expose shared information sources such as ALAPI weather and daily news.",
+  "example_arg": "/api weather_7d city=上海",
+  "timeout_sec": 30,
+  "version": "0.1.0",
+  "access_control": {
+    "allow_local": true,
+    "allow_remote_qq": true,
+    "allow_qq_owner": true,
+    "allow_qq_others": false,
+    "allow_group_without_at": false
+  },
+  "settings": {}
+}

@@ -30,6 +30,7 @@ _CURRENT_COSTUME_CONFIG = {}
 _CURRENT_COSTUME_EMOTION_MAP = {}
 _CURRENT_COSTUME_MODEL_PATH = ""
 MODEL_DEFAULT_MOTION = "__model_default__"
+STOP_MOTION = "__stop_motion__"
 
 
 def _get_logger():
@@ -41,6 +42,17 @@ def estimate_bubble_display_ms(text: str, *, minimum: int = 3200, maximum: int =
     clean = str(text or "").strip()
     read_ms = 2600 + len(clean) * 160
     return max(int(minimum), min(int(read_ms), int(maximum)))
+
+
+def update_current_costume_config(config: Optional[dict], model_path: Optional[str] = None) -> None:
+    """Update the active costume runtime config without reloading the model."""
+    safe_cfg = config if isinstance(config, dict) else {}
+    global _CURRENT_COSTUME_CONFIG, _CURRENT_COSTUME_EMOTION_MAP, _CURRENT_COSTUME_MODEL_PATH
+    _CURRENT_COSTUME_CONFIG = safe_cfg
+    if model_path is not None:
+        _CURRENT_COSTUME_MODEL_PATH = str(model_path or "").strip()
+    emotion_map = safe_cfg.get("emotion_map", {})
+    _CURRENT_COSTUME_EMOTION_MAP = emotion_map if isinstance(emotion_map, dict) else {}
 
 
 async def go_idle():
@@ -465,14 +477,7 @@ async def change_costume(model_path: str, config: dict = None):
     abs_path = abs_path.replace("\\", "/")
 
     safe_cfg = config if isinstance(config, dict) else {}
-    global _CURRENT_COSTUME_CONFIG, _CURRENT_COSTUME_EMOTION_MAP, _CURRENT_COSTUME_MODEL_PATH
-    _CURRENT_COSTUME_CONFIG = safe_cfg
-    _CURRENT_COSTUME_MODEL_PATH = abs_path
-    _CURRENT_COSTUME_EMOTION_MAP = (
-        safe_cfg.get("emotion_map", {})
-        if isinstance(safe_cfg.get("emotion_map", {}), dict)
-        else {}
-    )
+    update_current_costume_config(safe_cfg, model_path=abs_path)
     derived_keys = safe_cfg.get("derived_emotion_keys")
     if derived_keys:
         _get_logger().info(

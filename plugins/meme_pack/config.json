@@ -1,0 +1,80 @@
+{
+  "name": "表情包库",
+  "trigger": "meme_pack",
+  "llm_command": "meme_pack",
+  "type": "direct",
+  "aliases": [
+    "/表情包",
+    "/发表情",
+    "/随机表情",
+    "/导入表情包",
+    "/表情包统计"
+  ],
+  "description": "数据库版表情包系统：支持目录导入、按情绪/关键词选图、QQ 手动发送，并提供自动发送钩子。",
+  "example_arg": "/表情包 狡猾 / /导入表情包 D:\\memes / /表情包统计",
+  "timeout_sec": 20,
+  "version": "0.1.0",
+  "access_control": {
+    "allow_local": true,
+    "allow_remote_qq": true,
+    "allow_qq_owner": true,
+    "allow_qq_others": false,
+    "allow_group_without_at": false
+  },
+  "settings": {
+    "auto_enabled": {
+      "type": "bool",
+      "label": "启用自动表情包",
+      "description": "QQ 私聊回复后，根据语气小概率追加一张表情包。",
+      "default": true
+    },
+    "auto_probability": {
+      "type": "number",
+      "label": "自动发送概率",
+      "description": "0-1，命中场景后仍按概率发送，避免刷屏。",
+      "default": 0.12,
+      "min": 0,
+      "max": 1
+    },
+    "auto_private_only": {
+      "type": "bool",
+      "label": "仅 QQ 私聊自动发送",
+      "description": "默认不在群聊自动发表情包。",
+      "default": true
+    },
+    "llm_selector_enabled": {
+      "type": "bool",
+      "label": "启用 LLM 表情包选择器",
+      "description": "开启后会把候选表情包的描述、标签和当前对话交给模型判断是否发送以及选择哪张。",
+      "default": true
+    },
+    "session_cooldown_seconds": {
+      "type": "number",
+      "label": "会话冷却秒数",
+      "description": "同一 QQ 会话自动发送表情包的最短间隔。",
+      "default": 120,
+      "min": 5,
+      "max": 7200
+    },
+    "max_candidates": {
+      "type": "number",
+      "label": "候选数量",
+      "description": "自动选择时最多从多少张高分表情里抽取。",
+      "default": 8,
+      "min": 1,
+      "max": 64
+    },
+    "assets_dir": {
+      "type": "text",
+      "label": "素材目录",
+      "description": "导入后图片会复制到该目录。相对路径基于项目根目录。",
+      "default": "plugins/meme_pack/assets"
+    },
+    "database_path": {
+      "type": "text",
+      "label": "数据库路径",
+      "description": "表情包索引 SQLite 路径。相对路径基于项目根目录。",
+      "default": "plugins/meme_pack/data/memes.sqlite"
+    }
+  }
+}

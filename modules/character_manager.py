@@ -254,6 +254,7 @@ class CharacterManager:
                     costumes[name] = {"path": cfg, "emotion_map": {}}
             self.data["characters"][char_id] = {
                 "name": "默认角色",
+                "user_address": "Master",
                 "prompt": PERSONA_PROMPT,
                 "costumes": costumes,
                 "current_costume": next(iter(costumes.keys()), None),
@@ -268,6 +269,11 @@ class CharacterManager:
         characters = self.data.setdefault("characters", {})
 
         for _, char_data in characters.items():
+            user_address = str(char_data.get("user_address") or "").strip()
+            if not user_address:
+                char_data["user_address"] = "Master"
+                changed = True
+
             aliases = char_data.get("aliases") or []
             if isinstance(aliases, str):
                 aliases = [line.strip() for line in aliases.splitlines() if line.strip()]
@@ -392,6 +398,7 @@ class CharacterManager:
 
         self.data["characters"][char_id] = {
             "name": name,
+            "user_address": "Master",
             "aliases": [],
             "prompt": prompt,
             "default_emotion_map": {},

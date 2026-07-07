@@ -1,0 +1,43 @@
+{
+  "name": "代码代理",
+  "trigger": "code_agent",
+  "llm_command": "code_agent",
+  "type": "direct",
+  "aliases": [
+    "code_agent",
+    "codex",
+    "Codex",
+    "claude code",
+    "Claude Code",
+    "cc"
+  ],
+  "description": "把代码项目分析或修改任务委托给本机 Codex CLI / Claude Code。修改模式必须确认。",
+  "example_arg": "analyze ||| codex_cli ||| . ||| 检查项目为什么启动失败",
+  "timeout_sec": 300,
+  "tool_examples": [
+    "让 Codex 分析这个项目为什么启动失败",
+    "用 Claude Code 修改 README",
+    "code_agent analyze ||| codex_cli ||| . ||| 检查报错"
+  ],
+  "access_control": {
+    "allow_local": true,
+    "allow_remote_qq": true,
+    "allow_qq_owner": true,
+    "allow_qq_others": false,
+    "allow_group_without_at": false
+  },
+  "settings": {
+    "default_provider": {
+      "default": "codex_cli",
+      "description": "未明确指定 Codex/Claude 时使用的外部代码代理。"
+    },
+    "default_cwd": {
+      "default": ".",
+      "description": "自然语言未包含路径时使用的工作目录。"
+    },
+    "timeout_sec": {
+      "default": 300,
+      "description": "外部代码代理单次执行超时秒数。"
+    }
+  }
+}

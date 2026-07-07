@@ -1,6 +1,6 @@
 """
-应用主类
-管理整个应用的生命周期和组件初始化
+搴旂敤涓荤被
+绠＄悊鏁翠釜搴旂敤鐨勭敓鍛藉懆鏈熷拰缁勪欢鍒濆鍖?
 """
 
 import asyncio
@@ -71,6 +71,8 @@ from config import (
     VOICE_NAME,
     GUI_BACKEND,
     TTS_RATE,
+    TTS_SPLIT_LONG_TEXT,
+    TTS_CHUNK_CHARS,
     EMO_TO_LIVE2D,
     LIP_SYNC_ENABLED,
     RHUBARB_PATH,
@@ -113,7 +115,6 @@ from config import (
 from modules.advanced_memory import AdvancedMemorySystem
 from modules.memory_sqlite import get_memory_store
 from modules.emotion_controller import EmotionController
-from modules.activity_sidecar import ActivitySidecarManager
 from modules.plugin_manager import PluginManager
 from modules.skill_manager import SkillManager
 from modules.tool_router import ToolRouter
@@ -131,12 +132,13 @@ from modules.live2d import (
 
 # 导出ChatService（在chat_service.py中定义）
 from services.chat_service import ChatService
+from services.chat_support.text_splitter import split_chat_text_parts
 
 # [新增] 尝试导入屏幕感知模块 (容错处理)
 try:
     from modules.screen_sensor import ScreenSensor
 except ImportError:
-    print("[App] 未找到 modules.screen_sensor，屏幕感知功能将不可用")
+    print("[App] modules.screen_sensor not found; screen sensing disabled")
     ScreenSensor = None
 
 from core.container import ServiceContainer
@@ -165,18 +167,22 @@ except ImportError:
     MusicSensor = None
 
 
+def split_local_bubble_text_parts(text: str) -> list[str]:
+    return split_chat_text_parts(text, max_len=TTS_CHUNK_CHARS)
+
+
 class Live2DApplication:
-    """Live2D应用主类"""
+    # Live2D application.
 
     def __init__(self):
-        # 核心组件
+        # 鏍稿績缁勪欢
         self.container = ServiceContainer()
         self.event_bus = EventBus()
         self.state_machine = AgentStateMachine()
         self.logger = None
         self.event_logger = None
 
-        # 业务组件
+        # 涓氬姟缁勪欢
         self.brain = None
         self.memory_store = None
         self.emotion_controller = None
@@ -191,11 +197,11 @@ class Live2DApplication:
         self.chat_gateway_server = None
         self._silent_bubble_seq = 0
 
-        # [新增] 屏幕感知与语音组件
+        # [鏂板] 灞忓箷鎰熺煡涓庤闊崇粍浠?
         self.screen_sensor = None
-        self.voice_sensor = None  # 🟢 语音传感器
+        self.voice_sensor = None  # 馃煝 璇煶浼犳劅鍣?
 
-        # GUI相关
+        # GUI鐩稿叧
         self.qt_ui = None
         self.loop = None
         self.gui_ws_server = None
@@ -204,10 +210,10 @@ class Live2DApplication:
         self.display_state_config_path = Path("./data/display_state_config.json")
         self.display_mqtt_last_error = "未初始化"
 
-        # 日记状态标记，防止重复记录
+        # 鏃ヨ鐘舵€佹爣璁帮紝闃叉閲嶅璁板綍
         self.last_summary_date = None
 
-        # 配置
+        # 閰嶇疆
         self.tts_enabled = bool(TTS_ENABLED)
         self.runtime_settings_path = Path("./data/runtime_settings.json")
         self.think_motion_enabled = True
@@ -219,7 +225,7 @@ class Live2DApplication:
         except Exception:
             self.think_motion_name = "think"
 
-        # 音乐配置
+        # 闊充箰閰嶇疆
         self.music_sensor = None
 
     def _load_runtime_settings(self) -> Dict[str, Any]:
@@ -232,7 +238,7 @@ class Live2DApplication:
             return data if isinstance(data, dict) else {}
         except Exception as e:
             if self.logger:
-                self.logger.warning(f"加载运行时设置失败: {e}")
+                self.logger.warning(f"鍔犺浇杩愯鏃惰缃け璐? {e}")
             return {}
 
     def _save_runtime_settings(self, settings: Dict[str, Any]):
@@ -243,7 +249,43 @@ class Live2DApplication:
                 json.dump(settings, f, ensure_ascii=False, indent=2)
         except Exception as e:
             if self.logger:
-                self.logger.warning(f"保存运行时设置失败: {e}")
+                self.logger.warning(f"淇濆瓨杩愯鏃惰缃け璐? {e}")
+
+    def _publish_gui_activity_endpoint(self) -> None:
+        server = getattr(self, "gui_http_server", None)
+        if server is None:
+            return
+        endpoint = (
+            server.activity_ingest_url()
+            if hasattr(server, "activity_ingest_url")
+            else self._build_gui_activity_endpoint(
+                getattr(server, "host", GUI_HTTP_HOST),
+                getattr(server, "port", GUI_HTTP_PORT),
+                getattr(server, "path_prefix", GUI_HTTP_PREFIX),
+            )
+        )
+        settings = self._load_runtime_settings()
+        patch = {
+            "gui_http_host": getattr(server, "host", GUI_HTTP_HOST),
+            "gui_http_port": int(getattr(server, "port", GUI_HTTP_PORT)),
+            "gui_http_prefix": getattr(server, "path_prefix", GUI_HTTP_PREFIX),
+            "gui_activity_endpoint": endpoint,
+        }
+        if all(settings.get(key) == value for key, value in patch.items()):
+            return
+        settings.update(patch)
+        self._save_runtime_settings(settings)
+        if self.logger:
+            self.logger.info(f"GUI activity endpoint published: {endpoint}")
+
+    @staticmethod
+    def _build_gui_activity_endpoint(host: str, port: int, path_prefix: str) -> str:
+        prefix = str(path_prefix or "/gui").strip() or "/gui"
+        if not prefix.startswith("/"):
+            prefix = "/" + prefix
+        prefix = prefix.rstrip("/") or "/"
+        base = f"http://{host}:{int(port)}{prefix}"
+        return f"{base}/activity-ingest"
 
     def _load_runtime_tts_enabled(self) -> bool:
         settings = self._load_runtime_settings()
@@ -288,7 +330,7 @@ class Live2DApplication:
                 json.dump(cfg, f, ensure_ascii=False, indent=2)
         except Exception as e:
             if self.logger:
-                self.logger.warning(f"保存状态屏配置失败: {e}")
+                self.logger.warning(f"淇濆瓨鐘舵€佸睆閰嶇疆澶辫触: {e}")
 
     def _load_external_runtime_settings(self) -> Dict[str, Any]:
         return self._normalize_external_runtime_settings(self._load_runtime_settings())
@@ -302,7 +344,7 @@ class Live2DApplication:
             if isinstance(value, str):
                 return [
                     item.strip()
-                    for item in re.split(r"[,，\n\s]+", value)
+                    for item in re.split(r"[,锛孿n\s]+", value)
                     if item.strip()
                 ]
             if isinstance(value, list):
@@ -313,7 +355,7 @@ class Live2DApplication:
             if isinstance(value, str):
                 return [
                     item.strip()
-                    for item in re.split(r"[,，;\n]+", value)
+                    for item in re.split(r"[,锛?\n]+", value)
                     if item.strip()
                 ]
             if isinstance(value, list):
@@ -351,6 +393,17 @@ class Live2DApplication:
             except Exception:
                 value = int(default)
             return max(int(minimum), value)
+
+        gui_http_host = str(settings.get("gui_http_host", GUI_HTTP_HOST) or GUI_HTTP_HOST)
+        gui_http_port = int(settings.get("gui_http_port", GUI_HTTP_PORT) or GUI_HTTP_PORT)
+        gui_http_prefix = str(
+            settings.get("gui_http_prefix", GUI_HTTP_PREFIX) or GUI_HTTP_PREFIX
+        )
+        gui_activity_endpoint = str(settings.get("gui_activity_endpoint") or "").strip()
+        if not gui_activity_endpoint:
+            gui_activity_endpoint = self._build_gui_activity_endpoint(
+                gui_http_host, gui_http_port, gui_http_prefix
+            )
 
         napcat_access_token = str(
             settings.get("napcat_access_token", NAPCAT_ACCESS_TOKEN) or ""
@@ -401,13 +454,13 @@ class Live2DApplication:
             ),
             "napcat_owner_user_ids": owner_ids,
             "napcat_owner_label": str(
-                settings.get("napcat_owner_label", "主人") or "主人"
+                settings.get("napcat_owner_label", "涓讳汉") or "涓讳汉"
             ),
             "napcat_image_vision_enabled": bool(
                 settings.get("napcat_image_vision_enabled", True)
             ),
             "napcat_image_prompt": image_prompt
-            or "请客观详细描述这张QQ图片的内容，并提取其中可用于回复的关键信息。",
+            or "请客观详细描述这张 QQ 图片的内容，并提取可用于回复的关键信息。",
             "napcat_voice_reply_enabled": bool(
                 settings.get("napcat_voice_reply_enabled", NAPCAT_VOICE_REPLY_ENABLED)
             ),
@@ -428,15 +481,10 @@ class Live2DApplication:
             "gui_ws_host": str(settings.get("gui_ws_host", GUI_WS_HOST) or GUI_WS_HOST),
             "gui_ws_port": int(settings.get("gui_ws_port", GUI_WS_PORT) or GUI_WS_PORT),
             "gui_ws_path": str(settings.get("gui_ws_path", GUI_WS_PATH) or GUI_WS_PATH),
-            "gui_http_host": str(
-                settings.get("gui_http_host", GUI_HTTP_HOST) or GUI_HTTP_HOST
-            ),
-            "gui_http_port": int(
-                settings.get("gui_http_port", GUI_HTTP_PORT) or GUI_HTTP_PORT
-            ),
-            "gui_http_prefix": str(
-                settings.get("gui_http_prefix", GUI_HTTP_PREFIX) or GUI_HTTP_PREFIX
-            ),
+            "gui_http_host": gui_http_host,
+            "gui_http_port": gui_http_port,
+            "gui_http_prefix": gui_http_prefix,
+            "gui_activity_endpoint": gui_activity_endpoint,
             "expression_library_enabled": bool(
                 settings.get("expression_library_enabled", True)
             ),
@@ -465,6 +513,9 @@ class Live2DApplication:
             ),
             "sedentary_popup_enabled": bool(
                 settings.get("sedentary_popup_enabled", SEDENTARY_POPUP_ENABLED)
+            ),
+            "sedentary_status_visible": bool(
+                settings.get("sedentary_status_visible", True)
             ),
             "sedentary_popup_title": str(
                 settings.get("sedentary_popup_title", SEDENTARY_POPUP_TITLE)
@@ -759,26 +810,8 @@ class Live2DApplication:
             "skill_count": 0,
             "active_skills": [],
             "sedentary_live_applied": False,
-            "activity_sidecar_restarted": False,
         }
 
-        old_sedentary_runtime = (
-            int(getattr(config, "SEDENTARY_REMINDER_MINUTES", SEDENTARY_REMINDER_MINUTES)),
-            int(
-                getattr(
-                    config,
-                    "ACTIVITY_AGENT_SEDENTARY_BREAK_MINUTES",
-                    5,
-                )
-            ),
-            int(
-                getattr(
-                    config,
-                    "SEDENTARY_REMINDER_COOLDOWN_MINUTES",
-                    SEDENTARY_REMINDER_COOLDOWN_MINUTES,
-                )
-            ),
-        )
         config.SEDENTARY_REMINDER_MINUTES = int(
             external_settings["sedentary_reminder_minutes"]
         )
@@ -921,30 +954,11 @@ class Live2DApplication:
                 renderer=self.render_gateway_voice_reply,
             )
 
-        new_sedentary_runtime = (
-            config.SEDENTARY_REMINDER_MINUTES,
-            config.ACTIVITY_AGENT_SEDENTARY_BREAK_MINUTES,
-            config.SEDENTARY_REMINDER_COOLDOWN_MINUTES,
-        )
-        sidecar = getattr(self, "activity_sidecar", None)
-        if (
-            old_sedentary_runtime != new_sedentary_runtime
-            and sidecar is not None
-            and sidecar.is_running()
-        ):
-            try:
-                sidecar.stop()
-                sidecar.start()
-                result["activity_sidecar_restarted"] = bool(sidecar.is_running())
-            except Exception as exc:
-                if self.logger:
-                    self.logger.warning(f"Rust activity agent restart failed: {exc}")
-
         return result
 
     def initialize(self):
-        """初始化应用"""
-        # 1. 设置日志
+        # Initialize application.
+        # 1. 璁剧疆鏃ュ織
         try:
             from core.console_capture import install_console_capture
 
@@ -956,7 +970,7 @@ class Live2DApplication:
         self.logger = setup_logging(log_dir="./logs", log_name="agent", level="INFO")
         set_logger(self.logger)
 
-        # 启动时读取 TTS 运行时开关（优先于 config.py 默认值）
+        # 鍚姩鏃惰鍙?TTS 杩愯鏃跺紑鍏筹紙浼樺厛浜?config.py 榛樿鍊硷級
         self.tts_enabled = self._load_runtime_tts_enabled()
         try:
             import config as runtime_config
@@ -964,19 +978,19 @@ class Live2DApplication:
             runtime_config.TTS_ENABLED = self.tts_enabled
         except Exception:
             pass
-        self.logger.info(f"TTS 启动状态: {'开' if self.tts_enabled else '关'}")
+        self.logger.info(f"TTS startup state: {'on' if self.tts_enabled else 'off'}")
 
-        # 2. 初始化事件日志
+        # 2. 鍒濆鍖栦簨浠舵棩蹇?
         self.event_logger = EventLogger("./data/events.sqlite")
         self.skill_manager = SkillManager(logger=self.logger)
 
-        # 3. 初始化核心组件
+        # 3. 鍒濆鍖栨牳蹇冪粍浠?
         self.brain = AdvancedMemorySystem()
         self.memory_store = get_memory_store()
         self.emotion_controller = EmotionController(mapping=EMO_TO_LIVE2D)
-        self.logger.info("EmotionController 已初始化")
+        self.logger.info("EmotionController 宸插垵濮嬪寲")
 
-        # 4. 初始化插件系统
+        # 4. 鍒濆鍖栨彃浠剁郴缁?
         self.plugin_manager = PluginManager(plugin_dir="./plugins")
         self.plugin_manager.load_plugins()
 
@@ -1019,12 +1033,12 @@ class Live2DApplication:
             rhubarb_abs = os.path.abspath(RHUBARB_PATH)
             if os.path.exists(rhubarb_abs):
                 self.logger.info(
-                    f"口型同步已启用 (Rhubarb: {rhubarb_abs}, 平滑窗口: {LIP_SYNC_SMOOTH_WINDOW})"
+                    f"鍙ｅ瀷鍚屾宸插惎鐢?(Rhubarb: {rhubarb_abs}, 骞虫粦绐楀彛: {LIP_SYNC_SMOOTH_WINDOW})"
                 )
             else:
-                self.logger.warning(f"口型同步已开启但 Rhubarb 不存在: {rhubarb_abs}")
+                self.logger.warning(f"鍙ｅ瀷鍚屾宸插紑鍚絾 Rhubarb 涓嶅瓨鍦? {rhubarb_abs}")
         else:
-            self.logger.info("口型同步未启用 (LIP_SYNC_ENABLED=0)")
+            self.logger.info("鍙ｅ瀷鍚屾鏈惎鐢?(LIP_SYNC_ENABLED=0)")
 
         async def _bubble_to_event(
             text: str, emo: Optional[str], duration_ms: Optional[int]
@@ -1042,6 +1056,8 @@ class Live2DApplication:
             log_each_utterance=True,
             bubble_sender=_bubble_to_event,
             go_idle_fn=_tts_go_idle_to_event,
+            split_long_default=TTS_SPLIT_LONG_TEXT,
+            chunk_chars_default=TTS_CHUNK_CHARS,
             state_machine=self.state_machine,
             enable_lip_sync=LIP_SYNC_ENABLED,
             rhubarb_path=RHUBARB_PATH,
@@ -1062,10 +1078,11 @@ class Live2DApplication:
             event_bus=self.event_bus,
         )
 
-        # 7. 初始化聊天服务
+        # 7. 鍒濆鍖栬亰澶╂湇鍔?
         self.mcp_bridge = MCPToolBridge()
         self.chat_gateway = ChatGateway()
         self.chat_gateway.on_message(self._handle_external_chat_message)
+        self.chat_gateway.on_notice(self._handle_external_chat_notice)
         initial_external_settings = self._load_external_runtime_settings()
         self.apply_external_settings(initial_external_settings)
 
@@ -1107,101 +1124,102 @@ class Live2DApplication:
             app_ref=self,
             access_token=gui_access_token,
         )
-        self.activity_sidecar = ActivitySidecarManager(
-            logger=self.logger,
-            endpoint=ActivitySidecarManager.build_endpoint(
-                initial_external_settings.get("gui_http_host", GUI_HTTP_HOST),
-                initial_external_settings.get("gui_http_port", GUI_HTTP_PORT),
-                initial_external_settings.get("gui_http_prefix", GUI_HTTP_PREFIX),
-            ),
-        )
-
         if MusicSensor:
             self.music_sensor = MusicSensor(self.chat_service)
 
-        # 8. 初始化屏幕感知 (必须在 chat_service 之后)
+        # 8. 鍒濆鍖栧睆骞曟劅鐭?(蹇呴』鍦?chat_service 涔嬪悗)
         if ScreenSensor:
             try:
                 self.screen_sensor = ScreenSensor(self.chat_service)
                 self.chat_service.screen_sensor_ref = self.screen_sensor
-                self.logger.info("👀 ScreenSensor 屏幕感知模块已就绪")
-                if getattr(self, "activity_sidecar", None):
-                    self.logger.info(
-                        "🦀 ScreenSensor 当前优先使用 Rust activity events"
-                    )
+                self.logger.info("ScreenSensor initialized")
             except Exception as e:
-                self.logger.error(f"❌ ScreenSensor 初始化失败: {e}")
+                self.logger.error(f"鉂?ScreenSensor 鍒濆鍖栧け璐? {e}")
         else:
-            self.logger.warning("⚠️ ScreenSensor 模块未加载")
+            self.logger.warning("ScreenSensor module not loaded")
 
-        # 🟢 8.5 初始化语音感知
+        # 馃煝 8.5 鍒濆鍖栬闊虫劅鐭?        self._init_voice_sensor_if_configured()
+
+        # 9. 娉ㄥ唽浜嬩欢澶勭悊鍣?
+        self._wire_events()
+
+        # 10. 娉ㄥ唽鍒板鍣?
+        self._register_services()
+
+        self.logger.info("Application initialized")
+
+    def _ensure_voice_sensor_loaded(self):
+        if self.voice_sensor:
+            return self.voice_sensor
         try:
             from modules.voice_sensor import VoiceSensor
-            from config import VOICE_SENSOR_ENABLED, SHERPA_MODEL_CONFIG
 
-            # 无论默认是否开启，先实例化备用，由 start_async_loop 决定是否启动
             self.voice_sensor = VoiceSensor(
                 chat_service=self.chat_service,
                 event_bus=self.event_bus,
-                config_path=SHERPA_MODEL_CONFIG,
+                config_path=getattr(config, "SHERPA_MODEL_CONFIG", {}),
             )
-            self.logger.info("🎤 VoiceSensor 语音模块已加载 (就绪待命)")
+            if self.logger:
+                self.logger.info("VoiceSensor loaded on demand")
+            return self.voice_sensor
         except ImportError:
-            self.logger.warning("⚠️ 未找到 modules.voice_sensor，语音功能将不可用")
-            self.voice_sensor = None
+            if self.logger:
+                self.logger.warning("modules.voice_sensor not found; voice disabled")
         except Exception as e:
-            self.logger.error(f"❌ VoiceSensor 初始化失败: {e}")
+            if self.logger:
+                self.logger.error(f"鉂?VoiceSensor 鍒濆鍖栧け璐? {e}")
+        self.voice_sensor = None
+        return None
+
+    def _init_voice_sensor_if_configured(self):
+        if not getattr(config, "VOICE_SENSOR_ENABLED", False):
             self.voice_sensor = None
-
-        # 9. 注册事件处理器
-        self._wire_events()
-
-        # 10. 注册到容器
-        self._register_services()
-
-        self.logger.info("应用初始化完成")
+            if self.logger:
+                self.logger.info("VoiceSensor disabled; voice module not preloaded")
+            return None
+        return self._ensure_voice_sensor_loaded()
 
     def _wire_events(self):
-        """连接事件"""
-        # UI事件
+        # Connect events.
+        # UI浜嬩欢
         self.event_bus.on(Events.UI_BUBBLE, self._on_ui_bubble)
         self.event_bus.on(Events.UI_STATUS, self._on_ui_status)
         self.event_bus.on(Events.UI_APPEND, self._on_ui_append)
 
-        # 状态事件（将事件总线的状态变化转换为状态机状态）
+        # 鐘舵€佷簨浠讹紙灏嗕簨浠舵€荤嚎鐨勭姸鎬佸彉鍖栬浆鎹负鐘舵€佹満鐘舵€侊級
         self.event_bus.on("state.changed", self._on_state_changed_event)
 
-        # Live2D事件
+        # Live2D浜嬩欢
         self.event_bus.on(Events.LIVE2D_EMOTION, self._on_live2d_emotion)
         self.event_bus.on(Events.LIVE2D_MOTION, self._on_live2d_motion)
         self.event_bus.on(Events.LIVE2D_GO_IDLE, self._on_live2d_go_idle)
 
-        # 状态机监听器（直接处理状态，不通过事件总线）
+        # 鐘舵€佹満鐩戝惉鍣紙鐩存帴澶勭悊鐘舵€侊紝涓嶉€氳繃浜嬩欢鎬荤嚎锛?
         self.state_machine.add_listener(self._on_state_machine_change)
 
-        # TTS事件
+        # TTS浜嬩欢
         self.event_bus.on(Events.ASSISTANT_UTTER, self._on_assistant_utter)
         self.event_bus.on(Events.ASSISTANT_STREAM_START, self._on_stream_start)
         self.event_bus.on(Events.ASSISTANT_STREAM_FEED, self._on_stream_feed)
         self.event_bus.on(Events.ASSISTANT_STREAM_END, self._on_stream_end)
 
-        # 日志事件
+        # 鏃ュ織浜嬩欢
         self.event_bus.on(Events.CHAT_LOG, self._on_chat_log)
         self.event_bus.on(
-            Events.MEMORY_ADD_OK, lambda p: print(f"✅ [Memory] 记忆已添加")
+            Events.MEMORY_ADD_OK, lambda p: print("[Memory] added")
         )
         self.event_bus.on(
-            Events.MEMORY_ADD_FAIL, lambda p: print(f"⚠️ [Memory] 记忆添加失败")
+            Events.MEMORY_ADD_FAIL, lambda p: print("[Memory] add failed")
         )
 
-        # [可选] 监听被忽略的消息
+        # [鍙€塢 鐩戝惉琚拷鐣ョ殑娑堟伅
         self.event_bus.on(
             "chat.ignored",
-            lambda p: print(f"🚫 [Gatekeeper] 已忽略: {p.get('content', '')[:20]}..."),
+            lambda p: print(f"馃毇 [Gatekeeper] 宸插拷鐣? {p.get('content', '')[:20]}..."),
         )
 
     async def _on_ui_bubble(self, payload: Dict[str, Any]):
-        """处理UI气泡事件"""
+        # Handle UI bubble event.
         self._emit_gui_ws(
             {
                 "type": "bubble",
@@ -1215,12 +1233,12 @@ class Live2DApplication:
         )
 
     def _on_ui_status(self, payload: Dict[str, Any]):
-        """处理UI状态事件"""
+        # Handle UI status events.
         if self.qt_ui:
             try:
                 self.qt_ui.set_status(payload.get("text", ""))
             except Exception as e:
-                self.logger.warning(f"设置UI状态失败: {e}")
+                self.logger.warning(f"璁剧疆UI鐘舵€佸け璐? {e}")
 
         self._emit_gui_ws(
             {
@@ -1231,7 +1249,7 @@ class Live2DApplication:
         )
 
     def _on_ui_append(self, payload: Dict[str, Any]):
-        """处理UI追加事件"""
+        # Handle UI append event.
         if self.qt_ui:
             try:
                 self.qt_ui.append(
@@ -1648,7 +1666,7 @@ class Live2DApplication:
                 return
 
     async def _on_live2d_emotion(self, payload: Dict[str, Any]):
-        """处理Live2D情绪事件 - 使用 EmotionController 管理"""
+        # Handle Live2D emotion events.
         emo = (payload.get("emotion") or "").strip()
         intensity = payload.get("intensity")
         prefer_motion = payload.get("prefer_motion")
@@ -1669,13 +1687,13 @@ class Live2DApplication:
                 }
             )
             self.logger.debug(
-                f"🎭 [Emotion] 收到情绪请求: {emo} (prefer_motion={prefer_motion})"
+                f"馃幁 [Emotion] 鏀跺埌鎯呯华璇锋眰: {emo} (prefer_motion={prefer_motion})"
             )
 
-            # 标记活动（退出空闲模式）
+            # 鏍囪娲诲姩锛堥€€鍑虹┖闂叉ā寮忥級
             self.emotion_controller.mark_activity(reason or "emotion_request")
 
-            # 通过 EmotionController 处理情绪请求
+            # 閫氳繃 EmotionController 澶勭悊鎯呯华璇锋眰
             await self.emotion_controller.request_emotion(
                 label=emo,
                 intensity=intensity,
@@ -1683,13 +1701,13 @@ class Live2DApplication:
                 reason=reason,
             )
 
-            self.logger.debug(f"✅ [Emotion] 情绪处理完成: {emo}")
+            self.logger.debug(f"鉁?[Emotion] 鎯呯华澶勭悊瀹屾垚: {emo}")
 
         except Exception as e:
-            self.logger.error(f"❌ [Emotion] 处理失败: {e}", exc_info=True)
+            self.logger.error(f"鉂?[Emotion] 澶勭悊澶辫触: {e}", exc_info=True)
 
     async def _on_live2d_motion(self, payload: Dict[str, Any]):
-        """处理Live2D动作事件"""
+        # Handle Live2D motion events.
         m = (payload.get("motion") or "").strip()
         if not m:
             return
@@ -1706,7 +1724,7 @@ class Live2DApplication:
             pass
 
     async def _on_live2d_go_idle(self, payload: Dict[str, Any]):
-        """处理Live2D进入空闲事件"""
+        # Handle Live2D idle events.
         self._emit_gui_ws({"type": "live2d", "action": "idle"})
         if self.emotion_controller:
             try:
@@ -1721,13 +1739,13 @@ class Live2DApplication:
                 pass
 
     async def _on_state_changed_event(self, payload: dict):
-        """处理状态变化事件（从事件总线到状态机）"""
+        # Handle state changed events.
         state_name = payload.get("state")
         reason = payload.get("reason", "unknown")
 
-        self.logger.debug(f"收到状态变化事件: {state_name} (原因: {reason})")
+        self.logger.debug(f"鏀跺埌鐘舵€佸彉鍖栦簨浠? {state_name} (鍘熷洜: {reason})")
 
-        # 将字符串状态转换为 AgentState 枚举
+        # 灏嗗瓧绗︿覆鐘舵€佽浆鎹负 AgentState 鏋氫妇
         state_map = {
             "idle": AgentState.IDLE,
             "thinking": AgentState.THINKING,
@@ -1738,39 +1756,39 @@ class Live2DApplication:
         if target_state:
             await self.state_machine.set_state(target_state, reason=reason)
         else:
-            self.logger.warning(f"未知状态: {state_name}")
+            self.logger.warning(f"鏈煡鐘舵€? {state_name}")
 
     async def _on_state_machine_change(
         self, new_state: AgentState, prev_state: AgentState, meta: dict
     ):
-        """状态机监听器（直接处理状态变化）"""
+        # Handle state machine transitions.
         reason = meta.get("reason", "unknown")
         self.logger.debug(
-            f"🔄 [State] {prev_state.value} -> {new_state.value} (原因: {reason})"
+            f"馃攧 [State] {prev_state.value} -> {new_state.value} (鍘熷洜: {reason})"
         )
 
         try:
-            # 更新 EmotionController 的状态
+            # 鏇存柊 EmotionController 鐨勭姸鎬?
             self.emotion_controller.set_agent_state(new_state)
 
-            # 根据状态触发对应的动作
+            # 鏍规嵁鐘舵€佽Е鍙戝搴旂殑鍔ㄤ綔
             if new_state == AgentState.THINKING:
-                self.logger.debug(f"💭 [State] 进入思考状态")
+                self.logger.debug("[State] enter thinking")
 
-                # 异步触发 UI 状态更新
+                # 寮傛瑙﹀彂 UI 鐘舵€佹洿鏂?
                 asyncio.create_task(
                     self.event_bus.emit(Events.UI_STATUS, text="Thinking.")
                 )
 
                 if self.think_motion_enabled:
                     self.logger.debug(
-                        f"🎬 [State] 触发思考动作: {self.think_motion_name}"
+                        f"馃幀 [State] 瑙﹀彂鎬濊€冨姩浣? {self.think_motion_name}"
                     )
 
-                    # 标记活动（退出空闲）
+                    # 鏍囪娲诲姩锛堥€€鍑虹┖闂诧級
                     self.emotion_controller.mark_activity("thinking")
 
-                    # 直接通过 EmotionController 触发动作
+                    # 鐩存帴閫氳繃 EmotionController 瑙﹀彂鍔ㄤ綔
                     asyncio.create_task(
                         self.emotion_controller.request_emotion(
                             label=self.think_motion_name,
@@ -1780,16 +1798,16 @@ class Live2DApplication:
                     )
 
             elif new_state == AgentState.SPEAKING:
-                self.logger.debug(f"🗣️ [State] 进入说话状态")
+                self.logger.debug("[State] enter speaking")
                 asyncio.create_task(
                     self.event_bus.emit(Events.UI_STATUS, text="Speaking.")
                 )
 
-                # 说话时标记活动
+                # 璇磋瘽鏃舵爣璁版椿鍔?
                 self.emotion_controller.mark_activity("speaking")
 
             elif new_state == AgentState.IDLE:
-                self.logger.debug(f"😴 [State] 进入空闲状态")
+                self.logger.debug("[State] enter idle")
                 asyncio.create_task(self.event_bus.emit(Events.UI_STATUS, text="Idle"))
                 if reason not in {
                     "tts_disabled",
@@ -1799,10 +1817,10 @@ class Live2DApplication:
                     asyncio.create_task(self.event_bus.emit(Events.LIVE2D_GO_IDLE))
 
         except Exception as e:
-            self.logger.error(f"❌ [State] 状态事件错误: {e}", exc_info=True)
+            self.logger.error(f"鉂?[State] 鐘舵€佷簨浠堕敊璇? {e}", exc_info=True)
 
     async def _on_assistant_utter(self, payload: Dict[str, Any]):
-        """处理AI说话事件"""
+        # Handle assistant utter event.
         text = (payload.get("text") or "").strip()
         if not text:
             return
@@ -1835,15 +1853,26 @@ class Live2DApplication:
                     self.logger.debug(f"Text lip sync fallback skipped: {exc}")
                     duration_ms = estimate_bubble_display_ms(text)
                     bubble_seq = self._silent_bubble_seq
-                await self.event_bus.emit(
-                    Events.UI_BUBBLE,
-                    text=text,
-                    emotion=emotion,
-                    duration_ms=duration_ms,
-                )
+                bubble_parts = split_local_bubble_text_parts(text) or [text]
+                per_part_ms = max(1200, int(duration_ms / max(1, len(bubble_parts))))
+
+                async def _emit_silent_bubbles(seq: int):
+                    for part in bubble_parts:
+                        if seq != self._silent_bubble_seq:
+                            return
+                        await self.event_bus.emit(
+                            Events.UI_BUBBLE,
+                            text=part,
+                            emotion=emotion,
+                            duration_ms=per_part_ms,
+                        )
+                        await asyncio.sleep(max(0.35, per_part_ms / 1000.0 + 0.08))
+
+                asyncio.create_task(_emit_silent_bubbles(bubble_seq))
                 if duration_ms and duration_ms > 0:
                     async def _idle_after_silent_bubble(delay_ms: int, seq: int):
-                        await asyncio.sleep(max(0.35, delay_ms / 1000.0 + 0.18))
+                        total_delay = len(bubble_parts) * (per_part_ms / 1000.0 + 0.08)
+                        await asyncio.sleep(max(0.35, total_delay + 0.18))
                         if seq != self._silent_bubble_seq:
                             return
                         if self.state_machine.state != AgentState.SPEAKING:
@@ -1879,14 +1908,14 @@ class Live2DApplication:
         )
 
     async def _on_stream_start(self, payload: Dict[str, Any]):
-        """处理流开始事件"""
+        # Handle stream start event.
         self._silent_bubble_seq += 1
         if not self.tts_enabled or not bool(payload.get("speak", True)):
             return
         self.tts.start_stream()
 
     async def _on_stream_feed(self, payload: Dict[str, Any]):
-        """处理流数据事件"""
+        # Handle stream chunk event.
         if not self.tts_enabled or not bool(payload.get("speak", True)):
             return
         chunk = payload.get("chunk") or ""
@@ -1894,7 +1923,7 @@ class Live2DApplication:
             await self.tts.feed_stream(chunk, emotion=payload.get("emotion"))
 
     async def _on_stream_end(self, payload: Dict[str, Any]):
-        """处理流结束事件"""
+        # Handle stream end event.
         self.logger.debug(f"流结束，等待 TTS 播放完成")
         if not self.tts_enabled or not bool(payload.get("speak", True)):
             if bool(payload.get("show_bubble", True)):
@@ -1908,7 +1937,7 @@ class Live2DApplication:
             return
         await self.tts.stop_stream(emotion=payload.get("emotion"))
 
-        # 确保状态切换到 IDLE（如果 TTS 没有正常触发）
+        # 纭繚鐘舵€佸垏鎹㈠埌 IDLE锛堝鏋?TTS 娌℃湁姝ｅ父瑙﹀彂锛?
         # async def ensure_idle():
         #     await asyncio.sleep(2)  # 等待 TTS 播放完成
         #     if self.state_machine.state == AgentState.SPEAKING:
@@ -1918,19 +1947,77 @@ class Live2DApplication:
         # asyncio.create_task(ensure_idle())
 
     def restart_app(self):
-        """触发重启逻辑 (退出码 100)"""
-        print("♻️ [App] 接收到重启请求...")
+        # Trigger restart flow.
+        print("鈾伙笍 [App] 鎺ユ敹鍒伴噸鍚姹?..")
 
-        # 1. 先做清理 (保存日记、关闭数据库连接等)
+        if not self._watchdog_is_running():
+            self._spawn_delayed_watchdog_restart()
+
+        # 1. 鍏堝仛娓呯悊 (淇濆瓨鏃ヨ銆佸叧闂暟鎹簱杩炴帴绛?
         self.cleanup()
 
-        # 2. 退出进程，返回 100 给守护进程
+        # 2. 閫€鍑鸿繘绋嬶紝杩斿洖 100 缁欏畧鎶よ繘绋?
         import sys
 
         sys.exit(100)
 
+    def _watchdog_is_running(self) -> bool:
+        """Return True when the outer main.py watchdog owns its instance lock."""
+        try:
+            from core.single_instance import SingleInstanceLock
+
+            lock = SingleInstanceLock(Path(__file__).resolve().parents[1], "watchdog")
+            acquired = lock.acquire()
+            if acquired:
+                lock.release()
+                return False
+            return True
+        except Exception as exc:
+            self.logger.warning(f"Watchdog lock check failed; scheduling restart helper: {exc}")
+            return False
+
+    def _spawn_delayed_watchdog_restart(self) -> None:
+        """Start main.py after the current core process releases its single-instance lock."""
+        import subprocess
+        import sys
+
+        root = Path(__file__).resolve().parents[1]
+        entry = root / "main.py"
+        code = (
+            "import subprocess, sys, time\n"
+            "from pathlib import Path\n"
+            "from core.single_instance import SingleInstanceLock\n"
+            f"root = Path({str(root)!r})\n"
+            f"entry = Path({str(entry)!r})\n"
+            "deadline = time.time() + 30.0\n"
+            "while time.time() < deadline:\n"
+            "    lock = SingleInstanceLock(root, 'core')\n"
+            "    if lock.acquire():\n"
+            "        lock.release()\n"
+            "        break\n"
+            "    time.sleep(0.5)\n"
+            "flags = getattr(subprocess, 'DETACHED_PROCESS', 0) | getattr(subprocess, 'CREATE_NEW_PROCESS_GROUP', 0)\n"
+            "subprocess.Popen([sys.executable, str(entry)], cwd=str(root), stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, close_fds=True, creationflags=flags)\n"
+        )
+        flags = getattr(subprocess, "DETACHED_PROCESS", 0) | getattr(
+            subprocess, "CREATE_NEW_PROCESS_GROUP", 0
+        )
+        try:
+            subprocess.Popen(
+                [sys.executable, "-c", code],
+                cwd=str(root),
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                close_fds=True,
+                creationflags=flags,
+            )
+            self.logger.info("Scheduled delayed watchdog restart helper")
+        except Exception as exc:
+            self.logger.error(f"Failed to schedule delayed watchdog restart helper: {exc}")
+
     def _on_chat_log(self, payload: Dict[str, Any]):
-        """将聊天日志打印到控制台，并写入事件日志/转录。"""
+        # Relay chat log to console and event log.
         role = payload.get("role", "unknown")
         content = payload.get("content", "")
         meta = payload.get("meta", {})
@@ -1990,7 +2077,7 @@ class Live2DApplication:
             pass
 
     def _register_services(self):
-        """注册服务到容器"""
+        # Register services in the container.
         self.container.register("event_bus", lambda c: self.event_bus)
         self.container.register("state_machine", lambda c: self.state_machine)
         self.container.register("chat_service", lambda c: self.chat_service)
@@ -2003,18 +2090,18 @@ class Live2DApplication:
         if self.screen_sensor:
             self.container.register("screen_sensor", lambda c: self.screen_sensor)
 
-    #  定时任务调度器 (处理自动日记 + 补录)
+    #  瀹氭椂浠诲姟璋冨害鍣?(澶勭悊鑷姩鏃ヨ + 琛ュ綍)
     async def _scheduler_loop(self):
-        """后台定时任务调度器 (无时间限制补录版)"""
+        # Background scheduler loop.
         try:
             from config import AUTO_DIARY_ENABLED, AUTO_DIARY_TIME
         except ImportError:
             AUTO_DIARY_ENABLED = False
             AUTO_DIARY_TIME = "23:30"
 
-        self.logger.info("⏰ 定时任务调度器已启动")
+        self.logger.info("鈴?瀹氭椂浠诲姟璋冨害鍣ㄥ凡鍚姩")
 
-        # 内存标记（防止单次运行中每30秒查一次数据库，浪费性能）
+        # 鍐呭瓨鏍囪锛堥槻姝㈠崟娆¤繍琛屼腑姣?0绉掓煡涓€娆℃暟鎹簱锛屾氮璐规€ц兘锛?
         _last_makeup_check_date = None
 
         while True:
@@ -2023,7 +2110,7 @@ class Live2DApplication:
                 current_time_str = now.strftime("%H:%M")
                 current_date_str = now.strftime("%Y-%m-%d")
 
-                # ================= 场景 A: 准点触发 (23:30) =================
+                # ================= 鍦烘櫙 A: 鍑嗙偣瑙﹀彂 (23:30) =================
                 if AUTO_DIARY_ENABLED and current_time_str == AUTO_DIARY_TIME:
                     if self.memory_store:
                         today_stats = (
@@ -2033,7 +2120,7 @@ class Live2DApplication:
                         if today_stats.get("diary_done") is True:
                             self.last_summary_date = current_date_str
                     if self.last_summary_date != current_date_str:
-                        self.logger.info(f"✨ 触发每日总结 (准点)...")
+                        self.logger.info("Triggering daily summary")
                         if self.screen_sensor and self.chat_service:
                             report = self.screen_sensor.get_formatted_report()
                             if len(report) > 10:
@@ -2042,15 +2129,15 @@ class Live2DApplication:
                                 )
                                 if diary_text:
                                     self.last_summary_date = current_date_str
-                                    self.logger.info("✅ 今日日记已归档")
+                                    self.logger.info("Daily diary archived")
                                 else:
                                     self.logger.warning(
                                         f"⚠️ 今日日记生成失败，未写入归档标记: {current_date_str}"
                                     )
 
-                # ================= 场景 B: 补录昨天 (全天候检查) =================
-                # 🟢 [修改] 去掉了 and now.hour < 12
-                # 只要今天还没检查过补录(内存标记)，就去检查一次
+                # ================= 鍦烘櫙 B: 琛ュ綍鏄ㄥぉ (鍏ㄥぉ鍊欐鏌? =================
+                # 馃煝 [淇敼] 鍘绘帀浜?and now.hour < 12
+                # 鍙浠婂ぉ杩樻病妫€鏌ヨ繃琛ュ綍(鍐呭瓨鏍囪)锛屽氨鍘绘鏌ヤ竴娆?
                 if AUTO_DIARY_ENABLED and _last_makeup_check_date != current_date_str:
                     _last_makeup_check_date = (
                         current_date_str  # 标记：今天已经检查过了，别再查了
@@ -2059,23 +2146,23 @@ class Live2DApplication:
 
                 await asyncio.sleep(30)
             except Exception as e:
-                self.logger.error(f"调度器出错: {e}")
+                self.logger.error(f"璋冨害鍣ㄥ嚭閿? {e}")
                 import traceback
 
                 traceback.print_exc()
                 await asyncio.sleep(60)
 
-    # 退出清理 (处理关机保存)
+    # 閫€鍑烘竻鐞?(澶勭悊鍏虫満淇濆瓨)
     def cleanup(self):
-        """程序退出前的清理工作"""
-        print("🛑 正在关闭应用...")
+        # Cleanup before application exit.
+        print("馃洃 姝ｅ湪鍏抽棴搴旂敤...")
 
         # 🟢 停止语音监听，释放麦克风
         if self.voice_sensor:
             try:
                 self.voice_sensor.stop()
             except Exception as e:
-                print(f"关闭语音传感器出错: {e}")
+                print(f"鍏抽棴璇煶浼犳劅鍣ㄥ嚭閿? {e}")
 
         if self.plugin_manager and self.loop and self.loop.is_running():
             try:
@@ -2096,28 +2183,22 @@ class Live2DApplication:
                 self.gui_http_server.stop()
             except Exception as e:
                 print(f"GUI HTTP shutdown error: {e}")
-        if getattr(self, "activity_sidecar", None):
-            try:
-                self.activity_sidecar.stop()
-            except Exception as e:
-                print(f"Rust activity agent shutdown error: {e}")
-
-        # 尝试最后一次保存（如果今天还没写日记）
+        # 灏濊瘯鏈€鍚庝竴娆′繚瀛橈紙濡傛灉浠婂ぉ杩樻病鍐欐棩璁帮級
         try:
             if self.chat_gateway_server:
                 try:
                     self.chat_gateway_server.stop()
                 except Exception as e:
-                    print(f"关闭 NapCat webhook 出错: {e}")
+                    print(f"鍏抽棴 NapCat webhook 鍑洪敊: {e}")
             current_date = datetime.now().strftime("%Y-%m-%d")
-            # 如果配置开启，且今天还没记录，且传感器有数据
+            # 濡傛灉閰嶇疆寮€鍚紝涓斾粖澶╄繕娌¤褰曪紝涓斾紶鎰熷櫒鏈夋暟鎹?
             if self.last_summary_date != current_date and self.screen_sensor:
-                print("📝 检测到退出时今日尚未写日记，正在尝试保存数据...")
+                print("馃摑 妫€娴嬪埌閫€鍑烘椂浠婃棩灏氭湭鍐欐棩璁帮紝姝ｅ湪灏濊瘯淇濆瓨鏁版嵁...")
                 report = self.screen_sensor.get_formatted_report()
                 if len(report) > 20:
-                    self.logger.info(f"【退出存档】今日未归档数据:\n{report}")
+                    self.logger.info(f"銆愰€€鍑哄瓨妗ｃ€戜粖鏃ユ湭褰掓。鏁版嵁:\n{report}")
         except Exception as e:
-            print(f"退出清理出错: {e}")
+            print(f"閫€鍑烘竻鐞嗗嚭閿? {e}")
 
     def _has_daily_log_for_date(self, date_str: str) -> bool:
         if not self.memory_store:
@@ -2141,23 +2222,23 @@ class Live2DApplication:
             target_date = today_date - timedelta(days=delta_days)
             target_str = target_date.strftime("%Y-%m-%d")
             if self._has_daily_log_for_date(target_str):
-                self.logger.info(f"👀 {target_str} 日记已存在，跳过补录。")
+                self.logger.info(f"{target_str} diary already exists; skip backfill")
                 continue
 
             stats = self.memory_store.get_daily_screen_stats(target_str) or {}
             if stats.get("diary_done") is True:
-                self.logger.info(f"👀 {target_str} 已标记 diary_done，跳过补录。")
+                self.logger.info(f"{target_str} marked diary_done; skip backfill")
                 continue
 
             summary_text = str(stats.get("summary_text") or "").strip()
             if len(summary_text) <= 10:
-                self.logger.debug(f"👀 {target_str} 无有效活动数据，无需补录。")
+                self.logger.debug(f"{target_str} has no valid activity stats; skip backfill")
                 continue
 
             if delta_days == 1:
-                self.logger.info(f"✨ 发现昨日数据未归档，正在补录日记...")
+                self.logger.info("Backfilling yesterday diary")
             else:
-                self.logger.info(f"✨ 发现 {target_str} 数据未归档，正在补录日记...")
+                self.logger.info(f"Backfilling diary for {target_str}")
 
             diary_text = await self.chat_service.summarize_day(
                 summary_text,
@@ -2167,75 +2248,80 @@ class Live2DApplication:
             )
             if diary_text:
                 if delta_days == 1:
-                    self.logger.info(f"✅ 昨日({target_str})日记补录完成。")
+                    self.logger.info(f"Yesterday diary backfill completed: {target_str}")
                 else:
-                    self.logger.info(f"✅ {target_str} 日记补录完成。")
+                    self.logger.info(f"Diary backfill completed: {target_str}")
             else:
                 if delta_days == 1:
-                    self.logger.warning(f"⚠️ 昨日({target_str})日记补录失败，保留未归档状态。")
+                    self.logger.warning(f"Yesterday diary backfill failed: {target_str}")
                 else:
-                    self.logger.warning(f"⚠️ {target_str} 日记补录失败，保留未归档状态。")
+                    self.logger.warning(f"Diary backfill failed: {target_str}")
 
-    # 动态切换语音监听的方法
+    # 鍔ㄦ€佸垏鎹㈣闊崇洃鍚殑鏂规硶
     def set_voice_sensor_enabled(self, enabled: bool):
-        """动态开启或关闭语音监听"""
-        if not self.voice_sensor:
-            self.logger.error("⚠️ VoiceSensor 未就绪，无法切换")
-            return
-
+        # Enable or disable voice sensor dynamically.
         if enabled:
+            if not self.voice_sensor:
+                self._ensure_voice_sensor_loaded()
+            if not self.voice_sensor:
+                self.logger.error("⚠️ VoiceSensor 未就绪，无法切换")
+                return
             if not self.voice_sensor.running and self.loop:
-                self.logger.info("🎤 手动开启语音监听...")
+                self.logger.info("Voice sensor enabled")
                 self.voice_sensor.start(self.loop)
         else:
-            if self.voice_sensor.running:
-                self.logger.info("🔇 手动关闭语音监听...")
+            if self.voice_sensor and self.voice_sensor.running:
+                self.logger.info("Voice sensor disabled")
                 self.voice_sensor.stop()
 
     def start_async_loop(self):
-        """启动异步事件循环"""
-        self.logger.info("启动异步事件循环...")
+        # Start async event loop.
+        self.logger.info("Starting async event loop")
 
         def async_worker():
             # 1. 创建事件循环
             self.loop = asyncio.new_event_loop()
             asyncio.set_event_loop(self.loop)
 
-            # 2. 启动情绪控制器
+            # 2. 鍚姩鎯呯华鎺у埗鍣?
             if self.emotion_controller:
                 try:
                     self.emotion_controller.start(self.loop)
-                    self.logger.info("📉 情绪衰减循环已启动")
+                    self.logger.info("Emotion controller loop started")
                 except Exception as e:
-                    self.logger.error(f"❌ 情绪控制器启动失败: {e}")
+                    self.logger.error(f"鉂?鎯呯华鎺у埗鍣ㄥ惎鍔ㄥけ璐? {e}")
 
-            # 3. 启动所有插件
+            # 3. 鍚姩鎵€鏈夋彃浠?
             self.loop.create_task(
                 self.plugin_manager.start_all_plugins(
                     {"chat_service": self.chat_service}
                 )
             )
 
-            # 4. 启动定时调度器
+            # 4. 鍚姩瀹氭椂璋冨害鍣?
             self.loop.create_task(self._scheduler_loop())
 
             # 6. 启动音乐感知
             if self.music_sensor:
                 try:
-                    self.logger.info("🎵 启动 MusicSensor 监控线程...")
+                    self.logger.info("Starting MusicSensor thread")
                     self.music_sensor.start(self.loop)
                 except Exception as e:
-                    self.logger.error(f"❌ MusicSensor 启动失败: {e}")
+                    self.logger.error(f"鉂?MusicSensor 鍚姩澶辫触: {e}")
 
-            # 🟢 7. 启动语音监听 (如果配置为开启)
+            # 馃煝 7. 鍚姩璇煶鐩戝惉 (濡傛灉閰嶇疆涓哄紑鍚?
             import config
 
-            if getattr(config, "VOICE_SENSOR_ENABLED", False) and self.voice_sensor:
+            if getattr(config, "VOICE_SENSOR_ENABLED", False):
                 try:
-                    self.logger.info("🎤 启动 VoiceSensor 监听线程...")
+                    if not self.voice_sensor:
+                        self._ensure_voice_sensor_loaded()
+                    if not self.voice_sensor:
+                        raise RuntimeError("VoiceSensor is not ready")
+                    self.logger.info("Starting VoiceSensor thread")
                     self.voice_sensor.start(self.loop)
                 except Exception as e:
-                    self.logger.error(f"❌ VoiceSensor 启动失败: {e}")
+                    self.logger.error(f"鉂?VoiceSensor 鍚姩澶辫触: {e}")
 
             # 8. 运行循环
             try:
@@ -2250,54 +2336,38 @@ class Live2DApplication:
             if self.gui_http_server:
                 try:
                     self.gui_http_server.start()
+                    self._publish_gui_activity_endpoint()
                 except Exception as exc:
                     if self.logger:
                         self.logger.error(f"GUI HTTP start failed: {exc}")
-            try:
-                self.activity_sidecar.start()
-            except Exception as exc:
-                if self.logger:
-                    self.logger.warning(f"Rust activity agent start failed: {exc}")
-            if self.activity_sidecar and self.activity_sidecar.is_running():
-                self.logger.info("🦀 当前采集模式: Rust 优先")
-            else:
-                self.logger.info("🐍 当前采集模式: Python fallback")
+            if self.logger:
+                self.logger.info("Activity source: Live2D/Tauri activity ingest")
 
-            # 5. 启动屏幕感知（Rust sidecar 运行时，关闭 Python 本地采集线程）
+            # 5. 启动屏幕感知；久坐采集只消费 Live2D Rust 上报
             if self.screen_sensor:
                 try:
-                    if self.activity_sidecar and self.activity_sidecar.is_running():
-                        self.screen_sensor.use_rust_events_only = True
-                        self.logger.info(
-                            "🦀 Rust 优先采集已启用，关闭 Python 本地窗口轮询"
-                        )
-                        self.logger.info(
-                            "🦀 启动 ScreenSensor 监控线程（Rust 事件消费模式）"
-                        )
-                        self.screen_sensor.start(self.loop)
-                    else:
-                        self.screen_sensor.use_rust_events_only = False
-                        self.logger.info(
-                            "🚀 启动 ScreenSensor 监控线程（Python 本地采集模式）"
-                        )
-                        self.screen_sensor.start(self.loop)
+                    self.screen_sensor.use_rust_events_only = True
+                    self.logger.info(
+                        "Live2D/Tauri activity ingest enabled; Python window polling disabled"
+                    )
+                    self.screen_sensor.start(self.loop)
                 except Exception as e:
-                    self.logger.error(f"❌ ScreenSensor 启动失败: {e}")
+                    self.logger.error(f"鉂?ScreenSensor 鍚姩澶辫触: {e}")
 
             self.loop.run_forever()
 
         t = threading.Thread(target=async_worker, daemon=True)
         t.start()
-        self.logger.info("异步事件循环已启动")
+        self.logger.info("Async event loop started")
 
     def on_gui_send(self, text: str, ctx: Optional[Dict[str, Any]] = None):
-        """GUI发送消息回调"""
+        # GUI send callback.
         if self.loop is None:
-            print("⚠️ [Application] loop未初始化，忽略输入")
+            print("[Application] loop is not initialized; ignoring input")
             return
 
         async def _process():
-            # 默认来自文本输入，可被外部窗口覆盖为 codex_input 等来源
+            # 榛樿鏉ヨ嚜鏂囨湰杈撳叆锛屽彲琚閮ㄧ獥鍙ｈ鐩栦负 codex_input 绛夋潵婧?
             merged_ctx: Dict[str, Any] = {"source": "text_input"}
             if isinstance(ctx, dict):
                 merged_ctx.update(ctx)
@@ -2325,7 +2395,7 @@ class Live2DApplication:
             try:
                 f.result()
             except Exception as e:
-                self.logger.error(f"协程异常: {repr(e)}")
+                self.logger.error(f"鍗忕▼寮傚父: {repr(e)}")
 
         fut.add_done_callback(_done)
 
@@ -2337,10 +2407,7 @@ class Live2DApplication:
         channel: str = "qq",
         metadata: Optional[Dict[str, Any]] = None,
     ):
-        """处理外部渠道消息。
-
-        外部消息直接进入 chat_service，对话链路保持完整，但默认不驱动 Live2D 与桌面语音。
-        """
+        # Handle external channel messages.
         self.on_gui_send(
             text,
             {
@@ -2369,8 +2436,14 @@ class Live2DApplication:
             },
         )
 
+    async def _handle_external_chat_notice(self, event):
+        service = getattr(self, "chat_service", None)
+        if service is None or not hasattr(service, "handle_external_chat_notice"):
+            return
+        await service.handle_external_chat_notice(event)
+
     def on_gui_change_costume(self, path: str, config: dict):
-        """GUI换装回调"""
+        # GUI costume change callback.
         if self.loop is None:
             return
 
@@ -2381,7 +2454,7 @@ class Live2DApplication:
                     await asyncio.to_thread(
                         self.brain.add_memory,
                         "system",
-                        f"用户为你更换了服装，文件路径为: {path}",
+                        f"鐢ㄦ埛涓轰綘鏇存崲浜嗘湇瑁咃紝鏂囦欢璺緞涓? {path}",
                     )
             except Exception as e:
                 self.logger.error(f"换装失败: {e}")
@@ -2617,7 +2690,7 @@ class Live2DApplication:
             try:
                 current_costume = character_manager.get_current_costume_name(char_id)
                 self.logger.info(
-                    f"[RoleSync] 切换角色: {char_id} -> {char.get('name', char_id)} | costume={current_costume}"
+                    f"[RoleSync] 鍒囨崲瑙掕壊: {char_id} -> {char.get('name', char_id)} | costume={current_costume}"
                 )
                 if getattr(self, "qt_ui", None):
                     if current_costume and hasattr(
@@ -2636,11 +2709,11 @@ class Live2DApplication:
             return True
         except Exception as e:
             if self.logger:
-                self.logger.warning(f"切换角色运行时失败: {e}")
+                self.logger.warning(f"鍒囨崲瑙掕壊杩愯鏃跺け璐? {e}")
             return False
 
     def on_gui_preview_motion(self, motion_name: str, motion_type: int = 0):
-        """GUI预览动作回调"""
+        # GUI motion preview callback.
         if self.loop is None or not motion_name:
             return
 
@@ -2653,7 +2726,7 @@ class Live2DApplication:
         asyncio.run_coroutine_threadsafe(_do(), self.loop)
 
     def on_gui_preview_expression(self, exp_value):
-        """GUI预览表情回调"""
+        # GUI expression preview callback.
         if self.loop is None:
             return
 
@@ -2666,13 +2739,13 @@ class Live2DApplication:
         asyncio.run_coroutine_threadsafe(_do(), self.loop)
 
     def set_tts_enabled(self, enabled: bool):
-        """设置TTS开关"""
+        # Configure TTS switch.
         enabled = bool(enabled)
         self.tts_enabled = enabled
         if getattr(self, "tts", None):
             self.tts.enabled = enabled
 
-        # 保持 config 运行时状态与 UI 显示一致
+        # 淇濇寔 config 杩愯鏃剁姸鎬佷笌 UI 鏄剧ず涓€鑷?
         try:
             import config as runtime_config
 
@@ -2688,22 +2761,22 @@ class Live2DApplication:
         self._save_runtime_settings(settings)
 
     def set_think_motion_enabled(self, enabled: bool):
-        """设置思考动作开关"""
+        # Configure thinking motion switch.
         self.think_motion_enabled = bool(enabled)
         self.logger.info(f"THINK_MOTION_ENABLED = {self.think_motion_enabled}")
 
     def run(self):
-        """运行应用"""
+        # Run application.
         try:
-            # 初始化
+            # 鍒濆鍖?
             self.initialize()
 
-            self.logger.info("=== 五十铃怜 Live2D Agent 启动 ===")
+            self.logger.info("=== 浜斿崄閾冩€?Live2D Agent 鍚姩 ===")
 
             # 启动异步循环
             self.start_async_loop()
 
-            # 根据配置选择GUI
+            # 鏍规嵁閰嶇疆閫夋嫨GUI
             backend = (GUI_BACKEND or "auto").strip().lower()
 
             if backend == "tk":
@@ -2712,7 +2785,7 @@ class Live2DApplication:
                 try:
                     self._run_qt_gui()
                 except Exception as e:
-                    self.logger.warning(f"Qt启动失败，回退到Tk: {e}")
+                    self.logger.warning(f"Qt鍚姩澶辫触锛屽洖閫€鍒癟k: {e}")
                     self._run_tk_gui()
             else:  # auto
                 try:
@@ -2724,11 +2797,11 @@ class Live2DApplication:
         except KeyboardInterrupt:
             pass
         finally:
-            # 🟢 退出时触发清理
+            # 馃煝 閫€鍑烘椂瑙﹀彂娓呯悊
             self.cleanup()
 
     def _run_tk_gui(self):
-        """运行Tk GUI"""
+        # Run Tk GUI.
         from modules.gui.gui import ChatWindow
 
         window = ChatWindow(
@@ -2739,7 +2812,7 @@ class Live2DApplication:
         window.run()
 
     def _run_qt_gui(self):
-        """运行Qt GUI"""
+        # Run Qt GUI.
         global qt_ui
         import config
         from modules.qt_gui import QtChatTrayApp, QtGuiConfig
@@ -2747,7 +2820,7 @@ class Live2DApplication:
         self.qt_ui = QtChatTrayApp(
             on_send_callback=self.on_gui_send,
             on_tts_toggle_callback=self.set_tts_enabled,
-            on_voice_toggle_callback=self.set_voice_sensor_enabled,  # 🟢 传递语音控制回调
+            on_voice_toggle_callback=self.set_voice_sensor_enabled,  # 馃煝 浼犻€掕闊虫帶鍒跺洖璋?
             on_costume_callback=self.on_gui_change_costume,
             on_preview_motion_callback=self.on_gui_preview_motion,
             on_preview_expression_callback=self.on_gui_preview_expression,
@@ -2779,7 +2852,7 @@ class Live2DApplication:
             )
         self.qt_ui.set_status("Idle")
         try:
-            self.logger.info("[RoleSync] 启动时同步当前角色形象")
+            self.logger.info("[RoleSync] syncing active character visual on startup")
             if hasattr(self.qt_ui, "sync_active_character_visual"):
                 self.qt_ui.sync_active_character_visual()
             else:
@@ -2796,9 +2869,9 @@ class Live2DApplication:
     def _init_display_mqtt(self):
         if not MQTT_DISPLAY_ENABLED or mqtt is None:
             self.display_mqtt_last_error = (
-                "未启用 MQTT_DISPLAY"
+                "鏈惎鐢?MQTT_DISPLAY"
                 if not MQTT_DISPLAY_ENABLED
-                else "缺少 paho-mqtt 依赖"
+                else "缂哄皯 paho-mqtt 渚濊禆"
             )
             return
         try:
@@ -2893,7 +2966,7 @@ class Live2DApplication:
 
 
 class EventPresenter:
-    """事件展示器"""
+    # Event presenter.
 
     def __init__(
         self,
@@ -2906,18 +2979,18 @@ class EventPresenter:
         self.speak_direct_result = bool(speak_direct_result)
         self.verbose = bool(verbose)
         self.event_bus = event_bus
-        # 容错清理：防止模型输出非标准情绪标签被 TTS 读出来
+        # 瀹归敊娓呯悊锛氶槻姝㈡ā鍨嬭緭鍑洪潪鏍囧噯鎯呯华鏍囩琚?TTS 璇诲嚭鏉?
         self._emo_tag_any_re = re.compile(
-            r"<\s*/?\s*(?:emo(?:tion)?|happy|sad|angry|flustered|confused|neutral|think|idle)\b[^>]*>",
+            r"<\s*/?\s*(?:emo(?:tion)?|happy|sad|angry|shy|flustered|confused|neutral|think|idle)\b[^>]*>",
             flags=re.IGNORECASE,
         )
 
     def set_tts_enabled(self, enabled: bool):
-        """设置TTS开关"""
+        # Configure TTS switch.
         self.tts_enabled = bool(enabled)
         if self.verbose:
-            # 这里没有 logger，使用 event_bus 发送日志
-            print(f"🎚️ [Presenter] TTS: {'开' if self.tts_enabled else '关'}")
+            # 杩欓噷娌℃湁 logger锛屼娇鐢?event_bus 鍙戦€佹棩蹇?
+            print(f"[Presenter] TTS: {'on' if self.tts_enabled else 'off'}")
 
         # 🟢 [修改] 增加 interrupt 参数
 
@@ -2930,7 +3003,7 @@ class EventPresenter:
         interrupt: bool = True,
         show_bubble: bool = True,
     ):
-        """展示文本"""
+        # Present text.
         text = (text or "").strip()
         if not text:
             return
@@ -2945,11 +3018,11 @@ class EventPresenter:
             Events.ASSISTANT_UTTER,
             text=text,
             emotion=emotion,
-            interrupt=interrupt,  # <--- 使用传入的参数，而不是写死 True
+            interrupt=interrupt,  # <--- 浣跨敤浼犲叆鐨勫弬鏁帮紝鑰屼笉鏄啓姝?True
             speak=want_speak,
             show_bubble=bool(show_bubble),
         )
 
     async def present_direct(self, text: str, emotion: Optional[str] = None):
-        """直接展示（工具结果）"""
+        # Present direct tool text.
         await self.present(text, emotion=emotion, speak=self.speak_direct_result)

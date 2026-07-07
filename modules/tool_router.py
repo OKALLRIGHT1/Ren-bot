@@ -2,12 +2,18 @@ import re
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Set
 
+from services.capability_manager import ToolCapabilityManager
+
 
 @dataclass
 class ToolRouteResult:
     need_tools: bool
     tool_triggers: List[str]
     reason: str
+    capability_id: str = ""
+    capability_args: Optional[Dict[str, Any]] = None
+    capability_score: float = 0.0
+    capability_match_reason: str = ""
 
 
 class ToolRouter:
@@ -34,6 +40,46 @@ class ToolRouter:
         "看看链接",
         "总结网页",
         "解析网页",
+    ]
+    _CODE_AGENT_ACTION_HINTS = [
+        "分析",
+        "检查",
+        "查看",
+        "看一下",
+        "看看",
+        "读一下",
+        "审查",
+        "排查",
+        "修复",
+        "修改",
+        "重构",
+        "改一下",
+        "处理",
+        "接手",
+        "帮我",
+        "画",
+        "画图",
+        "绘图",
+        "生图",
+        "生成图片",
+    ]
+    _USER_FILE_PLACES = [
+        "下载目录",
+        "文档目录",
+        "桌面",
+        "documents",
+        "downloads",
+        "desktop",
+    ]
+    _USER_FILE_ACTIONS = [
+        "看看",
+        "查看",
+        "读取",
+        "列出",
+        "整理",
+        "移动",
+        "写入",
+        "保存",
     ]
     _MOEGIRL_HINTS = [
         "萌百",
@@ -88,14 +134,21 @@ class ToolRouter:
         delegate_map: Optional[Dict[str, object]] = None,
         *,
         enable_intent_keywords: bool = True,
+        capability_manager: Optional[ToolCapabilityManager] = None,
+        enable_capability_routes: bool = True,
     ):
         self.react_map = react_map
         self.delegate_map = delegate_map or {}
         self.direct_map = direct_map
         self.enable_intent_keywords = enable_intent_keywords
+        self.enable_capability_routes = enable_capability_routes
+        self.capability_manager = capability_manager or ToolCapabilityManager.from_plugin_maps(
+            react_map=self.react_map,
+            direct_map=self.direct_map,
+            delegate_map=self.delegate_map,
+        )
 
         self.intent_keywords = self._build_intent_keywords_from_plugins()
-        print(f"[Router] intent keywords loaded: {list(self.intent_keywords.keys())}")
 
         self.followup_keywords = [
             "继续",
@@ -108,6 +161,14 @@ class ToolRouter:
             "再来一个",
             "照刚才的",
         ]
+
+    def _plugin_has_capabilities(self, trigger: str) -> bool:
+        plugin = (
+            self.react_map.get(trigger)
+            or self.delegate_map.get(trigger)
+            or self.direct_map.get(trigger)
+        )
+        return callable(getattr(plugin, "get_capabilities", None))
 
     @staticmethod
     def _read_setting_value(settings: Dict[str, Any], key: str, default: Any) -> Any:
@@ -221,6 +282,33 @@ class ToolRouter:
             return False
         return any(hint in text for hint in self._WORKSPACE_READ_HINTS)
 
+    def _should_route_to_code_agent(self, text: str) -> bool:
+        if "code_agent" not in self.direct_map:
+            return False
+        has_provider = bool(
+            re.search(r"codex|claude\s*code|(^|[^\w])cc([^\w]|$)", text, re.IGNORECASE)
+        )
+        return has_provider and any(hint in text for hint in self._CODE_AGENT_ACTION_HINTS)
+
+    def _looks_like_image_generation(self, text: str) -> bool:
+        return bool(
+            re.search(
+                r"(画图|画画|画一张|绘图|生图|生成图|生成图片|图片生成|发图)",
+                str(text or ""),
+                flags=re.IGNORECASE,
+            )
+        )
+
+    def _should_route_to_user_files(self, text: str) -> bool:
+        if "user_files" not in self.direct_map:
+            return False
+        has_place = any(hint in text for hint in self._USER_FILE_PLACES)
+        has_action = any(hint in text for hint in self._USER_FILE_ACTIONS)
+        has_file_name = bool(
+            re.search(r"\.(txt|md|json|py|log|csv|zip|png|jpe?g|pdf|docx?)\b", text)
+        )
+        return has_place and (has_action or has_file_name)
+
     def _should_route_to_web_reader(self, text: str) -> bool:
         if "web_reader" not in self.delegate_map and "web_reader" not in self.react_map:
             return False
@@ -306,28 +394,60 @@ class ToolRouter:
         combined_map.update(self.react_map)
         combined_map.update(self.delegate_map)
 
-        if self._should_route_to_mcp_domain(text):
+        if self.enable_capability_routes and self.capability_manager is not None:
+            capability_result = self.capability_manager.match(user_text, {})
+            if capability_result.selected is not None:
+                selected = capability_result.selected
+                if (
+                    selected.plugin in self.react_map
+                    or selected.plugin in self.delegate_map
+                    or selected.plugin in self.direct_map
+                ):
+                    return ToolRouteResult(
+                        True,
+                        [selected.plugin],
+                        f"capability:{selected.capability_id}",
+                        capability_id=selected.capability_id,
+                        capability_args=dict(selected.args or {}),
+                        capability_score=float(selected.score or 0.0),
+                        capability_match_reason=str(selected.reason or ""),
+                    )
+            if capability_result.reason == "unavailable" and capability_result.candidates:
+                candidate = capability_result.candidates[0]
+                return ToolRouteResult(
+                    False,
+                    [],
+                    f"capability_unavailable:{candidate.capability_id}",
+                    capability_id=candidate.capability_id,
+                    capability_args=dict(candidate.args or {}),
+                    capability_score=float(candidate.score or 0.0),
+                    capability_match_reason=str(
+                        candidate.unavailable_reason or candidate.reason or ""
+                    ),
+                )
+
+        if not self._plugin_has_capabilities("mcp_tools") and self._should_route_to_mcp_domain(text):
             return ToolRouteResult(True, ["mcp_tools"], "mcp_domain_preferred")
 
-        if self._should_route_to_moegirl(text):
+        if not self._plugin_has_capabilities("moegirl_wiki") and self._should_route_to_moegirl(text):
             return ToolRouteResult(True, ["moegirl_wiki"], "moegirl_preferred")
 
-        if self._should_route_to_web_reader(text):
+        if not self._plugin_has_capabilities("web_reader") and self._should_route_to_web_reader(text):
             return ToolRouteResult(True, ["web_reader"], "web_reader_preferred")
 
-        if self._should_route_to_workspace_read(text):
+        if not self._plugin_has_capabilities("user_files") and self._should_route_to_user_files(text):
+            return ToolRouteResult(True, ["user_files"], "user_files_preferred")
+
+        if not self._plugin_has_capabilities("workspace_ops") and self._should_route_to_workspace_read(text):
             return ToolRouteResult(True, ["workspace_ops"], "workspace_read_preferred")
+
+        if not self._plugin_has_capabilities("code_agent") and self._should_route_to_code_agent(text):
+            return ToolRouteResult(True, ["code_agent"], "code_agent_preferred")
 
         if last_tool_triggers and any(k in text for k in self.followup_keywords):
             return ToolRouteResult(
                 True, list(dict.fromkeys(last_tool_triggers)), "followup_last_tool"
             )
-
-        for trigger in self.direct_map:
-            if trigger.lower() in text:
-                matched.add(trigger)
-        if matched:
-            return ToolRouteResult(True, sorted(matched), "direct_plugin_matched")
 
         for trigger in combined_map:
             if trigger.lower() in text:

@@ -1,0 +1,42 @@
+{
+  "name": "网页解析",
+  "trigger": "web_reader",
+  "llm_command": "web_reader",
+  "aliases": [
+    "网页解析",
+    "网页阅读",
+    "读网页",
+    "解析链接",
+    "打开链接",
+    "网页内容"
+  ],
+  "type": "delegate",
+  "description": "读取指定网页链接，提取标题、域名与正文摘要。参数直接传 URL。",
+  "example_arg": "https://example.com/article",
+  "timeout_sec": 15,
+  "settings": {
+    "request_timeout_sec": {
+      "type": "number",
+      "label": "请求超时(秒)",
+      "description": "抓取网页时的超时时间",
+      "default": 12,
+      "min": 3,
+      "max": 60
+    },
+    "max_chars": {
+      "type": "number",
+      "label": "正文最大字符数",
+      "description": "提取正文后的最大保留长度",
+      "default": 2400,
+      "min": 400,
+      "max": 8000
+    }
+  },
+  "access_control": {
+    "allow_local": true,
+    "allow_remote_qq": true,
+    "allow_qq_owner": true,
+    "allow_qq_others": false,
+    "allow_group_without_at": false
+  }
+}

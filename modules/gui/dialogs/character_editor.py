@@ -5,7 +5,7 @@ import requests
 
 from PySide6 import QtWidgets, QtCore, QtGui
 from modules.character_manager import character_manager, DEFAULT_EMOTION_KEYS
-from modules.live2d import MODEL_DEFAULT_MOTION
+from modules.live2d import MODEL_DEFAULT_MOTION, STOP_MOTION, update_current_costume_config
 
 try:
     from modules.gui.styles import get_ui_palette
@@ -299,6 +299,10 @@ class CharacterEditorWidget(QtWidgets.QWidget):
         self.edit_name = QtWidgets.QLineEdit()
         self.edit_name.textChanged.connect(self._save_current_char)
         form.addRow("角色名称:", self.edit_name)
+        self.edit_user_address = QtWidgets.QLineEdit()
+        self.edit_user_address.setPlaceholderText("例如：Master、主人、公子、制作人")
+        self.edit_user_address.textChanged.connect(self._save_current_char)
+        form.addRow("对用户称呼:", self.edit_user_address)
         self.edit_aliases = QtWidgets.QPlainTextEdit()
         self.edit_aliases.setMaximumHeight(72)
         self.edit_aliases.setPlaceholderText("每行一个别名，例如：祥子、小祥")
@@ -561,6 +565,9 @@ class CharacterEditorWidget(QtWidgets.QWidget):
             ["情绪", "动作(mtn)", "表情(exp)", "来源"]
         )
         self.emo_table.horizontalHeader().setStretchLastSection(True)
+        self.emo_table.horizontalHeader().setSectionResizeMode(
+            0, QtWidgets.QHeaderView.ResizeMode.Stretch
+        )
         self.emo_table.verticalHeader().setVisible(False)
         self.emo_table.setEditTriggers(
             QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers
@@ -569,9 +576,14 @@ class CharacterEditorWidget(QtWidgets.QWidget):
             QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows
         )
         self.emo_table.itemSelectionChanged.connect(self._on_emotion_selection_changed)
-        # 允许表格缩小，避免其 minimumSizeHint 顶住外层对话框高度
-        self.emo_table.setMinimumHeight(0)
-        right_layout.addWidget(self.emo_table, 1)
+        # 表格要能随高度伸展（Expanding），并保底露出表头+若干行；
+        # 不能用 Ignored，否则会被压成 0 只剩表头。
+        self.emo_table.setMinimumHeight(140)
+        self.emo_table.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Expanding,
+            QtWidgets.QSizePolicy.Policy.Expanding,
+        )
+        right_layout.addWidget(self.emo_table, 3)
 
         self.edit_mapping_group = QtWidgets.QGroupBox("编辑选中情绪映射")
         edit_layout = QtWidgets.QVBoxLayout(self.edit_mapping_group)
@@ -633,17 +645,21 @@ class CharacterEditorWidget(QtWidgets.QWidget):
         edit_layout.addLayout(form_grid)
 
         btn_save_row = QtWidgets.QHBoxLayout()
+        btn_save_row.setSpacing(6)
         self.btn_save_character_map = QtWidgets.QPushButton("保存到角色默认")
         self.btn_save_character_map.setObjectName("charPrimary")
+        self.btn_save_character_map.setMinimumWidth(96)
         self.btn_save_character_map.clicked.connect(
             self._apply_dropdown_to_character_default
         )
         self.btn_save_map = QtWidgets.QPushButton("✅ 保存映射")
         self.btn_save_map.setObjectName("charPrimary")
+        self.btn_save_map.setMinimumWidth(88)
         self.btn_save_map.clicked.connect(self._apply_dropdown_to_selected_emotion)
 
         self.btn_clear_map = QtWidgets.QPushButton("🧹 清除映射")
         self.btn_clear_map.setObjectName("charDanger")
+        self.btn_clear_map.setMinimumWidth(88)
         self.btn_clear_map.clicked.connect(self._clear_selected_emotion_override)
 
         btn_save_row.addWidget(self.btn_save_character_map, 1)
@@ -651,14 +667,46 @@ class CharacterEditorWidget(QtWidgets.QWidget):
         btn_save_row.addWidget(self.btn_clear_map, 1)
         edit_layout.addLayout(btn_save_row)
 
-        right_layout.addWidget(self.edit_mapping_group)
+        right_layout.addWidget(self.edit_mapping_group, 1)
 
-        # Assemble layout
-        main_costume_layout = QtWidgets.QHBoxLayout(self.tab_costume)
-        main_costume_layout.setContentsMargins(6, 6, 6, 6)
-        main_costume_layout.setSpacing(10)
-        main_costume_layout.addWidget(left_group, 2)
-        main_costume_layout.addWidget(right_group, 3)
+        # Assemble layout：和外层 tab_persona/tab_tts 一致，包滚动区。
+        # 用 Ignored 高度策略作用在 scroll 滚动区上，避免其 minimumSizeHint 顶住 QTabWidget 高度；
+        # 内部的部件使用 Preferred 策略，保证其完整的 natural/minimumSizeHint 高度以防内容挤压重叠。
+        # 同时为左右两个 group box 设置合理的最小宽度，防止在窄窗口下按钮被横向裁剪，超出的部分由滚动条展示。
+        main_costume_layout = QtWidgets.QVBoxLayout(self.tab_costume)
+        main_costume_layout.setContentsMargins(0, 0, 0, 0)
+        main_costume_layout.setSpacing(0)
+
+        scroll = QtWidgets.QScrollArea(self.tab_costume)
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(
+            QtCore.Qt.ScrollBarPolicy.ScrollBarAsNeeded
+        )
+        scroll.setVerticalScrollBarPolicy(
+            QtCore.Qt.ScrollBarPolicy.ScrollBarAsNeeded
+        )
+        scroll.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
+        scroll.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Preferred,
+            QtWidgets.QSizePolicy.Policy.Ignored,
+        )
+
+        scroll_widget = QtWidgets.QWidget()
+        left_group.setMinimumWidth(220)
+        right_group.setMinimumWidth(380)
+        for w in (left_group, right_group):
+            w.setSizePolicy(
+                QtWidgets.QSizePolicy.Policy.Preferred,
+                QtWidgets.QSizePolicy.Policy.Preferred,
+            )
+        side_layout = QtWidgets.QHBoxLayout(scroll_widget)
+        side_layout.setContentsMargins(6, 6, 6, 6)
+        side_layout.setSpacing(10)
+        side_layout.addWidget(left_group, 2)
+        side_layout.addWidget(right_group, 3)
+
+        scroll.setWidget(scroll_widget)
+        main_costume_layout.addWidget(scroll)
 
     # --- 逻辑 ---
 
@@ -689,6 +737,7 @@ class CharacterEditorWidget(QtWidgets.QWidget):
             return
 
         self.edit_name.blockSignals(True)
+        self.edit_user_address.blockSignals(True)
         self.edit_aliases.blockSignals(True)
         self.edit_prompt.blockSignals(True)
         self.catchphrase_enabled.blockSignals(True)
@@ -699,6 +748,7 @@ class CharacterEditorWidget(QtWidgets.QWidget):
         self.qq_profile_avatar.blockSignals(True)
 
         self.edit_name.setText(data.get("name", ""))
+        self.edit_user_address.setText(str(data.get("user_address") or "Master"))
         aliases = data.get("aliases") or []
         if isinstance(aliases, str):
             aliases_text = aliases
@@ -744,6 +794,7 @@ class CharacterEditorWidget(QtWidgets.QWidget):
         self.tts_status.setPlainText("")
 
         self.edit_name.blockSignals(False)
+        self.edit_user_address.blockSignals(False)
         self.edit_aliases.blockSignals(False)
         self.edit_prompt.blockSignals(False)
         self.catchphrase_enabled.blockSignals(False)
@@ -788,6 +839,7 @@ class CharacterEditorWidget(QtWidgets.QWidget):
             return
         data = self.mgr.get_character(self.current_char_id)
         data["name"] = self.edit_name.text()
+        data["user_address"] = self.edit_user_address.text().strip() or "Master"
         data["aliases"] = [
             line.strip()
             for line in self.edit_aliases.toPlainText().splitlines()
@@ -1120,6 +1172,7 @@ class CharacterEditorWidget(QtWidgets.QWidget):
 
         self.combo_motion.clear()
         self.combo_motion.addItem("模型默认姿态 / 刚打开状态", MODEL_DEFAULT_MOTION)
+        self.combo_motion.addItem("停止动作 / 不播放动作", STOP_MOTION)
         if self._current_motion_options:
             for item in self._current_motion_options:
                 name = str(item.get("name") or "").strip()
@@ -1523,6 +1576,23 @@ class CharacterEditorWidget(QtWidgets.QWidget):
         self.main_app.on_costume_callback(path, cfg)
         return True
 
+    def _hot_reload_current_costume_mapping(self) -> bool:
+        if not self.current_char_id or not self.current_costume_name:
+            return False
+        char = self.mgr.get_character(self.current_char_id) or {}
+        costume = (char.get("costumes") or {}).get(self.current_costume_name) or {}
+        path = str(costume.get("path") or "").strip()
+        if not path:
+            return False
+        current_path = getattr(self.main_app, "_current_costume_path", "") if self.main_app else ""
+        if self._normalize_preview_model_path(current_path) != self._normalize_preview_model_path(path):
+            return False
+        cfg = self.mgr.get_costume_runtime_config(
+            self.current_char_id, self.current_costume_name
+        )
+        update_current_costume_config(cfg, model_path=path)
+        return True
+
     def _apply_dropdown_to_selected_emotion(self):
         if not self.current_char_id or not self.current_costume_name:
             return
@@ -1555,6 +1625,7 @@ class CharacterEditorWidget(QtWidgets.QWidget):
         self.mgr.set_costume_emotion_override(
             self.current_char_id, self.current_costume_name, emo, payload
         )
+        self._hot_reload_current_costume_mapping()
         current_row = self.emo_table.currentRow()
         self._refresh_costume_detail_ui()
         if current_row >= 0:
@@ -1589,6 +1660,7 @@ class CharacterEditorWidget(QtWidgets.QWidget):
                 payload["exp"] = int(exp_value)
 
         self.mgr.set_character_emotion_default(self.current_char_id, emo, payload)
+        self._hot_reload_current_costume_mapping()
         current_row = self.emo_table.currentRow()
         self._refresh_costume_detail_ui()
         if current_row >= 0:
@@ -1613,6 +1685,7 @@ class CharacterEditorWidget(QtWidgets.QWidget):
             )
         else:
             self.mgr.set_character_emotion_default(self.current_char_id, emo, None)
+        self._hot_reload_current_costume_mapping()
         self._selected_motion_candidates = []
         self._refresh_motion_candidates_list()
         current_row = self.emo_table.currentRow()

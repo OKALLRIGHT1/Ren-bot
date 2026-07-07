@@ -71,6 +71,14 @@ def split_gateway_text_parts(text: str) -> List[str]:
         return []
     clean = re.sub(r"\n{3,}", "\n\n", clean)
 
+    def _is_structured_line(line: str) -> bool:
+        item = str(line or "").strip()
+        if not item:
+            return False
+        return bool(
+            re.match(r"^(?:\d+[.)、]\s+|ID:\s*|摘要:\s*|发件人:|时间:|附件:)", item)
+        )
+
     def _is_natural_line(line: str) -> bool:
         item = str(line or "").strip()
         if not item:
@@ -87,7 +95,9 @@ def split_gateway_text_parts(text: str) -> List[str]:
     parts: List[str] = []
     for block in blocks:
         lines = [line.strip() for line in block.split("\n") if line.strip()]
-        if 1 < len(lines) <= 5 and all(_is_natural_line(line) for line in lines):
+        if len(lines) > 1 and any(_is_structured_line(line) for line in lines):
+            parts.extend(lines)
+        elif 1 < len(lines) <= 5 and all(_is_natural_line(line) for line in lines):
             parts.extend(lines)
         else:
             parts.append(" ".join(lines))
@@ -98,10 +108,6 @@ def split_gateway_text_parts(text: str) -> List[str]:
     for part in parts:
         final_parts.extend(_split_long_gateway_part(part))
     final_parts = [part for part in final_parts if part]
-    if len(final_parts) > 8:
-        head = final_parts[:7]
-        tail = " ".join(final_parts[7:]).strip()
-        return head + ([tail] if tail else [])
     return final_parts
 
 
@@ -116,7 +122,10 @@ def _split_long_gateway_part(text: str, max_len: int = 55) -> List[str]:
     if len(chunks) <= 1:
         chunks = [item.strip() for item in re.split(r"(?<=[，,、])\s*", raw) if item.strip()]
     if len(chunks) <= 1:
-        return [raw]
+        hard_max = 260
+        if len(raw) <= hard_max:
+            return [raw]
+        return [raw[i : i + hard_max].strip() for i in range(0, len(raw), hard_max)]
 
     parts: List[str] = []
     current = ""

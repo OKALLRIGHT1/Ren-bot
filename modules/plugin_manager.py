@@ -9,6 +9,11 @@ import types
 from typing import Dict, Any, Tuple, List, Optional, Iterable
 from pathlib import Path
 from modules.plugin_secret_store import PluginSecretStore
+from modules.plugin_security_audit import (
+    build_plugin_security_matrix,
+    summarize_plugin_security_matrix,
+)
+from modules.security_redaction import is_secret_setting
 
 try:
     from modules.config_schema import build_plugin_config_schema
@@ -22,6 +27,7 @@ except Exception:
 
 
 QQ_REMOTE_SOURCES = {"qq_gateway", "napcat_qq"}
+DIRECT_COMMAND_PREFIXES = ("/", "!", "！")
 DEFAULT_ACCESS_CONTROL = {
     "allow_local": True,
     "allow_remote_qq": False,
@@ -29,6 +35,17 @@ DEFAULT_ACCESS_CONTROL = {
     "allow_qq_others": False,
     "allow_group_without_at": False,
 }
+
+
+def _safe_print(message: Any = "") -> None:
+    text = str(message)
+    stream = getattr(sys, "stdout", None)
+    encoding = getattr(stream, "encoding", None) or "utf-8"
+    try:
+        print(text)
+    except UnicodeEncodeError:
+        safe = text.encode(encoding, errors="replace").decode(encoding, errors="replace")
+        print(safe)
 
 
 class PluginManager:
@@ -47,6 +64,7 @@ class PluginManager:
         ] = {}  # ✅ 新增：存储 llm_command -> trigger 的映射
         self.secret_store = PluginSecretStore()
         self.deferred_tool_stats: Dict[str, Dict[str, int]] = {}
+        self.load_errors: List[Dict[str, str]] = []
 
         if not os.path.exists(plugin_dir):
             os.makedirs(plugin_dir)
@@ -60,7 +78,7 @@ class PluginManager:
 
     def _dbg(self, message: str):
         if self.debug_enabled:
-            print(message)
+            _safe_print(message)
 
     def _load_plugin_module(self, item_name: str, module_path: str):
         """Load plugin.py with a package context so relative imports work."""
@@ -115,18 +133,57 @@ class PluginManager:
         return adapter == "napcat_qq"
 
     def _is_secret_setting(self, setting_key: str, setting_info: Any) -> bool:
-        key_lower = str(setting_key or "").strip().lower()
-        if any(
-            token in key_lower
-            for token in ("api_key", "token", "secret", "password", "access_key")
-        ):
-            return True
-        if isinstance(setting_info, dict):
-            return str(setting_info.get("type") or "").strip().lower() in {
-                "secret",
-                "password",
+        return is_secret_setting(setting_key, setting_info)
+
+    def _resolve_plugin_type(
+        self,
+        trigger: str,
+        config: dict,
+        plugin: Any,
+        *,
+        source: str,
+        plugin_dir: Optional[str] = None,
+    ) -> str:
+        config_type = ""
+        if isinstance(config, dict):
+            config_type = str(config.get("type") or "").strip()
+        class_type = str(getattr(plugin, "type", "") or "").strip()
+        if config_type and class_type and config_type != class_type:
+            warning = {
+                "plugin": str(trigger),
+                "code": "plugin_type_mismatch",
+                "source": str(source),
+                "config_type": config_type,
+                "class_type": class_type,
             }
-        return False
+            if plugin_dir:
+                warning["plugin_dir"] = str(plugin_dir)
+            self.load_errors.append(warning)
+            _safe_print(
+                f"WARNING plugin type mismatch for {trigger}: "
+                f"config={config_type}, class={class_type}; using config"
+            )
+        return config_type or class_type or "react"
+
+    def _log_plugin_security_summary(self) -> None:
+        try:
+            matrix = build_plugin_security_matrix(
+                self.plugin_configs,
+                self._normalize_access_control,
+            )
+            summary = summarize_plugin_security_matrix(matrix)
+        except Exception as exc:
+            _safe_print(f"WARNING plugin security audit failed: {exc}")
+            return
+        owner_high = summary.get("owner_remote_high_risk_plugins") or []
+        other_qq = summary.get("other_qq_plugins") or []
+        group_no_at = summary.get("group_without_at_plugins") or []
+        _safe_print(
+            "[PluginSecurity] "
+            f"owner_high_risk={len(owner_high)} {owner_high}; "
+            f"other_qq={len(other_qq)} {other_qq}; "
+            f"group_without_at={len(group_no_at)} {group_no_at}"
+        )
 
     def _apply_secret_overrides(self, trigger: str, config: dict) -> dict:
         if not isinstance(config, dict):
@@ -136,7 +193,13 @@ class PluginManager:
             return config
         config = dict(config)
         settings_copy = dict(settings)
-        secrets = self.secret_store.get_all_for_plugin(trigger)
+        try:
+            secrets = self.secret_store.get_all_for_plugin(trigger)
+        except Exception as exc:
+            message = f"secret_override_failed: {exc}"
+            self.load_errors.append({"plugin": str(trigger), "error": message})
+            _safe_print(f"⚠️ 插件 {trigger} 的加密配置读取失败，已使用配置文件默认值: {exc}")
+            secrets = {}
         for key, value in list(settings_copy.items()):
             if not self._is_secret_setting(key, value):
                 continue
@@ -157,6 +220,29 @@ class PluginManager:
             return False
         channel_meta = context.get("channel_meta") or {}
         return bool(channel_meta.get("is_owner"))
+
+    def _is_group_context(self, context: Optional[dict]) -> bool:
+        if not isinstance(context, dict):
+            return False
+        channel_meta = context.get("channel_meta") or {}
+        message_type = str(channel_meta.get("message_type") or "").strip().lower()
+        return message_type == "group" or bool(channel_meta.get("group_id"))
+
+    def _is_group_mentioned_context(self, context: Optional[dict]) -> bool:
+        if not isinstance(context, dict):
+            return False
+        channel_meta = context.get("channel_meta") or {}
+        for key in (
+            "mentioned",
+            "is_mentioned",
+            "is_at",
+            "at_me",
+            "to_me",
+            "targets_self",
+        ):
+            if bool(channel_meta.get(key)):
+                return True
+        return False
 
     def _build_access_summary(self, access_control: Optional[dict]) -> str:
         normalized = self._normalize_access_control(access_control)
@@ -186,6 +272,12 @@ class PluginManager:
                     return False, "当前插件不允许 QQ 主人触发"
             elif not access_control["allow_qq_others"]:
                 return False, "当前插件不允许其他 QQ 联系人触发"
+            if (
+                self._is_group_context(context)
+                and not access_control["allow_group_without_at"]
+                and not self._is_group_mentioned_context(context)
+            ):
+                return False, "当前插件在 QQ 群聊中需要 @ 机器人后触发"
             return True, ""
 
         if not access_control["allow_local"]:
@@ -203,6 +295,83 @@ class PluginManager:
             return f"⚠️ 插件“{plugin_name}”当前不允许由{sender_label}触发：{reason}"
         return f"⚠️ 插件“{plugin_name}”当前不允许由本地入口触发：{reason}"
 
+    def _strip_direct_command_prefix(self, text: str) -> Tuple[str, bool]:
+        raw = str(text or "").strip()
+        if not raw:
+            return "", False
+        for prefix in DIRECT_COMMAND_PREFIXES:
+            if raw.startswith(prefix):
+                return raw[len(prefix) :].strip(), True
+        return raw, False
+
+    def _normalize_alias_list(self, value: Any) -> List[str]:
+        if not value:
+            return []
+        if isinstance(value, str):
+            rows = [value]
+        else:
+            try:
+                rows = list(value)
+            except TypeError:
+                rows = [value]
+        return list(dict.fromkeys(str(row).strip() for row in rows if str(row).strip()))
+
+    def _plugin_aliases(self, trigger: str, plugin: Any) -> List[str]:
+        aliases = self._normalize_alias_list(getattr(plugin, "aliases", None))
+        if not aliases:
+            aliases = [trigger]
+        if trigger not in aliases:
+            aliases.append(trigger)
+        return aliases
+
+    def _direct_command_aliases(self, plugin: Any) -> List[str]:
+        return self._normalize_alias_list(
+            getattr(plugin, "direct_command_aliases", None)
+        )
+
+    def _map_plugin(self, trigger: str, plugin: Any) -> None:
+        p_type = getattr(plugin, "type", "react")
+        aliases = self._plugin_aliases(trigger, plugin)
+
+        if p_type == "direct":
+            for alias in aliases:
+                self.direct_map[alias] = plugin
+        elif p_type == "delegate":
+            for alias in aliases:
+                self.delegate_map[alias] = plugin
+        elif p_type == "observe":
+            for alias in aliases:
+                self.observe_map[alias] = plugin
+        else:
+            for alias in aliases:
+                self.react_map[alias] = plugin
+
+        for alias in self._direct_command_aliases(plugin):
+            self.direct_map[alias] = plugin
+
+    def _unmap_plugin(self, trigger: str, plugin: Any) -> None:
+        p_type = getattr(plugin, "type", "react")
+        aliases = self._plugin_aliases(trigger, plugin)
+
+        maps = []
+        if p_type == "direct":
+            maps.append(self.direct_map)
+        elif p_type == "delegate":
+            maps.append(self.delegate_map)
+        elif p_type == "observe":
+            maps.append(self.observe_map)
+        else:
+            maps.append(self.react_map)
+
+        for alias in aliases:
+            for target_map in maps:
+                if target_map.get(alias) is plugin:
+                    target_map.pop(alias, None)
+
+        for alias in self._direct_command_aliases(plugin):
+            if self.direct_map.get(alias) is plugin:
+                self.direct_map.pop(alias, None)
+
     # -------------------- Load --------------------
     def load_plugins(self):
         self.plugins = {}
@@ -212,8 +381,9 @@ class PluginManager:
         self.observe_map = {}  # ✅ 防止残留
         self.plugin_dirs = {}  # ✅ 重置文件夹映射
         self.llm_command_map = {}  # ✅ 重置LLM命令映射
+        self.load_errors = []
 
-        print(f"🔌 [系统] 正在扫描插件目录: {self.plugin_dir}")
+        _safe_print(f"🔌 [系统] 正在扫描插件目录: {self.plugin_dir}")
 
         if not os.path.exists(self.plugin_dir):
             return
@@ -234,7 +404,7 @@ class PluginManager:
                 # 加载插件配置
                 config_path = os.path.join(plugin_path, "config.json")
                 if not os.path.exists(config_path):
-                    print(f"⚠️ 插件文件夹 {item_name} 缺少 config.json，已跳过")
+                    _safe_print(f"⚠️ 插件文件夹 {item_name} 缺少 config.json，已跳过")
                     continue
 
                 with open(config_path, "r", encoding="utf-8-sig") as f:
@@ -243,7 +413,7 @@ class PluginManager:
                 # 保存配置
                 trigger = config.get("trigger")
                 if not trigger:
-                    print(f"⚠️ 插件 {item_name} 的配置缺少 trigger，已跳过")
+                    _safe_print(f"⚠️ 插件 {item_name} 的配置缺少 trigger，已跳过")
                     continue
 
                 config["access_control"] = self._normalize_access_control(
@@ -258,14 +428,14 @@ class PluginManager:
                 # 尝试加载插件代码
                 module_path = os.path.join(plugin_path, "plugin.py")
                 if not os.path.exists(module_path):
-                    print(f"⚠️ 插件 {item_name} 缺少 plugin.py，已跳过")
+                    _safe_print(f"⚠️ 插件 {item_name} 缺少 plugin.py，已跳过")
                     continue
 
                 # 动态导入插件模块
                 module = self._load_plugin_module(item_name, module_path)
 
                 if not hasattr(module, "Plugin"):
-                    print(f"⚠️ 插件 {item_name} 缺少 Plugin 类，已跳过")
+                    _safe_print(f"⚠️ 插件 {item_name} 缺少 Plugin 类，已跳过")
                     continue
 
                 # 创建插件实例
@@ -283,10 +453,29 @@ class PluginManager:
                     if isinstance(config.get("settings", {}), dict)
                     else {}
                 )
+                inst.tool_examples = config.get("tool_examples", [])
+                if not isinstance(inst.tool_examples, list):
+                    inst.tool_examples = [str(inst.tool_examples)]
+                inst.direct_command_aliases = self._normalize_alias_list(
+                    config.get(
+                        "direct_command_aliases",
+                        getattr(inst, "direct_command_aliases", []),
+                    )
+                )
 
                 # 从配置中设置显示元数据，name 始终以 config 为准，保证 UI/列表使用中文名
+                resolved_type = self._resolve_plugin_type(
+                    trigger,
+                    config,
+                    inst,
+                    source="load_plugins",
+                    plugin_dir=item_name,
+                )
+                config["type"] = resolved_type
+                self.plugin_configs[trigger] = config
+
                 inst.name = config.get("name", trigger)
-                inst.type = config.get("type", getattr(inst, "type", "react"))
+                inst.type = resolved_type
                 if not hasattr(inst, "description"):
                     inst.description = config.get("description", "")
                 if not hasattr(inst, "example_arg"):
@@ -302,11 +491,11 @@ class PluginManager:
                     try:
                         inst.reload_config()
                     except Exception as e:
-                        print(f"⚠️ 插件 {trigger} 初始 reload_config 失败: {e}")
+                        _safe_print(f"⚠️ 插件 {trigger} 初始 reload_config 失败: {e}")
 
                 self.plugins[trigger] = inst
                 p_type = getattr(inst, "type", "react")
-                print(
+                _safe_print(
                     f"   ✅ 加载插件 [{p_type}]: {getattr(inst, 'name', trigger)} (v{config.get('version', '1.0.0')})"
                 )
 
@@ -314,43 +503,25 @@ class PluginManager:
                 llm_command = config.get("llm_command", trigger)
                 if llm_command:
                     self.llm_command_map[llm_command] = trigger
-                    print(f"   📝 LLM命令映射: {llm_command} -> {trigger}")
+                    _safe_print(f"   📝 LLM命令映射: {llm_command} -> {trigger}")
 
                 # 检查插件是否被禁用
                 if trigger in self.disabled_plugins:
-                    print(f"   ⚠️ 插件已禁用: {trigger}")
+                    _safe_print(f"   ⚠️ 插件已禁用: {trigger}")
                     continue
 
-                # 处理别名
-                aliases = getattr(inst, "aliases", None)
-                if not aliases:
-                    aliases = [trigger]
-                else:
-                    aliases = list(aliases)
-                    if trigger not in aliases:
-                        aliases.append(trigger)
-
-                # 根据类型映射到不同的命令字典
-                if p_type == "direct":
-                    for a in aliases:
-                        self.direct_map[a] = inst
-                elif p_type == "delegate":
-                    for a in aliases:
-                        self.delegate_map[a] = inst
-                elif p_type == "observe":  # 🆕 新增处理分支
-                    for a in aliases:
-                        self.observe_map[a] = inst
-                else:
-                    for a in aliases:
-                        self.react_map[a] = inst
+                self._map_plugin(trigger, inst)
 
             except json.JSONDecodeError as e:
-                print(f"❌ 插件 {item_name} 的 config.json 格式错误: {e}")
+                _safe_print(f"❌ 插件 {item_name} 的 config.json 格式错误: {e}")
             except Exception as e:
-                print(f"❌ 插件加载失败 {item_name}: {e}")
+                self.load_errors.append({"plugin": item_name, "error": str(e)})
+                _safe_print(f"❌ 插件加载失败 {item_name}: {e}")
                 import traceback
 
                 traceback.print_exc()
+
+        self._log_plugin_security_summary()
 
     async def start_all_plugins(self, context: Optional[dict] = None):
         for name, plugin in self.plugins.items():
@@ -368,7 +539,7 @@ class PluginManager:
                     else:
                         await plugin.start()
                 except Exception as e:
-                    print(f"❌ 启动插件 {name} 后台任务失败: {e}")
+                    _safe_print(f"❌ 启动插件 {name} 后台任务失败: {e}")
 
     async def stop_all_plugins(self):
         for name, plugin in self.plugins.items():
@@ -381,7 +552,7 @@ class PluginManager:
                 else:
                     stop()
             except Exception as e:
-                print(f"⚠️ 停止插件 {name} 后台任务失败: {e}")
+                _safe_print(f"⚠️ 停止插件 {name} 后台任务失败: {e}")
 
     # -------------------- Config Management --------------------
     def get_plugin_config(self, trigger: str) -> Optional[dict]:
@@ -396,14 +567,15 @@ class PluginManager:
                 continue
             if not access.get("allow_remote_qq"):
                 continue
-            if str(config.get("type") or "react") != "direct":
-                continue
-            aliases = config.get("aliases") or []
-            if not isinstance(aliases, list):
-                aliases = [trigger]
-            if trigger not in aliases:
-                aliases = list(aliases) + [trigger]
-            for alias in aliases:
+            aliases: List[str] = []
+            if str(config.get("type") or "react") == "direct":
+                aliases.extend(self._normalize_alias_list(config.get("aliases") or []))
+                if trigger not in aliases:
+                    aliases.append(trigger)
+            aliases.extend(
+                self._normalize_alias_list(config.get("direct_command_aliases") or [])
+            )
+            for alias in dict.fromkeys(aliases):
                 text = str(alias or "").strip()
                 if text:
                     keywords.append(text)
@@ -446,6 +618,15 @@ class PluginManager:
         # ✅ 关键修复：从 self.plugin_dirs 获取真实的文件夹名称
         # 如果找不到映射（理论上不可能），则回退到使用 trigger
         dir_name = self.plugin_dirs.get(trigger, trigger)
+        plugin = self.plugins[trigger]
+        resolved_type = self._resolve_plugin_type(
+            trigger,
+            config,
+            plugin,
+            source="save_plugin_config",
+            plugin_dir=dir_name,
+        )
+        config["type"] = resolved_type
 
         config_path = os.path.join(self.plugin_dir, dir_name, "config.json")
         try:
@@ -461,17 +642,22 @@ class PluginManager:
             self.plugin_configs[trigger] = effective_config
 
             # 更新插件实例的属性
-            plugin = self.plugins[trigger]
             if hasattr(plugin, "name"):
                 plugin.name = config.get("name", trigger)
             if hasattr(plugin, "type"):
-                plugin.type = config.get("type", "react")
+                plugin.type = resolved_type
             if hasattr(plugin, "description"):
                 plugin.description = config.get("description", "")
             if hasattr(plugin, "example_arg"):
                 plugin.example_arg = config.get("example_arg", "")
             if hasattr(plugin, "aliases"):
                 plugin.aliases = config.get("aliases", [trigger])
+            plugin.direct_command_aliases = self._normalize_alias_list(
+                effective_config.get(
+                    "direct_command_aliases",
+                    getattr(plugin, "direct_command_aliases", []),
+                )
+            )
             if hasattr(plugin, "timeout_sec"):
                 plugin.timeout_sec = (
                     effective_config.get("timeout_sec") or self.default_timeout_sec
@@ -485,20 +671,23 @@ class PluginManager:
                 if isinstance(effective_config.get("settings", {}), dict)
                 else {}
             )
+            plugin.tool_examples = effective_config.get("tool_examples", [])
+            if not isinstance(plugin.tool_examples, list):
+                plugin.tool_examples = [str(plugin.tool_examples)]
 
             # 调用插件的 reload_config 方法（如果存在）
             if hasattr(plugin, "reload_config") and callable(plugin.reload_config):
                 try:
                     plugin.reload_config()
-                    print(f"✅ 已调用插件 {trigger} 的 reload_config 方法")
+                    _safe_print(f"✅ 已调用插件 {trigger} 的 reload_config 方法")
                 except Exception as e:
-                    print(f"⚠️ 调用插件 {trigger} 的 reload_config 失败: {e}")
+                    _safe_print(f"⚠️ 调用插件 {trigger} 的 reload_config 失败: {e}")
 
             self._rebuild_plugin_maps()
 
             return True
         except Exception as e:
-            print(f"❌ 保存插件配置失败 {trigger}: {e}")
+            _safe_print(f"❌ 保存插件配置失败 {trigger}: {e}")
             return False
 
     def get_plugin_icon_path(self, trigger: str) -> Optional[str]:
@@ -633,7 +822,7 @@ class PluginManager:
         seen = set()
         for trigger, plugin in self.plugins.items():
             p_type = str(getattr(plugin, "type", "react") or "react")
-            if p_type not in {"react", "delegate"}:
+            if p_type not in {"react", "delegate", "direct"}:
                 continue
             pid = id(plugin)
             if pid in seen:
@@ -669,13 +858,18 @@ class PluginManager:
         )
         return any(word in text for word in keywords)
 
-    def search_tools(self, query: str, limit: int = 8) -> List[Dict[str, Any]]:
+    def search_tools(
+        self, query: str, limit: int = 8, context: Optional[dict] = None
+    ) -> List[Dict[str, Any]]:
         q = str(query or "").strip().lower()
         terms = [part for part in re.split(r"\s+", q) if part]
         scored = []
         for trigger, plugin in self.plugins.items():
             p_type = str(getattr(plugin, "type", "react") or "react")
-            if p_type not in {"react", "delegate"}:
+            if p_type not in {"react", "delegate", "direct"}:
+                continue
+            allowed, _reason = self._is_plugin_allowed(plugin, context)
+            if not allowed:
                 continue
             aliases = getattr(plugin, "aliases", []) or []
             if not isinstance(aliases, list):
@@ -712,6 +906,7 @@ class PluginManager:
                     "type": str(getattr(plugin, "type", "react") or "react"),
                     "description": str(getattr(plugin, "description", "") or ""),
                     "example_arg": str(getattr(plugin, "example_arg", "") or ""),
+                    "examples": list(getattr(plugin, "tool_examples", []) or []),
                 }
             )
         return rows
@@ -772,16 +967,79 @@ class PluginManager:
         return str(trigger or "").strip() in self.get_delegate_trigger_set()
 
     # -------------------- Parse / Helpers --------------------
-    def extract_commands(self, text: str) -> List[Tuple[str, str]]:
+    def _find_cmd_end(self, raw: str, args_start: int) -> int:
+        depth = 0
+        quote = ""
+        escaped = False
+        for idx in range(args_start, len(raw)):
+            char = raw[idx]
+            if quote:
+                if escaped:
+                    escaped = False
+                elif char == "\\":
+                    escaped = True
+                elif char == quote:
+                    quote = ""
+                continue
+            if char in {'"', "'"}:
+                quote = char
+                continue
+            if char in "[{":
+                depth += 1
+                continue
+            if char in "]}":
+                if depth > 0:
+                    depth -= 1
+                    continue
+                if char == "]":
+                    return idx
+        return -1
+
+    def _iter_command_matches(self, text: str) -> List[Tuple[str, str, int, int]]:
         raw = text or ""
-        matches = re.findall(self._cmd_pattern, raw, flags=re.DOTALL)
+        matches: List[Tuple[str, str, int, int]] = []
+        pos = 0
+        marker = "[CMD:"
+        while True:
+            start = raw.find(marker, pos)
+            if start < 0:
+                break
+            cursor = start + len(marker)
+            while cursor < len(raw) and raw[cursor].isspace():
+                cursor += 1
+            trigger_match = re.match(r"[A-Za-z0-9_-]+", raw[cursor:])
+            if not trigger_match:
+                pos = start + len(marker)
+                continue
+            trigger = trigger_match.group(0)
+            cursor += len(trigger)
+            if cursor >= len(raw) or not raw[cursor].isspace():
+                if cursor >= len(raw) or raw[cursor] not in {"|", "／", "/"}:
+                    pos = start + len(marker)
+                    continue
+            while cursor < len(raw) and raw[cursor].isspace():
+                cursor += 1
+            if cursor >= len(raw):
+                break
+            if raw[cursor] in {"|", "／", "/"}:
+                cursor += 1
+                while cursor < len(raw) and raw[cursor].isspace():
+                    cursor += 1
+            end = self._find_cmd_end(raw, cursor)
+            if end < 0:
+                break
+            matches.append((trigger.strip(), raw[cursor:end].strip(), start, end + 1))
+            pos = end + 1
+        return matches
+
+    def extract_commands(self, text: str) -> List[Tuple[str, str]]:
         out = []
-        for trigger, args in matches:
+        for trigger, args, _start, _end in self._iter_command_matches(text or ""):
             out.append((trigger.strip(), (args or "").strip()))
         return out
 
     def contains_cmd(self, text: str) -> bool:
-        return bool(re.search(self._cmd_pattern, text or "", flags=re.DOTALL))
+        return bool(self._iter_command_matches(text or ""))
 
     # -------------------- Execute --------------------
     async def _run_with_timeout(self, plugin, args: str, context: dict):
@@ -813,12 +1071,14 @@ class PluginManager:
         self, user_text: str, context: dict
     ) -> Tuple[bool, Optional[str]]:
         """
-        Direct 模式：只要用户输入中包含插件定义的 aliases 关键词，就直接触发。
+        Direct 模式：默认只响应 /命令；插件显式允许时才可自然语言触发。
         """
-        text = (user_text or "").strip()
+        raw_text = str(user_text or "").strip()
+        text, has_command_prefix = self._strip_direct_command_prefix(raw_text)
         if not text:
             return False, None
 
+        raw_low = raw_text.lower()
         low = text.lower()
 
         # 按照关键词长度倒序排列，优先匹配长词（防止“看屏幕”被“看”先匹配截断）
@@ -827,15 +1087,26 @@ class PluginManager:
         denied_message = None
 
         for key in sorted_keys:
-            # 【核心修改】这里从 startswith 改为 in，实现“关键词包含即触发”
-            if key.lower() in low:
+            key_low = key.lower()
+            normalized_key, key_has_command_prefix = self._strip_direct_command_prefix(key)
+            normalized_key_low = normalized_key.lower()
+            matched = key_low in raw_low or (
+                bool(normalized_key_low) and normalized_key_low in low
+            )
+            if matched:
+                args = raw_text if has_command_prefix and key_has_command_prefix else text
                 plugin = self.direct_map[key]
                 plugin_name = getattr(plugin, "name", key)
+                allow_natural_language = bool(
+                    getattr(plugin, "allow_natural_language_direct", False)
+                )
+                if not has_command_prefix and not allow_natural_language:
+                    continue
 
                 try:
                     should_handle = getattr(plugin, "should_handle_direct", None)
                     if callable(should_handle) and not bool(
-                        should_handle(text, context, key)
+                        should_handle(args, context, key)
                     ):
                         continue
                 except Exception as e:
@@ -856,8 +1127,6 @@ class PluginManager:
 
                 # 将用户的原始整句话作为参数传给插件
                 # 这样 plugin.py 里的 if "camera" in args 逻辑依然有效
-                args = text
-
                 try:
                     # 执行插件
                     res = await self._run_with_timeout(plugin, args, context)
@@ -870,7 +1139,7 @@ class PluginManager:
                     traceback.print_exc()
                     return True, f"⚠️ 视觉模块异常: {e}"
 
-        if denied_message:
+        if denied_message and has_command_prefix:
             return True, denied_message
 
         return False, None
@@ -886,24 +1155,7 @@ class PluginManager:
         if not plugin:
             return False
 
-        p_type = getattr(plugin, "type", "react")
-        aliases = getattr(plugin, "aliases", None) or [trigger]
-        aliases = list(aliases)
-        if trigger not in aliases:
-            aliases.append(trigger)
-
-        if p_type == "direct":
-            for a in aliases:
-                self.direct_map[a] = plugin
-        elif p_type == "delegate":
-            for a in aliases:
-                self.delegate_map[a] = plugin
-        elif p_type == "observe":
-            for a in aliases:
-                self.observe_map[a] = plugin
-        else:
-            for a in aliases:
-                self.react_map[a] = plugin
+        self._map_plugin(trigger, plugin)
 
         return True
 
@@ -919,24 +1171,7 @@ class PluginManager:
         if not plugin:
             return False
 
-        p_type = getattr(plugin, "type", "react")
-        aliases = getattr(plugin, "aliases", None) or [trigger]
-        aliases = list(aliases)
-        if trigger not in aliases:
-            aliases.append(trigger)
-
-        if p_type == "direct":
-            for a in aliases:
-                self.direct_map.pop(a, None)
-        elif p_type == "delegate":
-            for a in aliases:
-                self.delegate_map.pop(a, None)
-        elif p_type == "observe":
-            for a in aliases:
-                self.observe_map.pop(a, None)
-        else:
-            for a in aliases:
-                self.react_map.pop(a, None)
+        self._unmap_plugin(trigger, plugin)
 
         return True
 
@@ -1025,9 +1260,16 @@ class PluginManager:
         self._dbg(f"🔌 [ReAct] 允许工具: {allow_tools}")
         self._dbg(f"🔌 [ReAct] 上下文: {context}")
 
-        matches = re.findall(self._cmd_pattern, raw, flags=re.DOTALL)
+        parsed_matches = self._iter_command_matches(raw)
+        matches = [(trigger, args) for trigger, args, _start, _end in parsed_matches]
 
-        clean_text = re.sub(self._cmd_pattern, "", raw, flags=re.DOTALL).strip()
+        clean_parts = []
+        last = 0
+        for _trigger, _args, start, end in parsed_matches:
+            clean_parts.append(raw[last:start])
+            last = end
+        clean_parts.append(raw[last:])
+        clean_text = "".join(clean_parts).strip()
 
         self._dbg(f"🔌 [ReAct] 解析到 {len(matches)} 个命令: {matches}")
         self._dbg(f"🔌 [ReAct] 清理后的文本: {clean_text}")
@@ -1059,7 +1301,7 @@ class PluginManager:
                 triggered = True
                 matches_rows = [
                     row
-                    for row in self.search_tools(args)
+                    for row in self.search_tools(args, context=context)
                     if str(row.get("type") or "react") in allowed_types
                 ]
                 if not matches_rows:
@@ -1173,7 +1415,7 @@ class PluginManager:
             是否重载成功
         """
         if trigger not in self.plugins:
-            print(f"❌ 插件 {trigger} 不存在")
+            _safe_print(f"❌ 插件 {trigger} 不存在")
             return False
 
         try:
@@ -1188,7 +1430,7 @@ class PluginManager:
                     else:
                         old_plugin.stop()
                 except Exception as e:
-                    print(f"⚠️ 停止旧插件失败: {e}")
+                    _safe_print(f"⚠️ 停止旧插件失败: {e}")
 
             # 2. 获取插件目录
             dir_name = self.plugin_dirs.get(trigger, trigger)
@@ -1222,9 +1464,27 @@ class PluginManager:
                 if isinstance(config.get("settings", {}), dict)
                 else {}
             )
+            inst.tool_examples = config.get("tool_examples", [])
+            if not isinstance(inst.tool_examples, list):
+                inst.tool_examples = [str(inst.tool_examples)]
+            inst.direct_command_aliases = self._normalize_alias_list(
+                config.get(
+                    "direct_command_aliases",
+                    getattr(inst, "direct_command_aliases", []),
+                )
+            )
+
+            resolved_type = self._resolve_plugin_type(
+                trigger,
+                config,
+                inst,
+                source="reload_plugin",
+                plugin_dir=dir_name,
+            )
+            config["type"] = resolved_type
 
             inst.name = config.get("name", trigger)
-            inst.type = config.get("type", getattr(inst, "type", "react"))
+            inst.type = resolved_type
             if not hasattr(inst, "description"):
                 inst.description = config.get("description", "")
             if not hasattr(inst, "example_arg"):
@@ -1238,7 +1498,7 @@ class PluginManager:
                 try:
                     inst.reload_config()
                 except Exception as e:
-                    print(f"⚠️ 插件 {trigger} 热重载 reload_config 失败: {e}")
+                    _safe_print(f"⚠️ 插件 {trigger} 热重载 reload_config 失败: {e}")
 
             # 7. 更新插件
             self.plugins[trigger] = inst
@@ -1247,11 +1507,11 @@ class PluginManager:
             # 8. 重建映射
             self._rebuild_plugin_maps()
 
-            print(f"✅ 插件 [{trigger}] 已热重载")
+            _safe_print(f"✅ 插件 [{trigger}] 已热重载")
             return True
 
         except Exception as e:
-            print(f"❌ 热重载插件 {trigger} 失败: {e}")
+            _safe_print(f"❌ 热重载插件 {trigger} 失败: {e}")
             import traceback
 
             traceback.print_exc()
@@ -1270,37 +1530,13 @@ class PluginManager:
             if trigger in self.disabled_plugins:
                 continue
 
-            # 获取插件类型
-            p_type = getattr(inst, "type", "react")
-
-            # 获取别名
-            aliases = getattr(inst, "aliases", None)
-            if not aliases:
-                aliases = [trigger]
-            else:
-                aliases = list(aliases)
-                if trigger not in aliases:
-                    aliases.append(trigger)
-
             # 构建 LLM 命令映射
             llm_command = getattr(inst, "llm_command", trigger)
             if llm_command:
                 self.llm_command_map[llm_command] = trigger
 
-            # 根据类型映射
-            if p_type == "direct":
-                for a in aliases:
-                    self.direct_map[a] = inst
-            elif p_type == "delegate":
-                for a in aliases:
-                    self.delegate_map[a] = inst
-            elif p_type == "observe":
-                for a in aliases:
-                    self.observe_map[a] = inst
-            else:
-                for a in aliases:
-                    self.react_map[a] = inst
+            self._map_plugin(trigger, inst)
 
-        print(
+        _safe_print(
             f"✅ 插件映射已重建: react={len(self.react_map)}, delegate={len(self.delegate_map)}, direct={len(self.direct_map)}, observe={len(self.observe_map)}"
         )

@@ -4,6 +4,7 @@
 """
 import asyncio
 import functools
+import sys
 import time
 from typing import Callable, Any, Optional
 from core.logger import get_logger
@@ -17,6 +18,19 @@ def _get_logger():
         return get_logger()
     except Exception:
         return None
+
+
+def _safe_print(message: Any = "") -> None:
+    text = str(message)
+    stream = getattr(sys, "stdout", None)
+    encoding = getattr(stream, "encoding", None) or "utf-8"
+    try:
+        print(text)
+    except UnicodeEncodeError:
+        safe = text.encode(encoding, errors="replace").decode(
+            encoding, errors="replace"
+        )
+        print(safe)
 
 
 def handle_plugin_errors(plugin_name: str, log_errors: bool = True):
@@ -37,7 +51,7 @@ def handle_plugin_errors(plugin_name: str, log_errors: bool = True):
         @functools.wraps(func)
         async def async_wrapper(self, *args, **kwargs):
             start_time = time.time()
-            print(f"🔧 [插件] [{plugin_name}] 开始执行，参数: {args}")
+            _safe_print(f"🔧 [插件] [{plugin_name}] 开始执行，参数: {args}")
             try:
                 result = await func(self, *args, **kwargs)
                 
@@ -45,8 +59,8 @@ def handle_plugin_errors(plugin_name: str, log_errors: bool = True):
                 elapsed = time.time() - start_time
                 log = _get_logger()
                 
-                print(f"🔧 [插件] [{plugin_name}] ✅ 执行成功，耗时: {elapsed:.2f}秒")
-                print(f"🔧 [插件] [{plugin_name}] 结果: {str(result)[:200]}..." if len(str(result)) > 200 else f"🔧 [插件] [{plugin_name}] 结果: {result}")
+                _safe_print(f"🔧 [插件] [{plugin_name}] ✅ 执行成功，耗时: {elapsed:.2f}秒")
+                _safe_print(f"🔧 [插件] [{plugin_name}] 结果: {str(result)[:200]}..." if len(str(result)) > 200 else f"🔧 [插件] [{plugin_name}] 结果: {result}")
                 
                 if log:
                     if elapsed > 1.0:
@@ -58,7 +72,7 @@ def handle_plugin_errors(plugin_name: str, log_errors: bool = True):
                 
             except ValueError as e:
                 # 参数错误
-                print(f"🔧 [插件] [{plugin_name}] ❌ 参数错误: {e}")
+                _safe_print(f"🔧 [插件] [{plugin_name}] ❌ 参数错误: {e}")
                 log = _get_logger()
                 if log_errors and log:
                     log.warning(f"[{plugin_name}] 参数错误: {e}")
@@ -66,7 +80,7 @@ def handle_plugin_errors(plugin_name: str, log_errors: bool = True):
                 
             except (FileNotFoundError, PermissionError) as e:
                 # 文件/权限错误
-                print(f"🔧 [插件] [{plugin_name}] ❌ 文件/权限错误: {e}")
+                _safe_print(f"🔧 [插件] [{plugin_name}] ❌ 文件/权限错误: {e}")
                 log = _get_logger()
                 if log_errors and log:
                     log.error(f"[{plugin_name}] 文件/权限错误: {e}")
@@ -74,7 +88,7 @@ def handle_plugin_errors(plugin_name: str, log_errors: bool = True):
                 
             except ConnectionError as e:
                 # 网络连接错误
-                print(f"🔧 [插件] [{plugin_name}] ❌ 网络连接错误: {e}")
+                _safe_print(f"🔧 [插件] [{plugin_name}] ❌ 网络连接错误: {e}")
                 log = _get_logger()
                 if log_errors and log:
                     log.error(f"[{plugin_name}] 网络连接错误: {e}")
@@ -83,7 +97,7 @@ def handle_plugin_errors(plugin_name: str, log_errors: bool = True):
             except asyncio.TimeoutError as e:
                 # 超时错误
                 elapsed = time.time() - start_time
-                print(f"🔧 [插件] [{plugin_name}] ❌ 操作超时（{elapsed:.2f}秒）")
+                _safe_print(f"🔧 [插件] [{plugin_name}] ❌ 操作超时（{elapsed:.2f}秒）")
                 log = _get_logger()
                 if log_errors and log:
                     log.error(f"[{plugin_name}] 操作超时: {e}")
@@ -92,8 +106,8 @@ def handle_plugin_errors(plugin_name: str, log_errors: bool = True):
             except Exception as e:
                 # 其他未捕获的异常
                 elapsed = time.time() - start_time
-                print(f"🔧 [插件] [{plugin_name}] ❌ 未捕获异常: {type(e).__name__}: {e}")
-                print(f"🔧 [插件] [{plugin_name}] 执行时间: {elapsed:.2f}秒")
+                _safe_print(f"🔧 [插件] [{plugin_name}] ❌ 未捕获异常: {type(e).__name__}: {e}")
+                _safe_print(f"🔧 [插件] [{plugin_name}] 执行时间: {elapsed:.2f}秒")
                 import traceback
                 traceback.print_exc()
                 
@@ -106,15 +120,15 @@ def handle_plugin_errors(plugin_name: str, log_errors: bool = True):
         @functools.wraps(func)
         def sync_wrapper(self, *args, **kwargs):
             start_time = time.time()
-            print(f"🔧 [插件] [{plugin_name}] 开始执行（同步），参数: {args}")
+            _safe_print(f"🔧 [插件] [{plugin_name}] 开始执行（同步），参数: {args}")
             try:
                 result = func(self, *args, **kwargs)
                 
                 elapsed = time.time() - start_time
                 log = _get_logger()
                 
-                print(f"🔧 [插件] [{plugin_name}] ✅ 执行成功，耗时: {elapsed:.2f}秒")
-                print(f"🔧 [插件] [{plugin_name}] 结果: {str(result)[:200]}..." if len(str(result)) > 200 else f"🔧 [插件] [{plugin_name}] 结果: {result}")
+                _safe_print(f"🔧 [插件] [{plugin_name}] ✅ 执行成功，耗时: {elapsed:.2f}秒")
+                _safe_print(f"🔧 [插件] [{plugin_name}] 结果: {str(result)[:200]}..." if len(str(result)) > 200 else f"🔧 [插件] [{plugin_name}] 结果: {result}")
                 
                 if log:
                     if elapsed > 1.0:
@@ -125,21 +139,21 @@ def handle_plugin_errors(plugin_name: str, log_errors: bool = True):
                 return result
                 
             except ValueError as e:
-                print(f"🔧 [插件] [{plugin_name}] ❌ 参数错误: {e}")
+                _safe_print(f"🔧 [插件] [{plugin_name}] ❌ 参数错误: {e}")
                 log = _get_logger()
                 if log_errors and log:
                     log.warning(f"[{plugin_name}] 参数错误: {e}")
                 return f"❌ 参数错误: {e}"
                 
             except (FileNotFoundError, PermissionError) as e:
-                print(f"🔧 [插件] [{plugin_name}] ❌ 文件/权限错误: {e}")
+                _safe_print(f"🔧 [插件] [{plugin_name}] ❌ 文件/权限错误: {e}")
                 log = _get_logger()
                 if log_errors and log:
                     log.error(f"[{plugin_name}] 文件/权限错误: {e}")
                 return f"❌ 文件或权限错误: {e}"
                 
             except ConnectionError as e:
-                print(f"🔧 [插件] [{plugin_name}] ❌ 网络连接错误: {e}")
+                _safe_print(f"🔧 [插件] [{plugin_name}] ❌ 网络连接错误: {e}")
                 log = _get_logger()
                 if log_errors and log:
                     log.error(f"[{plugin_name}] 网络连接错误: {e}")
@@ -147,8 +161,8 @@ def handle_plugin_errors(plugin_name: str, log_errors: bool = True):
                 
             except Exception as e:
                 elapsed = time.time() - start_time
-                print(f"🔧 [插件] [{plugin_name}] ❌ 未捕获异常: {type(e).__name__}: {e}")
-                print(f"🔧 [插件] [{plugin_name}] 执行时间: {elapsed:.2f}秒")
+                _safe_print(f"🔧 [插件] [{plugin_name}] ❌ 未捕获异常: {type(e).__name__}: {e}")
+                _safe_print(f"🔧 [插件] [{plugin_name}] 执行时间: {elapsed:.2f}秒")
                 import traceback
                 traceback.print_exc()
                 

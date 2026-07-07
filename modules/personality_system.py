@@ -222,7 +222,7 @@ class EmotionContinuity:
     def __init__(self):
         self.emotion_history: List[str] = []
         self.max_history = 5
-        self.current_mood = "neutral"
+        self.current_emotion = "neutral"
     
     def adjust_emotion(self, new_emotion: str, intensity: float) -> tuple:
         """调整情绪，确保连贯性"""
@@ -232,7 +232,7 @@ class EmotionContinuity:
             self.emotion_history.pop(0)
         
         # 如果情绪相同，直接返回
-        if new_emotion == self.current_mood:
+        if new_emotion == self.current_emotion:
             return new_emotion, intensity
         
         # 情绪距离检查
@@ -246,7 +246,7 @@ class EmotionContinuity:
         current_group = None
         new_group = None
         for group, emotions in emotion_groups.items():
-            if self.current_mood in emotions:
+            if self.current_emotion in emotions:
                 current_group = group
             if new_emotion in emotions:
                 new_group = group
@@ -254,17 +254,21 @@ class EmotionContinuity:
         # 如果跨组切换，需要过渡
         if current_group and new_group and current_group != new_group:
             # 使用当前情绪作为过渡，降低强度
-            _get_logger().debug(f"情绪过渡: {self.current_mood} -> {new_emotion} (通过{self.current_mood})")
-            self.current_mood = new_emotion
-            return self.current_mood, intensity * 0.7
+            _get_logger().debug(f"情绪过渡: {self.current_emotion} -> {new_emotion} (通过{self.current_emotion})")
+            self.current_emotion = new_emotion
+            return self.current_emotion, intensity * 0.7
         
         # 同组切换，可以较快切换
-        self.current_mood = new_emotion
+        self.current_emotion = new_emotion
         return new_emotion, intensity
+
+    def get_emotion(self) -> str:
+        """获取当前短期外显情绪"""
+        return self.current_emotion
     
     def get_mood(self) -> str:
-        """获取当前心情"""
-        return self.current_mood
+        """兼容旧调用：返回当前短期外显情绪。"""
+        return self.get_emotion()
 
 
 class CharacterSharing:
@@ -361,6 +365,15 @@ class PersonalitySystem:
             "energy": self.state.energy_level,
             "social_mode": self.state.social_mode,
             "thinking": self.state.thinking_mode
+        }
+
+    def get_reply_state(self) -> Dict[str, Any]:
+        """获取回复生成需要的内在状态。"""
+        return {
+            "mood": self.state.current_mood,
+            "energy": self.state.energy_level,
+            "social_mode": self.state.social_mode,
+            "continuity_emotion": self.emotion_continuity.get_emotion(),
         }
 
 

@@ -8,7 +8,7 @@ import subprocess
 import uuid
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 try:
     from config import (
@@ -22,6 +22,8 @@ except Exception:
     CODEX_AUTORUN_COMMANDS = []
     CODEX_AUTORUN_TIMEOUT_SEC = 120
     CODEX_AUTOROLLBACK_ON_FAIL = False
+
+from services.capability_manager import ToolCapability, ToolCapabilityMatch
 
 
 class Plugin:
@@ -79,6 +81,67 @@ class Plugin:
         self.pending_changes: Dict[str, Dict[str, Any]] = {}
         self.session_backups: Dict[str, Dict[str, Any]] = {}
         self.session_changed_files: List[str] = []
+
+    def get_capabilities(self):
+        return [
+            ToolCapability(
+                id="workspace.read",
+                plugin="workspace_ops",
+                trigger_mode="natural",
+                match=self._match_workspace_read,
+                description="Read a file inside the current project workspace.",
+                examples=["帮我看看 README.md", "读取 services/chat_service.py"],
+            )
+        ]
+
+    def _match_workspace_read(
+        self, text: str, ctx: Dict[str, Any]
+    ) -> Optional[ToolCapabilityMatch]:
+        raw = str(text or "").strip()
+        lowered = raw.lower()
+        if not raw or not self._looks_like_workspace_path(lowered):
+            return None
+        read_hints = (
+            "读",
+            "读一下",
+            "读取",
+            "看看",
+            "查看",
+            "打开",
+            "查文件",
+            "读代码",
+            "看代码",
+            "read",
+            "open",
+            "show",
+        )
+        if not any(hint in lowered for hint in read_hints):
+            return None
+        return ToolCapabilityMatch(
+            capability_id="workspace.read",
+            plugin="workspace_ops",
+            score=0.9,
+            args={"action": "read_file"},
+            raw_text=raw,
+            reason="workspace_read_intent",
+        )
+
+    def _looks_like_workspace_path(self, text: str) -> bool:
+        markers = (
+            "/",
+            "\\",
+            ".py",
+            ".md",
+            ".json",
+            ".yaml",
+            ".yml",
+            ".txt",
+            ".toml",
+            ".ini",
+            ".js",
+            ".ts",
+        )
+        return any(marker in str(text or "") for marker in markers)
 
     async def run(self, args: str, ctx: Dict[str, Any]) -> str:
         if not bool((ctx or {}).get("delegate_mode", False)):

@@ -163,7 +163,6 @@ impl SedentaryTracker {
 
         if presence != "active" {
             self.rest_streak = self.rest_streak.saturating_add(1);
-            self.active_minutes = self.active_minutes.saturating_add(1);
             if self.rest_streak >= self.break_minutes {
                 self.active_minutes = 0;
                 self.last_alert_minute = None;
@@ -560,8 +559,9 @@ mod tests {
 
         assert!(tracker.observe(1, "active").is_none());
         assert!(tracker.observe(2, "idle").is_none());
+        assert!(tracker.observe(3, "active").is_none());
         let alert = tracker
-            .observe(3, "active")
+            .observe(4, "active")
             .expect("short rest does not reset");
 
         assert_eq!(alert.active_minutes, 3);
@@ -575,7 +575,7 @@ mod tests {
         assert!(tracker.observe(2, "idle").is_none());
         let snapshot = tracker.snapshot(2);
 
-        assert_eq!(snapshot.active_minutes, 2);
+        assert_eq!(snapshot.active_minutes, 1);
         assert_eq!(snapshot.window_minutes, 60);
         assert_eq!(snapshot.break_minutes, 5);
         assert_eq!(snapshot.cooldown_minutes, 60);
@@ -640,5 +640,18 @@ mod tests {
         assert!(tracker.sample(20, Some(201)).is_none());
 
         assert_eq!(tracker.sample(21, Some(201)), Some((20, "idle", 1)));
+    }
+
+    #[test]
+    fn idle_sample_does_not_increase_active_minutes() {
+        let mut tracker = SedentaryTracker::new(60, 5, 60);
+
+        tracker.observe(1, "active");
+        tracker.observe(2, "active");
+        tracker.observe(3, "idle");
+
+        let snapshot = tracker.snapshot(3);
+        assert_eq!(snapshot.active_minutes, 2);
+        assert_eq!(snapshot.rest_streak, 1);
     }
 }
