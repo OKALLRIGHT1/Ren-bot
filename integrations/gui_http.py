@@ -1170,6 +1170,145 @@ class GuiHttpServer:
         except Exception:
             pass
 
+    def _characters_service(self, root: str):
+        from services.gui_api.characters_service import CharactersService
+
+        paths = self._build_paths(root)
+        return CharactersService(Path(paths["characters"]))
+
+    def _reload_characters(self) -> None:
+        if self.app_ref is None:
+            return
+        try:
+            character_module = self._load_local_module(
+                "gui_http_character_manager",
+                ["modules", "character_manager.py"],
+            )
+            character_manager = character_module.character_manager
+            character_manager.load()
+        except Exception:
+            pass
+
+    def _character_write_status(self, result: Dict[str, Any]) -> int:
+        error = str(result.get("error") or "")
+        if error == "write_failed":
+            return 500
+        if error in {"not_found", "costume_not_found"}:
+            return 404
+        if error in {
+            "cannot_delete_active",
+            "cannot_delete_last_costume",
+            "invalid_costume",
+        }:
+            return 400
+        return 400
+
+    async def _handle_characters_list(self, _request: web.Request) -> web.Response:
+        root = self._find_backend_root(os.getcwd())
+        if not root:
+            return self._json_response(
+                {"ok": False, "error": "backend_not_found"}, status=404
+            )
+        data = self._characters_service(root).list_characters()
+        return self._json_response({"ok": True, "data": data})
+
+    async def _handle_characters_get(self, request: web.Request) -> web.Response:
+        root = self._find_backend_root(os.getcwd())
+        if not root:
+            return self._json_response(
+                {"ok": False, "error": "backend_not_found"}, status=404
+            )
+        character_id = str(request.query.get("id") or request.query.get("character_id") or "").strip()
+        result = self._characters_service(root).get_character(character_id)
+        if not result.get("ok"):
+            return self._json_response(result, status=self._character_write_status(result))
+        return self._json_response(result)
+
+    async def _handle_characters_upsert(self, request: web.Request) -> web.Response:
+        root = self._find_backend_root(os.getcwd())
+        if not root:
+            return self._json_response(
+                {"ok": False, "error": "backend_not_found"}, status=404
+            )
+        payload = await self._read_payload(request)
+        result = self._characters_service(root).upsert_character(payload)
+        if not result.get("ok"):
+            return self._json_response(result, status=self._character_write_status(result))
+        self._reload_characters()
+        return self._json_response(result)
+
+    async def _handle_characters_delete(self, request: web.Request) -> web.Response:
+        root = self._find_backend_root(os.getcwd())
+        if not root:
+            return self._json_response(
+                {"ok": False, "error": "backend_not_found"}, status=404
+            )
+        payload = await self._read_payload(request)
+        character_id = str(payload.get("id") or payload.get("character_id") or "").strip()
+        result = self._characters_service(root).delete_character(character_id)
+        if not result.get("ok"):
+            return self._json_response(result, status=self._character_write_status(result))
+        self._reload_characters()
+        return self._json_response(result)
+
+    async def _handle_characters_activate(self, request: web.Request) -> web.Response:
+        root = self._find_backend_root(os.getcwd())
+        if not root:
+            return self._json_response(
+                {"ok": False, "error": "backend_not_found"}, status=404
+            )
+        payload = await self._read_payload(request)
+        character_id = str(payload.get("id") or payload.get("character_id") or "").strip()
+        result = self._characters_service(root).activate_character(character_id)
+        if not result.get("ok"):
+            return self._json_response(result, status=self._character_write_status(result))
+        self._reload_characters()
+        return self._json_response(result)
+
+    async def _handle_characters_costume_upsert(self, request: web.Request) -> web.Response:
+        root = self._find_backend_root(os.getcwd())
+        if not root:
+            return self._json_response(
+                {"ok": False, "error": "backend_not_found"}, status=404
+            )
+        payload = await self._read_payload(request)
+        character_id = str(payload.get("character_id") or payload.get("id") or "").strip()
+        result = self._characters_service(root).upsert_costume(character_id, payload)
+        if not result.get("ok"):
+            return self._json_response(result, status=self._character_write_status(result))
+        self._reload_characters()
+        return self._json_response(result)
+
+    async def _handle_characters_costume_delete(self, request: web.Request) -> web.Response:
+        root = self._find_backend_root(os.getcwd())
+        if not root:
+            return self._json_response(
+                {"ok": False, "error": "backend_not_found"}, status=404
+            )
+        payload = await self._read_payload(request)
+        character_id = str(payload.get("character_id") or payload.get("id") or "").strip()
+        costume_name = str(payload.get("name") or payload.get("costume") or "").strip()
+        result = self._characters_service(root).delete_costume(character_id, costume_name)
+        if not result.get("ok"):
+            return self._json_response(result, status=self._character_write_status(result))
+        self._reload_characters()
+        return self._json_response(result)
+
+    async def _handle_characters_costume_wear(self, request: web.Request) -> web.Response:
+        root = self._find_backend_root(os.getcwd())
+        if not root:
+            return self._json_response(
+                {"ok": False, "error": "backend_not_found"}, status=404
+            )
+        payload = await self._read_payload(request)
+        character_id = str(payload.get("character_id") or payload.get("id") or "").strip()
+        costume_name = str(payload.get("name") or payload.get("costume") or "").strip()
+        result = self._characters_service(root).set_current_costume(character_id, costume_name)
+        if not result.get("ok"):
+            return self._json_response(result, status=self._character_write_status(result))
+        self._reload_characters()
+        return self._json_response(result)
+
     async def _handle_health(self, _request: web.Request) -> web.Response:
         return self._json_response({"ok": True, "service": "gui_http"})
 
@@ -1708,6 +1847,23 @@ class GuiHttpServer:
         app.router.add_post(self._api_path("/models/providers/delete"), self._handle_providers_delete)
         app.router.add_post(self._api_path("/models/router"), self._handle_models_router_save)
         app.router.add_get(self._api_path("/dashboard"), self._handle_dashboard_get)
+        app.router.add_get(self._api_path("/characters"), self._handle_characters_list)
+        app.router.add_get(self._api_path("/characters/get"), self._handle_characters_get)
+        app.router.add_post(self._api_path("/characters/upsert"), self._handle_characters_upsert)
+        app.router.add_post(self._api_path("/characters/delete"), self._handle_characters_delete)
+        app.router.add_post(self._api_path("/characters/activate"), self._handle_characters_activate)
+        app.router.add_post(
+            self._api_path("/characters/costumes/upsert"),
+            self._handle_characters_costume_upsert,
+        )
+        app.router.add_post(
+            self._api_path("/characters/costumes/delete"),
+            self._handle_characters_costume_delete,
+        )
+        app.router.add_post(
+            self._api_path("/characters/costumes/wear"),
+            self._handle_characters_costume_wear,
+        )
         app.router.add_get(
             self._api_path("/characters/costume-meta"),
             self._handle_character_costume_meta,
