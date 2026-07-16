@@ -646,6 +646,40 @@ class GuiHttpServer:
             return 400
         return 400
 
+    def _status_screen_gui_service(self):
+        from services.gui_api.status_screen_service import StatusScreenGuiService
+
+        root = self._find_backend_root(os.getcwd()) or os.getcwd()
+        app = self.app_ref
+        status_text_getter = None
+        publish = None
+        load_config = None
+        save_config_fn = None
+        if app is not None:
+            if hasattr(app, "get_display_mqtt_status_text"):
+                status_text_getter = app.get_display_mqtt_status_text
+            if hasattr(app, "publish_display_state"):
+                publish = app.publish_display_state
+            if hasattr(app, "load_display_state_config"):
+                load_config = app.load_display_state_config
+            if hasattr(app, "save_display_state_config"):
+                save_config_fn = app.save_display_state_config
+        return StatusScreenGuiService(
+            config_path=Path(root) / "data" / "display_state_config.json",
+            status_text_getter=status_text_getter,
+            publish=publish,
+            load_config=load_config,
+            save_config_fn=save_config_fn,
+        )
+
+    def _status_screen_result_status(self, result: Dict[str, Any]) -> int:
+        error = str(result.get("error") or "")
+        if error in {"publish_unavailable"}:
+            return 503
+        if error in {"empty_payload", "save_failed", "publish_failed"}:
+            return 400
+        return 400
+
     def _knowledge_result_status(self, result: Dict[str, Any]) -> int:
         error = str(result.get("error") or "")
         if error in {
@@ -2557,6 +2591,26 @@ class GuiHttpServer:
             return self._json_response(result, status=self._codex_result_status(result))
         return self._json_response(result)
 
+    async def _handle_status_screen_get(self, _request: web.Request) -> web.Response:
+        result = self._status_screen_gui_service().get_config()
+        if not result.get("ok"):
+            return self._json_response(result, status=self._status_screen_result_status(result))
+        return self._json_response(result)
+
+    async def _handle_status_screen_save(self, request: web.Request) -> web.Response:
+        payload = await self._read_payload(request)
+        result = self._status_screen_gui_service().save_config(payload)
+        if not result.get("ok"):
+            return self._json_response(result, status=self._status_screen_result_status(result))
+        return self._json_response(result)
+
+    async def _handle_status_screen_test(self, request: web.Request) -> web.Response:
+        payload = await self._read_payload(request)
+        result = self._status_screen_gui_service().test_publish(payload)
+        if not result.get("ok"):
+            return self._json_response(result, status=self._status_screen_result_status(result))
+        return self._json_response(result)
+
     async def _handle_activity_ingest(self, request: web.Request) -> web.Response:
         store = self._get_memory_store()
         if store is None:
@@ -2777,6 +2831,11 @@ class GuiHttpServer:
         app.router.add_post(self._api_path("/logs/tail"), self._handle_logs_tail)
         app.router.add_get(self._api_path("/codex"), self._handle_codex_get)
         app.router.add_post(self._api_path("/codex"), self._handle_codex_save)
+        app.router.add_get(self._api_path("/status-screen"), self._handle_status_screen_get)
+        app.router.add_post(self._api_path("/status-screen"), self._handle_status_screen_save)
+        app.router.add_post(
+            self._api_path("/status-screen/test"), self._handle_status_screen_test
+        )
         app.router.add_get(self._api_path("/events"), self._handle_events)
         app.router.add_get(self._api_path("/outbound"), self._handle_outbound_records)
         app.router.add_get(self._api_path("/reply-effects"), self._handle_reply_effects)

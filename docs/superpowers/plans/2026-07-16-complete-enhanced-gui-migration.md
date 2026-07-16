@@ -92,7 +92,7 @@ Status values: `available` · `partial` · `raw-json-only` · `placeholder` · `
 | 11 | Meme pack | meme_manager | `plugins/meme_pack` + `services/gui_api/meme_pack_service.py` | list/get/update/set-enabled/delete/stats | `MemePackPage` | file import/dir import still local-plugin only | meme service + page unit tests | available |
 | 12 | Diary | diary_manager | episodes + `services/gui_api/diary_service.py` | list/get/upsert/delete/export | `DiaryPage` | create-new diary without existing id optional polish | diary service + page unit tests | available |
 | 13 | Memory center | memory_editor | `modules/memory_sqlite.py` / advanced_memory / `services/gui_api/memory_service.py` | core list/upsert/delete/category + vector status/rebuild/embedding test + legacy items/episodes/transcript | `MemoryPage` core/vector + legacy tabs | profile overview polish, vector row inspector | memory service + page unit tests | partial |
-| 14 | Status screen | status_screen_manager | status_screen modules | none | none | get/save/test-send image assets | status screen tests | missing |
+| 14 | Status screen | status_screen_manager | display_state_config + `services/gui_api/status_screen_service.py` | get/save/test | `StatusScreenPage` | icon image picker polish optional | status screen service + page unit tests | available |
 | 15 | App recognition | screen_app_rules | `modules/screen_app_registry.py` + `services/gui_api/app_rules_service.py` | list/save/test | `AppRulesPage` | priority field optional | app rules service + page unit tests | available |
 | 16 | Sedentary | sedentary_page | runtime_settings + activity config + `services/gui_api/sedentary_service.py` | `GET/POST /sedentary`, `POST /sedentary/preview` (+ `GET /activity-config`) | `SedentaryPage` structured | optional real popup image picker in remote mode | sedentary service + page unit tests | available |
 | 17 | Dependencies | settings dependency page | `modules/dependency_check.py` | scan/install | `DependenciesPage` | install confirmation UX polish | dep page unit tests | available |
@@ -102,8 +102,8 @@ Status values: `available` · `partial` · `raw-json-only` · `placeholder` · `
 | 21 | Console log | ConsoleLogDialog | logs dir + `services/gui_api/logs_service.py` | `GET /logs`, `/logs/tail` | `ConsolePage` | websocket stream optional | logs service + page unit tests | available |
 | 22 | App logs | (settings/runtime logs) | logs dir + `services/gui_api/logs_service.py` | `GET /logs`, `/logs/tail` | `AppLogsPage` | multi-file rotate browser polish | logs service + page unit tests | available |
 | 23 | Codex / code assistant | CodexAssistantDialog | runtime_settings + `services/gui_api/codex_service.py` | `GET/POST /codex` | `CodexPage` | external invoke still via chat/CLI | codex service + page unit tests | available |
-| 24 | Live2D model mgmt | desktop tray + resources | enhanced resources.rs + characters | local resource APIs only | desktop only | model list/import/scale persist via enhanced + optional backend costume path | resource+scale tests | partial |
-| 25 | Global/model scale wheel | enhanced desktop | resources + config | local Tauri store | desktop | ensure persist sync control-center display | scale tests | partial |
+| 24 | Live2D model mgmt | desktop tray + resources | enhanced resources.rs + characters | local resource APIs only | `Live2dPage` ops guide + desktop | import UI optional | live2d page unit tests | available |
+| 25 | Global/model scale wheel | enhanced desktop | resources + config | localStorage model-scale keys | `Live2dPage` + desktop tray/wheel | control-center live scale readout optional | live2d page unit tests | available |
 
 ---
 
