@@ -605,6 +605,18 @@ class GuiHttpServer:
             return 400
         return 400
 
+    def _app_rules_gui_service(self):
+        from services.gui_api.app_rules_service import AppRulesGuiService
+
+        root = self._find_backend_root(os.getcwd()) or os.getcwd()
+        return AppRulesGuiService(rules_path=Path(root) / "data" / "app_category_rules.json")
+
+    def _app_rules_result_status(self, result: Dict[str, Any]) -> int:
+        error = str(result.get("error") or "")
+        if error in {"empty_payload", "save_failed"}:
+            return 400
+        return 400
+
     def _knowledge_result_status(self, result: Dict[str, Any]) -> int:
         error = str(result.get("error") or "")
         if error in {
@@ -2459,6 +2471,27 @@ class GuiHttpServer:
             return self._json_response(result, status=self._qq_gateway_result_status(result))
         return self._json_response(result)
 
+    async def _handle_app_rules_list(self, _request: web.Request) -> web.Response:
+        result = self._app_rules_gui_service().list_rules()
+        if not result.get("ok"):
+            return self._json_response(result, status=self._app_rules_result_status(result))
+        return self._json_response(result)
+
+    async def _handle_app_rules_save(self, request: web.Request) -> web.Response:
+        payload = await self._read_payload(request)
+        rules = payload.get("rules") if isinstance(payload.get("rules"), list) else payload
+        result = self._app_rules_gui_service().save_rules(rules)
+        if not result.get("ok"):
+            return self._json_response(result, status=self._app_rules_result_status(result))
+        return self._json_response(result)
+
+    async def _handle_app_rules_test(self, request: web.Request) -> web.Response:
+        payload = await self._read_payload(request)
+        result = self._app_rules_gui_service().test_match(payload)
+        if not result.get("ok"):
+            return self._json_response(result, status=self._app_rules_result_status(result))
+        return self._json_response(result)
+
     async def _handle_activity_ingest(self, request: web.Request) -> web.Response:
         store = self._get_memory_store()
         if store is None:
@@ -2671,6 +2704,9 @@ class GuiHttpServer:
         app.router.add_post(self._api_path("/qq/gateway"), self._handle_qq_gateway_save)
         app.router.add_get(self._api_path("/theme"), self._handle_theme_get)
         app.router.add_post(self._api_path("/theme"), self._handle_theme_save)
+        app.router.add_get(self._api_path("/app-rules"), self._handle_app_rules_list)
+        app.router.add_post(self._api_path("/app-rules"), self._handle_app_rules_save)
+        app.router.add_post(self._api_path("/app-rules/test"), self._handle_app_rules_test)
         app.router.add_get(self._api_path("/events"), self._handle_events)
         app.router.add_get(self._api_path("/outbound"), self._handle_outbound_records)
         app.router.add_get(self._api_path("/reply-effects"), self._handle_reply_effects)
