@@ -554,6 +554,57 @@ class GuiHttpServer:
             return 400
         return 400
 
+    def _theme_gui_service(self):
+        from modules.runtime_settings import load_runtime_settings, update_runtime_settings
+        from services.gui_api.theme_service import ThemeGuiService
+
+        themes = {}
+        default_theme = ""
+        try:
+            from modules.gui import styles as styles_mod
+
+            themes = dict(getattr(styles_mod, "THEMES", {}) or {})
+            default_theme = str(getattr(styles_mod, "DEFAULT_THEME_NAME", "") or "")
+        except Exception:
+            themes = {}
+            default_theme = ""
+        return ThemeGuiService(
+            load_runtime=load_runtime_settings,
+            update_runtime=update_runtime_settings,
+            themes=themes,
+            default_theme=default_theme,
+        )
+
+    def _qq_gateway_gui_service(self):
+        from modules.runtime_settings import load_runtime_settings, update_runtime_settings
+        from services.gui_api.qq_gateway_service import QqGatewayGuiService
+
+        apply_settings = None
+        app = self.app_ref
+        if app is not None and hasattr(app, "apply_external_settings"):
+            apply_settings = app.apply_external_settings
+        return QqGatewayGuiService(
+            load_runtime=load_runtime_settings,
+            update_runtime=update_runtime_settings,
+            apply_settings=apply_settings,
+        )
+
+    def _theme_result_status(self, result: Dict[str, Any]) -> int:
+        error = str(result.get("error") or "")
+        if error in {"runtime_store_unavailable"}:
+            return 503
+        if error in {"empty_payload", "invalid_theme", "invalid_palette"}:
+            return 400
+        return 400
+
+    def _qq_gateway_result_status(self, result: Dict[str, Any]) -> int:
+        error = str(result.get("error") or "")
+        if error in {"runtime_store_unavailable"}:
+            return 503
+        if error in {"empty_payload"}:
+            return 400
+        return 400
+
     def _knowledge_result_status(self, result: Dict[str, Any]) -> int:
         error = str(result.get("error") or "")
         if error in {
@@ -2382,6 +2433,32 @@ class GuiHttpServer:
             return self._json_response(result, status=self._meme_result_status(result))
         return self._json_response(result)
 
+    async def _handle_theme_get(self, _request: web.Request) -> web.Response:
+        result = self._theme_gui_service().list_themes()
+        if not result.get("ok"):
+            return self._json_response(result, status=self._theme_result_status(result))
+        return self._json_response(result)
+
+    async def _handle_theme_save(self, request: web.Request) -> web.Response:
+        payload = await self._read_payload(request)
+        result = self._theme_gui_service().save(payload)
+        if not result.get("ok"):
+            return self._json_response(result, status=self._theme_result_status(result))
+        return self._json_response(result)
+
+    async def _handle_qq_gateway_get(self, _request: web.Request) -> web.Response:
+        result = self._qq_gateway_gui_service().get_settings()
+        if not result.get("ok"):
+            return self._json_response(result, status=self._qq_gateway_result_status(result))
+        return self._json_response(result)
+
+    async def _handle_qq_gateway_save(self, request: web.Request) -> web.Response:
+        payload = await self._read_payload(request)
+        result = self._qq_gateway_gui_service().save_settings(payload)
+        if not result.get("ok"):
+            return self._json_response(result, status=self._qq_gateway_result_status(result))
+        return self._json_response(result)
+
     async def _handle_activity_ingest(self, request: web.Request) -> web.Response:
         store = self._get_memory_store()
         if store is None:
@@ -2590,6 +2667,10 @@ class GuiHttpServer:
         app.router.add_post(
             self._api_path("/qq/profiles/delete"), self._handle_qq_profile_delete
         )
+        app.router.add_get(self._api_path("/qq/gateway"), self._handle_qq_gateway_get)
+        app.router.add_post(self._api_path("/qq/gateway"), self._handle_qq_gateway_save)
+        app.router.add_get(self._api_path("/theme"), self._handle_theme_get)
+        app.router.add_post(self._api_path("/theme"), self._handle_theme_save)
         app.router.add_get(self._api_path("/events"), self._handle_events)
         app.router.add_get(self._api_path("/outbound"), self._handle_outbound_records)
         app.router.add_get(self._api_path("/reply-effects"), self._handle_reply_effects)
