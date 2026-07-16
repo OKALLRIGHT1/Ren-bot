@@ -160,7 +160,28 @@ class GuiHttpServer:
             response = web.Response(status=204)
             self._cors_headers(request, response)
             return response
-        response = await handler(request)
+        try:
+            response = await handler(request)
+        except web.HTTPException as exc:
+            # Convert framework HTML/plain errors into JSON so Enhanced never
+            # receives "404: Not Found" text payloads that break JSON parsers.
+            if int(exc.status) in {404, 405}:
+                response = self._json_response(
+                    {
+                        "ok": False,
+                        "error": (
+                            "route_not_found"
+                            if int(exc.status) == 404
+                            else "method_not_allowed"
+                        ),
+                        "path": str(request.rel_url.path or request.path or ""),
+                        "method": str(request.method or ""),
+                        "hint": "后端路由不存在或方法不支持。请重启 Python 后端以加载最新 GUI API。",
+                    },
+                    status=int(exc.status),
+                )
+            else:
+                raise
         self._cors_headers(request, response)
         return response
 
@@ -1653,7 +1674,43 @@ class GuiHttpServer:
         return self._json_response(result)
 
     async def _handle_health(self, _request: web.Request) -> web.Response:
-        return self._json_response({"ok": True, "service": "gui_http"})
+        return self._json_response(
+            {
+                "ok": True,
+                "service": "gui_http",
+                "api_version": "enhanced-gui-1",
+                "features": [
+                    "models",
+                    "characters",
+                    "memory-core",
+                    "diary",
+                    "knowledge",
+                    "plugins-settings",
+                    "sedentary",
+                    "info-sources",
+                    "expression-library",
+                    "meme-pack",
+                    "theme",
+                    "qq-gateway",
+                    "app-rules",
+                    "logs",
+                    "codex",
+                    "status-screen",
+                ],
+            }
+        )
+
+    async def _handle_not_found(self, request: web.Request) -> web.Response:
+        return self._json_response(
+            {
+                "ok": False,
+                "error": "route_not_found",
+                "path": str(request.rel_url.path or request.path or ""),
+                "method": str(request.method or ""),
+                "hint": "后端路由不存在。请重启 Python 后端以加载最新 GUI API。",
+            },
+            status=404,
+        )
 
     async def _handle_runtime_status(self, _request: web.Request) -> web.Response:
         return self._json_response({"ok": True, "data": self._build_runtime_status()})
@@ -2678,6 +2735,7 @@ class GuiHttpServer:
     async def _async_start(self) -> None:
         app = web.Application(middlewares=[self._cors_middleware, self._auth_middleware])
         app.router.add_get(self._api_path("/health"), self._handle_health)
+        # Keep /health also available without trailing prefix mismatches for probes.
         app.router.add_get(
             self._api_path("/runtime/status"), self._handle_runtime_status
         )
@@ -2926,6 +2984,12 @@ class GuiHttpServer:
             self._api_path("/settings/mcp"),
             lambda request: self._handle_settings_save(request, "mcpConfig"),
         )
+        # Catch-all JSON 404 for unknown /gui paths (after concrete routes).
+        not_found = self._api_path("/{tail:.*}")
+        app.router.add_get(not_found, self._handle_not_found)
+        app.router.add_post(not_found, self._handle_not_found)
+        app.router.add_put(not_found, self._handle_not_found)
+        app.router.add_delete(not_found, self._handle_not_found)
 
         requested_port = self.port
         self._runner = web.AppRunner(app, access_log=None)
