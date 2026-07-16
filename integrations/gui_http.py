@@ -1066,6 +1066,110 @@ class GuiHttpServer:
             "mcpConfig": self._mask_secrets(mcp_config),
         }
 
+
+    def _models_service(self, root: str):
+        from services.gui_api.models_service import ModelsCatalogService
+
+        paths = self._build_paths(root)
+        return ModelsCatalogService(Path(paths["customModels"]))
+
+    async def _handle_models_get(self, _request: web.Request) -> web.Response:
+        root = self._find_backend_root(os.getcwd())
+        if not root:
+            return self._json_response(
+                {"ok": False, "error": "backend_not_found"}, status=404
+            )
+        data = self._models_service(root).list_catalog()
+        return self._json_response({"ok": True, "data": data})
+
+    async def _handle_models_upsert(self, request: web.Request) -> web.Response:
+        root = self._find_backend_root(os.getcwd())
+        if not root:
+            return self._json_response(
+                {"ok": False, "error": "backend_not_found"}, status=404
+            )
+        payload = await self._read_payload(request)
+        result = self._models_service(root).upsert_model(payload)
+        if not result.get("ok"):
+            code = 400 if result.get("error") != "write_failed" else 500
+            return self._json_response(result, status=code)
+        self._reload_custom_models()
+        return self._json_response(result)
+
+    async def _handle_models_delete(self, request: web.Request) -> web.Response:
+        root = self._find_backend_root(os.getcwd())
+        if not root:
+            return self._json_response(
+                {"ok": False, "error": "backend_not_found"}, status=404
+            )
+        payload = await self._read_payload(request)
+        model_id = str(payload.get("id") or payload.get("model_id") or "").strip()
+        result = self._models_service(root).delete_model(model_id)
+        if not result.get("ok"):
+            code = 404 if result.get("error") == "not_found" else 400
+            if result.get("error") == "write_failed":
+                code = 500
+            return self._json_response(result, status=code)
+        self._reload_custom_models()
+        return self._json_response(result)
+
+    async def _handle_providers_upsert(self, request: web.Request) -> web.Response:
+        root = self._find_backend_root(os.getcwd())
+        if not root:
+            return self._json_response(
+                {"ok": False, "error": "backend_not_found"}, status=404
+            )
+        payload = await self._read_payload(request)
+        result = self._models_service(root).upsert_provider(payload)
+        if not result.get("ok"):
+            code = 400 if result.get("error") != "write_failed" else 500
+            return self._json_response(result, status=code)
+        self._reload_custom_models()
+        return self._json_response(result)
+
+    async def _handle_providers_delete(self, request: web.Request) -> web.Response:
+        root = self._find_backend_root(os.getcwd())
+        if not root:
+            return self._json_response(
+                {"ok": False, "error": "backend_not_found"}, status=404
+            )
+        payload = await self._read_payload(request)
+        provider_id = str(payload.get("id") or payload.get("provider_id") or "").strip()
+        result = self._models_service(root).delete_provider(provider_id)
+        if not result.get("ok"):
+            code = 404 if result.get("error") == "not_found" else 400
+            if result.get("error") == "write_failed":
+                code = 500
+            return self._json_response(result, status=code)
+        self._reload_custom_models()
+        return self._json_response(result)
+
+    async def _handle_models_router_save(self, request: web.Request) -> web.Response:
+        root = self._find_backend_root(os.getcwd())
+        if not root:
+            return self._json_response(
+                {"ok": False, "error": "backend_not_found"}, status=404
+            )
+        payload = await self._read_payload(request)
+        router = payload.get("router") if isinstance(payload.get("router"), dict) else payload
+        result = self._models_service(root).save_router(router if isinstance(router, dict) else {})
+        if not result.get("ok"):
+            code = 400 if result.get("error") != "write_failed" else 500
+            return self._json_response(result, status=code)
+        self._reload_custom_models()
+        return self._json_response(result)
+
+    def _reload_custom_models(self) -> None:
+        if self.app_ref is None:
+            return
+        try:
+            runtime_config = self._load_local_module(
+                "gui_http_runtime_config", ["config.py"]
+            )
+            runtime_config.load_custom_models(force=True)
+        except Exception:
+            pass
+
     async def _handle_health(self, _request: web.Request) -> web.Response:
         return self._json_response({"ok": True, "service": "gui_http"})
 
@@ -1597,6 +1701,12 @@ class GuiHttpServer:
             self._api_path("/runtime/control"), self._handle_runtime_control
         )
         app.router.add_get(self._api_path("/settings"), self._handle_settings_get)
+        app.router.add_get(self._api_path("/models"), self._handle_models_get)
+        app.router.add_post(self._api_path("/models/upsert"), self._handle_models_upsert)
+        app.router.add_post(self._api_path("/models/delete"), self._handle_models_delete)
+        app.router.add_post(self._api_path("/models/providers/upsert"), self._handle_providers_upsert)
+        app.router.add_post(self._api_path("/models/providers/delete"), self._handle_providers_delete)
+        app.router.add_post(self._api_path("/models/router"), self._handle_models_router_save)
         app.router.add_get(self._api_path("/dashboard"), self._handle_dashboard_get)
         app.router.add_get(
             self._api_path("/characters/costume-meta"),
