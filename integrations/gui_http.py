@@ -421,6 +421,75 @@ class GuiHttpServer:
             write_root=Path(root) / "knowledge_docs",
         )
 
+    def _sedentary_gui_service(self):
+        from modules.runtime_settings import load_runtime_settings, update_runtime_settings
+        from services.gui_api.sedentary_service import SedentaryGuiService
+
+        apply_settings = None
+        app = self.app_ref
+        if app is not None and hasattr(app, "apply_external_settings"):
+            apply_settings = app.apply_external_settings
+        defaults = None
+        try:
+            import config as runtime_config
+
+            defaults = {
+                "sedentary_reminder_minutes": int(
+                    getattr(runtime_config, "SEDENTARY_REMINDER_MINUTES", 60) or 60
+                ),
+                "sedentary_break_minutes": int(
+                    getattr(runtime_config, "SEDENTARY_BREAK_MINUTES", 5) or 5
+                ),
+                "sedentary_cooldown_minutes": int(
+                    getattr(runtime_config, "SEDENTARY_REMINDER_COOLDOWN_MINUTES", 30)
+                    or 30
+                ),
+                "sedentary_popup_enabled": bool(
+                    getattr(runtime_config, "SEDENTARY_POPUP_ENABLED", True)
+                ),
+                "sedentary_status_visible": True,
+                "sedentary_popup_title": str(
+                    getattr(runtime_config, "SEDENTARY_POPUP_TITLE", "该起来活动一下了")
+                    or "该起来活动一下了"
+                ),
+                "sedentary_popup_message": str(
+                    getattr(
+                        runtime_config,
+                        "SEDENTARY_POPUP_MESSAGE",
+                        "你已经连续使用 {app_name} {active_minutes} 分钟。",
+                    )
+                    or "你已经连续使用 {app_name} {active_minutes} 分钟。"
+                ),
+                "sedentary_popup_image_path": str(
+                    getattr(runtime_config, "SEDENTARY_POPUP_IMAGE_PATH", "") or ""
+                ),
+                "sedentary_popup_snooze_minutes": int(
+                    getattr(runtime_config, "SEDENTARY_POPUP_SNOOZE_MINUTES", 10) or 10
+                ),
+                "sedentary_popup_auto_close_seconds": int(
+                    getattr(runtime_config, "SEDENTARY_POPUP_AUTO_CLOSE_SECONDS", 20)
+                    or 20
+                ),
+            }
+        except Exception:
+            defaults = None
+        return SedentaryGuiService(
+            load_runtime=load_runtime_settings,
+            update_runtime=update_runtime_settings,
+            apply_settings=apply_settings,
+            defaults=defaults,
+        )
+
+    def _sedentary_result_status(self, result: Dict[str, Any]) -> int:
+        error = str(result.get("error") or "")
+        if error in {"runtime_store_unavailable"}:
+            return 503
+        if error.startswith("apply_failed"):
+            return 500
+        if error in {"empty_payload"}:
+            return 400
+        return 400
+
     def _knowledge_result_status(self, result: Dict[str, Any]) -> int:
         error = str(result.get("error") or "")
         if error in {
@@ -2022,6 +2091,26 @@ class GuiHttpServer:
         }
         return self._json_response({"ok": True, "data": data})
 
+    async def _handle_sedentary_get(self, _request: web.Request) -> web.Response:
+        result = self._sedentary_gui_service().get_settings()
+        if not result.get("ok"):
+            return self._json_response(result, status=self._sedentary_result_status(result))
+        return self._json_response(result)
+
+    async def _handle_sedentary_save(self, request: web.Request) -> web.Response:
+        payload = await self._read_payload(request)
+        result = self._sedentary_gui_service().save_settings(payload)
+        if not result.get("ok"):
+            return self._json_response(result, status=self._sedentary_result_status(result))
+        return self._json_response(result)
+
+    async def _handle_sedentary_preview(self, request: web.Request) -> web.Response:
+        payload = await self._read_payload(request)
+        result = self._sedentary_gui_service().preview(payload)
+        if not result.get("ok"):
+            return self._json_response(result, status=self._sedentary_result_status(result))
+        return self._json_response(result)
+
     async def _handle_activity_ingest(self, request: web.Request) -> web.Response:
         store = self._get_memory_store()
         if store is None:
@@ -2238,6 +2327,11 @@ class GuiHttpServer:
         )
         app.router.add_get(
             self._api_path("/activity-config"), self._handle_activity_config
+        )
+        app.router.add_get(self._api_path("/sedentary"), self._handle_sedentary_get)
+        app.router.add_post(self._api_path("/sedentary"), self._handle_sedentary_save)
+        app.router.add_post(
+            self._api_path("/sedentary/preview"), self._handle_sedentary_preview
         )
         app.router.add_post(
             self._api_path("/activity-ingest"), self._handle_activity_ingest
