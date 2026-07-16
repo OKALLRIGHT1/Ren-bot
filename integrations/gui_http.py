@@ -519,6 +519,41 @@ class GuiHttpServer:
             return 404
         return 400
 
+    def _expression_library_gui_service(self):
+        from modules.runtime_settings import load_runtime_settings, update_runtime_settings
+        from services.gui_api.expression_library_service import ExpressionLibraryGuiService
+
+        return ExpressionLibraryGuiService(
+            store=self._get_memory_store(),
+            load_runtime=load_runtime_settings,
+            update_runtime=update_runtime_settings,
+        )
+
+    def _expression_result_status(self, result: Dict[str, Any]) -> int:
+        error = str(result.get("error") or "")
+        if error in {"memory_store_unavailable", "runtime_store_unavailable"}:
+            return 503
+        if error in {"not_found"}:
+            return 404
+        if error in {"invalid_id", "empty_fields", "empty_ids", "empty_payload"}:
+            return 400
+        return 400
+
+    def _meme_pack_gui_service(self):
+        from services.gui_api.meme_pack_service import MemePackGuiService
+
+        return MemePackGuiService(plugin_manager=self._get_plugin_manager())
+
+    def _meme_result_status(self, result: Dict[str, Any]) -> int:
+        error = str(result.get("error") or "")
+        if error in {"meme_store_unavailable"}:
+            return 503
+        if error in {"not_found"}:
+            return 404
+        if error in {"invalid_id", "empty_ids"}:
+            return 400
+        return 400
+
     def _knowledge_result_status(self, result: Dict[str, Any]) -> int:
         error = str(result.get("error") or "")
         if error in {
@@ -2184,6 +2219,121 @@ class GuiHttpServer:
             return self._json_response(result, status=self._info_sources_result_status(result))
         return self._json_response(result)
 
+    async def _handle_expression_list(self, request: web.Request) -> web.Response:
+        result = self._expression_library_gui_service().list_patterns(
+            character_name=str(request.query.get("character_name") or "").strip(),
+            scene=str(request.query.get("scene") or "").strip(),
+            query=str(request.query.get("query") or request.query.get("q") or "").strip(),
+            enabled_only=str(request.query.get("enabled_only") or "").strip().lower()
+            in {"1", "true", "yes"},
+            limit=int(request.query.get("limit") or 500),
+        )
+        if not result.get("ok"):
+            return self._json_response(result, status=self._expression_result_status(result))
+        return self._json_response(result)
+
+    async def _handle_expression_get(self, request: web.Request) -> web.Response:
+        pattern_id = str(request.query.get("id") or "").strip()
+        result = self._expression_library_gui_service().get_pattern(pattern_id)
+        if not result.get("ok"):
+            return self._json_response(result, status=self._expression_result_status(result))
+        return self._json_response(result)
+
+    async def _handle_expression_upsert(self, request: web.Request) -> web.Response:
+        payload = await self._read_payload(request)
+        result = self._expression_library_gui_service().upsert_pattern(payload)
+        if not result.get("ok"):
+            return self._json_response(result, status=self._expression_result_status(result))
+        return self._json_response(result)
+
+    async def _handle_expression_delete(self, request: web.Request) -> web.Response:
+        payload = await self._read_payload(request)
+        pattern_id = str(payload.get("id") or request.query.get("id") or "").strip()
+        result = self._expression_library_gui_service().delete_pattern(pattern_id)
+        if not result.get("ok"):
+            return self._json_response(result, status=self._expression_result_status(result))
+        return self._json_response(result)
+
+    async def _handle_expression_set_enabled(self, request: web.Request) -> web.Response:
+        payload = await self._read_payload(request)
+        ids = payload.get("ids") if isinstance(payload.get("ids"), list) else []
+        if not ids and payload.get("id"):
+            ids = [payload.get("id")]
+        result = self._expression_library_gui_service().set_enabled(
+            ids, bool(payload.get("enabled", True))
+        )
+        if not result.get("ok"):
+            return self._json_response(result, status=self._expression_result_status(result))
+        return self._json_response(result)
+
+    async def _handle_expression_runtime_get(self, _request: web.Request) -> web.Response:
+        result = self._expression_library_gui_service().get_runtime()
+        if not result.get("ok"):
+            return self._json_response(result, status=self._expression_result_status(result))
+        return self._json_response(result)
+
+    async def _handle_expression_runtime_save(self, request: web.Request) -> web.Response:
+        payload = await self._read_payload(request)
+        result = self._expression_library_gui_service().save_runtime(payload)
+        if not result.get("ok"):
+            return self._json_response(result, status=self._expression_result_status(result))
+        return self._json_response(result)
+
+    async def _handle_meme_list(self, request: web.Request) -> web.Response:
+        result = self._meme_pack_gui_service().list_assets(
+            query=str(request.query.get("query") or request.query.get("q") or "").strip(),
+            include_disabled=str(request.query.get("include_disabled") or "1")
+            .strip()
+            .lower()
+            not in {"0", "false", "no"},
+            limit=int(request.query.get("limit") or 500),
+        )
+        if not result.get("ok"):
+            return self._json_response(result, status=self._meme_result_status(result))
+        return self._json_response(result)
+
+    async def _handle_meme_get(self, request: web.Request) -> web.Response:
+        asset_id = str(request.query.get("id") or "").strip()
+        result = self._meme_pack_gui_service().get_asset(asset_id)
+        if not result.get("ok"):
+            return self._json_response(result, status=self._meme_result_status(result))
+        return self._json_response(result)
+
+    async def _handle_meme_update(self, request: web.Request) -> web.Response:
+        payload = await self._read_payload(request)
+        result = self._meme_pack_gui_service().update_asset(payload)
+        if not result.get("ok"):
+            return self._json_response(result, status=self._meme_result_status(result))
+        return self._json_response(result)
+
+    async def _handle_meme_set_enabled(self, request: web.Request) -> web.Response:
+        payload = await self._read_payload(request)
+        ids = payload.get("ids") if isinstance(payload.get("ids"), list) else []
+        if not ids and payload.get("id") is not None:
+            ids = [payload.get("id")]
+        result = self._meme_pack_gui_service().set_enabled(ids, bool(payload.get("enabled", True)))
+        if not result.get("ok"):
+            return self._json_response(result, status=self._meme_result_status(result))
+        return self._json_response(result)
+
+    async def _handle_meme_delete(self, request: web.Request) -> web.Response:
+        payload = await self._read_payload(request)
+        ids = payload.get("ids") if isinstance(payload.get("ids"), list) else []
+        if not ids and payload.get("id") is not None:
+            ids = [payload.get("id")]
+        result = self._meme_pack_gui_service().delete_assets(
+            ids, delete_files=bool(payload.get("delete_files", False))
+        )
+        if not result.get("ok"):
+            return self._json_response(result, status=self._meme_result_status(result))
+        return self._json_response(result)
+
+    async def _handle_meme_stats(self, _request: web.Request) -> web.Response:
+        result = self._meme_pack_gui_service().stats()
+        if not result.get("ok"):
+            return self._json_response(result, status=self._meme_result_status(result))
+        return self._json_response(result)
+
     async def _handle_activity_ingest(self, request: web.Request) -> web.Response:
         store = self._get_memory_store()
         if store is None:
@@ -2424,6 +2574,38 @@ class GuiHttpServer:
         app.router.add_post(
             self._api_path("/info-sources/test"), self._handle_info_sources_test
         )
+        app.router.add_get(
+            self._api_path("/expression-library"), self._handle_expression_list
+        )
+        app.router.add_get(
+            self._api_path("/expression-library/get"), self._handle_expression_get
+        )
+        app.router.add_post(
+            self._api_path("/expression-library/upsert"), self._handle_expression_upsert
+        )
+        app.router.add_post(
+            self._api_path("/expression-library/delete"), self._handle_expression_delete
+        )
+        app.router.add_post(
+            self._api_path("/expression-library/set-enabled"),
+            self._handle_expression_set_enabled,
+        )
+        app.router.add_get(
+            self._api_path("/expression-library/runtime"),
+            self._handle_expression_runtime_get,
+        )
+        app.router.add_post(
+            self._api_path("/expression-library/runtime"),
+            self._handle_expression_runtime_save,
+        )
+        app.router.add_get(self._api_path("/meme-pack"), self._handle_meme_list)
+        app.router.add_get(self._api_path("/meme-pack/get"), self._handle_meme_get)
+        app.router.add_get(self._api_path("/meme-pack/stats"), self._handle_meme_stats)
+        app.router.add_post(self._api_path("/meme-pack/update"), self._handle_meme_update)
+        app.router.add_post(
+            self._api_path("/meme-pack/set-enabled"), self._handle_meme_set_enabled
+        )
+        app.router.add_post(self._api_path("/meme-pack/delete"), self._handle_meme_delete)
         app.router.add_post(
             self._api_path("/activity-ingest"), self._handle_activity_ingest
         )
