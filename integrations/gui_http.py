@@ -490,6 +490,35 @@ class GuiHttpServer:
             return 400
         return 400
 
+    def _info_sources_gui_service(self):
+        from services.gui_api.info_sources_service import InfoSourcesGuiService
+
+        root = self._find_backend_root(os.getcwd()) or os.getcwd()
+        source_root = Path(root) / "data" / "info_sources"
+        secret_store = None
+        try:
+            from modules.plugin_secret_store import PluginSecretStore
+
+            secret_store = PluginSecretStore()
+        except Exception:
+            secret_store = None
+        return InfoSourcesGuiService(source_root=source_root, secret_store=secret_store)
+
+    def _info_sources_result_status(self, result: Dict[str, Any]) -> int:
+        error = str(result.get("error") or "")
+        if error in {"secret_store_unavailable"}:
+            return 503
+        if error in {
+            "invalid_id",
+            "invalid_provider",
+            "empty_text",
+            "empty_payload",
+        }:
+            return 400
+        if "not found" in error.lower() or error in {"not_found"}:
+            return 404
+        return 400
+
     def _knowledge_result_status(self, result: Dict[str, Any]) -> int:
         error = str(result.get("error") or "")
         if error in {
@@ -2111,6 +2140,50 @@ class GuiHttpServer:
             return self._json_response(result, status=self._sedentary_result_status(result))
         return self._json_response(result)
 
+    async def _handle_info_sources_list(self, request: web.Request) -> web.Response:
+        provider_id = str(request.query.get("provider_id") or request.query.get("provider") or "").strip()
+        result = self._info_sources_gui_service().list_overview(provider_id=provider_id)
+        if not result.get("ok"):
+            return self._json_response(result, status=self._info_sources_result_status(result))
+        return self._json_response(result)
+
+    async def _handle_info_sources_endpoint_get(self, request: web.Request) -> web.Response:
+        endpoint_id = str(request.query.get("id") or request.query.get("endpoint_id") or "").strip()
+        provider_id = str(request.query.get("provider_id") or request.query.get("provider") or "").strip()
+        result = self._info_sources_gui_service().get_endpoint(endpoint_id, provider_id=provider_id)
+        if not result.get("ok"):
+            return self._json_response(result, status=self._info_sources_result_status(result))
+        return self._json_response(result)
+
+    async def _handle_info_sources_endpoint_save(self, request: web.Request) -> web.Response:
+        payload = await self._read_payload(request)
+        result = self._info_sources_gui_service().save_endpoint(payload)
+        if not result.get("ok"):
+            return self._json_response(result, status=self._info_sources_result_status(result))
+        return self._json_response(result)
+
+    async def _handle_info_sources_token(self, request: web.Request) -> web.Response:
+        payload = await self._read_payload(request)
+        result = self._info_sources_gui_service().update_token(payload)
+        if not result.get("ok"):
+            return self._json_response(result, status=self._info_sources_result_status(result))
+        return self._json_response(result)
+
+    async def _handle_info_sources_draft(self, request: web.Request) -> web.Response:
+        payload = await self._read_payload(request)
+        text = str(payload.get("text") or payload.get("doc") or "").strip()
+        result = self._info_sources_gui_service().build_draft(text)
+        if not result.get("ok"):
+            return self._json_response(result, status=self._info_sources_result_status(result))
+        return self._json_response(result)
+
+    async def _handle_info_sources_test(self, request: web.Request) -> web.Response:
+        payload = await self._read_payload(request)
+        result = await self._info_sources_gui_service().test_endpoint(payload)
+        if not result.get("ok"):
+            return self._json_response(result, status=self._info_sources_result_status(result))
+        return self._json_response(result)
+
     async def _handle_activity_ingest(self, request: web.Request) -> web.Response:
         store = self._get_memory_store()
         if store is None:
@@ -2332,6 +2405,24 @@ class GuiHttpServer:
         app.router.add_post(self._api_path("/sedentary"), self._handle_sedentary_save)
         app.router.add_post(
             self._api_path("/sedentary/preview"), self._handle_sedentary_preview
+        )
+        app.router.add_get(self._api_path("/info-sources"), self._handle_info_sources_list)
+        app.router.add_get(
+            self._api_path("/info-sources/endpoint"),
+            self._handle_info_sources_endpoint_get,
+        )
+        app.router.add_post(
+            self._api_path("/info-sources/endpoint"),
+            self._handle_info_sources_endpoint_save,
+        )
+        app.router.add_post(
+            self._api_path("/info-sources/token"), self._handle_info_sources_token
+        )
+        app.router.add_post(
+            self._api_path("/info-sources/draft"), self._handle_info_sources_draft
+        )
+        app.router.add_post(
+            self._api_path("/info-sources/test"), self._handle_info_sources_test
         )
         app.router.add_post(
             self._api_path("/activity-ingest"), self._handle_activity_ingest
