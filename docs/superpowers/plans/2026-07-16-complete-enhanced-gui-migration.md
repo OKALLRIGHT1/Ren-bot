@@ -91,7 +91,7 @@ Status values: `available` · `partial` · `raw-json-only` · `placeholder` · `
 | 10 | Expression library | expression_library_manager | plugin/data expression store | none | none | list/filter/edit/delete/stats | expression tests | missing |
 | 11 | Meme pack | meme_manager | `plugins/meme_pack` | none dedicated GUI API | none | list/preview/edit triggers/stats | meme tests | missing |
 | 12 | Diary | diary_manager | diary files + chat_support diary | none GUI list API | none | list/get/save/delete/export | diary tests | missing |
-| 13 | Memory center | memory_editor | `modules/memory_sqlite.py` / advanced_memory | items/episodes/transcript only | Memory tabs raw-ish tables | persons, category tree, vector status, search test, rebuild index, embedding model | memory domain tests | partial |
+| 13 | Memory center | memory_editor | `modules/memory_sqlite.py` / advanced_memory / `services/gui_api/memory_service.py` | core list/upsert/delete/category + vector status/rebuild/embedding test + legacy items/episodes/transcript | `MemoryPage` core/vector + legacy tabs | profile overview polish, vector row inspector | memory service + page unit tests | partial |
 | 14 | Status screen | status_screen_manager | status_screen modules | none | none | get/save/test-send image assets | status screen tests | missing |
 | 15 | App recognition | screen_app_rules | `modules/screen_app_registry.py` | none | none | rules CRUD/test classify | app rules tests | missing |
 | 16 | Sedentary | sedentary_page | runtime_settings + activity config | `GET /activity-config` client-safe | none dedicated UI | save sedentary UI fields, popup text/image, test reminder, notify enhanced | sedentary API+page | partial |

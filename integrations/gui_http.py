@@ -370,6 +370,48 @@ class GuiHttpServer:
         except Exception:
             return None
 
+    def _get_brain(self):
+        chat_service = (
+            getattr(self.app_ref, "chat_service", None) if self.app_ref is not None else None
+        )
+        brain = getattr(chat_service, "brain", None)
+        if brain is not None:
+            return brain
+        return getattr(self.app_ref, "brain", None) if self.app_ref is not None else None
+
+    def _get_memory_core(self):
+        brain = self._get_brain()
+        memory_core = getattr(brain, "memory_core", None) if brain is not None else None
+        if memory_core is not None:
+            return memory_core
+        store = self._get_memory_store()
+        if store is None:
+            return None
+        try:
+            from config import MEMORY_SETTINGS
+            from modules.memory_core import MemoryCoreService
+
+            core = MemoryCoreService(store, settings=MEMORY_SETTINGS)
+            core.initialize()
+            return core
+        except Exception:
+            return None
+
+    def _memory_gui_service(self):
+        from services.gui_api.memory_service import MemoryGuiService
+
+        return MemoryGuiService(memory_core=self._get_memory_core(), brain=self._get_brain())
+
+    def _memory_result_status(self, result: Dict[str, Any]) -> int:
+        error = str(result.get("error") or "")
+        if error in {"not_found"}:
+            return 404
+        if error in {"memory_core_unavailable", "brain_unavailable"}:
+            return 503
+        if error in {"empty_content", "invalid_id"}:
+            return 400
+        return 400
+
     def _get_plugin_manager(self):
         return getattr(self.app_ref, "plugin_manager", None)
 
@@ -1566,6 +1608,67 @@ class GuiHttpServer:
             status=status,
         )
 
+    async def _handle_memory_core_list(self, request: web.Request) -> web.Response:
+        result = self._memory_gui_service().list_core_records(
+            status=str(request.query.get("status") or "active"),
+            person_id=str(request.query.get("person_id") or ""),
+            category_id=str(request.query.get("category_id") or "all"),
+            query=str(request.query.get("query") or ""),
+            limit=int(request.query.get("limit") or 500),
+        )
+        if not result.get("ok"):
+            return self._json_response(result, status=self._memory_result_status(result))
+        return self._json_response(result)
+
+    async def _handle_memory_core_get(self, request: web.Request) -> web.Response:
+        record_id = str(request.query.get("id") or request.query.get("record_id") or "").strip()
+        result = self._memory_gui_service().get_core_record(record_id)
+        if not result.get("ok"):
+            return self._json_response(result, status=self._memory_result_status(result))
+        return self._json_response(result)
+
+    async def _handle_memory_core_upsert(self, request: web.Request) -> web.Response:
+        payload = await self._read_payload(request)
+        result = self._memory_gui_service().upsert_core_record(payload)
+        if not result.get("ok"):
+            return self._json_response(result, status=self._memory_result_status(result))
+        return self._json_response(result)
+
+    async def _handle_memory_core_delete(self, request: web.Request) -> web.Response:
+        payload = await self._read_payload(request)
+        record_id = str(payload.get("id") or payload.get("record_id") or "").strip()
+        result = self._memory_gui_service().delete_core_record(record_id)
+        if not result.get("ok"):
+            return self._json_response(result, status=self._memory_result_status(result))
+        return self._json_response(result)
+
+    async def _handle_memory_core_category(self, request: web.Request) -> web.Response:
+        payload = await self._read_payload(request)
+        record_id = str(payload.get("id") or payload.get("record_id") or "").strip()
+        category_id = str(payload.get("category_id") or payload.get("category_override") or "")
+        result = self._memory_gui_service().set_category_override(record_id, category_id)
+        if not result.get("ok"):
+            return self._json_response(result, status=self._memory_result_status(result))
+        return self._json_response(result)
+
+    async def _handle_memory_vector_status(self, _request: web.Request) -> web.Response:
+        result = self._memory_gui_service().vector_status()
+        if not result.get("ok"):
+            return self._json_response(result, status=self._memory_result_status(result))
+        return self._json_response(result)
+
+    async def _handle_memory_vector_rebuild(self, _request: web.Request) -> web.Response:
+        result = self._memory_gui_service().rebuild_vector_index()
+        if not result.get("ok"):
+            return self._json_response(result, status=self._memory_result_status(result))
+        return self._json_response(result)
+
+    async def _handle_memory_embedding_test(self, _request: web.Request) -> web.Response:
+        result = self._memory_gui_service().test_embedding()
+        if not result.get("ok"):
+            return self._json_response(result, status=self._memory_result_status(result))
+        return self._json_response(result)
+
     async def _handle_memory_items(self, request: web.Request) -> web.Response:
         payload = dict(request.query)
         return self._json_response(
@@ -1898,6 +2001,26 @@ class GuiHttpServer:
         )
         app.router.add_post(
             self._api_path("/dependencies/install"), self._handle_dependency_install
+        )
+        app.router.add_get(self._api_path("/memory/core"), self._handle_memory_core_list)
+        app.router.add_get(self._api_path("/memory/core/get"), self._handle_memory_core_get)
+        app.router.add_post(
+            self._api_path("/memory/core/upsert"), self._handle_memory_core_upsert
+        )
+        app.router.add_post(
+            self._api_path("/memory/core/delete"), self._handle_memory_core_delete
+        )
+        app.router.add_post(
+            self._api_path("/memory/core/category"), self._handle_memory_core_category
+        )
+        app.router.add_get(
+            self._api_path("/memory/vector/status"), self._handle_memory_vector_status
+        )
+        app.router.add_post(
+            self._api_path("/memory/vector/rebuild"), self._handle_memory_vector_rebuild
+        )
+        app.router.add_post(
+            self._api_path("/memory/embedding/test"), self._handle_memory_embedding_test
         )
         app.router.add_get(self._api_path("/memory/items"), self._handle_memory_items)
         app.router.add_post(
