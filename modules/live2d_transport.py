@@ -123,15 +123,59 @@ class LegacyLocalWebSocketTransport:
 class GuiWebSocketTransport:
     name = "gui_ws"
 
-    def __init__(self, gui_ws_server: Any):
+    def __init__(self, gui_ws_server: Any, media_registry: Any | None = None):
         self._gui_ws_server = gui_ws_server
+        self._media_registry = media_registry
+
+    def _attach_media_ticket(self, message: dict[str, Any]) -> dict[str, Any]:
+        payload = dict(message or {})
+        try:
+            msg = int(payload.get("msg") or 0)
+        except (TypeError, ValueError):
+            msg = 0
+        if msg not in {13500, 13600}:
+            return payload
+        data = payload.get("data")
+        if not isinstance(data, dict):
+            return payload
+        sound = str(data.get("sound") or "").strip()
+        if not sound or sound.startswith(("http://", "https://", "asset://", "tauri://")):
+            return payload
+        from pathlib import Path
+
+        from integrations.gui_media import MediaTicketError, guess_audio_media_type
+
+        path = Path(sound).expanduser()
+        if not path.is_file():
+            return payload
+        media_type = guess_audio_media_type(path)
+        if not media_type or self._media_registry is None:
+            return payload
+        try:
+            ticket = self._media_registry.register(path, media_type=media_type)
+        except MediaTicketError:
+            return payload
+        except Exception:
+            return payload
+        next_data = dict(data)
+        # Remote clients must fetch via ticket; strip host-local absolute paths.
+        next_data.pop("sound", None)
+        payload["data"] = next_data
+        payload["media"] = {
+            "ticket": ticket,
+            "content_type": media_type,
+        }
+        return payload
 
     async def deliver(self, delivery: Live2DDelivery) -> None:
         if self._gui_ws_server is None:
             raise RuntimeError("gui websocket server is not available")
         from integrations.gui_protocol import build_live2d_envelope
 
-        envelope = build_live2d_envelope(delivery.command_id, delivery.message)
+        message = self._attach_media_ticket(delivery.message)
+        envelope = build_live2d_envelope(delivery.command_id, message)
+        if isinstance(message.get("media"), dict):
+            envelope["media"] = dict(message["media"])
         emit_capability = getattr(self._gui_ws_server, "emit_capability", None)
         if callable(emit_capability):
             emit_capability("live2d.protocol.v1", envelope)

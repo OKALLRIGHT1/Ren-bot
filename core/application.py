@@ -154,6 +154,7 @@ from integrations.chat_gateway import (
 from integrations.gui_ws import GuiWebSocketServer
 from integrations.gui_http import GuiHttpServer
 from integrations.gui_access import get_or_create_gui_access_token
+from integrations.gui_media import GuiMediaRegistry
 from modules.live2d_transport import (
     GuiWebSocketTransport,
     LegacyLocalWebSocketTransport,
@@ -1190,6 +1191,7 @@ class Live2DApplication:
         )
 
         gui_access_token = get_or_create_gui_access_token()
+        self.gui_media_registry = GuiMediaRegistry()
         self.gui_ws_server = GuiWebSocketServer(
             host=initial_external_settings.get("gui_ws_host", GUI_WS_HOST),
             port=initial_external_settings.get("gui_ws_port", GUI_WS_PORT),
@@ -1202,7 +1204,10 @@ class Live2DApplication:
             Live2DTransportBus(
                 [
                     LegacyLocalWebSocketTransport(),
-                    GuiWebSocketTransport(self.gui_ws_server),
+                    GuiWebSocketTransport(
+                        self.gui_ws_server,
+                        media_registry=self.gui_media_registry,
+                    ),
                 ],
                 logger=self.logger,
             )
@@ -1214,6 +1219,7 @@ class Live2DApplication:
             logger=self.logger,
             app_ref=self,
             access_token=gui_access_token,
+            media_registry=self.gui_media_registry,
         )
         if MusicSensor:
             self.music_sensor = MusicSensor(self.chat_service)

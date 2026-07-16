@@ -12,7 +12,11 @@ from typing import Any, Dict, Optional
 from urllib.parse import urlparse
 
 from aiohttp import web
+from integrations.gui_media import GuiMediaRegistry, MediaTicketError
 from modules.security_redaction import is_secret_setting
+
+
+LIVE2D_ACTIVITY_SOURCE = "live2d-tauri"
 
 
 class GuiHttpServer:
@@ -28,6 +32,7 @@ class GuiHttpServer:
         logger: Optional[Any] = None,
         app_ref: Optional[Any] = None,
         access_token: str = "",
+        media_registry: Optional[GuiMediaRegistry] = None,
     ):
         self.host = str(host or "127.0.0.1").strip() or "127.0.0.1"
         self.port = int(port)
@@ -35,6 +40,7 @@ class GuiHttpServer:
         self.logger = logger
         self.app_ref = app_ref
         self.access_token = str(access_token or "").strip()
+        self.media_registry = media_registry or GuiMediaRegistry()
 
         self._thread: Optional[threading.Thread] = None
         self._server_loop: Optional[asyncio.AbstractEventLoop] = None
@@ -213,33 +219,74 @@ class GuiHttpServer:
         return value
 
     @classmethod
-    def _mask_secrets(cls, value: Any, parent_key: str = "") -> Any:
+    def _mask_secrets(
+        cls,
+        value: Any,
+        parent_key: str = "",
+        parent_is_secret: bool = False,
+    ) -> Any:
         if isinstance(value, dict):
             masked: Dict[str, Any] = {}
             for key, item in value.items():
-                if cls._is_secret_key(str(key)):
+                key_text = str(key)
+                secret_setting = is_secret_setting(key_text, item)
+                if secret_setting and isinstance(item, dict):
+                    masked[key] = cls._mask_secrets(
+                        item,
+                        key_text,
+                        parent_is_secret=True,
+                    )
+                elif secret_setting:
                     masked[key] = cls._mask_secret_value(item)
                 else:
-                    masked[key] = cls._mask_secrets(item, str(key))
+                    child_parent = (
+                        parent_key
+                        if key_text == "default" and parent_is_secret
+                        else key_text
+                    )
+                    masked[key] = cls._mask_secrets(
+                        item,
+                        child_parent,
+                        parent_is_secret=parent_is_secret and key_text == "default",
+                    )
             return masked
         if isinstance(value, list):
-            return [cls._mask_secrets(item, parent_key) for item in value]
-        if cls._is_secret_key(parent_key):
+            return [
+                cls._mask_secrets(item, parent_key, parent_is_secret)
+                for item in value
+            ]
+        if parent_is_secret or cls._is_secret_key(parent_key):
             return cls._mask_secret_value(value)
         return value
 
     @classmethod
     def _restore_masked_secrets(
-        cls, incoming: Any, current: Any, parent_key: str = ""
+        cls,
+        incoming: Any,
+        current: Any,
+        parent_key: str = "",
+        parent_is_secret: bool = False,
     ) -> Any:
         if isinstance(incoming, dict):
             existing = current if isinstance(current, dict) else {}
             restored: Dict[str, Any] = {}
             for key, value in incoming.items():
+                key_text = str(key)
+                secret_setting = is_secret_setting(key_text, value)
+                child_parent = (
+                    parent_key
+                    if key_text == "default" and parent_is_secret
+                    else key_text
+                )
                 restored[key] = cls._restore_masked_secrets(
                     value,
                     existing.get(key),
-                    str(key),
+                    child_parent,
+                    parent_is_secret=(
+                        secret_setting
+                        if isinstance(value, dict)
+                        else parent_is_secret and key_text == "default"
+                    ),
                 )
             return restored
         if isinstance(incoming, list):
@@ -250,13 +297,18 @@ class GuiHttpServer:
                     existing_items[index] if index < len(existing_items) else None
                 )
                 restored_list.append(
-                    cls._restore_masked_secrets(item, existing_item, parent_key)
+                    cls._restore_masked_secrets(
+                        item,
+                        existing_item,
+                        parent_key,
+                        parent_is_secret,
+                    )
                 )
             return restored_list
         if (
             isinstance(incoming, str)
             and incoming == cls.SECRET_MASK
-            and cls._is_secret_key(parent_key)
+            and (parent_is_secret or cls._is_secret_key(parent_key))
             and isinstance(current, str)
         ):
             return current
@@ -853,15 +905,16 @@ class GuiHttpServer:
         chat_service = (
             getattr(self.app_ref, "chat_service", None) if self.app_ref is not None else None
         )
-        tracker = getattr(chat_service, "reply_effect_tracker", None)
-        if tracker is None or not hasattr(tracker, "recent"):
-            return {"records": [], "stats": {}, "error": "reply_effect_tracker_unavailable"}
+        brain = getattr(chat_service, "brain", None)
+        memory_core = getattr(brain, "memory_core", None)
+        if memory_core is None:
+            return {"records": [], "stats": {}, "error": "memory_core_unavailable"}
         limit = max(1, min(500, int(payload.get("limit") or 50)))
         session_id = str(payload.get("session_id") or "").strip()
         try:
             return {
-                "records": tracker.recent(limit=limit, session_id=session_id),
-                "stats": tracker.stats(limit=max(limit, 200), session_id=session_id),
+                "records": memory_core.list_feedback(limit=limit, session_id=session_id),
+                "stats": memory_core.feedback_stats(limit=max(limit, 200), session_id=session_id),
             }
         except Exception as exc:
             return {"records": [], "stats": {}, "error": str(exc)}
@@ -1018,6 +1071,26 @@ class GuiHttpServer:
 
     async def _handle_runtime_status(self, _request: web.Request) -> web.Response:
         return self._json_response({"ok": True, "data": self._build_runtime_status()})
+
+    async def _handle_runtime_control(self, request: web.Request) -> web.Response:
+        payload = await self._read_payload(request)
+        action = str(payload.get("action") or "").strip().lower()
+        if action not in {"shutdown", "restart"}:
+            return self._json_response(
+                {"ok": False, "error": "invalid_action"}, status=400
+            )
+        control = getattr(self.app_ref, "request_runtime_control", None)
+        if not callable(control):
+            return self._json_response(
+                {"ok": False, "error": "runtime_control_unavailable"}, status=409
+            )
+        ok, error = control(action)
+        if not ok:
+            return self._json_response(
+                {"ok": False, "error": str(error or "runtime_control_failed")},
+                status=409,
+            )
+        return self._json_response({"ok": True, "action": action})
 
     async def _handle_settings_get(self, _request: web.Request) -> web.Response:
         root = self._find_backend_root(os.getcwd())
@@ -1413,6 +1486,16 @@ class GuiHttpServer:
             return self._json_response(
                 {"ok": False, "error": "payload_must_be_object"}, status=400
             )
+        source = str(payload.get("source") or "").strip()
+        if source != LIVE2D_ACTIVITY_SOURCE:
+            return self._json_response(
+                {
+                    "ok": False,
+                    "error": "invalid_activity_source",
+                    "expected": LIVE2D_ACTIVITY_SOURCE,
+                },
+                status=400,
+            )
         try:
             if hasattr(store, "ingest_activity_event"):
                 result = store.ingest_activity_event(payload)
@@ -1426,11 +1509,39 @@ class GuiHttpServer:
                 {"ok": False, "error": f"save_failed: {exc}"}, status=500
             )
 
+    async def _handle_media_download(self, request: web.Request) -> web.Response:
+        ticket = str(request.match_info.get("ticket") or "").strip()
+        if not ticket:
+            return self._json_response(
+                {"ok": False, "error": "ticket_required"}, status=400
+            )
+        try:
+            opened = self.media_registry.consume(ticket)
+        except MediaTicketError as exc:
+            return self._json_response(
+                {"ok": False, "error": str(exc)}, status=404
+            )
+        except Exception as exc:
+            return self._json_response(
+                {"ok": False, "error": f"media_unavailable: {exc}"}, status=500
+            )
+        return web.FileResponse(
+            path=opened.path,
+            headers={
+                "Content-Type": opened.media_type,
+                "Cache-Control": "no-store",
+                "X-Content-Type-Options": "nosniff",
+            },
+        )
+
     async def _async_start(self) -> None:
         app = web.Application(middlewares=[self._cors_middleware, self._auth_middleware])
         app.router.add_get(self._api_path("/health"), self._handle_health)
         app.router.add_get(
             self._api_path("/runtime/status"), self._handle_runtime_status
+        )
+        app.router.add_post(
+            self._api_path("/runtime/control"), self._handle_runtime_control
         )
         app.router.add_get(self._api_path("/settings"), self._handle_settings_get)
         app.router.add_get(self._api_path("/dashboard"), self._handle_dashboard_get)
@@ -1513,6 +1624,9 @@ class GuiHttpServer:
         )
         app.router.add_post(
             self._api_path("/activity-ingest"), self._handle_activity_ingest
+        )
+        app.router.add_get(
+            self._api_path("/media/{ticket}"), self._handle_media_download
         )
         app.router.add_route("OPTIONS", "/{tail:.*}", self._handle_health)
         app.router.add_post(
