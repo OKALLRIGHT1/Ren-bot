@@ -52,7 +52,11 @@ class GuiWebSocketServer:
 
     def _extract_token(self, ws: websockets.WebSocketServerProtocol, raw_path: str) -> str:
         try:
-            headers = getattr(ws, "request_headers", {}) or {}
+            headers = getattr(ws, "request_headers", None)
+            if not headers:
+                request = getattr(ws, "request", None)
+                headers = getattr(request, "headers", None)
+            headers = headers or {}
             header_token = str(headers.get("X-GUI-Token") or "").strip()
             if header_token:
                 return header_token
@@ -67,6 +71,17 @@ class GuiWebSocketServer:
         values = parse_qs(query)
         token_values = values.get("token") or []
         return str(token_values[0] if token_values else "").strip()
+
+    def _connection_path(
+        self, ws: websockets.WebSocketServerProtocol, raw_path: str | None
+    ) -> str:
+        if raw_path:
+            return str(raw_path)
+        legacy_path = str(getattr(ws, "path", "") or "")
+        if legacy_path:
+            return legacy_path
+        request = getattr(ws, "request", None)
+        return str(getattr(request, "path", "") or self.path)
 
     def _authorized(self, ws: websockets.WebSocketServerProtocol, raw_path: str) -> bool:
         if not self.access_token:
@@ -161,10 +176,7 @@ class GuiWebSocketServer:
             asyncio.run_coroutine_threadsafe(self.broadcast(payload), self._loop)
 
     async def _handle_client(self, ws: websockets.WebSocketServerProtocol, path: str | None = None) -> None:
-        if path is None:
-            path = getattr(ws, 'path', '')
-        if not path:
-            path = self.path
+        path = self._connection_path(ws, path)
         if not self._path_allowed(path):
             try:
                 await ws.close(code=1008, reason="invalid_path")
