@@ -402,6 +402,25 @@ class GuiHttpServer:
 
         return MemoryGuiService(memory_core=self._get_memory_core(), brain=self._get_brain())
 
+    def _diary_gui_service(self):
+        from services.gui_api.diary_service import DiaryGuiService
+
+        root = self._find_backend_root(os.getcwd()) or os.getcwd()
+        return DiaryGuiService(
+            store=self._get_memory_store(),
+            export_root=Path(root) / "output",
+        )
+
+    def _diary_result_status(self, result: Dict[str, Any]) -> int:
+        error = str(result.get("error") or "")
+        if error in {"not_found", "no_diaries"}:
+            return 404
+        if error in {"memory_store_unavailable"}:
+            return 503
+        if error in {"empty_fields", "invalid_id"}:
+            return 400
+        return 400
+
     def _memory_result_status(self, result: Dict[str, Any]) -> int:
         error = str(result.get("error") or "")
         if error in {"not_found"}:
@@ -1608,6 +1627,49 @@ class GuiHttpServer:
             status=status,
         )
 
+    async def _handle_diary_list(self, request: web.Request) -> web.Response:
+        result = self._diary_gui_service().list_diaries(
+            query=str(request.query.get("query") or ""),
+            limit=int(request.query.get("limit") or 500),
+        )
+        if not result.get("ok"):
+            return self._json_response(result, status=self._diary_result_status(result))
+        return self._json_response(result)
+
+    async def _handle_diary_get(self, request: web.Request) -> web.Response:
+        diary_id = str(request.query.get("id") or request.query.get("diary_id") or "").strip()
+        result = self._diary_gui_service().get_diary(diary_id)
+        if not result.get("ok"):
+            return self._json_response(result, status=self._diary_result_status(result))
+        return self._json_response(result)
+
+    async def _handle_diary_upsert(self, request: web.Request) -> web.Response:
+        payload = await self._read_payload(request)
+        result = self._diary_gui_service().upsert_diary(payload)
+        if not result.get("ok"):
+            return self._json_response(result, status=self._diary_result_status(result))
+        return self._json_response(result)
+
+    async def _handle_diary_delete(self, request: web.Request) -> web.Response:
+        payload = await self._read_payload(request)
+        diary_id = str(payload.get("id") or payload.get("diary_id") or "").strip()
+        result = self._diary_gui_service().delete_diary(diary_id)
+        if not result.get("ok"):
+            return self._json_response(result, status=self._diary_result_status(result))
+        return self._json_response(result)
+
+    async def _handle_diary_export(self, request: web.Request) -> web.Response:
+        payload = await self._read_payload(request)
+        ids = payload.get("ids") if isinstance(payload.get("ids"), list) else None
+        result = self._diary_gui_service().export_markdown(
+            query=str(payload.get("query") or ""),
+            ids=ids,
+            path=str(payload.get("path") or ""),
+        )
+        if not result.get("ok"):
+            return self._json_response(result, status=self._diary_result_status(result))
+        return self._json_response(result)
+
     async def _handle_memory_core_list(self, request: web.Request) -> web.Response:
         result = self._memory_gui_service().list_core_records(
             status=str(request.query.get("status") or "active"),
@@ -2002,6 +2064,11 @@ class GuiHttpServer:
         app.router.add_post(
             self._api_path("/dependencies/install"), self._handle_dependency_install
         )
+        app.router.add_get(self._api_path("/diary"), self._handle_diary_list)
+        app.router.add_get(self._api_path("/diary/get"), self._handle_diary_get)
+        app.router.add_post(self._api_path("/diary/upsert"), self._handle_diary_upsert)
+        app.router.add_post(self._api_path("/diary/delete"), self._handle_diary_delete)
+        app.router.add_post(self._api_path("/diary/export"), self._handle_diary_export)
         app.router.add_get(self._api_path("/memory/core"), self._handle_memory_core_list)
         app.router.add_get(self._api_path("/memory/core/get"), self._handle_memory_core_get)
         app.router.add_post(

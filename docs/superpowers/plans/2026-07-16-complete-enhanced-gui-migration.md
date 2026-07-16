@@ -90,7 +90,7 @@ Status values: `available` · `partial` · `raw-json-only` · `placeholder` · `
 | 9 | Knowledge base | knowledge manager + import wizard | `modules/memory/knowledge_store.py` | none | none | dirs/docs/import/delete/reindex/search/import-chat | knowledge tests | missing |
 | 10 | Expression library | expression_library_manager | plugin/data expression store | none | none | list/filter/edit/delete/stats | expression tests | missing |
 | 11 | Meme pack | meme_manager | `plugins/meme_pack` | none dedicated GUI API | none | list/preview/edit triggers/stats | meme tests | missing |
-| 12 | Diary | diary_manager | diary files + chat_support diary | none GUI list API | none | list/get/save/delete/export | diary tests | missing |
+| 12 | Diary | diary_manager | episodes + `services/gui_api/diary_service.py` | list/get/upsert/delete/export | `DiaryPage` | create-new diary without existing id optional polish | diary service + page unit tests | available |
 | 13 | Memory center | memory_editor | `modules/memory_sqlite.py` / advanced_memory / `services/gui_api/memory_service.py` | core list/upsert/delete/category + vector status/rebuild/embedding test + legacy items/episodes/transcript | `MemoryPage` core/vector + legacy tabs | profile overview polish, vector row inspector | memory service + page unit tests | partial |
 | 14 | Status screen | status_screen_manager | status_screen modules | none | none | get/save/test-send image assets | status screen tests | missing |
 | 15 | App recognition | screen_app_rules | `modules/screen_app_registry.py` | none | none | rules CRUD/test classify | app rules tests | missing |
