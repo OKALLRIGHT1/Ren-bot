@@ -205,39 +205,22 @@ async def _resolve_host() -> str:
 
 async def _send_to_models(msg: int, msg_id: int, data_builder, max_retries: int = 2):
     """
-    无 ACK 模式下的稳定发送：
-    - 同一连接 send 串行化（send_lock）
-    - 短超时 + 小重试
-    - 失败标记 broken，下一次自动重连
+    构造 Live2D 指令并通过可插拔传输总线输出。
+    默认总线仅包含本地旧 WebSocket；应用层可注入 GUI 组合总线。
     """
-    retry_count = 0
-    while retry_count <= max_retries:
+    del max_retries  # retries are owned by individual transports
+    from modules.live2d_transport import send_live2d_message
+
+    last_error: Exception | None = None
+    for mid in LIVE2D_MODEL_IDS:
+        payload = {"msg": msg, "msgId": msg_id, "data": data_builder(mid)}
         try:
-            ws = await _connection_pool.get_connection()
-
-            # ✅ 串行化 send：避免并发写一个 ws
-            async with _connection_pool._send_lock:
-                for mid in LIVE2D_MODEL_IDS:
-                    payload = {"msg": msg, "msgId": msg_id, "data": data_builder(mid)}
-                    await asyncio.wait_for(
-                        ws.send(json.dumps(payload)), timeout=SEND_TIMEOUT
-                    )
-
-            return  # 成功发送，结束
-
-        except Exception as e:
-            retry_count += 1
-            await _connection_pool.mark_broken()
-
-            if retry_count <= max_retries:
-                _get_logger().warning(
-                    f"发送失败(尝试 {retry_count}/{max_retries}): {e}"
-                )
-                await asyncio.sleep(0.1)
-                continue
-
-            _get_logger().error(f"发送失败，已达最大重试次数: {e}")
-            raise
+            await send_live2d_message(payload)
+        except Exception as exc:
+            last_error = exc
+            _get_logger().error(f"发送失败: {exc}")
+    if last_error is not None:
+        raise last_error
 
 
 # ==========================================

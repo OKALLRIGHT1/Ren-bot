@@ -154,6 +154,22 @@ from integrations.chat_gateway import (
 from integrations.gui_ws import GuiWebSocketServer
 from integrations.gui_http import GuiHttpServer
 from integrations.gui_access import get_or_create_gui_access_token
+from modules.live2d_transport import (
+    GuiWebSocketTransport,
+    LegacyLocalWebSocketTransport,
+    Live2DTransportBus,
+    configure_live2d_transport,
+)
+
+
+LIVE2D_ONLY_APP_ID = "com.live2d-only.app"
+LIVE2D_ACTIVITY_SETTING_KEYS = (
+    "gui_activity_endpoint",
+    "gui_access_token",
+    "sedentary_reminder_minutes",
+    "sedentary_break_minutes",
+    "sedentary_cooldown_minutes",
+)
 
 try:
     from modules.live2d import go_idle
@@ -209,6 +225,9 @@ class Live2DApplication:
         self.display_mqtt_client = None
         self.display_state_config_path = Path("./data/display_state_config.json")
         self.display_mqtt_last_error = "未初始化"
+        self._runtime_mode = ""
+        self._headless_stop_event = threading.Event()
+        self._requested_exit_code = 0
 
         # 鏃ヨ鐘舵€佹爣璁帮紝闃叉閲嶅璁板綍
         self.last_summary_date = None
@@ -271,12 +290,62 @@ class Live2DApplication:
             "gui_http_prefix": getattr(server, "path_prefix", GUI_HTTP_PREFIX),
             "gui_activity_endpoint": endpoint,
         }
-        if all(settings.get(key) == value for key, value in patch.items()):
-            return
-        settings.update(patch)
-        self._save_runtime_settings(settings)
+        access_token = str(getattr(server, "access_token", "") or "").strip()
+        if access_token:
+            patch["gui_access_token"] = access_token
+        if not all(settings.get(key) == value for key, value in patch.items()):
+            settings.update(patch)
+            self._save_runtime_settings(settings)
+            if self.logger:
+                self.logger.info(f"GUI activity endpoint published: {endpoint}")
+        self._sync_live2d_activity_settings(settings)
+
+    def _live2d_activity_settings_path(self) -> Optional[Path]:
+        appdata = str(os.getenv("APPDATA") or "").strip()
+        if not appdata:
+            return None
+        return Path(appdata) / LIVE2D_ONLY_APP_ID / "runtime_settings.json"
+
+    def _sync_live2d_activity_settings(self, settings: Dict[str, Any]) -> bool:
+        path = self._live2d_activity_settings_path()
+        if path is None:
+            return False
+        patch = {
+            key: settings[key]
+            for key in LIVE2D_ACTIVITY_SETTING_KEYS
+            if key in settings and settings[key] not in (None, "")
+        }
+        if not patch:
+            return False
+        current: Dict[str, Any] = {}
+        if path.exists():
+            try:
+                loaded = json.loads(path.read_text(encoding="utf-8"))
+                if isinstance(loaded, dict):
+                    current = loaded
+            except Exception as exc:
+                if self.logger:
+                    self.logger.warning(
+                        f"Live2D activity settings read failed: {exc}"
+                    )
+        if all(current.get(key) == value for key, value in patch.items()):
+            return True
+        current.update(patch)
+        temp_path = path.with_suffix(path.suffix + ".tmp")
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            temp_path.write_text(
+                json.dumps(current, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            os.replace(temp_path, path)
+        except Exception as exc:
+            if self.logger:
+                self.logger.warning(f"Live2D activity settings sync failed: {exc}")
+            return False
         if self.logger:
-            self.logger.info(f"GUI activity endpoint published: {endpoint}")
+            self.logger.info("Live2D activity settings synchronized")
+        return True
 
     @staticmethod
     def _build_gui_activity_endpoint(host: str, port: int, path_prefix: str) -> str:
@@ -503,7 +572,7 @@ class Live2DApplication:
             ),
             "sedentary_break_minutes": _int_setting(
                 "sedentary_break_minutes",
-                int(getattr(config, "ACTIVITY_AGENT_SEDENTARY_BREAK_MINUTES", 5)),
+                int(getattr(config, "SEDENTARY_BREAK_MINUTES", 5)),
                 1,
             ),
             "sedentary_cooldown_minutes": _int_setting(
@@ -797,6 +866,19 @@ class Live2DApplication:
         else:
             merged_settings = self._load_runtime_settings()
         external_settings = self._normalize_external_runtime_settings(merged_settings)
+        self._sync_live2d_activity_settings(
+            {
+                **merged_settings,
+                "gui_activity_endpoint": external_settings["gui_activity_endpoint"],
+                "sedentary_reminder_minutes": external_settings[
+                    "sedentary_reminder_minutes"
+                ],
+                "sedentary_break_minutes": external_settings["sedentary_break_minutes"],
+                "sedentary_cooldown_minutes": external_settings[
+                    "sedentary_cooldown_minutes"
+                ],
+            }
+        )
         result = {
             "mcp_enabled": bool(external_settings["mcp_enabled"]),
             "napcat_enabled": bool(external_settings["napcat_enabled"]),
@@ -815,7 +897,7 @@ class Live2DApplication:
         config.SEDENTARY_REMINDER_MINUTES = int(
             external_settings["sedentary_reminder_minutes"]
         )
-        config.ACTIVITY_AGENT_SEDENTARY_BREAK_MINUTES = int(
+        config.SEDENTARY_BREAK_MINUTES = int(
             external_settings["sedentary_break_minutes"]
         )
         config.SEDENTARY_REMINDER_COOLDOWN_MINUTES = int(
@@ -1116,6 +1198,15 @@ class Live2DApplication:
             access_token=gui_access_token,
         )
         self.gui_ws_server.set_message_handler(self._on_gui_ws_message)
+        configure_live2d_transport(
+            Live2DTransportBus(
+                [
+                    LegacyLocalWebSocketTransport(),
+                    GuiWebSocketTransport(self.gui_ws_server),
+                ],
+                logger=self.logger,
+            )
+        )
         self.gui_http_server = GuiHttpServer(
             host=initial_external_settings.get("gui_http_host", GUI_HTTP_HOST),
             port=initial_external_settings.get("gui_http_port", GUI_HTTP_PORT),
@@ -2454,7 +2545,7 @@ class Live2DApplication:
                     await asyncio.to_thread(
                         self.brain.add_memory,
                         "system",
-                        f"鐢ㄦ埛涓轰綘鏇存崲浜嗘湇瑁咃紝鏂囦欢璺緞涓? {path}",
+                        f"用户为你更换了服装，文件路径为: {path}",
                     )
             except Exception as e:
                 self.logger.error(f"换装失败: {e}")
@@ -2777,7 +2868,10 @@ class Live2DApplication:
             self.start_async_loop()
 
             # 鏍规嵁閰嶇疆閫夋嫨GUI
-            backend = (GUI_BACKEND or "auto").strip().lower()
+            backend = (
+                getattr(config, "GUI_BACKEND", GUI_BACKEND) or "auto"
+            ).strip().lower()
+            self._runtime_mode = backend
 
             if backend == "tk":
                 self._run_tk_gui()
@@ -2787,6 +2881,8 @@ class Live2DApplication:
                 except Exception as e:
                     self.logger.warning(f"Qt鍚姩澶辫触锛屽洖閫€鍒癟k: {e}")
                     self._run_tk_gui()
+            elif backend == "headless":
+                self._run_headless()
             else:  # auto
                 try:
                     self._run_qt_gui()
@@ -2799,6 +2895,21 @@ class Live2DApplication:
         finally:
             # 馃煝 閫€鍑烘椂瑙﹀彂娓呯悊
             self.cleanup()
+        return self._requested_exit_code
+
+    def _run_headless(self):
+        self.logger.info("Headless runtime started; desktop GUI is disabled")
+        self._headless_stop_event.wait()
+
+    def request_runtime_control(self, action: str) -> tuple[bool, str]:
+        action = str(action or "").strip().lower()
+        if action not in {"shutdown", "restart"}:
+            return False, "invalid_action"
+        if self._runtime_mode != "headless":
+            return False, "headless_required"
+        self._requested_exit_code = 100 if action == "restart" else 0
+        self._headless_stop_event.set()
+        return True, ""
 
     def _run_tk_gui(self):
         # Run Tk GUI.
