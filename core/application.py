@@ -568,6 +568,22 @@ class Live2DApplication:
                 1,
                 min(8, expression_max_prompt_items),
             ),
+            "activity_monitor_enabled": bool(
+                settings.get("activity_monitor_enabled", True)
+            ),
+            "activity_include_process_path": bool(
+                settings.get("activity_include_process_path", False)
+            ),
+            "activity_include_window_title": bool(
+                settings.get("activity_include_window_title", False)
+            ),
+            "activity_include_browser_context": bool(
+                settings.get("activity_include_browser_context", False)
+            ),
+            "activity_config_revision": max(
+                0,
+                _int_setting("activity_config_revision", 0, 0),
+            ),
             "sedentary_reminder_minutes": _int_setting(
                 "sedentary_reminder_minutes", SEDENTARY_REMINDER_MINUTES, 1
             ),
@@ -858,15 +874,132 @@ class Live2DApplication:
             self.loop,
         )
 
+
+    def get_activity_client_config(self) -> Dict[str, Any]:
+        settings = self._load_runtime_settings()
+        try:
+            revision = int(settings.get("activity_config_revision") or 0)
+        except Exception:
+            revision = 0
+
+        def _int(key: str, default: int) -> int:
+            try:
+                value = int(settings.get(key, default) or default)
+            except Exception:
+                value = int(default)
+            return max(1, value)
+
+        return {
+            "revision": max(0, revision),
+            "monitor_enabled": bool(settings.get("activity_monitor_enabled", True)),
+            "sedentary_reminder_minutes": _int(
+                "sedentary_reminder_minutes",
+                int(getattr(config, "SEDENTARY_REMINDER_MINUTES", 60) or 60),
+            ),
+            "sedentary_break_minutes": _int(
+                "sedentary_break_minutes",
+                int(getattr(config, "SEDENTARY_BREAK_MINUTES", 5) or 5),
+            ),
+            "sedentary_cooldown_minutes": _int(
+                "sedentary_cooldown_minutes",
+                int(getattr(config, "SEDENTARY_REMINDER_COOLDOWN_MINUTES", 60) or 60),
+            ),
+            "include_process_path": bool(
+                settings.get("activity_include_process_path", False)
+            ),
+            "include_window_title": bool(
+                settings.get("activity_include_window_title", False)
+            ),
+            "include_browser_context": bool(
+                settings.get("activity_include_browser_context", False)
+            ),
+        }
+
+    def notify_activity_config_changed(self, revision: int) -> None:
+        payload = {
+            "type": "activity_config_changed",
+            "revision": int(revision),
+        }
+        server = getattr(self, "gui_ws_server", None)
+        if server is None:
+            return
+        if hasattr(server, "emit_capability"):
+            try:
+                server.emit_capability("activity.config.v1", payload)
+                return
+            except Exception:
+                pass
+        if hasattr(server, "emit"):
+            try:
+                server.emit(payload)
+            except Exception:
+                pass
+
+    def _activity_client_fingerprint(self, settings: Dict[str, Any]) -> tuple:
+        def _int(key: str, default: int) -> int:
+            try:
+                value = int(settings.get(key, default) or default)
+            except Exception:
+                value = int(default)
+            return max(1, value)
+
+        return (
+            bool(settings.get("activity_monitor_enabled", True)),
+            _int(
+                "sedentary_reminder_minutes",
+                int(getattr(config, "SEDENTARY_REMINDER_MINUTES", 60) or 60),
+            ),
+            _int(
+                "sedentary_break_minutes",
+                int(getattr(config, "SEDENTARY_BREAK_MINUTES", 5) or 5),
+            ),
+            _int(
+                "sedentary_cooldown_minutes",
+                int(getattr(config, "SEDENTARY_REMINDER_COOLDOWN_MINUTES", 60) or 60),
+            ),
+            bool(settings.get("activity_include_process_path", False)),
+            bool(settings.get("activity_include_window_title", False)),
+            bool(settings.get("activity_include_browser_context", False)),
+        )
+
+    def _bump_activity_config_revision_if_needed(
+        self, before: Dict[str, Any], after: Dict[str, Any]
+    ) -> int:
+        if self._activity_client_fingerprint(before) == self._activity_client_fingerprint(
+            after
+        ):
+            try:
+                return max(0, int(after.get("activity_config_revision") or 0))
+            except Exception:
+                return 0
+        try:
+            current = int(after.get("activity_config_revision") or 0)
+        except Exception:
+            current = 0
+        revision = max(0, current) + 1
+        after["activity_config_revision"] = revision
+        try:
+            self._save_runtime_settings(after)
+        except Exception:
+            pass
+        return revision
+
     def apply_external_settings(
         self, settings: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
         if isinstance(settings, dict):
             merged_settings = self._load_runtime_settings()
+            before_settings = dict(merged_settings)
             merged_settings.update(settings)
         else:
             merged_settings = self._load_runtime_settings()
+            before_settings = dict(merged_settings)
         external_settings = self._normalize_external_runtime_settings(merged_settings)
+        activity_before_fp = self._activity_client_fingerprint(before_settings)
+        activity_after_fp = self._activity_client_fingerprint(merged_settings)
+        activity_revision = self._bump_activity_config_revision_if_needed(
+            before_settings, merged_settings
+        )
         self._sync_live2d_activity_settings(
             {
                 **merged_settings,
@@ -880,6 +1013,9 @@ class Live2DApplication:
                 ],
             }
         )
+        # live2d-only file sync remains compatibility-only; enhanced uses /activity-config.
+        if activity_before_fp != activity_after_fp:
+            self.notify_activity_config_changed(activity_revision)
         result = {
             "mcp_enabled": bool(external_settings["mcp_enabled"]),
             "napcat_enabled": bool(external_settings["napcat_enabled"]),

@@ -28,6 +28,27 @@ def _close_store(store) -> None:
         delattr(store._local, "conn")
 
 
+def test_memory_store_repairs_known_costume_message_mojibake(tmp_path):
+    store = _new_store(tmp_path)
+    broken = (
+        "鐢ㄦ埛涓轰綘鏇存崲浜嗘湇瑁咃紝鏂囦欢璺緞涓? "
+        "D:/models/tomori/model.json"
+    )
+    transcript_id = store.add_transcript("system", broken)
+
+    repaired = store.repair_known_transcript_mojibake()
+    row = next(
+        item for item in store.list_transcript(limit=20) if item["id"] == transcript_id
+    )
+
+    assert repaired == 1
+    assert row["content"] == (
+        "用户为你更换了服装，文件路径为: D:/models/tomori/model.json"
+    )
+    assert store.repair_known_transcript_mojibake() == 0
+    _close_store(store)
+
+
 def _reserve_port_pair():
     for port in range(18097, 18140):
         first = socket.socket()
@@ -199,3 +220,47 @@ async def test_activity_ingest_requests_work_session_status_refresh():
 
     assert response.status == 200
     assert app.qt_ui.refresh_requests == 1
+
+
+@pytest.mark.asyncio
+async def test_activity_ingest_rejects_non_live2d_tauri_source():
+    class Request:
+        def __init__(self, payload):
+            self.payload = payload
+
+        async def json(self, *, loads):
+            return dict(self.payload)
+
+    class Store:
+        def __init__(self):
+            self.saved = 0
+
+        def ingest_activity_event(self, payload):
+            self.saved += 1
+            return {"latest": True, "historized": False}
+
+    class Ui:
+        def __init__(self):
+            self.refresh_requests = 0
+
+        def request_work_session_status_refresh(self):
+            self.refresh_requests += 1
+
+    class App:
+        def __init__(self):
+            self.qt_ui = Ui()
+
+    app = App()
+    store = Store()
+    server = GuiHttpServer(app_ref=app)
+    server._get_memory_store = lambda: store
+
+    missing_source = await server._handle_activity_ingest(Request({"event_id": "bad-1"}))
+    old_source = await server._handle_activity_ingest(
+        Request({"event_id": "bad-2", "source": "rust-agent"})
+    )
+
+    assert missing_source.status == 400
+    assert old_source.status == 400
+    assert store.saved == 0
+    assert app.qt_ui.refresh_requests == 0

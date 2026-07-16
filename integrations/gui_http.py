@@ -1470,6 +1470,59 @@ class GuiHttpServer:
                 status=500,
             )
 
+
+    async def _handle_activity_config(self, _request: web.Request) -> web.Response:
+        app = self.app_ref
+        if app is not None and hasattr(app, "get_activity_client_config"):
+            try:
+                data = app.get_activity_client_config()
+            except Exception as exc:
+                return self._json_response(
+                    {"ok": False, "error": f"activity_config_unavailable: {exc}"},
+                    status=500,
+                )
+            if not isinstance(data, dict):
+                return self._json_response(
+                    {"ok": False, "error": "activity_config_invalid"},
+                    status=500,
+                )
+            return self._json_response({"ok": True, "data": dict(data)})
+
+        # Fallback when app_ref is missing methods (e.g. partial stubs in tests).
+        settings: Dict[str, Any] = {}
+        if app is not None and hasattr(app, "_load_runtime_settings"):
+            try:
+                loaded = app._load_runtime_settings()
+                if isinstance(loaded, dict):
+                    settings = loaded
+            except Exception:
+                settings = {}
+
+        def _int(key: str, default: int) -> int:
+            try:
+                value = int(settings.get(key, default) or default)
+            except Exception:
+                value = int(default)
+            return max(1, value)
+
+        data = {
+            "revision": max(0, int(settings.get("activity_config_revision") or 0)),
+            "monitor_enabled": bool(settings.get("activity_monitor_enabled", True)),
+            "sedentary_reminder_minutes": _int("sedentary_reminder_minutes", 60),
+            "sedentary_break_minutes": _int("sedentary_break_minutes", 5),
+            "sedentary_cooldown_minutes": _int("sedentary_cooldown_minutes", 60),
+            "include_process_path": bool(
+                settings.get("activity_include_process_path", False)
+            ),
+            "include_window_title": bool(
+                settings.get("activity_include_window_title", False)
+            ),
+            "include_browser_context": bool(
+                settings.get("activity_include_browser_context", False)
+            ),
+        }
+        return self._json_response({"ok": True, "data": data})
+
     async def _handle_activity_ingest(self, request: web.Request) -> web.Response:
         store = self._get_memory_store()
         if store is None:
@@ -1621,6 +1674,9 @@ class GuiHttpServer:
         )
         app.router.add_get(
             self._api_path("/activity-events"), self._handle_activity_events
+        )
+        app.router.add_get(
+            self._api_path("/activity-config"), self._handle_activity_config
         )
         app.router.add_post(
             self._api_path("/activity-ingest"), self._handle_activity_ingest
