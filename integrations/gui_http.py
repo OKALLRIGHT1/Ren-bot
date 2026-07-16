@@ -411,6 +411,29 @@ class GuiHttpServer:
             export_root=Path(root) / "output",
         )
 
+    def _knowledge_gui_service(self):
+        from services.gui_api.knowledge_service import KnowledgeGuiService
+
+        root = self._find_backend_root(os.getcwd()) or os.getcwd()
+        return KnowledgeGuiService(
+            plugin_manager=self._get_plugin_manager(),
+            brain=self._get_brain(),
+            write_root=Path(root) / "knowledge_docs",
+        )
+
+    def _knowledge_result_status(self, result: Dict[str, Any]) -> int:
+        error = str(result.get("error") or "")
+        if error in {
+            "plugin_manager_unavailable",
+            "brain_unavailable",
+            "plugin_or_brain_unavailable",
+            "ingest_unavailable",
+        }:
+            return 503
+        if error in {"empty_query", "invalid_path", "empty_dirs", "empty_fields"}:
+            return 400
+        return 400
+
     def _diary_result_status(self, result: Dict[str, Any]) -> int:
         error = str(result.get("error") or "")
         if error in {"not_found", "no_diaries"}:
@@ -1627,6 +1650,74 @@ class GuiHttpServer:
             status=status,
         )
 
+    async def _handle_knowledge_list(self, _request: web.Request) -> web.Response:
+        result = self._knowledge_gui_service().list_dirs()
+        if not result.get("ok"):
+            return self._json_response(result, status=self._knowledge_result_status(result))
+        return self._json_response(result)
+
+    async def _handle_knowledge_save_dirs(self, request: web.Request) -> web.Response:
+        payload = await self._read_payload(request)
+        dirs = payload.get("dirs") if isinstance(payload.get("dirs"), list) else payload
+        result = self._knowledge_gui_service().save_dirs(dirs)
+        if not result.get("ok"):
+            return self._json_response(result, status=self._knowledge_result_status(result))
+        return self._json_response(result)
+
+    async def _handle_knowledge_stats(self, _request: web.Request) -> web.Response:
+        result = self._knowledge_gui_service().stats()
+        if not result.get("ok"):
+            return self._json_response(result, status=self._knowledge_result_status(result))
+        return self._json_response(result)
+
+    async def _handle_knowledge_search(self, request: web.Request) -> web.Response:
+        query = str(request.query.get("query") or request.query.get("q") or "").strip()
+        if not query:
+            payload = await self._read_payload(request)
+            query = str(payload.get("query") or payload.get("q") or "").strip()
+            limit = int(payload.get("limit") or 5)
+        else:
+            limit = int(request.query.get("limit") or 5)
+        result = self._knowledge_gui_service().search(query, limit=limit)
+        if not result.get("ok"):
+            return self._json_response(result, status=self._knowledge_result_status(result))
+        return self._json_response(result)
+
+    async def _handle_knowledge_import(self, request: web.Request) -> web.Response:
+        payload = await self._read_payload(request)
+        path = str(payload.get("path") or "").strip()
+        result = self._knowledge_gui_service().import_file(path)
+        if not result.get("ok"):
+            return self._json_response(result, status=self._knowledge_result_status(result))
+        return self._json_response(result)
+
+    async def _handle_knowledge_rebuild(self, _request: web.Request) -> web.Response:
+        result = self._knowledge_gui_service().rebuild()
+        if not result.get("ok"):
+            return self._json_response(result, status=self._knowledge_result_status(result))
+        return self._json_response(result)
+
+    async def _handle_knowledge_delete_dirs(self, request: web.Request) -> web.Response:
+        payload = await self._read_payload(request)
+        dirs = payload.get("dirs") if isinstance(payload.get("dirs"), list) else []
+        result = self._knowledge_gui_service().delete_by_dirs(dirs)
+        if not result.get("ok"):
+            return self._json_response(result, status=self._knowledge_result_status(result))
+        return self._json_response(result)
+
+    async def _handle_knowledge_learn(self, _request: web.Request) -> web.Response:
+        result = self._knowledge_gui_service().learn_configured_dirs()
+        if not result.get("ok"):
+            return self._json_response(result, status=self._knowledge_result_status(result))
+        return self._json_response(result)
+
+    async def _handle_knowledge_create_doc(self, request: web.Request) -> web.Response:
+        payload = await self._read_payload(request)
+        result = self._knowledge_gui_service().create_doc(payload)
+        if not result.get("ok"):
+            return self._json_response(result, status=self._knowledge_result_status(result))
+        return self._json_response(result)
+
     async def _handle_diary_list(self, request: web.Request) -> web.Response:
         result = self._diary_gui_service().list_diaries(
             query=str(request.query.get("query") or ""),
@@ -2069,6 +2160,20 @@ class GuiHttpServer:
         app.router.add_post(self._api_path("/diary/upsert"), self._handle_diary_upsert)
         app.router.add_post(self._api_path("/diary/delete"), self._handle_diary_delete)
         app.router.add_post(self._api_path("/diary/export"), self._handle_diary_export)
+        app.router.add_get(self._api_path("/knowledge"), self._handle_knowledge_list)
+        app.router.add_get(self._api_path("/knowledge/stats"), self._handle_knowledge_stats)
+        app.router.add_get(self._api_path("/knowledge/search"), self._handle_knowledge_search)
+        app.router.add_post(self._api_path("/knowledge/search"), self._handle_knowledge_search)
+        app.router.add_post(self._api_path("/knowledge/dirs"), self._handle_knowledge_save_dirs)
+        app.router.add_post(self._api_path("/knowledge/import"), self._handle_knowledge_import)
+        app.router.add_post(self._api_path("/knowledge/rebuild"), self._handle_knowledge_rebuild)
+        app.router.add_post(
+            self._api_path("/knowledge/delete-dirs"), self._handle_knowledge_delete_dirs
+        )
+        app.router.add_post(self._api_path("/knowledge/learn"), self._handle_knowledge_learn)
+        app.router.add_post(
+            self._api_path("/knowledge/create-doc"), self._handle_knowledge_create_doc
+        )
         app.router.add_get(self._api_path("/memory/core"), self._handle_memory_core_list)
         app.router.add_get(self._api_path("/memory/core/get"), self._handle_memory_core_get)
         app.router.add_post(

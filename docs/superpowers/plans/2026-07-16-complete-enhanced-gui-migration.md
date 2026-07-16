@@ -87,7 +87,7 @@ Status values: `available` · `partial` · `raw-json-only` · `placeholder` · `
 | 6 | Theme / colors | settings color page | runtime_settings palette | raw runtime | none dedicated | `GET/POST /theme` client-safe palette | theme tests | missing |
 | 7 | Plugins | plugin manager dialog | `modules/plugin_manager.py` | list/toggle/reload/config/schema | `PluginsPage` | permissions/aliases/model select/deps/secret mask DTOs | plugin tests exist partial | partial |
 | 8 | Info sources | info_sources_page | `services/info_sources/*` | none dedicated | none | list/save/test endpoints draft-generate | info source API tests | missing |
-| 9 | Knowledge base | knowledge manager + import wizard | `modules/memory/knowledge_store.py` | none | none | dirs/docs/import/delete/reindex/search/import-chat | knowledge tests | missing |
+| 9 | Knowledge base | knowledge manager + import wizard | `modules/memory/knowledge_store.py` + `services/gui_api/knowledge_service.py` | dirs/stats/search/import/rebuild/delete-dirs/learn/create-doc | `KnowledgePage` | chat-record import wizard parity | knowledge service + page unit tests | partial |
 | 10 | Expression library | expression_library_manager | plugin/data expression store | none | none | list/filter/edit/delete/stats | expression tests | missing |
 | 11 | Meme pack | meme_manager | `plugins/meme_pack` | none dedicated GUI API | none | list/preview/edit triggers/stats | meme tests | missing |
 | 12 | Diary | diary_manager | episodes + `services/gui_api/diary_service.py` | list/get/upsert/delete/export | `DiaryPage` | create-new diary without existing id optional polish | diary service + page unit tests | available |
