@@ -1687,10 +1687,19 @@ class GuiHttpServer:
         except Exception as exc:
             return self._json_response({"ok": False, "error": str(exc)}, status=400)
 
+    def _plugins_gui_service(self):
+        from services.gui_api.plugins_service import PluginsGuiService
+
+        return PluginsGuiService(manager=self._get_plugin_manager())
+
     async def _handle_plugin_list(self, _request: web.Request) -> web.Response:
-        return self._json_response(
-            {"ok": True, "data": {"plugins": self._list_plugins()}}
-        )
+        result = self._plugins_gui_service().list_plugins()
+        if not result.get("ok"):
+            # fallback to legacy sanitize list for partial managers
+            return self._json_response(
+                {"ok": True, "data": {"plugins": self._list_plugins()}}
+            )
+        return self._json_response(result)
 
     async def _handle_plugin_toggle(self, request: web.Request) -> web.Response:
         payload = await self._read_payload(request)
@@ -1698,8 +1707,10 @@ class GuiHttpServer:
         enabled = bool(payload.get("enabled"))
         ok, error = self._set_plugin_enabled(trigger, enabled)
         status = 200 if ok else 400
+        listed = self._plugins_gui_service().list_plugins()
+        plugins = listed.get("data", {}).get("plugins") if listed.get("ok") else self._list_plugins()
         return self._json_response(
-            {"ok": ok, "error": error, "data": {"plugins": self._list_plugins()}},
+            {"ok": ok, "error": error, "data": {"plugins": plugins}},
             status=status,
         )
 
@@ -1708,8 +1719,10 @@ class GuiHttpServer:
         trigger = str(payload.get("trigger") or "").strip()
         ok, error = self._reload_plugin(trigger)
         status = 200 if ok else 400
+        listed = self._plugins_gui_service().list_plugins()
+        plugins = listed.get("data", {}).get("plugins") if listed.get("ok") else self._list_plugins()
         return self._json_response(
-            {"ok": ok, "error": error, "data": {"plugins": self._list_plugins()}},
+            {"ok": ok, "error": error, "data": {"plugins": plugins}},
             status=status,
         )
 
@@ -1719,6 +1732,9 @@ class GuiHttpServer:
             return self._json_response(
                 {"ok": False, "error": "invalid_trigger"}, status=400
             )
+        result = self._plugins_gui_service().get_config(trigger)
+        if result.get("ok"):
+            return self._json_response(result)
         data = self._serialize_plugin_config(trigger)
         schema = self._serialize_plugin_config_schema(trigger)
         return self._json_response({"ok": True, "data": {"config": data, "schema": schema}})
@@ -1737,6 +1753,20 @@ class GuiHttpServer:
     async def _handle_plugin_config_save(self, request: web.Request) -> web.Response:
         payload = await self._read_payload(request)
         trigger = str(payload.get("trigger") or "").strip()
+        # Structured form save path: { trigger, settings: { field: value } }
+        if isinstance(payload.get("settings"), dict) and "config" not in payload:
+            result = self._plugins_gui_service().save_settings(trigger, payload.get("settings") or {})
+            if not result.get("ok"):
+                return self._json_response(result, status=400)
+            listed = self._plugins_gui_service().list_plugins()
+            plugins = (
+                listed.get("data", {}).get("plugins")
+                if listed.get("ok")
+                else self._list_plugins()
+            )
+            data = dict(result.get("data") or {})
+            data["plugins"] = plugins
+            return self._json_response({"ok": True, "data": data})
         config = (
             payload.get("config")
             if isinstance(payload.get("config"), dict)
@@ -1744,14 +1774,32 @@ class GuiHttpServer:
         )
         if not isinstance(config, dict):
             config = {}
+        # Prefer structured raw save with secret restore when service available.
+        service_result = self._plugins_gui_service().save_raw_config(trigger, config)
+        if service_result.get("ok"):
+            listed = self._plugins_gui_service().list_plugins()
+            plugins = (
+                listed.get("data", {}).get("plugins")
+                if listed.get("ok")
+                else self._list_plugins()
+            )
+            data = dict(service_result.get("data") or {})
+            data["plugins"] = plugins
+            return self._json_response({"ok": True, "data": data})
         ok, error = self._save_plugin_config(trigger, config)
+        listed = self._plugins_gui_service().list_plugins()
+        plugins = (
+            listed.get("data", {}).get("plugins")
+            if listed.get("ok")
+            else self._list_plugins()
+        )
         return self._json_response(
             {
                 "ok": ok,
                 "error": error,
                 "data": {
                     "config": self._serialize_plugin_config(trigger),
-                    "plugins": self._list_plugins(),
+                    "plugins": plugins,
                 },
             },
             status=200 if ok else 400,
@@ -2460,6 +2508,9 @@ class GuiHttpServer:
         )
         app.router.add_post(
             self._api_path("/plugins/config"), self._handle_plugin_config_save
+        )
+        app.router.add_post(
+            self._api_path("/plugins/settings"), self._handle_plugin_config_save
         )
         app.router.add_get(
             self._api_path("/dependencies"), self._handle_dependency_scan
