@@ -73,6 +73,22 @@ async def test_hello_updates_client_capabilities():
     assert handled and handled[0][1] is client
 
 
+@pytest.mark.asyncio
+async def test_activity_config_capability_is_supported_for_targeted_broadcast():
+    server = GuiWebSocketServer(access_token="secret")
+    capable = FakeWs()
+    legacy = FakeWs()
+    server._clients.update({capable, legacy})
+    server._client_capabilities[capable] = {"activity.config.v1"}
+    server._client_capabilities[legacy] = {"gui.v1"}
+    await server.broadcast_capability(
+        "activity.config.v1",
+        {"type": "activity_config_changed", "revision": 2},
+    )
+    assert len(capable.sent) == 1
+    assert legacy.sent == []
+
+
 def test_emit_capability_uses_event_loop_scheduler():
     import threading
 

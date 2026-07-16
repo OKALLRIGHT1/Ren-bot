@@ -146,3 +146,31 @@ def test_notify_activity_config_changed_uses_capability_channel():
             {"type": "activity_config_changed", "revision": 7},
         )
     ]
+
+
+@pytest.mark.asyncio
+async def test_activity_config_endpoint_available_in_contract_shape():
+    # Keep the remote activity payload shape aligned with the enhanced contract.
+    app = FakeApp(
+        runtime_settings={
+            "sedentary_reminder_minutes": 45,
+            "sedentary_break_minutes": 8,
+            "sedentary_cooldown_minutes": 30,
+            "activity_config_revision": 1,
+            "gui_access_token": "must-not-leak",
+        }
+    )
+    response = await GuiHttpServer(app_ref=app)._handle_activity_config(FakeRequest())
+    payload = json.loads(response.text)
+    assert payload["ok"] is True
+    assert set(payload["data"].keys()) >= {
+        "revision",
+        "monitor_enabled",
+        "sedentary_reminder_minutes",
+        "sedentary_break_minutes",
+        "sedentary_cooldown_minutes",
+        "include_process_path",
+        "include_window_title",
+        "include_browser_context",
+    }
+    assert "must-not-leak" not in response.text
