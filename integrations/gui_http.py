@@ -617,6 +617,35 @@ class GuiHttpServer:
             return 400
         return 400
 
+    def _logs_gui_service(self):
+        from services.gui_api.logs_service import LogsGuiService
+
+        root = self._find_backend_root(os.getcwd()) or os.getcwd()
+        return LogsGuiService(log_dir=Path(root) / "logs")
+
+    def _codex_gui_service(self):
+        from modules.runtime_settings import load_runtime_settings, update_runtime_settings
+        from services.gui_api.codex_service import CodexGuiService
+
+        return CodexGuiService(
+            load_runtime=load_runtime_settings,
+            update_runtime=update_runtime_settings,
+        )
+
+    def _logs_result_status(self, result: Dict[str, Any]) -> int:
+        error = str(result.get("error") or "")
+        if error in {"invalid_name", "log_not_allowed", "path_escape"}:
+            return 400
+        return 400
+
+    def _codex_result_status(self, result: Dict[str, Any]) -> int:
+        error = str(result.get("error") or "")
+        if error in {"runtime_store_unavailable"}:
+            return 503
+        if error in {"empty_payload"}:
+            return 400
+        return 400
+
     def _knowledge_result_status(self, result: Dict[str, Any]) -> int:
         error = str(result.get("error") or "")
         if error in {
@@ -2492,6 +2521,42 @@ class GuiHttpServer:
             return self._json_response(result, status=self._app_rules_result_status(result))
         return self._json_response(result)
 
+    async def _handle_logs_list(self, _request: web.Request) -> web.Response:
+        result = self._logs_gui_service().list_logs()
+        if not result.get("ok"):
+            return self._json_response(result, status=self._logs_result_status(result))
+        return self._json_response(result)
+
+    async def _handle_logs_tail(self, request: web.Request) -> web.Response:
+        name = str(request.query.get("name") or "").strip()
+        if not name:
+            payload = await self._read_payload(request)
+            name = str(payload.get("name") or "").strip()
+            max_bytes = payload.get("max_bytes")
+        else:
+            max_bytes = request.query.get("max_bytes")
+        try:
+            max_bytes_i = int(max_bytes) if max_bytes not in (None, "") else None
+        except Exception:
+            max_bytes_i = None
+        result = self._logs_gui_service().tail(name, max_bytes=max_bytes_i)
+        if not result.get("ok"):
+            return self._json_response(result, status=self._logs_result_status(result))
+        return self._json_response(result)
+
+    async def _handle_codex_get(self, _request: web.Request) -> web.Response:
+        result = self._codex_gui_service().get_settings()
+        if not result.get("ok"):
+            return self._json_response(result, status=self._codex_result_status(result))
+        return self._json_response(result)
+
+    async def _handle_codex_save(self, request: web.Request) -> web.Response:
+        payload = await self._read_payload(request)
+        result = self._codex_gui_service().save_settings(payload)
+        if not result.get("ok"):
+            return self._json_response(result, status=self._codex_result_status(result))
+        return self._json_response(result)
+
     async def _handle_activity_ingest(self, request: web.Request) -> web.Response:
         store = self._get_memory_store()
         if store is None:
@@ -2707,6 +2772,11 @@ class GuiHttpServer:
         app.router.add_get(self._api_path("/app-rules"), self._handle_app_rules_list)
         app.router.add_post(self._api_path("/app-rules"), self._handle_app_rules_save)
         app.router.add_post(self._api_path("/app-rules/test"), self._handle_app_rules_test)
+        app.router.add_get(self._api_path("/logs"), self._handle_logs_list)
+        app.router.add_get(self._api_path("/logs/tail"), self._handle_logs_tail)
+        app.router.add_post(self._api_path("/logs/tail"), self._handle_logs_tail)
+        app.router.add_get(self._api_path("/codex"), self._handle_codex_get)
+        app.router.add_post(self._api_path("/codex"), self._handle_codex_save)
         app.router.add_get(self._api_path("/events"), self._handle_events)
         app.router.add_get(self._api_path("/outbound"), self._handle_outbound_records)
         app.router.add_get(self._api_path("/reply-effects"), self._handle_reply_effects)

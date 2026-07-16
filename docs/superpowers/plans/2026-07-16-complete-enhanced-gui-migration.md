@@ -98,10 +98,10 @@ Status values: `available` · `partial` · `raw-json-only` · `placeholder` · `
 | 17 | Dependencies | settings dependency page | `modules/dependency_check.py` | scan/install | `DependenciesPage` | install confirmation UX polish | dep page unit tests | available |
 | 18 | MCP | settings mcp page | mcp_tools plugin config | plugin config/settings APIs | `McpPage` → plugins schema form for mcp_tools | dedicated server status/test beyond plugin form | plugin enrichment + mcp page | available |
 | 19 | QQ / NapCat | settings gateway page | gateway runtime + qq profiles + `services/gui_api/qq_gateway_service.py` | `GET/POST /qq/gateway` + profiles | `QqGatewayPage` + profiles API | profiles dedicated page polish optional | qq gateway service + page unit tests | available |
-| 20 | Diagnostics events | diagnostics | event logger | `/events` etc | Diagnostics pre dump | typed tables, filters | diagnostics tests | partial |
-| 21 | Console log | ConsoleLogDialog | logging bridge | none stream API | none | log tail stream or poll API | console tests | missing |
-| 22 | App logs | (settings/runtime logs) | file logs | none | none | safe log list/tail | app log tests | missing |
-| 23 | Codex / code assistant | CodexAssistantDialog | `modules/codex_*` | none GUI API | none | config + invoke status | codex tests | missing |
+| 20 | Diagnostics events | diagnostics | event logger | `/events` etc | Diagnostics tabs + poll | typed table polish optional | diagnostics page tests exist | available |
+| 21 | Console log | ConsoleLogDialog | logs dir + `services/gui_api/logs_service.py` | `GET /logs`, `/logs/tail` | `ConsolePage` | websocket stream optional | logs service + page unit tests | available |
+| 22 | App logs | (settings/runtime logs) | logs dir + `services/gui_api/logs_service.py` | `GET /logs`, `/logs/tail` | `AppLogsPage` | multi-file rotate browser polish | logs service + page unit tests | available |
+| 23 | Codex / code assistant | CodexAssistantDialog | runtime_settings + `services/gui_api/codex_service.py` | `GET/POST /codex` | `CodexPage` | external invoke still via chat/CLI | codex service + page unit tests | available |
 | 24 | Live2D model mgmt | desktop tray + resources | enhanced resources.rs + characters | local resource APIs only | desktop only | model list/import/scale persist via enhanced + optional backend costume path | resource+scale tests | partial |
 | 25 | Global/model scale wheel | enhanced desktop | resources + config | local Tauri store | desktop | ensure persist sync control-center display | scale tests | partial |
 
