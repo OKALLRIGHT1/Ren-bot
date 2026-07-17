@@ -1,13 +1,37 @@
 from __future__ import annotations
 
+import base64
+import mimetypes
+from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional
+
+PREVIEW_MAX_BYTES = 450_000
 
 
 def _as_dict(value: Any) -> Dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
-def _asset_to_dict(asset: Any) -> Dict[str, Any]:
+def _preview_data_url(file_path: str) -> str:
+    path = Path(str(file_path or "")).expanduser()
+    try:
+        if not path.is_file():
+            return ""
+        size = path.stat().st_size
+        if size <= 0 or size > PREVIEW_MAX_BYTES:
+            return ""
+        mime, _ = mimetypes.guess_type(str(path))
+        mime = mime or "image/png"
+        if not str(mime).startswith("image/"):
+            return ""
+        raw = path.read_bytes()
+        encoded = base64.b64encode(raw).decode("ascii")
+        return f"data:{mime};base64,{encoded}"
+    except Exception:
+        return ""
+
+
+def _asset_to_dict(asset: Any, *, with_preview: bool = False) -> Dict[str, Any]:
     if asset is None:
         return {}
     if isinstance(asset, dict):
@@ -25,17 +49,25 @@ def _asset_to_dict(asset: Any) -> Dict[str, Any]:
             "usage_count": int(getattr(asset, "usage_count", 0) or 0),
         }
     tags = data.get("tags") if isinstance(data.get("tags"), list) else []
-    return {
+    file_path = str(data.get("file_path") or "")
+    row = {
         "id": int(data.get("id") or 0),
         "file_name": str(data.get("file_name") or ""),
-        "file_path": str(data.get("file_path") or ""),
+        "file_path": file_path,
         "description": str(data.get("description") or ""),
         "tags": [str(tag).strip() for tag in tags if str(tag).strip()],
         "emotion": str(data.get("emotion") or ""),
         "enabled": bool(data.get("enabled", True)),
         "banned": bool(data.get("banned", False)),
         "usage_count": int(data.get("usage_count") or 0),
+        "has_preview": False,
+        "preview_data_url": "",
     }
+    if with_preview:
+        preview = _preview_data_url(file_path)
+        row["preview_data_url"] = preview
+        row["has_preview"] = bool(preview)
+    return row
 
 
 class MemePackGuiService:
@@ -88,7 +120,7 @@ class MemePackGuiService:
             stats = store.stats() if hasattr(store, "stats") else {}
         except Exception as exc:
             return {"ok": False, "error": str(exc) or "meme_store_unavailable"}
-        assets = [_asset_to_dict(row) for row in rows]
+        assets = [_asset_to_dict(row, with_preview=True) for row in rows]
         return {
             "ok": True,
             "data": {
@@ -111,7 +143,7 @@ class MemePackGuiService:
             return {"ok": False, "error": str(exc) or "meme_store_unavailable"}
         if not asset:
             return {"ok": False, "error": "not_found"}
-        return {"ok": True, "data": _asset_to_dict(asset)}
+        return {"ok": True, "data": _asset_to_dict(asset, with_preview=True)}
 
     def update_asset(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         body = _as_dict(payload)
