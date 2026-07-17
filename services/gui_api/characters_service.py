@@ -124,7 +124,24 @@ class CharactersService:
                 "tts": {
                     "enabled": bool(tts.get("enabled")),
                     "voice": str(tts.get("voice") or ""),
-                    "has_ref_audio": bool(str(tts.get("ref_audio") or tts.get("refer_wav_path") or "").strip()),
+                    "gpt_w": str(tts.get("gpt_w") or ""),
+                    "sov_w": str(tts.get("sov_w") or ""),
+                    "ref_wav": str(
+                        tts.get("ref_wav")
+                        or tts.get("ref_audio")
+                        or tts.get("refer_wav_path")
+                        or ""
+                    ),
+                    "prompt_lang": str(tts.get("prompt_lang") or "ja"),
+                    "prompt_text": str(tts.get("prompt_text") or ""),
+                    "has_ref_audio": bool(
+                        str(
+                            tts.get("ref_wav")
+                            or tts.get("ref_audio")
+                            or tts.get("refer_wav_path")
+                            or ""
+                        ).strip()
+                    ),
                 },
                 "qq_profile": _as_dict(row.get("qq_profile")),
                 "is_active": character_id == data["active_id"],
@@ -156,7 +173,24 @@ class CharactersService:
         if "tts_config" in payload and isinstance(payload.get("tts_config"), dict):
             tts = _as_dict(current.get("tts_config"))
             incoming = _as_dict(payload.get("tts_config"))
-            tts.update({k: v for k, v in incoming.items() if k != "ref_audio" or v})
+            for key in (
+                "enabled",
+                "voice",
+                "gpt_w",
+                "sov_w",
+                "prompt_lang",
+                "prompt_text",
+            ):
+                if key in incoming:
+                    tts[key] = incoming.get(key)
+            ref_value = None
+            for key in ("ref_wav", "ref_audio", "refer_wav_path"):
+                if key in incoming:
+                    ref_value = incoming.get(key)
+                    break
+            if ref_value is not None:
+                tts["ref_wav"] = str(ref_value or "")
+                tts["ref_audio"] = str(ref_value or "")
             current["tts_config"] = tts
         if "qq_profile" in payload and isinstance(payload.get("qq_profile"), dict):
             current["qq_profile"] = payload.get("qq_profile")
