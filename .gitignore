@@ -114,6 +114,7 @@ recovered_chat_service.py
 # =========================
 # Local-only project areas
 # =========================
+/docs/
 plugins/what_to_eat/
 plugins/Isuzu_news/
 plugins/meme_pack/assets/
