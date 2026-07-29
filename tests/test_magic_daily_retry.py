@@ -2,6 +2,11 @@ import asyncio
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
+if not (Path(__file__).parents[1] / "plugins" / "Isuzu_news" / "magic_daily").is_dir():
+    pytest.skip("local Isuzu_news plugin is not part of the public repository", allow_module_level=True)
+
 from plugins.Isuzu_news.magic_daily.constants import (
     DEFAULT_ANIME,
     DEFAULT_HITOKOTO,
