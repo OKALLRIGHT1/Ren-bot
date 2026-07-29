@@ -22,6 +22,16 @@
     "allow_group_without_at": false
   },
   "settings": {
+    "model_queue": {
+      "type": "model_queue",
+      "label": "表情包选择模型（按顺序尝试）",
+      "description": "从主程序模型中选择聊天用途模型。留空时跟随 default 任务路由。",
+      "purpose": [
+        "chat"
+      ],
+      "max_items": 3,
+      "default": []
+    },
     "auto_enabled": {
       "type": "bool",
       "label": "启用自动表情包",

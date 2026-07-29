@@ -65,7 +65,7 @@ def load_sedentary_settings_state() -> dict:
         "sedentary_break_minutes": int(
             runtime.get(
                 "sedentary_break_minutes",
-                getattr(config, "ACTIVITY_AGENT_SEDENTARY_BREAK_MINUTES", 5),
+                getattr(config, "SEDENTARY_BREAK_MINUTES", 5),
             )
             or 5
         ),

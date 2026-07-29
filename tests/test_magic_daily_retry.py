@@ -11,6 +11,7 @@ from plugins.Isuzu_news.magic_daily.constants import (
     DEFAULT_WORLD_NEWS,
 )
 from plugins.Isuzu_news.magic_daily.plugin_impl import Plugin
+from plugins.Isuzu_news.magic_daily.api.bgm import BGMAPI
 
 
 class _FakeBGMAPI:
@@ -57,6 +58,13 @@ class _FakeITHomeRSS:
 
 class _FakeSession:
     closed = False
+
+
+def test_bgm_parse_can_disable_default_fallback():
+    api = BGMAPI()
+
+    assert api.parse_today_anime([], max_count=2, use_fallback=False) == []
+    assert api.parse_today_anime([], max_count=2)
 
 
 class _CapturingInfoSourceService:
@@ -189,3 +197,33 @@ def test_fetch_all_data_uses_configured_info_sources_for_alapi_daily_sources(tmp
     )
     assert _CapturingInfoSourceService.calls == [(1, 2, 3, 4)]
     assert Path(_CapturingInfoSourceService.init_kwargs["endpoint_dir"]) == endpoint_dir
+
+
+def test_build_report_data_filters_distant_holidays(monkeypatch):
+    plugin = Plugin()
+
+    async def fake_fetch_all_data(
+        max_anime_count,
+        max_news_count,
+        max_hotword_count,
+        max_holiday_count,
+    ):
+        return (
+            [],
+            [],
+            DEFAULT_HITOKOTO,
+            [
+                {"name": "周末", "days_left": 2},
+                {"name": "中秋节", "days_left": 80},
+                {"name": "国庆节", "days_left": "85"},
+                {"name": "无效节日", "days_left": "unknown"},
+            ],
+            [],
+            [],
+        )
+
+    monkeypatch.setattr(plugin, "_fetch_all_data", fake_fetch_all_data)
+
+    report_data = asyncio.run(plugin._build_report_data())
+
+    assert report_data["moyu_list"] == [{"name": "周末", "days_left": 2}]

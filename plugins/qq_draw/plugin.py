@@ -7,7 +7,7 @@ import re
 import tempfile
 import uuid
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from services.capability_manager import ToolCapability, ToolCapabilityMatch
 
@@ -43,11 +43,20 @@ class Plugin:
 
     def _check_available(self, ctx: Dict[str, Any]) -> Dict[str, Any]:
         self.reload_config()
-        if self._resolve_api_key():
+        providers = self._build_provider_queue()
+        if not providers:
+            return {
+                "available": False,
+                "reason": (
+                    "no_image_models: 请先在「模型与路由」给模型勾选画图用途，"
+                    "再打开本插件设置，把要用的模型加到「画图模型」执行链"
+                ),
+            }
+        if any(self._resolve_provider_api_key(provider) for provider in providers):
             return {"available": True}
         return {
             "available": False,
-            "reason": "missing_secret: qq_draw.api_key",
+            "reason": "missing_secret: 画图模型未配置 API Key",
         }
 
     def reload_config(self):
@@ -61,26 +70,16 @@ class Plugin:
             if isinstance(runtime_settings, dict) and runtime_settings
             else (self._config.get("settings") or {})
         )
+        # Only keep request-style knobs here. Connection info comes from 模型与路由.
         self._settings = {
-            "base_url": self._read_setting(
-                settings, "base_url", "https://api.sub2api.froge-ai.com"
-            ),
-            "api_mode": self._read_setting(settings, "api_mode", "chat"),
-            "endpoint_path": self._read_setting(
-                settings, "endpoint_path", "/v1/chat/completions"
-            ),
-            "edit_endpoint_path": self._read_setting(
-                settings, "edit_endpoint_path", "/v1/images/edits"
-            ),
-            "api_key": self._read_setting(settings, "api_key", ""),
-            "model_name": self._read_setting(settings, "model_name", "grok-2-image"),
+            "model_queue": self._read_setting(settings, "model_queue", []),
             "size_value": self._read_setting(settings, "size_value", "1024x1024"),
             "quality": self._read_setting(settings, "quality", ""),
             "style": self._read_setting(settings, "style", ""),
             "negative_prompt": self._read_setting(settings, "negative_prompt", ""),
             "extra_body_json": self._read_setting(settings, "extra_body_json", "{}"),
             "request_timeout_sec": self._read_setting(
-                settings, "request_timeout_sec", 180
+                settings, "request_timeout_sec", 300
             ),
             "caption_template": self._read_setting(
                 settings, "caption_template", "🖼️ 已按你的要求画好了。"
@@ -88,6 +87,7 @@ class Plugin:
             "image_to_image_enabled": bool(
                 self._read_setting(settings, "image_to_image_enabled", True)
             ),
+            "max_input_images": self._read_setting(settings, "max_input_images", 8),
             "input_image_field": self._read_setting(
                 settings, "input_image_field", "image"
             ),
@@ -105,6 +105,195 @@ class Plugin:
         if isinstance(value, dict):
             return value.get("default", default)
         return value
+
+    def _request_defaults(self) -> Dict[str, Any]:
+        return {
+            "size_value": self._settings.get("size_value"),
+            "quality": self._settings.get("quality"),
+            "style": self._settings.get("style"),
+            "negative_prompt": self._settings.get("negative_prompt"),
+            "extra_body_json": self._settings.get("extra_body_json"),
+            "request_timeout_sec": self._settings.get("request_timeout_sec"),
+            "input_image_field": self._settings.get("input_image_field"),
+            "input_image_format": self._settings.get("input_image_format"),
+            "include_chat_image_part": self._settings.get("include_chat_image_part"),
+            "max_input_images": self._settings.get("max_input_images"),
+        }
+
+    def _max_input_images(self) -> int:
+        raw = self._settings.get("max_input_images", 8)
+        if isinstance(raw, dict):
+            raw = raw.get("default", 8)
+        try:
+            value = int(raw)
+        except Exception:
+            value = 8
+        if value <= 0:
+            return 8
+        return min(value, 16)
+
+    def _normalize_image_list(self, images: Any) -> List[str]:
+        if images is None:
+            return []
+        if isinstance(images, str):
+            text = images.strip()
+            return [text] if text else []
+        if not isinstance(images, (list, tuple)):
+            return []
+        cleaned: List[str] = []
+        for item in images:
+            text = str(item or "").strip()
+            if text:
+                cleaned.append(text)
+        return cleaned
+
+    def _selected_model_ids(self) -> List[str]:
+        raw = self._settings.get("model_queue", [])
+        if raw is None:
+            return []
+        if isinstance(raw, str):
+            text = raw.strip()
+            if not text:
+                return []
+            if text.startswith("["):
+                try:
+                    parsed = json.loads(text)
+                    raw = parsed
+                except Exception:
+                    raw = [
+                        part.strip()
+                        for part in re.split(r"[\n,，;；]+", text)
+                        if part.strip()
+                    ]
+            else:
+                raw = [
+                    part.strip()
+                    for part in re.split(r"[\n,，;；]+", text)
+                    if part.strip()
+                ]
+        if not isinstance(raw, (list, tuple)):
+            return []
+        result: List[str] = []
+        seen = set()
+        for item in raw:
+            mid = str(item or "").strip()
+            if not mid or mid in seen:
+                continue
+            seen.add(mid)
+            result.append(mid)
+        return result
+
+    def _load_model_catalog(self) -> Dict[str, Dict[str, Any]]:
+        catalog: Dict[str, Dict[str, Any]] = {}
+        try:
+            from config import MODELS as CONFIG_MODELS
+
+            if isinstance(CONFIG_MODELS, dict):
+                for key, value in CONFIG_MODELS.items():
+                    if isinstance(value, dict):
+                        catalog[str(key)] = dict(value)
+        except Exception:
+            pass
+
+        custom_path = Path("data/custom_models.json")
+        if custom_path.exists():
+            try:
+                payload = json.loads(custom_path.read_text(encoding="utf-8"))
+                models = payload.get("models") if isinstance(payload, dict) else {}
+                if isinstance(models, dict):
+                    for key, value in models.items():
+                        if isinstance(value, dict):
+                            catalog[str(key)] = dict(value)
+            except Exception as exc:
+                self._debug(f"load custom_models failed: {exc}")
+        return catalog
+
+    def _load_router(self) -> Dict[str, Any]:
+        router: Dict[str, Any] = {}
+        try:
+            from config import LLM_ROUTER
+
+            if isinstance(LLM_ROUTER, dict):
+                router.update(LLM_ROUTER)
+        except Exception:
+            pass
+        custom_path = Path("data/custom_models.json")
+        if custom_path.exists():
+            try:
+                payload = json.loads(custom_path.read_text(encoding="utf-8"))
+                custom_router = payload.get("router") if isinstance(payload, dict) else {}
+                if isinstance(custom_router, dict):
+                    router.update(custom_router)
+            except Exception as exc:
+                self._debug(f"load router failed: {exc}")
+        return router
+
+    def _build_provider_queue(
+        self, *, image_base64: str = "", image_base64_list: Optional[List[str]] = None
+    ) -> List[Dict[str, Any]]:
+        """Prefer models selected in this plugin; fallback to 任务路由 image_*."""
+        try:
+            from modules.model_catalog import list_image_providers
+        except Exception as exc:
+            self._debug(f"list_image_providers unavailable: {exc}")
+            return []
+
+        images = self._normalize_image_list(image_base64_list)
+        if not images and image_base64:
+            images = self._normalize_image_list(image_base64)
+        has_input_images = bool(images)
+
+        selected = self._selected_model_ids()
+        providers = list_image_providers(
+            self._load_model_catalog(),
+            image_base64=images[0] if has_input_images else "",
+            request_defaults=self._request_defaults(),
+            router=self._load_router(),
+            selected_ids=selected if selected else None,
+        )
+        cleaned: List[Dict[str, Any]] = []
+        seen = set()
+        for provider in providers:
+            if not provider.get("base_url"):
+                self._debug(
+                    f"skip model={provider.get('name')}: missing base_url"
+                )
+                continue
+            signature = (
+                str(provider.get("name") or "").strip().lower(),
+                str(provider.get("base_url") or "").strip().lower(),
+                str(provider.get("endpoint_path") or "").strip().lower(),
+                str(provider.get("model_name") or "").strip().lower(),
+            )
+            if signature in seen:
+                continue
+            seen.add(signature)
+            cleaned.append(provider)
+        return cleaned
+
+    def _resolve_provider_api_key(self, provider: Optional[Dict[str, Any]] = None) -> str:
+        provider = provider or {}
+        key = str(provider.get("api_key") or "").strip()
+        if key:
+            return key
+
+        env_raw = str(provider.get("api_key_env") or "").strip()
+        env_names = [
+            part.strip()
+            for part in re.split(r"[\s,，;；|]+", env_raw)
+            if part.strip()
+        ]
+        if not env_names:
+            name = str(provider.get("name") or provider.get("model_name") or "").lower()
+            if "grok" in name or "xai" in name:
+                env_names = ["GROK_API_KEY", "XAI_API_KEY"]
+            else:
+                env_names = ["GROK_API_KEY", "XAI_API_KEY", "OPENAI_API_KEY"]
+        for env_name in env_names:
+            value = str(os.getenv(env_name) or "").strip()
+            if value:
+                return value
+        return ""
 
     def should_handle_direct(
         self, user_text: str, context: dict, matched_alias: str
@@ -139,22 +328,57 @@ class Plugin:
         source = str((context or {}).get("source") or "").strip().lower()
         return source in {"qq_gateway", "napcat_qq"}
 
-    def _format_input_image_payload(self, image_base64: str) -> str:
+    def _format_input_image_payload(
+        self, image_base64: str, provider: Optional[Dict[str, Any]] = None
+    ) -> str:
         raw = str(image_base64 or "").strip()
         if not raw:
             return ""
-        image_format = str(self._settings.get("input_image_format") or "data_url").strip().lower()
+        provider = provider or self._request_defaults()
+        image_format = str(
+            provider.get("input_image_format")
+            or self._settings.get("input_image_format")
+            or "data_url"
+        ).strip().lower()
         if image_format == "base64":
             return raw
         return f"data:image/png;base64,{raw}"
 
+    def _format_input_image_payloads(
+        self,
+        image_base64: str = "",
+        image_base64_list: Optional[List[str]] = None,
+        provider: Optional[Dict[str, Any]] = None,
+    ) -> List[str]:
+        images = self._normalize_image_list(image_base64_list)
+        if not images and image_base64:
+            images = self._normalize_image_list(image_base64)
+        payloads: List[str] = []
+        for item in images:
+            payload = self._format_input_image_payload(item, provider=provider)
+            if payload:
+                payloads.append(payload)
+        return payloads
+
     def _build_request_body(
-        self, prompt: str, image_base64: str = ""
+        self,
+        prompt: str,
+        image_base64: str = "",
+        image_base64_list: Optional[List[str]] = None,
+        provider: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
-        input_image_payload = self._format_input_image_payload(image_base64)
+        provider = provider or self._request_defaults()
+        input_image_payloads = self._format_input_image_payloads(
+            image_base64=image_base64,
+            image_base64_list=image_base64_list,
+            provider=provider,
+        )
         use_chat_image_part = bool(
-            input_image_payload
-            and self._settings.get("include_chat_image_part", True)
+            input_image_payloads
+            and provider.get(
+                "include_chat_image_part",
+                self._settings.get("include_chat_image_part", True),
+            )
         )
         message_content: Any
         if use_chat_image_part:
@@ -162,14 +386,17 @@ class Plugin:
                 {
                     "type": "text",
                     "text": prompt,
-                },
-                {
-                    "type": "image_url",
-                    "image_url": {
-                        "url": input_image_payload,
-                    },
-                },
+                }
             ]
+            for payload in input_image_payloads:
+                message_content.append(
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": payload,
+                        },
+                    }
+                )
         else:
             message_content = prompt
 
@@ -185,36 +412,62 @@ class Plugin:
         }
 
         # 2. 注入所有通用与画图参数
-        model_value = str(self._settings.get("model_name") or "").strip()
+        model_value = str(provider.get("model_name") or "").strip()
         if model_value:
             body["model"] = model_value
 
-        size_value = str(self._settings.get("size_value") or "").strip()
+        size_value = str(
+            provider.get("size_value") or self._settings.get("size_value") or ""
+        ).strip()
         if size_value:
             body["size"] = size_value
 
-        quality_value = str(self._settings.get("quality") or "").strip()
+        quality_value = str(
+            provider.get("quality") or self._settings.get("quality") or ""
+        ).strip()
         if quality_value:
             body["quality"] = quality_value
 
-        style_value = str(self._settings.get("style") or "").strip()
+        style_value = str(
+            provider.get("style") or self._settings.get("style") or ""
+        ).strip()
         if style_value:
             body["style"] = style_value
 
-        negative_value = str(self._settings.get("negative_prompt") or "").strip()
+        negative_value = str(
+            provider.get("negative_prompt")
+            or self._settings.get("negative_prompt")
+            or ""
+        ).strip()
         if negative_value:
             body["negative_prompt"] = negative_value
 
-        if input_image_payload and bool(
+        if input_image_payloads and bool(
             self._settings.get("image_to_image_enabled", True)
         ):
-            field_name = str(self._settings.get("input_image_field") or "image").strip()
+            field_name = str(
+                provider.get("input_image_field")
+                or self._settings.get("input_image_field")
+                or "image"
+            ).strip()
             if field_name:
-                body[field_name] = input_image_payload
+                # 1 张保持兼容单值；多张传数组，让上游按参考图列表处理。
+                body[field_name] = (
+                    input_image_payloads[0]
+                    if len(input_image_payloads) == 1
+                    else list(input_image_payloads)
+                )
+                if len(input_image_payloads) > 1:
+                    body["images"] = list(input_image_payloads)
 
         # 3. 合并自定义额外参数
         extra_args_raw = (
-                str(self._settings.get("extra_body_json") or "{}").strip() or "{}"
+            str(
+                provider.get("extra_body_json")
+                or self._settings.get("extra_body_json")
+                or "{}"
+            ).strip()
+            or "{}"
         )
         extra_args = json.loads(extra_args_raw)
         if not isinstance(extra_args, dict):
@@ -224,15 +477,24 @@ class Plugin:
         self._normalize_request_body(body)
         return body
 
-    def _is_image_edit_endpoint(self, image_base64: str = "") -> bool:
+    def _is_image_edit_endpoint(
+        self,
+        image_base64: str = "",
+        image_base64_list: Optional[List[str]] = None,
+        provider: Optional[Dict[str, Any]] = None,
+    ) -> bool:
+        provider = provider or {}
+        images = self._normalize_image_list(image_base64_list)
+        if not images and image_base64:
+            images = self._normalize_image_list(image_base64)
         endpoint_path = (
             str(
-                self._settings.get("edit_endpoint_path")
-                or self._settings.get("endpoint_path")
+                provider.get("edit_endpoint_path")
+                or provider.get("endpoint_path")
                 or ""
             ).strip().lower()
-            if image_base64
-            else str(self._settings.get("endpoint_path") or "").strip().lower()
+            if images
+            else str(provider.get("endpoint_path") or "").strip().lower()
         )
         return endpoint_path.endswith("/images/edits")
 
@@ -246,16 +508,37 @@ class Plugin:
             return b""
 
     def _build_edit_form_fields(
-        self, prompt: str, image_base64: str
-    ) -> Tuple[Dict[str, Any], bytes]:
-        body = self._build_request_body(prompt, image_base64="")
-        image_bytes = self._decode_base64_image(image_base64)
-        if not image_bytes:
+        self,
+        prompt: str,
+        image_base64: str = "",
+        image_base64_list: Optional[List[str]] = None,
+        provider: Optional[Dict[str, Any]] = None,
+    ) -> Tuple[Dict[str, Any], List[bytes]]:
+        body = self._build_request_body(
+            prompt, image_base64="", image_base64_list=None, provider=provider
+        )
+        images = self._normalize_image_list(image_base64_list)
+        if not images and image_base64:
+            images = self._normalize_image_list(image_base64)
+        image_bytes_list: List[bytes] = []
+        for item in images:
+            decoded = self._decode_base64_image(item)
+            if decoded:
+                image_bytes_list.append(decoded)
+        if not image_bytes_list:
             raise RuntimeError("图生图输入图片解码失败")
 
         fields: Dict[str, Any] = {}
+        skip_keys = {
+            "messages",
+            "image",
+            "images",
+            "image_base64",
+            "init_image",
+            "input_image",
+        }
         for key, value in body.items():
-            if key in {"messages", "image", "image_base64", "init_image", "input_image"}:
+            if key in skip_keys:
                 continue
             if value in (None, "", [], {}):
                 continue
@@ -263,7 +546,7 @@ class Plugin:
                 fields[key] = json.dumps(value, ensure_ascii=False)
             else:
                 fields[key] = str(value)
-        return fields, image_bytes
+        return fields, image_bytes_list
 
     def _normalize_request_body(self, body: Dict[str, Any]) -> None:
         response_format = body.get("response_format")
@@ -274,12 +557,6 @@ class Plugin:
             else:
                 body.pop("response_format", None)
 
-    def _resolve_api_key(self) -> str:
-        key = str(self._settings.get("api_key") or "").strip()
-        if key:
-            return key
-        return str(os.getenv("GROK_API_KEY") or "").strip()
-
     def _debug_enabled(self) -> bool:
         return bool(self._settings.get("debug_logging", False))
 
@@ -287,34 +564,86 @@ class Plugin:
         if self._debug_enabled():
             logger.info(f"[qq_draw] {message}")
 
-    def _resolve_request_timeout_sec(self) -> float:
-        raw = self._settings.get("request_timeout_sec", 180)
+    def _resolve_request_timeout_sec(
+        self, provider: Optional[Dict[str, Any]] = None
+    ) -> float:
+        provider = provider or {}
+        raw = provider.get(
+            "request_timeout_sec", self._settings.get("request_timeout_sec", 300)
+        )
+        if isinstance(raw, dict):
+            raw = raw.get("default", 300)
         try:
             value = float(raw)
         except Exception:
-            value = 180.0
+            value = 300.0
         if value <= 0:
-            value = 180.0
+            value = 300.0
         return value
 
-    def _build_request_url(self, image_base64: str = "") -> str:
-        base_url = str(self._settings.get("base_url") or "").strip().rstrip("/")
+    def _client_timeout(
+        self, provider: Optional[Dict[str, Any]] = None
+    ):
+        total = self._resolve_request_timeout_sec(provider=provider)
+        # Image generation can stream slowly; pin sock_read to the same budget.
+        return aiohttp.ClientTimeout(
+            total=total, connect=30, sock_connect=30, sock_read=total
+        )
+
+    def _default_http_headers(self, api_key: str = "") -> Dict[str, str]:
+        # Some reverse proxies (Cloudflare) block non-browser clients with 403/1010.
+        headers = {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/122.0.0.0 Safari/537.36"
+            ),
+            "Accept": "application/json, text/plain, */*",
+        }
+        key = str(api_key or "").strip()
+        if key:
+            headers["Authorization"] = f"Bearer {key}"
+        return headers
+
+    def _build_request_url(
+        self,
+        image_base64: str = "",
+        image_base64_list: Optional[List[str]] = None,
+        provider: Optional[Dict[str, Any]] = None,
+    ) -> str:
+        provider = provider or {}
+        base_url = str(provider.get("base_url") or "").strip()
+        images = self._normalize_image_list(image_base64_list)
+        if not images and image_base64:
+            images = self._normalize_image_list(image_base64)
+        has_input_images = bool(images)
         endpoint_path = (
             str(
-                self._settings.get("edit_endpoint_path")
-                or self._settings.get("endpoint_path")
+                provider.get("edit_endpoint_path")
+                or provider.get("endpoint_path")
                 or ""
             ).strip()
-            if image_base64
-            else str(self._settings.get("endpoint_path") or "").strip()
+            if has_input_images
+            else str(provider.get("endpoint_path") or "").strip()
         )
         if not base_url:
-            raise ValueError("未配置 base_url")
+            raise ValueError("未配置 base_url（请在模型与路由里填写）")
         if not endpoint_path:
-            raise ValueError("未配置 endpoint_path")
-        if not endpoint_path.startswith("/"):
-            endpoint_path = "/" + endpoint_path
-        return base_url + endpoint_path
+            endpoint_path = (
+                "/v1/images/edits" if has_input_images else "/v1/images/generations"
+            )
+        try:
+            from modules.model_catalog import join_endpoint_url
+        except Exception:
+            join_endpoint_url = None
+        if join_endpoint_url is not None:
+            return join_endpoint_url(base_url, endpoint_path)
+        # fallback if catalog import fails
+        base = base_url.rstrip("/")
+        path = endpoint_path if endpoint_path.startswith("/") else "/" + endpoint_path
+        if base.endswith("/v1") and path.startswith("/v1/"):
+            path = path[3:]
+        return base + path
 
     def _extract_image_bytes(self, payload: Any) -> Optional[bytes]:
         if isinstance(payload, bytes):
@@ -610,10 +939,15 @@ class Plugin:
         file_path.write_bytes(image_bytes)
         return str(file_path)
 
-    async def _download_image_bytes(self, url: str, headers: Dict[str, str]) -> bytes:
+    async def _download_image_bytes(
+        self,
+        url: str,
+        headers: Dict[str, str],
+        provider: Optional[Dict[str, Any]] = None,
+    ) -> bytes:
         if aiohttp is None:
             raise RuntimeError("aiohttp 未安装，无法下载图片 URL")
-        timeout = aiohttp.ClientTimeout(total=self._resolve_request_timeout_sec())
+        timeout = self._client_timeout(provider=provider)
         async with aiohttp.ClientSession(timeout=timeout) as session:
             async with session.get(url, headers=headers or None) as resp:
                 if resp.status >= 400:
@@ -621,50 +955,75 @@ class Plugin:
                     raise RuntimeError(f"下载图片失败: HTTP {resp.status} {text[:200]}")
                 return await resp.read()
 
-    async def _call_image_api(self, prompt: str, image_base64: str = "") -> Any:
+    async def _call_image_api_with_provider(
+        self,
+        prompt: str,
+        image_base64: str = "",
+        image_base64_list: Optional[List[str]] = None,
+        provider: Optional[Dict[str, Any]] = None,
+    ) -> Any:
         if aiohttp is None:
             raise RuntimeError("aiohttp 未安装，无法调用生图接口")
 
-        api_key = self._resolve_api_key()
+        if not provider:
+            raise RuntimeError(
+                "没有可用的画图模型。请到「模型与路由」添加模型并勾选用途「画图」。"
+            )
+        api_key = self._resolve_provider_api_key(provider)
         if not api_key:
             raise RuntimeError(
-                "未配置 API Key，请在 QQ生图 插件设置里填写，或设置环境变量 GROK_API_KEY"
+                f"模型 {provider.get('name') or 'provider'} 未配置 API Key。"
+                "请在模型与路由里填写，或设置对应环境变量（如 GROK_API_KEY）。"
             )
 
-        url = self._build_request_url(image_base64=image_base64)
-        body = self._build_request_body(prompt, image_base64=image_base64)
-        api_mode = str(self._settings.get("api_mode") or "chat").strip().lower()
-        headers = {
-            "Authorization": f"Bearer {api_key}",
-        }
+        images = self._normalize_image_list(image_base64_list)
+        if not images and image_base64:
+            images = self._normalize_image_list(image_base64)
 
-        timeout = aiohttp.ClientTimeout(total=self._resolve_request_timeout_sec())
+        url = self._build_request_url(
+            image_base64_list=images, provider=provider
+        )
+        body = self._build_request_body(
+            prompt, image_base64_list=images, provider=provider
+        )
+        api_mode = str(provider.get("api_mode") or "images").strip().lower()
+        headers = self._default_http_headers(api_key)
+
+        timeout = self._client_timeout(provider=provider)
         async with aiohttp.ClientSession(timeout=timeout) as session:
-            if image_base64 and self._is_image_edit_endpoint(image_base64=image_base64):
+            if images and self._is_image_edit_endpoint(
+                image_base64_list=images, provider=provider
+            ):
                 form = aiohttp.FormData()
-                fields, image_bytes = self._build_edit_form_fields(prompt, image_base64)
+                fields, image_bytes_list = self._build_edit_form_fields(
+                    prompt, image_base64_list=images, provider=provider
+                )
                 for key, value in fields.items():
                     form.add_field(key, value)
-                form.add_field(
-                    "image",
-                    image_bytes,
-                    filename="input.png",
-                    content_type="image/png",
-                )
+                # OpenAI-style edits accept repeated "image" parts for multi-ref.
+                for index, image_bytes in enumerate(image_bytes_list):
+                    form.add_field(
+                        "image",
+                        image_bytes,
+                        filename=f"input_{index + 1}.png",
+                        content_type="image/png",
+                    )
                 debug_body = dict(fields)
-                debug_body["image"] = "<binary image omitted>"
+                debug_body["image"] = f"<{len(image_bytes_list)} binary images omitted>"
                 self._debug(
-                    f"mode={api_mode} model={fields.get('model', '')} url={url} multipart={json.dumps(debug_body, ensure_ascii=False)[:500]}"
+                    f"provider={provider.get('name')} mode={api_mode} model={fields.get('model', '')} url={url} multipart={json.dumps(debug_body, ensure_ascii=False)[:500]}"
                 )
                 async with session.post(url, headers=headers, data=form) as resp:
                     text = await resp.text()
-                    self._debug(f"raw_status={resp.status} raw_response={text[:1000]}")
+                    self._debug(
+                        f"provider={provider.get('name')} raw_status={resp.status} raw_response={text[:1000]}"
+                    )
                     if resp.status >= 400:
                         raise RuntimeError(self._format_api_error(resp.status, text))
                     try:
                         parsed = json.loads(text)
                         self._debug(
-                            f"parsed_json={json.dumps(parsed, ensure_ascii=False)[:500]}"
+                            f"provider={provider.get('name')} parsed_json={json.dumps(parsed, ensure_ascii=False)[:500]}"
                         )
                         return parsed
                     except Exception:
@@ -675,17 +1034,19 @@ class Plugin:
             if "messages" in debug_body:
                 debug_body["messages"] = "<messages omitted>"
             self._debug(
-                f"mode={api_mode} model={body.get('model', '')} url={url} body={json.dumps(debug_body, ensure_ascii=False)[:500]}"
+                f"provider={provider.get('name')} mode={api_mode} model={body.get('model', '')} url={url} body={json.dumps(debug_body, ensure_ascii=False)[:500]}"
             )
             async with session.post(url, headers=headers, json=body) as resp:
                 text = await resp.text()
-                self._debug(f"raw_status={resp.status} raw_response={text[:1000]}")
+                self._debug(
+                    f"provider={provider.get('name')} raw_status={resp.status} raw_response={text[:1000]}"
+                )
                 if resp.status >= 400:
                     raise RuntimeError(self._format_api_error(resp.status, text))
                 sse_payloads = self._extract_sse_payloads(text)
                 if sse_payloads:
                     self._debug(
-                        f"sse_chunks={len(sse_payloads)} first_chunk={json.dumps(sse_payloads[0], ensure_ascii=False)[:500]}"
+                        f"provider={provider.get('name')} sse_chunks={len(sse_payloads)} first_chunk={json.dumps(sse_payloads[0], ensure_ascii=False)[:500]}"
                     )
                     merged = self._merge_sse_payloads(sse_payloads)
                     if isinstance(merged, dict) and isinstance(
@@ -697,70 +1058,150 @@ class Plugin:
                             self._format_api_error(resp.status, error_text)
                         )
                     self._debug(
-                        f"merged_result={json.dumps(merged, ensure_ascii=False)[:500]}"
+                        f"provider={provider.get('name')} merged_result={json.dumps(merged, ensure_ascii=False)[:500]}"
                     )
                     return merged
                 try:
                     parsed = json.loads(text)
                     self._debug(
-                        f"parsed_json={json.dumps(parsed, ensure_ascii=False)[:500]}"
+                        f"provider={provider.get('name')} parsed_json={json.dumps(parsed, ensure_ascii=False)[:500]}"
                     )
                     return parsed
                 except Exception:
                     raise RuntimeError(f"接口返回不是合法 JSON: {text[:500]}")
 
-    async def _load_first_context_image_base64(self, context: dict) -> str:
-        if not self._is_qq_context(context):
-            return ""
-        if not bool(self._settings.get("image_to_image_enabled", True)):
-            return ""
-        channel_meta = (context or {}).get("channel_meta") or {}
-        images = channel_meta.get("images") or []
+    async def _materialize_image_bytes(
+        self,
+        result: Any,
+        provider: Optional[Dict[str, Any]] = None,
+    ) -> bytes:
+        image_bytes = self._pick_image_bytes_from_result(result)
+        if image_bytes:
+            return image_bytes
+
+        image_url = self._pick_image_url_from_result(result)
+        if not image_url:
+            return b""
+
+        api_key = self._resolve_provider_api_key(provider)
+        headers = self._default_http_headers(api_key)
+        return await self._download_image_bytes(
+            image_url, headers, provider=provider
+        )
+
+    async def _call_image_api(
+        self,
+        prompt: str,
+        image_base64: str = "",
+        image_base64_list: Optional[List[str]] = None,
+    ) -> Tuple[Any, Dict[str, Any], bytes]:
+        images = self._normalize_image_list(image_base64_list)
+        if not images and image_base64:
+            images = self._normalize_image_list(image_base64)
+        providers = self._build_provider_queue(image_base64_list=images)
+        if not providers:
+            raise RuntimeError(
+                "没有可用的画图模型。请："
+                "1) 在「模型与路由」给模型勾选用途「画图」；"
+                "2) 打开 QQ生图 插件设置，把要用的模型加到「画图模型」执行链。"
+            )
+        errors: List[str] = []
+        last_result: Any = None
+        last_provider = providers[0]
+
+        for provider in providers:
+            name = str(provider.get("name") or "provider").strip() or "provider"
+            try:
+                self._debug(
+                    f"trying provider={name} model={provider.get('model_name')} base_url={provider.get('base_url')} input_images={len(images)}"
+                )
+                result = await self._call_image_api_with_provider(
+                    prompt, image_base64_list=images, provider=provider
+                )
+                last_result = result
+                last_provider = provider
+                image_bytes = await self._materialize_image_bytes(
+                    result, provider=provider
+                )
+                if image_bytes:
+                    self._debug(f"provider={name} succeeded")
+                    return result, provider, image_bytes
+                summary = self._format_no_image_result(result)
+                errors.append(f"{name}: {summary}")
+                self._debug(f"provider={name} returned no image, continue fallback")
+            except Exception as exc:
+                error_text = str(exc).strip() or repr(exc)
+                errors.append(f"{name}: {error_text}")
+                logger.warning(f"[qq_draw] provider failed name={name} err={error_text}")
+                continue
+
+        if last_result is not None and not errors:
+            return last_result, last_provider, b""
+        if last_result is not None and all("没解析出图片" in item for item in errors):
+            return last_result, last_provider, b""
+        joined = " | ".join(errors[:4]) if errors else "未知错误"
+        raise RuntimeError(f"全部生图通道失败：{joined}")
+
+    async def _load_image_base64_list_from_meta(
+        self, images: Any, *, source: str = "attachment"
+    ) -> List[str]:
         if not isinstance(images, list) or not images:
-            return ""
+            return []
         try:
             from integrations.chat_gateway.media_utils import load_image_base64
         except Exception as exc:
             self._debug(f"load_image_base64 unavailable: {exc}")
-            return ""
-        try:
-            return str(
-                await asyncio.to_thread(load_image_base64, images[0])
-            ).strip()
-        except Exception as exc:
-            self._debug(f"load first QQ image failed: {exc}")
-            return ""
+            return []
 
-    async def _load_reply_image_base64(self, context: dict) -> str:
+        max_images = self._max_input_images()
+        loaded: List[str] = []
+        for index, image_meta in enumerate(images[:max_images]):
+            try:
+                value = str(
+                    await asyncio.to_thread(load_image_base64, image_meta)
+                ).strip()
+            except Exception as exc:
+                self._debug(f"load {source} image[{index}] failed: {exc}")
+                continue
+            if value:
+                loaded.append(value)
+        return loaded
+
+    async def _load_context_image_base64_list(self, context: dict) -> List[str]:
         if not self._is_qq_context(context):
-            return ""
+            return []
         if not bool(self._settings.get("image_to_image_enabled", True)):
-            return ""
+            return []
+        channel_meta = (context or {}).get("channel_meta") or {}
+        images = channel_meta.get("images") or []
+        return await self._load_image_base64_list_from_meta(
+            images, source="attachment"
+        )
+
+    async def _load_reply_image_base64_list(self, context: dict) -> List[str]:
+        if not self._is_qq_context(context):
+            return []
+        if not bool(self._settings.get("image_to_image_enabled", True)):
+            return []
         channel_meta = (context or {}).get("channel_meta") or {}
         reply_meta = channel_meta.get("reply") or {}
         if not isinstance(reply_meta, dict):
-            return ""
+            return []
         reply_message_id = str(reply_meta.get("message_id") or "").strip()
         if not reply_message_id:
-            return ""
+            return []
 
         chat_service = (context or {}).get("chat_service")
         gateway = getattr(chat_service, "chat_gateway", None)
         if gateway is None:
-            return ""
+            return []
         adapter = getattr(gateway, "adapters", {}).get("napcat_qq")
         if adapter is None or not hasattr(adapter, "fetch_message_by_id"):
-            return ""
+            return []
 
         session_id = str(channel_meta.get("session_id") or "").strip()
         if not session_id:
-            return ""
-
-        try:
-            from integrations.chat_gateway.media_utils import load_image_base64
-        except Exception as exc:
-            self._debug(f"reply load_image_base64 unavailable: {exc}")
-            return ""
+            return []
 
         try:
             result = await adapter.fetch_message_by_id(
@@ -768,24 +1209,16 @@ class Plugin:
             )
         except Exception as exc:
             self._debug(f"fetch reply message failed: {exc}")
-            return ""
+            return []
         if not isinstance(result, dict) or not result.get("ok"):
             self._debug(f"fetch reply message not ok: {result}")
-            return ""
+            return []
         item = result.get("item")
         if not isinstance(item, dict):
-            return ""
+            return []
         meta = item.get("meta") if isinstance(item.get("meta"), dict) else {}
         images = meta.get("images") or []
-        if not isinstance(images, list) or not images:
-            return ""
-        try:
-            return str(
-                await asyncio.to_thread(load_image_base64, images[0])
-            ).strip()
-        except Exception as exc:
-            self._debug(f"load reply image failed: {exc}")
-            return ""
+        return await self._load_image_base64_list_from_meta(images, source="reply")
 
     def _format_api_error(self, status: int, text: str) -> str:
         raw = (text or "").strip()
@@ -831,41 +1264,31 @@ class Plugin:
         text = str(args or "").strip()
         prompt = self._extract_prompt(text)
         if not prompt:
-            return "用法：/画图 你的提示词 或 /画画 你的提示词；如果同时带一张 QQ 图片，就会优先按图生图处理。"
+            return (
+                "用法：/画图 你的提示词 或 /画画 你的提示词；"
+                "如果同时带 QQ 图片（可多张），会全部作为参考图做图生图。"
+            )
 
-        input_image_base64 = await self._load_first_context_image_base64(context)
+        input_images = await self._load_context_image_base64_list(context)
         input_image_source = ""
-        if input_image_base64:
+        if input_images:
             input_image_source = "attachment"
         else:
-            input_image_base64 = await self._load_reply_image_base64(context)
-            if input_image_base64:
+            input_images = await self._load_reply_image_base64_list(context)
+            if input_images:
                 input_image_source = "reply"
-        if input_image_base64:
+        if input_images:
             self._debug(
-                f"image_to_image input detected from QQ {input_image_source}"
+                f"image_to_image inputs detected from QQ {input_image_source}: {len(input_images)}"
             )
 
         try:
-            result = await self._call_image_api(
-                prompt, image_base64=input_image_base64
+            result, provider, image_bytes = await self._call_image_api(
+                prompt, image_base64_list=input_images
             )
         except Exception as exc:
             error_text = str(exc).strip() or repr(exc)
             return f"调用生图接口失败：{error_text}"
-
-        image_bytes = self._pick_image_bytes_from_result(result)
-        if not image_bytes:
-            image_url = self._pick_image_url_from_result(result)
-            if image_url:
-                try:
-                    headers = {}
-                    api_key = self._resolve_api_key()
-                    if api_key:
-                        headers["Authorization"] = f"Bearer {api_key}"
-                    image_bytes = await self._download_image_bytes(image_url, headers)
-                except Exception as exc:
-                    return f"图片地址已返回，但下载失败：{exc}"
 
         if not image_bytes:
             return self._format_no_image_result(result)
@@ -878,12 +1301,24 @@ class Plugin:
         caption_tpl = str(
             self._settings.get("caption_template") or "🖼️ 已按你的要求画好了。"
         )
+        provider_name = str((provider or {}).get("name") or "primary").strip() or "primary"
         # 这里保留 replace 逻辑作为底层防御，以防你未来在 config 里又加回了 {prompt}
-        caption = caption_tpl.replace("{prompt}", prompt)
+        caption = (
+            caption_tpl.replace("{prompt}", prompt)
+            .replace("{provider}", provider_name)
+            .replace("{model}", str((provider or {}).get("model_name") or ""))
+        )
+        success_suffix = (
+            ""
+            if provider_name in {"primary", "main", "default"}
+            else f"（{provider_name} 兜底）"
+        )
         return {
             "__type__": "gateway_image",
             "image_path": image_path,
             "caption": caption,
-            "success_text": "🖼️ 已把这张图发到 QQ 了。",
+            "success_text": f"🖼️ 已把这张图发到 QQ 了{success_suffix}。",
             "fallback_text": "图已经生成出来了，但回发到 QQ 失败了。",
+            "provider": provider_name,
+            "model_name": str((provider or {}).get("model_name") or ""),
         }

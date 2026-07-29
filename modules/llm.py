@@ -582,6 +582,8 @@ def chat_with_ai(
     caller: str = "",
     request_id: str = "",
     timeout_sec: float = 30,
+    model_keys_override=None,
+    call_metadata=None,
 ):
     request_id = request_id or uuid.uuid4().hex[:8]
     caller = caller or "unknown"
@@ -605,11 +607,21 @@ def chat_with_ai(
     )
     _warn_caller_task_check(check, prefix="[LLM Sync]", trace=trace)
 
-    model_keys = LLM_ROUTER.get(task_type, LLM_ROUTER.get("default", []))
+    model_keys = (
+        model_keys_override
+        if model_keys_override is not None
+        else LLM_ROUTER.get(task_type, LLM_ROUTER.get("default", []))
+    )
     if isinstance(model_keys, str):
         model_keys = [model_keys]
+    else:
+        model_keys = [str(key).strip() for key in (model_keys or []) if str(key).strip()]
 
-    preferred_model = None if LLM_ROUTER_STRICT_ORDER else get_preferred_model(task_type)
+    preferred_model = (
+        None
+        if model_keys_override is not None or LLM_ROUTER_STRICT_ORDER
+        else get_preferred_model(task_type)
+    )
     if preferred_model and preferred_model in model_keys:
         model_keys = [preferred_model] + [m for m in model_keys if m != preferred_model]
 
@@ -672,6 +684,13 @@ def chat_with_ai(
                 _trace_log(
                     f"[LLM Sync] ✅ 成功({method}) (len={len(content)}) ({trace})"
                 )
+                if isinstance(call_metadata, dict):
+                    call_metadata.update(
+                        {
+                            "model_key": str(key),
+                            "transport": str(method),
+                        }
+                    )
                 return str(content)
             except Exception as e:
                 safe_error = redact_sensitive_text(e)

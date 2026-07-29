@@ -120,3 +120,39 @@ def test_napcat_extracts_url_from_json_card_component():
     assert event is not None
     assert "https://www.bilibili.com/video/BV123" in event.text
     assert event.metadata["qq_card_links"] == ["https://www.bilibili.com/video/BV123"]
+
+
+def test_napcat_group_at_preserves_targets_self_metadata():
+    """群消息去掉展示用 @ 后，仍应把 at_me 传给下游插件权限判断。"""
+    adapter = NapCatOneBotAdapter(
+        owner_user_ids=["10001"],
+        allow_group=True,
+        group_require_at=True,
+        filter_mode="off",
+    )
+    event = adapter.normalize_event(
+        {
+            "post_type": "message",
+            "message_type": "group",
+            "self_id": 2594777156,
+            "user_id": 10001,
+            "group_id": 499413574,
+            "message_id": 99,
+            "raw_message": "[CQ:at,qq=2594777156] 帮我查一下有没有什么东西不用反而容易坏",
+            "message": [
+                {"type": "at", "data": {"qq": "2594777156"}},
+                {
+                    "type": "text",
+                    "data": {"text": " 帮我查一下有没有什么东西不用反而容易坏"},
+                },
+            ],
+            "sender": {"nickname": "主人", "card": ""},
+        }
+    )
+
+    assert event is not None
+    assert event.text == "帮我查一下有没有什么东西不用反而容易坏"
+    assert event.metadata["targets_self"] is True
+    assert event.metadata["at_me"] is True
+    assert event.metadata["is_mentioned"] is True
+    assert event.metadata["message_type"] == "group"

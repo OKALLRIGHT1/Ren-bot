@@ -306,12 +306,18 @@ class QtChatTrayApp(QtCore.QObject):
         panel_layout.addWidget(self._container)
 
         main_vbox = QtWidgets.QVBoxLayout(self._container)
-        main_vbox.setContentsMargins(10, 8, 10, 8)
-        main_vbox.setSpacing(4)
+        main_vbox.setContentsMargins(12, 10, 12, 10)
+        main_vbox.setSpacing(8)
 
-        top_bar = QtWidgets.QHBoxLayout()
+        # 顶栏：状态信息 + 紧凑窗口控制胶囊
+        title_bar = QtWidgets.QFrame()
+        title_bar.setObjectName("titleBar")
+        top_bar = QtWidgets.QHBoxLayout(title_bar)
+        top_bar.setContentsMargins(8, 4, 6, 4)
+        top_bar.setSpacing(6)
+
         self._dot = QtWidgets.QLabel("")
-        self._dot.setFixedSize(9, 9)
+        self._dot.setFixedSize(8, 8)
         set_dot_status(self._dot, "ok")
 
         self._lbl_status = QtWidgets.QLabel("Ready")
@@ -335,22 +341,36 @@ class QtChatTrayApp(QtCore.QObject):
         )
         self._lbl_work_session.setTextFormat(QtCore.Qt.TextFormat.PlainText)
 
-        btn_shrink = QtWidgets.QPushButton("─")
+        window_ctl = QtWidgets.QFrame()
+        window_ctl.setObjectName("windowCtlGroup")
+        window_ctl_layout = QtWidgets.QHBoxLayout(window_ctl)
+        window_ctl_layout.setContentsMargins(3, 2, 3, 2)
+        window_ctl_layout.setSpacing(2)
+
+        btn_shrink = QtWidgets.QPushButton("–")
         btn_shrink.setObjectName("windowCtl")
+        btn_shrink.setToolTip("最小化到悬浮球")
+        btn_shrink.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
+        btn_shrink.setFixedSize(24, 22)
         btn_shrink.clicked.connect(self._switch_to_ball)
 
-        btn_close = QtWidgets.QPushButton("✕")
-        btn_close.setObjectName("windowCtl")
+        btn_close = QtWidgets.QPushButton("×")
+        btn_close.setObjectName("windowCtlClose")
+        btn_close.setToolTip("隐藏窗口")
+        btn_close.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
+        btn_close.setFixedSize(24, 22)
         btn_close.clicked.connect(self.hide)
+
+        window_ctl_layout.addWidget(btn_shrink)
+        window_ctl_layout.addWidget(btn_close)
 
         top_bar.addWidget(self._dot)
         top_bar.addWidget(self._lbl_status)
         top_bar.addWidget(self._lbl_character)
         top_bar.addWidget(self._lbl_work_session)
-        top_bar.addStretch()
-        top_bar.addWidget(btn_shrink)
-        top_bar.addWidget(btn_close)
-        main_vbox.addLayout(top_bar)
+        top_bar.addStretch(1)
+        top_bar.addWidget(window_ctl)
+        main_vbox.addWidget(title_bar)
 
         self._history = QtWidgets.QTextEdit()
         self._history.setObjectName("historyView")
@@ -363,7 +383,7 @@ class QtChatTrayApp(QtCore.QObject):
         input_box = QtWidgets.QHBoxLayout()
         self._input = QtWidgets.QLineEdit()
         self._input.setObjectName("chatInput")
-        self._input.setFixedHeight(30)
+        self._input.setFixedHeight(32)
         self._input.setPlaceholderText("和我聊聊，或直接输入任务 / 指令…")
         self._input.returnPressed.connect(self._on_send_clicked)
 
@@ -373,8 +393,8 @@ class QtChatTrayApp(QtCore.QObject):
         btn_send.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
         btn_send.clicked.connect(self._on_send_clicked)
 
-        input_box.setContentsMargins(7, 2, 4, 2)
-        input_box.setSpacing(5)
+        input_box.setContentsMargins(10, 2, 4, 2)
+        input_box.setSpacing(6)
         input_box.addWidget(self._input, 1)
         input_box.addWidget(btn_send)
 
@@ -383,15 +403,19 @@ class QtChatTrayApp(QtCore.QObject):
         input_container.setLayout(input_box)
         main_vbox.addWidget(input_container)
 
-        tools_layout = QtWidgets.QHBoxLayout()
-        tools_layout.setContentsMargins(0, 0, 0, 0)
-        tools_layout.setSpacing(3)
+        # 底栏：左侧快捷开关，右侧设置/工具
+        tools_bar = QtWidgets.QFrame()
+        tools_bar.setObjectName("toolsBar")
+        tools_layout = QtWidgets.QHBoxLayout(tools_bar)
+        tools_layout.setContentsMargins(2, 1, 2, 1)
+        tools_layout.setSpacing(1)
 
         def mk_btn(text, cb, tip=""):
             b = QtWidgets.QPushButton(text)
             b.setObjectName("toolbarBtn")
             b.setToolTip(tip)
             b.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
+            b.setFixedSize(28, 26)
             b.clicked.connect(cb)
             return b
 
@@ -422,18 +446,20 @@ class QtChatTrayApp(QtCore.QObject):
 
         self._btn_more = mk_btn("⋯", self._show_more_menu, "更多功能")
 
+        # 左：状态快捷开关
         tools_layout.addWidget(self._btn_tts)
         tools_layout.addWidget(self._btn_voice)
         tools_layout.addWidget(self._btn_dnd)
         tools_layout.addWidget(self._btn_costume)
-        tools_layout.addStretch()
+        tools_layout.addStretch(1)
+        # 右：设置与工具
         tools_layout.addWidget(self._btn_mode)
         tools_layout.addWidget(self._btn_console)
         tools_layout.addWidget(self._btn_settings)
         tools_layout.addWidget(self._btn_more)
         tools_layout.addWidget(self._btn_expand)
 
-        main_vbox.addLayout(tools_layout)
+        main_vbox.addWidget(tools_bar)
 
         self._size_grip = QtWidgets.QSizeGrip(self._container)
         self._size_grip.setStyleSheet(

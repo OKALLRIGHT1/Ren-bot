@@ -69,9 +69,7 @@
             "item_type": "text",
             "label": "通知推送目标会话",
             "description": "填 session_id，例如 private:123456。",
-            "default": [
-                "private:1132824061"
-            ]
+            "default": []
         },
         "summary_folders": {
             "type": "list",

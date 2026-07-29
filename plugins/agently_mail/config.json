@@ -13,18 +13,30 @@
         "读邮件",
         "发邮件",
         "回邮件",
-        "转发邮件"
+        "转发邮件",
+        "测试邮件通知",
+        "邮件通知测试"
     ],
-    "description": "通过本机 agently-cli 查询、读取、搜索和按确认流程发送邮件。",
+    "description": "通过本机 agently-cli 查询、读取、搜索和按确认流程发送邮件；支持新邮件 QQ 私聊通知。",
     "example_arg": "最近邮件",
     "timeout_sec": 150,
-    "version": "0.1.0",
+    "version": "0.2.0",
     "settings": {
+        "model_queue": {
+            "type": "model_queue",
+            "label": "邮件意图模型（按顺序尝试）",
+            "description": "从主程序模型中选择推理/工具用途模型。留空时跟随 gatekeeper 任务路由。",
+            "purpose": [
+                "tool_reasoning"
+            ],
+            "max_items": 3,
+            "default": []
+        },
         "cli_path": {
             "type": "text",
             "label": "agently-cli 路径",
             "description": "默认使用全局 npm 安装的 Agent Mail CLI。",
-            "default": "C:\\Users\\Gengar\\AppData\\Roaming\\npm\\agently-cli.cmd"
+            "default": "agently-cli"
         },
         "default_limit": {
             "type": "number",
@@ -57,13 +69,67 @@
             "default": 120,
             "min": 5,
             "max": 180
+        },
+        "enable_notifications": {
+            "type": "bool",
+            "label": "启用新邮件通知",
+            "description": "开启后会在收到新邮件时主动推送到 QQ 私聊。",
+            "default": true
+        },
+        "notification_check_interval_sec": {
+            "type": "number",
+            "label": "通知检查间隔(秒)",
+            "description": "后台轮询收件箱的间隔。间隔太短会频繁拉起 CLI。",
+            "default": 120,
+            "min": 30,
+            "max": 600
+        },
+        "notification_target_sessions": {
+            "type": "list",
+            "item_type": "text",
+            "label": "通知推送目标会话",
+            "description": "填 session_id，例如 private:<QQ号>。",
+            "default": []
+        },
+        "notification_character_name": {
+            "type": "choice",
+            "label": "通知角色",
+            "description": "新邮件摘要用哪个角色的口吻来说。下拉选项来自角色库，避免手输名字。",
+            "default": "丰川祥子",
+            "choices_source": "characters",
+            "choices": [
+                "丰川祥子"
+            ]
+        },
+        "notification_poll_limit": {
+            "type": "number",
+            "label": "轮询检查数量",
+            "description": "每次后台轮询最多检查多少封最近邮件。",
+            "default": 10,
+            "min": 1,
+            "max": 20
+        },
+        "notification_body_chars": {
+            "type": "number",
+            "label": "通知正文图片字数",
+            "description": "推送正文图片时最多展示多少字符。",
+            "default": 1600,
+            "min": 300,
+            "max": 5000
+        },
+        "seen_state_path": {
+            "type": "text",
+            "label": "已读通知状态文件",
+            "description": "记录已通知过的邮件 ID，避免重启后重复推送。",
+            "default": "data/agently_mail_seen.json"
         }
     },
     "tool_examples": [
         "最近邮件",
         "搜索邮件 账单",
         "读邮件 msg_xxx",
-        "发邮件 to=a@example.com subject=主题 body=正文"
+        "发邮件 to=a@example.com subject=主题 body=正文",
+        "测试邮件通知"
     ],
     "access_control": {
         "allow_local": true,

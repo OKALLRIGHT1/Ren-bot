@@ -12,7 +12,11 @@ from typing import Any, Dict, Optional
 from urllib.parse import urlparse
 
 from aiohttp import web
+from integrations.gui_media import GuiMediaRegistry, MediaTicketError
 from modules.security_redaction import is_secret_setting
+
+
+LIVE2D_ACTIVITY_SOURCE = "live2d-tauri"
 
 
 class GuiHttpServer:
@@ -28,6 +32,7 @@ class GuiHttpServer:
         logger: Optional[Any] = None,
         app_ref: Optional[Any] = None,
         access_token: str = "",
+        media_registry: Optional[GuiMediaRegistry] = None,
     ):
         self.host = str(host or "127.0.0.1").strip() or "127.0.0.1"
         self.port = int(port)
@@ -35,6 +40,7 @@ class GuiHttpServer:
         self.logger = logger
         self.app_ref = app_ref
         self.access_token = str(access_token or "").strip()
+        self.media_registry = media_registry or GuiMediaRegistry()
 
         self._thread: Optional[threading.Thread] = None
         self._server_loop: Optional[asyncio.AbstractEventLoop] = None
@@ -154,7 +160,28 @@ class GuiHttpServer:
             response = web.Response(status=204)
             self._cors_headers(request, response)
             return response
-        response = await handler(request)
+        try:
+            response = await handler(request)
+        except web.HTTPException as exc:
+            # Convert framework HTML/plain errors into JSON so Enhanced never
+            # receives "404: Not Found" text payloads that break JSON parsers.
+            if int(exc.status) in {404, 405}:
+                response = self._json_response(
+                    {
+                        "ok": False,
+                        "error": (
+                            "route_not_found"
+                            if int(exc.status) == 404
+                            else "method_not_allowed"
+                        ),
+                        "path": str(request.rel_url.path or request.path or ""),
+                        "method": str(request.method or ""),
+                        "hint": "后端路由不存在或方法不支持。请重启 Python 后端以加载最新 GUI API。",
+                    },
+                    status=int(exc.status),
+                )
+            else:
+                raise
         self._cors_headers(request, response)
         return response
 
@@ -213,33 +240,74 @@ class GuiHttpServer:
         return value
 
     @classmethod
-    def _mask_secrets(cls, value: Any, parent_key: str = "") -> Any:
+    def _mask_secrets(
+        cls,
+        value: Any,
+        parent_key: str = "",
+        parent_is_secret: bool = False,
+    ) -> Any:
         if isinstance(value, dict):
             masked: Dict[str, Any] = {}
             for key, item in value.items():
-                if cls._is_secret_key(str(key)):
+                key_text = str(key)
+                secret_setting = is_secret_setting(key_text, item)
+                if secret_setting and isinstance(item, dict):
+                    masked[key] = cls._mask_secrets(
+                        item,
+                        key_text,
+                        parent_is_secret=True,
+                    )
+                elif secret_setting:
                     masked[key] = cls._mask_secret_value(item)
                 else:
-                    masked[key] = cls._mask_secrets(item, str(key))
+                    child_parent = (
+                        parent_key
+                        if key_text == "default" and parent_is_secret
+                        else key_text
+                    )
+                    masked[key] = cls._mask_secrets(
+                        item,
+                        child_parent,
+                        parent_is_secret=parent_is_secret and key_text == "default",
+                    )
             return masked
         if isinstance(value, list):
-            return [cls._mask_secrets(item, parent_key) for item in value]
-        if cls._is_secret_key(parent_key):
+            return [
+                cls._mask_secrets(item, parent_key, parent_is_secret)
+                for item in value
+            ]
+        if parent_is_secret or cls._is_secret_key(parent_key):
             return cls._mask_secret_value(value)
         return value
 
     @classmethod
     def _restore_masked_secrets(
-        cls, incoming: Any, current: Any, parent_key: str = ""
+        cls,
+        incoming: Any,
+        current: Any,
+        parent_key: str = "",
+        parent_is_secret: bool = False,
     ) -> Any:
         if isinstance(incoming, dict):
             existing = current if isinstance(current, dict) else {}
             restored: Dict[str, Any] = {}
             for key, value in incoming.items():
+                key_text = str(key)
+                secret_setting = is_secret_setting(key_text, value)
+                child_parent = (
+                    parent_key
+                    if key_text == "default" and parent_is_secret
+                    else key_text
+                )
                 restored[key] = cls._restore_masked_secrets(
                     value,
                     existing.get(key),
-                    str(key),
+                    child_parent,
+                    parent_is_secret=(
+                        secret_setting
+                        if isinstance(value, dict)
+                        else parent_is_secret and key_text == "default"
+                    ),
                 )
             return restored
         if isinstance(incoming, list):
@@ -250,13 +318,18 @@ class GuiHttpServer:
                     existing_items[index] if index < len(existing_items) else None
                 )
                 restored_list.append(
-                    cls._restore_masked_secrets(item, existing_item, parent_key)
+                    cls._restore_masked_secrets(
+                        item,
+                        existing_item,
+                        parent_key,
+                        parent_is_secret,
+                    )
                 )
             return restored_list
         if (
             isinstance(incoming, str)
             and incoming == cls.SECRET_MASK
-            and cls._is_secret_key(parent_key)
+            and (parent_is_secret or cls._is_secret_key(parent_key))
             and isinstance(current, str)
         ):
             return current
@@ -317,6 +390,384 @@ class GuiHttpServer:
             return module.get_memory_store()
         except Exception:
             return None
+
+    def _get_brain(self):
+        chat_service = (
+            getattr(self.app_ref, "chat_service", None) if self.app_ref is not None else None
+        )
+        brain = getattr(chat_service, "brain", None)
+        if brain is not None:
+            return brain
+        return getattr(self.app_ref, "brain", None) if self.app_ref is not None else None
+
+    def _get_memory_core(self):
+        brain = self._get_brain()
+        memory_core = getattr(brain, "memory_core", None) if brain is not None else None
+        if memory_core is not None:
+            return memory_core
+        store = self._get_memory_store()
+        if store is None:
+            return None
+        try:
+            from config import MEMORY_SETTINGS
+            from modules.memory_core import MemoryCoreService
+
+            core = MemoryCoreService(store, settings=MEMORY_SETTINGS)
+            core.initialize()
+            return core
+        except Exception:
+            return None
+
+    def _memory_gui_service(self):
+        from services.gui_api.memory_service import MemoryGuiService
+
+        return MemoryGuiService(memory_core=self._get_memory_core(), brain=self._get_brain())
+
+    def _diary_gui_service(self):
+        from services.gui_api.diary_service import DiaryGuiService
+
+        root = self._find_backend_root(os.getcwd()) or os.getcwd()
+        return DiaryGuiService(
+            store=self._get_memory_store(),
+            export_root=Path(root) / "output",
+        )
+
+    def _knowledge_gui_service(self):
+        from services.gui_api.knowledge_service import KnowledgeGuiService
+
+        root = self._find_backend_root(os.getcwd()) or os.getcwd()
+        return KnowledgeGuiService(
+            plugin_manager=self._get_plugin_manager(),
+            brain=self._get_brain(),
+            write_root=Path(root) / "knowledge_docs",
+        )
+
+    def _sedentary_gui_service(self):
+        from modules.runtime_settings import load_runtime_settings, update_runtime_settings
+        from services.gui_api.sedentary_service import SedentaryGuiService
+
+        apply_settings = None
+        app = self.app_ref
+        if app is not None and hasattr(app, "apply_external_settings"):
+            apply_settings = app.apply_external_settings
+        defaults = None
+        try:
+            import config as runtime_config
+
+            defaults = {
+                "sedentary_reminder_minutes": int(
+                    getattr(runtime_config, "SEDENTARY_REMINDER_MINUTES", 60) or 60
+                ),
+                "sedentary_break_minutes": int(
+                    getattr(runtime_config, "SEDENTARY_BREAK_MINUTES", 5) or 5
+                ),
+                "sedentary_cooldown_minutes": int(
+                    getattr(runtime_config, "SEDENTARY_REMINDER_COOLDOWN_MINUTES", 30)
+                    or 30
+                ),
+                "sedentary_popup_enabled": bool(
+                    getattr(runtime_config, "SEDENTARY_POPUP_ENABLED", True)
+                ),
+                "sedentary_status_visible": True,
+                "sedentary_popup_title": str(
+                    getattr(runtime_config, "SEDENTARY_POPUP_TITLE", "该起来活动一下了")
+                    or "该起来活动一下了"
+                ),
+                "sedentary_popup_message": str(
+                    getattr(
+                        runtime_config,
+                        "SEDENTARY_POPUP_MESSAGE",
+                        "你已经连续使用 {app_name} {active_minutes} 分钟。",
+                    )
+                    or "你已经连续使用 {app_name} {active_minutes} 分钟。"
+                ),
+                "sedentary_popup_image_path": str(
+                    getattr(runtime_config, "SEDENTARY_POPUP_IMAGE_PATH", "") or ""
+                ),
+                "sedentary_popup_snooze_minutes": int(
+                    getattr(runtime_config, "SEDENTARY_POPUP_SNOOZE_MINUTES", 10) or 10
+                ),
+                "sedentary_popup_auto_close_seconds": int(
+                    getattr(runtime_config, "SEDENTARY_POPUP_AUTO_CLOSE_SECONDS", 20)
+                    or 20
+                ),
+            }
+        except Exception:
+            defaults = None
+        return SedentaryGuiService(
+            load_runtime=load_runtime_settings,
+            update_runtime=update_runtime_settings,
+            apply_settings=apply_settings,
+            defaults=defaults,
+        )
+
+    def _sedentary_result_status(self, result: Dict[str, Any]) -> int:
+        error = str(result.get("error") or "")
+        if error in {"runtime_store_unavailable"}:
+            return 503
+        if error.startswith("apply_failed"):
+            return 500
+        if error in {"empty_payload"}:
+            return 400
+        return 400
+
+    def _info_sources_gui_service(self):
+        from services.gui_api.info_sources_service import InfoSourcesGuiService
+
+        root = self._find_backend_root(os.getcwd()) or os.getcwd()
+        source_root = Path(root) / "data" / "info_sources"
+        secret_store = None
+        try:
+            from modules.plugin_secret_store import PluginSecretStore
+
+            secret_store = PluginSecretStore()
+        except Exception:
+            secret_store = None
+        return InfoSourcesGuiService(source_root=source_root, secret_store=secret_store)
+
+    def _info_sources_result_status(self, result: Dict[str, Any]) -> int:
+        error = str(result.get("error") or "")
+        if error in {"secret_store_unavailable"}:
+            return 503
+        if error in {
+            "invalid_id",
+            "invalid_provider",
+            "empty_text",
+            "empty_payload",
+        }:
+            return 400
+        if "not found" in error.lower() or error in {"not_found"}:
+            return 404
+        return 400
+
+    def _expression_library_gui_service(self):
+        from modules.runtime_settings import load_runtime_settings, update_runtime_settings
+        from services.gui_api.expression_library_service import ExpressionLibraryGuiService
+
+        return ExpressionLibraryGuiService(
+            store=self._get_memory_store(),
+            load_runtime=load_runtime_settings,
+            update_runtime=update_runtime_settings,
+        )
+
+    def _expression_result_status(self, result: Dict[str, Any]) -> int:
+        error = str(result.get("error") or "")
+        if error in {"memory_store_unavailable", "runtime_store_unavailable"}:
+            return 503
+        if error in {"not_found"}:
+            return 404
+        if error in {"invalid_id", "empty_fields", "empty_ids", "empty_payload"}:
+            return 400
+        return 400
+
+    def _meme_pack_gui_service(self):
+        from services.gui_api.meme_pack_service import MemePackGuiService
+
+        return MemePackGuiService(plugin_manager=self._get_plugin_manager())
+
+    def _meme_result_status(self, result: Dict[str, Any]) -> int:
+        error = str(result.get("error") or "")
+        if error in {"meme_store_unavailable"}:
+            return 503
+        if error in {"not_found"}:
+            return 404
+        if error in {"invalid_id", "empty_ids"}:
+            return 400
+        return 400
+
+    def _theme_gui_service(self):
+        from modules.runtime_settings import load_runtime_settings, update_runtime_settings
+        from services.gui_api.theme_service import ThemeGuiService
+
+        themes = {}
+        default_theme = ""
+        try:
+            from modules.gui import styles as styles_mod
+
+            themes = dict(getattr(styles_mod, "THEMES", {}) or {})
+            default_theme = str(getattr(styles_mod, "DEFAULT_THEME_NAME", "") or "")
+        except Exception:
+            themes = {}
+            default_theme = ""
+        return ThemeGuiService(
+            load_runtime=load_runtime_settings,
+            update_runtime=update_runtime_settings,
+            themes=themes,
+            default_theme=default_theme,
+        )
+
+    def _qq_gateway_gui_service(self):
+        from modules.runtime_settings import load_runtime_settings, update_runtime_settings
+        from services.gui_api.qq_gateway_service import QqGatewayGuiService
+
+        apply_settings = None
+        app = self.app_ref
+        if app is not None and hasattr(app, "apply_external_settings"):
+            apply_settings = app.apply_external_settings
+        return QqGatewayGuiService(
+            load_runtime=load_runtime_settings,
+            update_runtime=update_runtime_settings,
+            apply_settings=apply_settings,
+        )
+
+    def _external_services_gui_service(self):
+        from modules.runtime_settings import load_runtime_settings, update_runtime_settings
+        from services.gui_api.external_services_service import ExternalServicesGuiService
+
+        return ExternalServicesGuiService(
+            load_runtime=load_runtime_settings,
+            update_runtime=update_runtime_settings,
+        )
+
+    def _external_services_result_status(self, result: Dict[str, Any]) -> int:
+        error = str(result.get("error") or "")
+        if error in {
+            "command_required",
+            "command_not_found",
+            "cwd_not_found",
+            "start_timeout",
+            "process_exited",
+            "invalid_service_id",
+            "empty_services",
+            "ensure_failed",
+            "stop_failed",
+        }:
+            return 400
+        return 400
+
+    def _theme_result_status(self, result: Dict[str, Any]) -> int:
+        error = str(result.get("error") or "")
+        if error in {"runtime_store_unavailable"}:
+            return 503
+        if error in {"empty_payload", "invalid_theme", "invalid_palette"}:
+            return 400
+        return 400
+
+    def _qq_gateway_result_status(self, result: Dict[str, Any]) -> int:
+        error = str(result.get("error") or "")
+        if error in {"runtime_store_unavailable"}:
+            return 503
+        if error in {"empty_payload"}:
+            return 400
+        return 400
+
+    def _app_rules_gui_service(self):
+        from services.gui_api.app_rules_service import AppRulesGuiService
+
+        root = self._find_backend_root(os.getcwd()) or os.getcwd()
+        return AppRulesGuiService(rules_path=Path(root) / "data" / "app_category_rules.json")
+
+    def _app_rules_result_status(self, result: Dict[str, Any]) -> int:
+        error = str(result.get("error") or "")
+        if error in {"empty_payload", "save_failed"}:
+            return 400
+        return 400
+
+    def _logs_gui_service(self):
+        from services.gui_api.logs_service import LogsGuiService
+
+        root = self._find_backend_root(os.getcwd()) or os.getcwd()
+        return LogsGuiService(log_dir=Path(root) / "logs")
+
+    def _codex_gui_service(self):
+        from modules.runtime_settings import load_runtime_settings, update_runtime_settings
+        from services.gui_api.codex_service import CodexGuiService
+
+        return CodexGuiService(
+            load_runtime=load_runtime_settings,
+            update_runtime=update_runtime_settings,
+        )
+
+    def _logs_result_status(self, result: Dict[str, Any]) -> int:
+        error = str(result.get("error") or "")
+        if error in {"invalid_name", "log_not_allowed", "path_escape"}:
+            return 400
+        return 400
+
+    def _codex_result_status(self, result: Dict[str, Any]) -> int:
+        error = str(result.get("error") or "")
+        if error in {"runtime_store_unavailable"}:
+            return 503
+        if error in {"empty_payload"}:
+            return 400
+        return 400
+
+    def _status_screen_gui_service(self):
+        from services.gui_api.status_screen_service import StatusScreenGuiService
+
+        root = self._find_backend_root(os.getcwd()) or os.getcwd()
+        app = self.app_ref
+        status_text_getter = None
+        publish = None
+        load_config = None
+        save_config_fn = None
+        if app is not None:
+            if hasattr(app, "get_display_mqtt_status_text"):
+                status_text_getter = app.get_display_mqtt_status_text
+            if hasattr(app, "publish_display_state"):
+                publish = app.publish_display_state
+            if hasattr(app, "load_display_state_config"):
+                load_config = app.load_display_state_config
+            if hasattr(app, "save_display_state_config"):
+                save_config_fn = app.save_display_state_config
+        return StatusScreenGuiService(
+            config_path=Path(root) / "data" / "display_state_config.json",
+            status_text_getter=status_text_getter,
+            publish=publish,
+            load_config=load_config,
+            save_config_fn=save_config_fn,
+        )
+
+    def _status_screen_result_status(self, result: Dict[str, Any]) -> int:
+        error = str(result.get("error") or "")
+        if error in {"publish_unavailable"}:
+            return 503
+        if error in {
+            "empty_payload",
+            "save_failed",
+            "publish_failed",
+            "empty_image",
+            "image_not_found",
+            "image_read_failed",
+            "invalid_image_base64",
+            "convert_failed",
+            "pillow_unavailable",
+        }:
+            return 400
+        return 400
+
+    def _knowledge_result_status(self, result: Dict[str, Any]) -> int:
+        error = str(result.get("error") or "")
+        if error in {
+            "plugin_manager_unavailable",
+            "brain_unavailable",
+            "plugin_or_brain_unavailable",
+            "ingest_unavailable",
+        }:
+            return 503
+        if error in {"empty_query", "invalid_path", "empty_dirs", "empty_fields"}:
+            return 400
+        return 400
+
+    def _diary_result_status(self, result: Dict[str, Any]) -> int:
+        error = str(result.get("error") or "")
+        if error in {"not_found", "no_diaries"}:
+            return 404
+        if error in {"memory_store_unavailable"}:
+            return 503
+        if error in {"empty_fields", "invalid_id"}:
+            return 400
+        return 400
+
+    def _memory_result_status(self, result: Dict[str, Any]) -> int:
+        error = str(result.get("error") or "")
+        if error in {"not_found"}:
+            return 404
+        if error in {"memory_core_unavailable", "brain_unavailable"}:
+            return 503
+        if error in {"empty_content", "invalid_id"}:
+            return 400
+        return 400
 
     def _get_plugin_manager(self):
         return getattr(self.app_ref, "plugin_manager", None)
@@ -853,15 +1304,16 @@ class GuiHttpServer:
         chat_service = (
             getattr(self.app_ref, "chat_service", None) if self.app_ref is not None else None
         )
-        tracker = getattr(chat_service, "reply_effect_tracker", None)
-        if tracker is None or not hasattr(tracker, "recent"):
-            return {"records": [], "stats": {}, "error": "reply_effect_tracker_unavailable"}
+        brain = getattr(chat_service, "brain", None)
+        memory_core = getattr(brain, "memory_core", None)
+        if memory_core is None:
+            return {"records": [], "stats": {}, "error": "memory_core_unavailable"}
         limit = max(1, min(500, int(payload.get("limit") or 50)))
         session_id = str(payload.get("session_id") or "").strip()
         try:
             return {
-                "records": tracker.recent(limit=limit, session_id=session_id),
-                "stats": tracker.stats(limit=max(limit, 200), session_id=session_id),
+                "records": memory_core.list_feedback(limit=limit, session_id=session_id),
+                "stats": memory_core.feedback_stats(limit=max(limit, 200), session_id=session_id),
             }
         except Exception as exc:
             return {"records": [], "stats": {}, "error": str(exc)}
@@ -1013,11 +1465,423 @@ class GuiHttpServer:
             "mcpConfig": self._mask_secrets(mcp_config),
         }
 
+
+    def _models_service(self, root: str):
+        from services.gui_api.models_service import ModelsCatalogService
+
+        paths = self._build_paths(root)
+        return ModelsCatalogService(Path(paths["customModels"]))
+
+    async def _handle_models_get(self, _request: web.Request) -> web.Response:
+        root = self._find_backend_root(os.getcwd())
+        if not root:
+            return self._json_response(
+                {"ok": False, "error": "backend_not_found"}, status=404
+            )
+        data = self._models_service(root).list_catalog()
+        return self._json_response({"ok": True, "data": data})
+
+    async def _handle_models_upsert(self, request: web.Request) -> web.Response:
+        root = self._find_backend_root(os.getcwd())
+        if not root:
+            return self._json_response(
+                {"ok": False, "error": "backend_not_found"}, status=404
+            )
+        payload = await self._read_payload(request)
+        result = self._models_service(root).upsert_model(payload)
+        if not result.get("ok"):
+            code = 400 if result.get("error") != "write_failed" else 500
+            return self._json_response(result, status=code)
+        self._reload_custom_models()
+        return self._json_response(result)
+
+    async def _handle_models_delete(self, request: web.Request) -> web.Response:
+        root = self._find_backend_root(os.getcwd())
+        if not root:
+            return self._json_response(
+                {"ok": False, "error": "backend_not_found"}, status=404
+            )
+        payload = await self._read_payload(request)
+        model_id = str(payload.get("id") or payload.get("model_id") or "").strip()
+        result = self._models_service(root).delete_model(model_id)
+        if not result.get("ok"):
+            code = 404 if result.get("error") == "not_found" else 400
+            if result.get("error") == "write_failed":
+                code = 500
+            return self._json_response(result, status=code)
+        self._reload_custom_models()
+        return self._json_response(result)
+
+    async def _handle_providers_upsert(self, request: web.Request) -> web.Response:
+        root = self._find_backend_root(os.getcwd())
+        if not root:
+            return self._json_response(
+                {"ok": False, "error": "backend_not_found"}, status=404
+            )
+        payload = await self._read_payload(request)
+        result = self._models_service(root).upsert_provider(payload)
+        if not result.get("ok"):
+            code = 400 if result.get("error") != "write_failed" else 500
+            return self._json_response(result, status=code)
+        self._reload_custom_models()
+        return self._json_response(result)
+
+    async def _handle_providers_delete(self, request: web.Request) -> web.Response:
+        root = self._find_backend_root(os.getcwd())
+        if not root:
+            return self._json_response(
+                {"ok": False, "error": "backend_not_found"}, status=404
+            )
+        payload = await self._read_payload(request)
+        provider_id = str(payload.get("id") or payload.get("provider_id") or "").strip()
+        result = self._models_service(root).delete_provider(provider_id)
+        if not result.get("ok"):
+            code = 404 if result.get("error") == "not_found" else 400
+            if result.get("error") == "write_failed":
+                code = 500
+            return self._json_response(result, status=code)
+        self._reload_custom_models()
+        return self._json_response(result)
+
+    async def _handle_models_router_save(self, request: web.Request) -> web.Response:
+        root = self._find_backend_root(os.getcwd())
+        if not root:
+            return self._json_response(
+                {"ok": False, "error": "backend_not_found"}, status=404
+            )
+        payload = await self._read_payload(request)
+        router = payload.get("router") if isinstance(payload.get("router"), dict) else payload
+        result = self._models_service(root).save_router(router if isinstance(router, dict) else {})
+        if not result.get("ok"):
+            code = 400 if result.get("error") != "write_failed" else 500
+            return self._json_response(result, status=code)
+        self._reload_custom_models()
+        return self._json_response(result)
+
+    def _runtime_config_module(self):
+        """Return the live process config module (same object old Qt GUI imports).
+
+        Do not load config.py under an alternate module name: that creates a
+        second PROVIDERS/MODELS/LLM_ROUTER namespace and Enhanced GUI writes would
+        never show up in the legacy settings dialog until full restart.
+        """
+        import config as runtime_config
+
+        return runtime_config
+
+    def _reload_custom_models(self) -> None:
+        try:
+            runtime_config = self._runtime_config_module()
+            if hasattr(runtime_config, "load_custom_models"):
+                runtime_config.load_custom_models(force=True)
+        except Exception:
+            if self.logger is not None:
+                try:
+                    self.logger.exception("reload custom models failed")
+                except Exception:
+                    pass
+
+    def _characters_service(self, root: str):
+        from services.gui_api.characters_service import CharactersService
+
+        paths = self._build_paths(root)
+        return CharactersService(Path(paths["characters"]))
+
+    def _reload_characters(self) -> None:
+        if self.app_ref is None:
+            return
+        try:
+            character_module = self._load_local_module(
+                "gui_http_character_manager",
+                ["modules", "character_manager.py"],
+            )
+            character_manager = character_module.character_manager
+            character_manager.load()
+        except Exception:
+            pass
+
+    def _character_write_status(self, result: Dict[str, Any]) -> int:
+        error = str(result.get("error") or "")
+        if error == "write_failed":
+            return 500
+        if error in {"not_found", "costume_not_found"}:
+            return 404
+        if error in {
+            "cannot_delete_active",
+            "cannot_delete_last_costume",
+            "invalid_costume",
+            "badge_not_found",
+            "image_not_found",
+            "invalid_image",
+            "image_copy_failed",
+        }:
+            return 400
+        return 400
+
+    async def _handle_characters_list(self, _request: web.Request) -> web.Response:
+        root = self._find_backend_root(os.getcwd())
+        if not root:
+            return self._json_response(
+                {"ok": False, "error": "backend_not_found"}, status=404
+            )
+        data = self._characters_service(root).list_characters()
+        return self._json_response({"ok": True, "data": data})
+
+    async def _handle_characters_get(self, request: web.Request) -> web.Response:
+        root = self._find_backend_root(os.getcwd())
+        if not root:
+            return self._json_response(
+                {"ok": False, "error": "backend_not_found"}, status=404
+            )
+        character_id = str(request.query.get("id") or request.query.get("character_id") or "").strip()
+        result = self._characters_service(root).get_character(character_id)
+        if not result.get("ok"):
+            return self._json_response(result, status=self._character_write_status(result))
+        return self._json_response(result)
+
+    async def _handle_characters_upsert(self, request: web.Request) -> web.Response:
+        root = self._find_backend_root(os.getcwd())
+        if not root:
+            return self._json_response(
+                {"ok": False, "error": "backend_not_found"}, status=404
+            )
+        payload = await self._read_payload(request)
+        result = self._characters_service(root).upsert_character(payload)
+        if not result.get("ok"):
+            return self._json_response(result, status=self._character_write_status(result))
+        self._reload_characters()
+        return self._json_response(result)
+
+    async def _handle_characters_delete(self, request: web.Request) -> web.Response:
+        root = self._find_backend_root(os.getcwd())
+        if not root:
+            return self._json_response(
+                {"ok": False, "error": "backend_not_found"}, status=404
+            )
+        payload = await self._read_payload(request)
+        character_id = str(payload.get("id") or payload.get("character_id") or "").strip()
+        result = self._characters_service(root).delete_character(character_id)
+        if not result.get("ok"):
+            return self._json_response(result, status=self._character_write_status(result))
+        self._reload_characters()
+        return self._json_response(result)
+
+    async def _handle_characters_activate(self, request: web.Request) -> web.Response:
+        root = self._find_backend_root(os.getcwd())
+        if not root:
+            return self._json_response(
+                {"ok": False, "error": "backend_not_found"}, status=404
+            )
+        payload = await self._read_payload(request)
+        character_id = str(payload.get("id") or payload.get("character_id") or "").strip()
+        result = self._characters_service(root).activate_character(character_id)
+        if not result.get("ok"):
+            return self._json_response(result, status=self._character_write_status(result))
+        self._reload_characters()
+        return self._json_response(result)
+
+    async def _handle_characters_costume_upsert(self, request: web.Request) -> web.Response:
+        root = self._find_backend_root(os.getcwd())
+        if not root:
+            return self._json_response(
+                {"ok": False, "error": "backend_not_found"}, status=404
+            )
+        payload = await self._read_payload(request)
+        character_id = str(payload.get("character_id") or payload.get("id") or "").strip()
+        result = self._characters_service(root).upsert_costume(character_id, payload)
+        if not result.get("ok"):
+            return self._json_response(result, status=self._character_write_status(result))
+        self._reload_characters()
+        return self._json_response(result)
+
+    async def _handle_characters_costume_delete(self, request: web.Request) -> web.Response:
+        root = self._find_backend_root(os.getcwd())
+        if not root:
+            return self._json_response(
+                {"ok": False, "error": "backend_not_found"}, status=404
+            )
+        payload = await self._read_payload(request)
+        character_id = str(payload.get("character_id") or payload.get("id") or "").strip()
+        costume_name = str(payload.get("name") or payload.get("costume") or "").strip()
+        result = self._characters_service(root).delete_costume(character_id, costume_name)
+        if not result.get("ok"):
+            return self._json_response(result, status=self._character_write_status(result))
+        self._reload_characters()
+        return self._json_response(result)
+
+    async def _handle_characters_costume_wear(self, request: web.Request) -> web.Response:
+        root = self._find_backend_root(os.getcwd())
+        if not root:
+            return self._json_response(
+                {"ok": False, "error": "backend_not_found"}, status=404
+            )
+        payload = await self._read_payload(request)
+        character_id = str(payload.get("character_id") or payload.get("id") or "").strip()
+        costume_name = str(payload.get("name") or payload.get("costume") or "").strip()
+        result = self._characters_service(root).set_current_costume(character_id, costume_name)
+        if not result.get("ok"):
+            return self._json_response(result, status=self._character_write_status(result))
+        self._reload_characters()
+        return self._json_response(result)
+
+    async def _handle_characters_badge_current(
+        self, _request: web.Request
+    ) -> web.Response:
+        root = self._find_backend_root(os.getcwd())
+        if not root:
+            return self._json_response(
+                {"ok": False, "error": "backend_not_found"}, status=404
+            )
+        result = self._characters_service(root).get_current_badge()
+        if not result.get("ok"):
+            return self._json_response(result, status=self._character_write_status(result))
+        return self._json_response(result)
+
+    async def _handle_characters_badge_get(self, request: web.Request) -> web.Response:
+        root = self._find_backend_root(os.getcwd())
+        if not root:
+            return self._json_response(
+                {"ok": False, "error": "backend_not_found"}, status=404
+            )
+        character_id = str(
+            request.query.get("character_id") or request.query.get("id") or ""
+        ).strip()
+        costume_name = str(
+            request.query.get("costume") or request.query.get("costume_name") or ""
+        ).strip()
+        result = self._characters_service(root).get_badge(character_id, costume_name)
+        if not result.get("ok"):
+            return self._json_response(result, status=self._character_write_status(result))
+        return self._json_response(result)
+
+    async def _handle_characters_badge_import(
+        self, request: web.Request
+    ) -> web.Response:
+        root = self._find_backend_root(os.getcwd())
+        if not root:
+            return self._json_response(
+                {"ok": False, "error": "backend_not_found"}, status=404
+            )
+        payload = await self._read_payload(request)
+        result = self._characters_service(root).import_badge(
+            str(payload.get("character_id") or payload.get("id") or ""),
+            str(payload.get("source_path") or payload.get("path") or ""),
+            costume_name=str(
+                payload.get("costume") or payload.get("costume_name") or ""
+            ),
+            scale=payload.get("scale", 1.0),
+            offset_x=payload.get("offset_x", 0.0),
+            offset_y=payload.get("offset_y", 0.0),
+        )
+        if not result.get("ok"):
+            return self._json_response(result, status=self._character_write_status(result))
+        self._reload_characters()
+        return self._json_response(result)
+
+    async def _handle_characters_badge_update(
+        self, request: web.Request
+    ) -> web.Response:
+        root = self._find_backend_root(os.getcwd())
+        if not root:
+            return self._json_response(
+                {"ok": False, "error": "backend_not_found"}, status=404
+            )
+        payload = await self._read_payload(request)
+        result = self._characters_service(root).update_badge(
+            str(payload.get("character_id") or payload.get("id") or ""),
+            costume_name=str(
+                payload.get("costume") or payload.get("costume_name") or ""
+            ),
+            scale=payload.get("scale", 1.0),
+            offset_x=payload.get("offset_x", 0.0),
+            offset_y=payload.get("offset_y", 0.0),
+        )
+        if not result.get("ok"):
+            return self._json_response(result, status=self._character_write_status(result))
+        self._reload_characters()
+        return self._json_response(result)
+
+    async def _handle_characters_badge_clear(
+        self, request: web.Request
+    ) -> web.Response:
+        root = self._find_backend_root(os.getcwd())
+        if not root:
+            return self._json_response(
+                {"ok": False, "error": "backend_not_found"}, status=404
+            )
+        payload = await self._read_payload(request)
+        result = self._characters_service(root).clear_badge(
+            str(payload.get("character_id") or payload.get("id") or ""),
+            costume_name=str(
+                payload.get("costume") or payload.get("costume_name") or ""
+            ),
+        )
+        if not result.get("ok"):
+            return self._json_response(result, status=self._character_write_status(result))
+        self._reload_characters()
+        return self._json_response(result)
+
     async def _handle_health(self, _request: web.Request) -> web.Response:
-        return self._json_response({"ok": True, "service": "gui_http"})
+        return self._json_response(
+            {
+                "ok": True,
+                "service": "gui_http",
+                "api_version": "enhanced-gui-1",
+                "features": [
+                    "models",
+                    "characters",
+                    "memory-core",
+                    "diary",
+                    "knowledge",
+                    "plugins-settings",
+                    "sedentary",
+                    "info-sources",
+                    "expression-library",
+                    "meme-pack",
+                    "theme",
+                    "qq-gateway",
+                    "app-rules",
+                    "logs",
+                    "codex",
+                    "status-screen",
+                ],
+            }
+        )
+
+    async def _handle_not_found(self, request: web.Request) -> web.Response:
+        return self._json_response(
+            {
+                "ok": False,
+                "error": "route_not_found",
+                "path": str(request.rel_url.path or request.path or ""),
+                "method": str(request.method or ""),
+                "hint": "后端路由不存在。请重启 Python 后端以加载最新 GUI API。",
+            },
+            status=404,
+        )
 
     async def _handle_runtime_status(self, _request: web.Request) -> web.Response:
         return self._json_response({"ok": True, "data": self._build_runtime_status()})
+
+    async def _handle_runtime_control(self, request: web.Request) -> web.Response:
+        payload = await self._read_payload(request)
+        action = str(payload.get("action") or "").strip().lower()
+        if action not in {"shutdown", "restart"}:
+            return self._json_response(
+                {"ok": False, "error": "invalid_action"}, status=400
+            )
+        control = getattr(self.app_ref, "request_runtime_control", None)
+        if not callable(control):
+            return self._json_response(
+                {"ok": False, "error": "runtime_control_unavailable"}, status=409
+            )
+        ok, error = control(action)
+        if not ok:
+            return self._json_response(
+                {"ok": False, "error": str(error or "runtime_control_failed")},
+                status=409,
+            )
+        return self._json_response({"ok": True, "action": action})
 
     async def _handle_settings_get(self, _request: web.Request) -> web.Response:
         root = self._find_backend_root(os.getcwd())
@@ -1077,10 +1941,7 @@ class GuiHttpServer:
         if self.app_ref is not None:
             try:
                 if section == "customModels":
-                    runtime_config = self._load_local_module(
-                        "gui_http_runtime_config", ["config.py"]
-                    )
-                    runtime_config.load_custom_models(force=True)
+                    self._reload_custom_models()
                 elif section == "runtimeSettings":
                     self.app_ref.apply_external_settings()
                 elif section == "characters":
@@ -1154,10 +2015,19 @@ class GuiHttpServer:
         except Exception as exc:
             return self._json_response({"ok": False, "error": str(exc)}, status=400)
 
+    def _plugins_gui_service(self):
+        from services.gui_api.plugins_service import PluginsGuiService
+
+        return PluginsGuiService(manager=self._get_plugin_manager())
+
     async def _handle_plugin_list(self, _request: web.Request) -> web.Response:
-        return self._json_response(
-            {"ok": True, "data": {"plugins": self._list_plugins()}}
-        )
+        result = self._plugins_gui_service().list_plugins()
+        if not result.get("ok"):
+            # fallback to legacy sanitize list for partial managers
+            return self._json_response(
+                {"ok": True, "data": {"plugins": self._list_plugins()}}
+            )
+        return self._json_response(result)
 
     async def _handle_plugin_toggle(self, request: web.Request) -> web.Response:
         payload = await self._read_payload(request)
@@ -1165,8 +2035,10 @@ class GuiHttpServer:
         enabled = bool(payload.get("enabled"))
         ok, error = self._set_plugin_enabled(trigger, enabled)
         status = 200 if ok else 400
+        listed = self._plugins_gui_service().list_plugins()
+        plugins = listed.get("data", {}).get("plugins") if listed.get("ok") else self._list_plugins()
         return self._json_response(
-            {"ok": ok, "error": error, "data": {"plugins": self._list_plugins()}},
+            {"ok": ok, "error": error, "data": {"plugins": plugins}},
             status=status,
         )
 
@@ -1175,8 +2047,10 @@ class GuiHttpServer:
         trigger = str(payload.get("trigger") or "").strip()
         ok, error = self._reload_plugin(trigger)
         status = 200 if ok else 400
+        listed = self._plugins_gui_service().list_plugins()
+        plugins = listed.get("data", {}).get("plugins") if listed.get("ok") else self._list_plugins()
         return self._json_response(
-            {"ok": ok, "error": error, "data": {"plugins": self._list_plugins()}},
+            {"ok": ok, "error": error, "data": {"plugins": plugins}},
             status=status,
         )
 
@@ -1186,6 +2060,9 @@ class GuiHttpServer:
             return self._json_response(
                 {"ok": False, "error": "invalid_trigger"}, status=400
             )
+        result = self._plugins_gui_service().get_config(trigger)
+        if result.get("ok"):
+            return self._json_response(result)
         data = self._serialize_plugin_config(trigger)
         schema = self._serialize_plugin_config_schema(trigger)
         return self._json_response({"ok": True, "data": {"config": data, "schema": schema}})
@@ -1204,6 +2081,20 @@ class GuiHttpServer:
     async def _handle_plugin_config_save(self, request: web.Request) -> web.Response:
         payload = await self._read_payload(request)
         trigger = str(payload.get("trigger") or "").strip()
+        # Structured form save path: { trigger, settings: { field: value } }
+        if isinstance(payload.get("settings"), dict) and "config" not in payload:
+            result = self._plugins_gui_service().save_settings(trigger, payload.get("settings") or {})
+            if not result.get("ok"):
+                return self._json_response(result, status=400)
+            listed = self._plugins_gui_service().list_plugins()
+            plugins = (
+                listed.get("data", {}).get("plugins")
+                if listed.get("ok")
+                else self._list_plugins()
+            )
+            data = dict(result.get("data") or {})
+            data["plugins"] = plugins
+            return self._json_response({"ok": True, "data": data})
         config = (
             payload.get("config")
             if isinstance(payload.get("config"), dict)
@@ -1211,14 +2102,32 @@ class GuiHttpServer:
         )
         if not isinstance(config, dict):
             config = {}
+        # Prefer structured raw save with secret restore when service available.
+        service_result = self._plugins_gui_service().save_raw_config(trigger, config)
+        if service_result.get("ok"):
+            listed = self._plugins_gui_service().list_plugins()
+            plugins = (
+                listed.get("data", {}).get("plugins")
+                if listed.get("ok")
+                else self._list_plugins()
+            )
+            data = dict(service_result.get("data") or {})
+            data["plugins"] = plugins
+            return self._json_response({"ok": True, "data": data})
         ok, error = self._save_plugin_config(trigger, config)
+        listed = self._plugins_gui_service().list_plugins()
+        plugins = (
+            listed.get("data", {}).get("plugins")
+            if listed.get("ok")
+            else self._list_plugins()
+        )
         return self._json_response(
             {
                 "ok": ok,
                 "error": error,
                 "data": {
                     "config": self._serialize_plugin_config(trigger),
-                    "plugins": self._list_plugins(),
+                    "plugins": plugins,
                 },
             },
             status=200 if ok else 400,
@@ -1249,6 +2158,263 @@ class GuiHttpServer:
             {"ok": ok, "data": result, "error": result.get("message", "")},
             status=status,
         )
+
+    async def _handle_knowledge_list(self, _request: web.Request) -> web.Response:
+        result = self._knowledge_gui_service().list_dirs()
+        if not result.get("ok"):
+            return self._json_response(result, status=self._knowledge_result_status(result))
+        return self._json_response(result)
+
+    async def _handle_knowledge_save_dirs(self, request: web.Request) -> web.Response:
+        payload = await self._read_payload(request)
+        dirs = payload.get("dirs") if isinstance(payload.get("dirs"), list) else payload
+        result = self._knowledge_gui_service().save_dirs(dirs)
+        if not result.get("ok"):
+            return self._json_response(result, status=self._knowledge_result_status(result))
+        return self._json_response(result)
+
+    async def _handle_knowledge_stats(self, _request: web.Request) -> web.Response:
+        result = self._knowledge_gui_service().stats()
+        if not result.get("ok"):
+            return self._json_response(result, status=self._knowledge_result_status(result))
+        return self._json_response(result)
+
+    async def _handle_knowledge_search(self, request: web.Request) -> web.Response:
+        query = str(request.query.get("query") or request.query.get("q") or "").strip()
+        if not query:
+            payload = await self._read_payload(request)
+            query = str(payload.get("query") or payload.get("q") or "").strip()
+            limit = int(payload.get("limit") or 5)
+        else:
+            limit = int(request.query.get("limit") or 5)
+        result = self._knowledge_gui_service().search(query, limit=limit)
+        if not result.get("ok"):
+            return self._json_response(result, status=self._knowledge_result_status(result))
+        return self._json_response(result)
+
+    async def _handle_knowledge_import(self, request: web.Request) -> web.Response:
+        payload = await self._read_payload(request)
+        path = str(payload.get("path") or "").strip()
+        result = await asyncio.to_thread(
+            self._knowledge_gui_service().import_file, path
+        )
+        if not result.get("ok"):
+            return self._json_response(result, status=self._knowledge_result_status(result))
+        return self._json_response(result)
+
+    async def _handle_knowledge_rebuild(self, _request: web.Request) -> web.Response:
+        # Collection rebuild can touch Chroma on disk; keep the event loop free.
+        result = await asyncio.to_thread(self._knowledge_gui_service().rebuild)
+        if not result.get("ok"):
+            return self._json_response(result, status=self._knowledge_result_status(result))
+        return self._json_response(result)
+
+    async def _handle_knowledge_delete_dirs(self, request: web.Request) -> web.Response:
+        payload = await self._read_payload(request)
+        dirs = payload.get("dirs") if isinstance(payload.get("dirs"), list) else []
+        result = await asyncio.to_thread(
+            self._knowledge_gui_service().delete_by_dirs, dirs
+        )
+        if not result.get("ok"):
+            return self._json_response(result, status=self._knowledge_result_status(result))
+        return self._json_response(result)
+
+    async def _handle_knowledge_learn(self, _request: web.Request) -> web.Response:
+        # Long-running ingest must not block the aiohttp event loop.
+        result = await asyncio.to_thread(
+            self._knowledge_gui_service().learn_configured_dirs
+        )
+        if not result.get("ok"):
+            return self._json_response(result, status=self._knowledge_result_status(result))
+        return self._json_response(result)
+
+    async def _handle_knowledge_create_doc(self, request: web.Request) -> web.Response:
+        payload = await self._read_payload(request)
+        result = self._knowledge_gui_service().create_doc(payload)
+        if not result.get("ok"):
+            return self._json_response(result, status=self._knowledge_result_status(result))
+        return self._json_response(result)
+
+    async def _handle_diary_list(self, request: web.Request) -> web.Response:
+        result = self._diary_gui_service().list_diaries(
+            query=str(request.query.get("query") or ""),
+            limit=int(request.query.get("limit") or 500),
+        )
+        if not result.get("ok"):
+            return self._json_response(result, status=self._diary_result_status(result))
+        return self._json_response(result)
+
+    async def _handle_diary_get(self, request: web.Request) -> web.Response:
+        diary_id = str(request.query.get("id") or request.query.get("diary_id") or "").strip()
+        result = self._diary_gui_service().get_diary(diary_id)
+        if not result.get("ok"):
+            return self._json_response(result, status=self._diary_result_status(result))
+        return self._json_response(result)
+
+    async def _handle_diary_upsert(self, request: web.Request) -> web.Response:
+        payload = await self._read_payload(request)
+        result = self._diary_gui_service().upsert_diary(payload)
+        if not result.get("ok"):
+            return self._json_response(result, status=self._diary_result_status(result))
+        return self._json_response(result)
+
+    async def _handle_diary_delete(self, request: web.Request) -> web.Response:
+        payload = await self._read_payload(request)
+        diary_id = str(payload.get("id") or payload.get("diary_id") or "").strip()
+        result = self._diary_gui_service().delete_diary(diary_id)
+        if not result.get("ok"):
+            return self._json_response(result, status=self._diary_result_status(result))
+        return self._json_response(result)
+
+    async def _handle_diary_export(self, request: web.Request) -> web.Response:
+        payload = await self._read_payload(request)
+        ids = payload.get("ids") if isinstance(payload.get("ids"), list) else None
+        result = self._diary_gui_service().export_markdown(
+            query=str(payload.get("query") or ""),
+            ids=ids,
+            path=str(payload.get("path") or ""),
+        )
+        if not result.get("ok"):
+            return self._json_response(result, status=self._diary_result_status(result))
+        return self._json_response(result)
+
+    async def _handle_memory_core_list(self, request: web.Request) -> web.Response:
+        result = self._memory_gui_service().list_core_records(
+            status=str(request.query.get("status") or "active"),
+            person_id=str(request.query.get("person_id") or ""),
+            category_id=str(request.query.get("category_id") or "all"),
+            query=str(request.query.get("query") or ""),
+            limit=int(request.query.get("limit") or 500),
+        )
+        if not result.get("ok"):
+            return self._json_response(result, status=self._memory_result_status(result))
+        return self._json_response(result)
+
+    async def _handle_memory_core_profile(self, request: web.Request) -> web.Response:
+        result = self._memory_gui_service().get_profile_overview(
+            person_id=str(request.query.get("person_id") or "owner"),
+            limit=int(request.query.get("limit") or 500),
+        )
+        if not result.get("ok"):
+            return self._json_response(result, status=self._memory_result_status(result))
+        return self._json_response(result)
+
+    async def _handle_memory_core_get(self, request: web.Request) -> web.Response:
+        record_id = str(request.query.get("id") or request.query.get("record_id") or "").strip()
+        result = self._memory_gui_service().get_core_record(record_id)
+        if not result.get("ok"):
+            return self._json_response(result, status=self._memory_result_status(result))
+        return self._json_response(result)
+
+    async def _handle_memory_core_upsert(self, request: web.Request) -> web.Response:
+        payload = await self._read_payload(request)
+        result = self._memory_gui_service().upsert_core_record(payload)
+        if not result.get("ok"):
+            return self._json_response(result, status=self._memory_result_status(result))
+        return self._json_response(result)
+
+    async def _handle_memory_core_delete(self, request: web.Request) -> web.Response:
+        payload = await self._read_payload(request)
+        record_id = str(payload.get("id") or payload.get("record_id") or "").strip()
+        result = self._memory_gui_service().delete_core_record(record_id)
+        if not result.get("ok"):
+            return self._json_response(result, status=self._memory_result_status(result))
+        return self._json_response(result)
+
+    async def _handle_memory_core_category(self, request: web.Request) -> web.Response:
+        payload = await self._read_payload(request)
+        record_id = str(payload.get("id") or payload.get("record_id") or "").strip()
+        category_id = str(payload.get("category_id") or payload.get("category_override") or "")
+        result = self._memory_gui_service().set_category_override(record_id, category_id)
+        if not result.get("ok"):
+            return self._json_response(result, status=self._memory_result_status(result))
+        return self._json_response(result)
+
+    async def _handle_memory_vector_status(self, _request: web.Request) -> web.Response:
+        result = self._memory_gui_service().vector_status()
+        if not result.get("ok"):
+            return self._json_response(result, status=self._memory_result_status(result))
+        return self._json_response(result)
+
+    async def _handle_memory_vector_rebuild(self, _request: web.Request) -> web.Response:
+        result = self._memory_gui_service().rebuild_vector_index()
+        if not result.get("ok"):
+            return self._json_response(result, status=self._memory_result_status(result))
+        return self._json_response(result)
+
+    async def _handle_memory_embedding_test(self, request: web.Request) -> web.Response:
+        payload = await self._read_payload(request)
+        result = self._memory_gui_service().test_embedding(payload)
+        if not result.get("ok"):
+            return self._json_response(result, status=self._memory_result_status(result))
+        return self._json_response(result)
+
+    async def _handle_memory_embedding_get(self, _request: web.Request) -> web.Response:
+        result = self._memory_gui_service().get_embedding_selection()
+        if not result.get("ok"):
+            return self._json_response(result, status=self._memory_result_status(result))
+        return self._json_response(result)
+
+    async def _handle_memory_embedding_save(self, request: web.Request) -> web.Response:
+        payload = await self._read_payload(request)
+        result = self._memory_gui_service().save_embedding_selection(payload)
+        if not result.get("ok"):
+            return self._json_response(result, status=self._memory_result_status(result))
+        return self._json_response(result)
+
+    async def _handle_memory_ollama_status(self, _request: web.Request) -> web.Response:
+        result = self._memory_gui_service().get_ollama_status()
+        if not result.get("ok"):
+            return self._json_response(result, status=self._memory_result_status(result))
+        return self._json_response(result)
+
+    async def _handle_memory_ollama_ensure(self, request: web.Request) -> web.Response:
+        payload = await self._read_payload(request)
+        result = await asyncio.to_thread(
+            self._memory_gui_service().ensure_ollama, payload
+        )
+        if not result.get("ok"):
+            return self._json_response(result, status=self._memory_result_status(result))
+        return self._json_response(result)
+
+    async def _handle_external_services_list(self, _request: web.Request) -> web.Response:
+        result = self._external_services_gui_service().list_services()
+        if not result.get("ok"):
+            return self._json_response(
+                result, status=self._external_services_result_status(result)
+            )
+        return self._json_response(result)
+
+    async def _handle_external_services_save(self, request: web.Request) -> web.Response:
+        payload = await self._read_payload(request)
+        result = self._external_services_gui_service().save_services(payload)
+        if not result.get("ok"):
+            return self._json_response(
+                result, status=self._external_services_result_status(result)
+            )
+        return self._json_response(result)
+
+    async def _handle_external_services_ensure(self, request: web.Request) -> web.Response:
+        payload = await self._read_payload(request)
+        result = await asyncio.to_thread(
+            self._external_services_gui_service().ensure, payload
+        )
+        if not result.get("ok"):
+            return self._json_response(
+                result, status=self._external_services_result_status(result)
+            )
+        return self._json_response(result)
+
+    async def _handle_external_services_stop(self, request: web.Request) -> web.Response:
+        payload = await self._read_payload(request)
+        result = await asyncio.to_thread(
+            self._external_services_gui_service().stop, payload
+        )
+        if not result.get("ok"):
+            return self._json_response(
+                result, status=self._external_services_result_status(result)
+            )
+        return self._json_response(result)
 
     async def _handle_memory_items(self, request: web.Request) -> web.Response:
         payload = dict(request.query)
@@ -1397,6 +2563,352 @@ class GuiHttpServer:
                 status=500,
             )
 
+
+    async def _handle_activity_config(self, _request: web.Request) -> web.Response:
+        app = self.app_ref
+        if app is not None and hasattr(app, "get_activity_client_config"):
+            try:
+                data = app.get_activity_client_config()
+            except Exception as exc:
+                return self._json_response(
+                    {"ok": False, "error": f"activity_config_unavailable: {exc}"},
+                    status=500,
+                )
+            if not isinstance(data, dict):
+                return self._json_response(
+                    {"ok": False, "error": "activity_config_invalid"},
+                    status=500,
+                )
+            return self._json_response({"ok": True, "data": dict(data)})
+
+        # Fallback when app_ref is missing methods (e.g. partial stubs in tests).
+        settings: Dict[str, Any] = {}
+        if app is not None and hasattr(app, "_load_runtime_settings"):
+            try:
+                loaded = app._load_runtime_settings()
+                if isinstance(loaded, dict):
+                    settings = loaded
+            except Exception:
+                settings = {}
+
+        def _int(key: str, default: int) -> int:
+            try:
+                value = int(settings.get(key, default) or default)
+            except Exception:
+                value = int(default)
+            return max(1, value)
+
+        data = {
+            "revision": max(0, int(settings.get("activity_config_revision") or 0)),
+            "monitor_enabled": bool(settings.get("activity_monitor_enabled", True)),
+            "sedentary_reminder_minutes": _int("sedentary_reminder_minutes", 60),
+            "sedentary_break_minutes": _int("sedentary_break_minutes", 5),
+            "sedentary_cooldown_minutes": _int("sedentary_cooldown_minutes", 60),
+            "include_process_path": bool(
+                settings.get("activity_include_process_path", False)
+            ),
+            "include_window_title": bool(
+                settings.get("activity_include_window_title", True)
+            ),
+            "include_browser_context": bool(
+                settings.get("activity_include_browser_context", True)
+            ),
+        }
+        return self._json_response({"ok": True, "data": data})
+
+    async def _handle_sedentary_get(self, _request: web.Request) -> web.Response:
+        result = self._sedentary_gui_service().get_settings()
+        if not result.get("ok"):
+            return self._json_response(result, status=self._sedentary_result_status(result))
+        return self._json_response(result)
+
+    async def _handle_sedentary_save(self, request: web.Request) -> web.Response:
+        payload = await self._read_payload(request)
+        result = self._sedentary_gui_service().save_settings(payload)
+        if not result.get("ok"):
+            return self._json_response(result, status=self._sedentary_result_status(result))
+        return self._json_response(result)
+
+    async def _handle_sedentary_preview(self, request: web.Request) -> web.Response:
+        payload = await self._read_payload(request)
+        result = self._sedentary_gui_service().preview(payload)
+        if not result.get("ok"):
+            return self._json_response(result, status=self._sedentary_result_status(result))
+        return self._json_response(result)
+
+    async def _handle_info_sources_list(self, request: web.Request) -> web.Response:
+        provider_id = str(request.query.get("provider_id") or request.query.get("provider") or "").strip()
+        result = self._info_sources_gui_service().list_overview(provider_id=provider_id)
+        if not result.get("ok"):
+            return self._json_response(result, status=self._info_sources_result_status(result))
+        return self._json_response(result)
+
+    async def _handle_info_sources_endpoint_get(self, request: web.Request) -> web.Response:
+        endpoint_id = str(request.query.get("id") or request.query.get("endpoint_id") or "").strip()
+        provider_id = str(request.query.get("provider_id") or request.query.get("provider") or "").strip()
+        result = self._info_sources_gui_service().get_endpoint(endpoint_id, provider_id=provider_id)
+        if not result.get("ok"):
+            return self._json_response(result, status=self._info_sources_result_status(result))
+        return self._json_response(result)
+
+    async def _handle_info_sources_endpoint_save(self, request: web.Request) -> web.Response:
+        payload = await self._read_payload(request)
+        result = self._info_sources_gui_service().save_endpoint(payload)
+        if not result.get("ok"):
+            return self._json_response(result, status=self._info_sources_result_status(result))
+        return self._json_response(result)
+
+    async def _handle_info_sources_token(self, request: web.Request) -> web.Response:
+        payload = await self._read_payload(request)
+        result = self._info_sources_gui_service().update_token(payload)
+        if not result.get("ok"):
+            return self._json_response(result, status=self._info_sources_result_status(result))
+        return self._json_response(result)
+
+    async def _handle_info_sources_draft(self, request: web.Request) -> web.Response:
+        payload = await self._read_payload(request)
+        text = str(payload.get("text") or payload.get("doc") or "").strip()
+        result = self._info_sources_gui_service().build_draft(text)
+        if not result.get("ok"):
+            return self._json_response(result, status=self._info_sources_result_status(result))
+        return self._json_response(result)
+
+    async def _handle_info_sources_test(self, request: web.Request) -> web.Response:
+        payload = await self._read_payload(request)
+        result = await self._info_sources_gui_service().test_endpoint(payload)
+        if not result.get("ok"):
+            return self._json_response(result, status=self._info_sources_result_status(result))
+        return self._json_response(result)
+
+    async def _handle_expression_list(self, request: web.Request) -> web.Response:
+        result = self._expression_library_gui_service().list_patterns(
+            character_name=str(request.query.get("character_name") or "").strip(),
+            scene=str(request.query.get("scene") or "").strip(),
+            query=str(request.query.get("query") or request.query.get("q") or "").strip(),
+            enabled_only=str(request.query.get("enabled_only") or "").strip().lower()
+            in {"1", "true", "yes"},
+            limit=int(request.query.get("limit") or 500),
+        )
+        if not result.get("ok"):
+            return self._json_response(result, status=self._expression_result_status(result))
+        return self._json_response(result)
+
+    async def _handle_expression_get(self, request: web.Request) -> web.Response:
+        pattern_id = str(request.query.get("id") or "").strip()
+        result = self._expression_library_gui_service().get_pattern(pattern_id)
+        if not result.get("ok"):
+            return self._json_response(result, status=self._expression_result_status(result))
+        return self._json_response(result)
+
+    async def _handle_expression_upsert(self, request: web.Request) -> web.Response:
+        payload = await self._read_payload(request)
+        result = self._expression_library_gui_service().upsert_pattern(payload)
+        if not result.get("ok"):
+            return self._json_response(result, status=self._expression_result_status(result))
+        return self._json_response(result)
+
+    async def _handle_expression_delete(self, request: web.Request) -> web.Response:
+        payload = await self._read_payload(request)
+        pattern_id = str(payload.get("id") or request.query.get("id") or "").strip()
+        result = self._expression_library_gui_service().delete_pattern(pattern_id)
+        if not result.get("ok"):
+            return self._json_response(result, status=self._expression_result_status(result))
+        return self._json_response(result)
+
+    async def _handle_expression_set_enabled(self, request: web.Request) -> web.Response:
+        payload = await self._read_payload(request)
+        ids = payload.get("ids") if isinstance(payload.get("ids"), list) else []
+        if not ids and payload.get("id"):
+            ids = [payload.get("id")]
+        result = self._expression_library_gui_service().set_enabled(
+            ids, bool(payload.get("enabled", True))
+        )
+        if not result.get("ok"):
+            return self._json_response(result, status=self._expression_result_status(result))
+        return self._json_response(result)
+
+    async def _handle_expression_runtime_get(self, _request: web.Request) -> web.Response:
+        result = self._expression_library_gui_service().get_runtime()
+        if not result.get("ok"):
+            return self._json_response(result, status=self._expression_result_status(result))
+        return self._json_response(result)
+
+    async def _handle_expression_runtime_save(self, request: web.Request) -> web.Response:
+        payload = await self._read_payload(request)
+        result = self._expression_library_gui_service().save_runtime(payload)
+        if not result.get("ok"):
+            return self._json_response(result, status=self._expression_result_status(result))
+        return self._json_response(result)
+
+    async def _handle_meme_list(self, request: web.Request) -> web.Response:
+        result = self._meme_pack_gui_service().list_assets(
+            query=str(request.query.get("query") or request.query.get("q") or "").strip(),
+            include_disabled=str(request.query.get("include_disabled") or "1")
+            .strip()
+            .lower()
+            not in {"0", "false", "no"},
+            limit=int(request.query.get("limit") or 500),
+        )
+        if not result.get("ok"):
+            return self._json_response(result, status=self._meme_result_status(result))
+        return self._json_response(result)
+
+    async def _handle_meme_get(self, request: web.Request) -> web.Response:
+        asset_id = str(request.query.get("id") or "").strip()
+        result = self._meme_pack_gui_service().get_asset(asset_id)
+        if not result.get("ok"):
+            return self._json_response(result, status=self._meme_result_status(result))
+        return self._json_response(result)
+
+    async def _handle_meme_update(self, request: web.Request) -> web.Response:
+        payload = await self._read_payload(request)
+        result = self._meme_pack_gui_service().update_asset(payload)
+        if not result.get("ok"):
+            return self._json_response(result, status=self._meme_result_status(result))
+        return self._json_response(result)
+
+    async def _handle_meme_set_enabled(self, request: web.Request) -> web.Response:
+        payload = await self._read_payload(request)
+        ids = payload.get("ids") if isinstance(payload.get("ids"), list) else []
+        if not ids and payload.get("id") is not None:
+            ids = [payload.get("id")]
+        result = self._meme_pack_gui_service().set_enabled(ids, bool(payload.get("enabled", True)))
+        if not result.get("ok"):
+            return self._json_response(result, status=self._meme_result_status(result))
+        return self._json_response(result)
+
+    async def _handle_meme_delete(self, request: web.Request) -> web.Response:
+        payload = await self._read_payload(request)
+        ids = payload.get("ids") if isinstance(payload.get("ids"), list) else []
+        if not ids and payload.get("id") is not None:
+            ids = [payload.get("id")]
+        result = self._meme_pack_gui_service().delete_assets(
+            ids, delete_files=bool(payload.get("delete_files", False))
+        )
+        if not result.get("ok"):
+            return self._json_response(result, status=self._meme_result_status(result))
+        return self._json_response(result)
+
+    async def _handle_meme_stats(self, _request: web.Request) -> web.Response:
+        result = self._meme_pack_gui_service().stats()
+        if not result.get("ok"):
+            return self._json_response(result, status=self._meme_result_status(result))
+        return self._json_response(result)
+
+    async def _handle_theme_get(self, _request: web.Request) -> web.Response:
+        result = self._theme_gui_service().list_themes()
+        if not result.get("ok"):
+            return self._json_response(result, status=self._theme_result_status(result))
+        return self._json_response(result)
+
+    async def _handle_theme_save(self, request: web.Request) -> web.Response:
+        payload = await self._read_payload(request)
+        result = self._theme_gui_service().save(payload)
+        if not result.get("ok"):
+            return self._json_response(result, status=self._theme_result_status(result))
+        return self._json_response(result)
+
+    async def _handle_qq_gateway_get(self, _request: web.Request) -> web.Response:
+        result = self._qq_gateway_gui_service().get_settings()
+        if not result.get("ok"):
+            return self._json_response(result, status=self._qq_gateway_result_status(result))
+        return self._json_response(result)
+
+    async def _handle_qq_gateway_save(self, request: web.Request) -> web.Response:
+        payload = await self._read_payload(request)
+        result = self._qq_gateway_gui_service().save_settings(payload)
+        if not result.get("ok"):
+            return self._json_response(result, status=self._qq_gateway_result_status(result))
+        return self._json_response(result)
+
+    async def _handle_app_rules_list(self, _request: web.Request) -> web.Response:
+        result = self._app_rules_gui_service().list_rules()
+        if not result.get("ok"):
+            return self._json_response(result, status=self._app_rules_result_status(result))
+        return self._json_response(result)
+
+    async def _handle_app_rules_save(self, request: web.Request) -> web.Response:
+        payload = await self._read_payload(request)
+        rules = payload.get("rules") if isinstance(payload.get("rules"), list) else payload
+        result = self._app_rules_gui_service().save_rules(rules)
+        if not result.get("ok"):
+            return self._json_response(result, status=self._app_rules_result_status(result))
+        return self._json_response(result)
+
+    async def _handle_app_rules_test(self, request: web.Request) -> web.Response:
+        payload = await self._read_payload(request)
+        result = self._app_rules_gui_service().test_match(payload)
+        if not result.get("ok"):
+            return self._json_response(result, status=self._app_rules_result_status(result))
+        return self._json_response(result)
+
+    async def _handle_logs_list(self, _request: web.Request) -> web.Response:
+        result = self._logs_gui_service().list_logs()
+        if not result.get("ok"):
+            return self._json_response(result, status=self._logs_result_status(result))
+        return self._json_response(result)
+
+    async def _handle_logs_tail(self, request: web.Request) -> web.Response:
+        name = str(request.query.get("name") or "").strip()
+        if not name:
+            payload = await self._read_payload(request)
+            name = str(payload.get("name") or "").strip()
+            max_bytes = payload.get("max_bytes")
+        else:
+            max_bytes = request.query.get("max_bytes")
+        try:
+            max_bytes_i = int(max_bytes) if max_bytes not in (None, "") else None
+        except Exception:
+            max_bytes_i = None
+        result = self._logs_gui_service().tail(name, max_bytes=max_bytes_i)
+        if not result.get("ok"):
+            return self._json_response(result, status=self._logs_result_status(result))
+        return self._json_response(result)
+
+    async def _handle_codex_get(self, _request: web.Request) -> web.Response:
+        result = self._codex_gui_service().get_settings()
+        if not result.get("ok"):
+            return self._json_response(result, status=self._codex_result_status(result))
+        return self._json_response(result)
+
+    async def _handle_codex_save(self, request: web.Request) -> web.Response:
+        payload = await self._read_payload(request)
+        result = self._codex_gui_service().save_settings(payload)
+        if not result.get("ok"):
+            return self._json_response(result, status=self._codex_result_status(result))
+        return self._json_response(result)
+
+    async def _handle_status_screen_get(self, _request: web.Request) -> web.Response:
+        result = self._status_screen_gui_service().get_config()
+        if not result.get("ok"):
+            return self._json_response(result, status=self._status_screen_result_status(result))
+        return self._json_response(result)
+
+    async def _handle_status_screen_save(self, request: web.Request) -> web.Response:
+        payload = await self._read_payload(request)
+        result = self._status_screen_gui_service().save_config(payload)
+        if not result.get("ok"):
+            return self._json_response(result, status=self._status_screen_result_status(result))
+        return self._json_response(result)
+
+    async def _handle_status_screen_test(self, request: web.Request) -> web.Response:
+        payload = await self._read_payload(request)
+        result = self._status_screen_gui_service().test_publish(payload)
+        if not result.get("ok"):
+            return self._json_response(result, status=self._status_screen_result_status(result))
+        return self._json_response(result)
+
+    async def _handle_status_screen_convert(self, request: web.Request) -> web.Response:
+        payload = await self._read_payload(request)
+        result = self._status_screen_gui_service().convert_image(
+            path=str(payload.get("path") or "").strip(),
+            image_base64=str(payload.get("image_base64") or payload.get("image") or ""),
+            size=int(payload.get("size") or 32),
+        )
+        if not result.get("ok"):
+            return self._json_response(result, status=self._status_screen_result_status(result))
+        return self._json_response(result)
+
     async def _handle_activity_ingest(self, request: web.Request) -> web.Response:
         store = self._get_memory_store()
         if store is None:
@@ -1413,6 +2925,16 @@ class GuiHttpServer:
             return self._json_response(
                 {"ok": False, "error": "payload_must_be_object"}, status=400
             )
+        source = str(payload.get("source") or "").strip()
+        if source != LIVE2D_ACTIVITY_SOURCE:
+            return self._json_response(
+                {
+                    "ok": False,
+                    "error": "invalid_activity_source",
+                    "expected": LIVE2D_ACTIVITY_SOURCE,
+                },
+                status=400,
+            )
         try:
             if hasattr(store, "ingest_activity_event"):
                 result = store.ingest_activity_event(payload)
@@ -1426,14 +2948,86 @@ class GuiHttpServer:
                 {"ok": False, "error": f"save_failed: {exc}"}, status=500
             )
 
+    async def _handle_media_download(self, request: web.Request) -> web.Response:
+        ticket = str(request.match_info.get("ticket") or "").strip()
+        if not ticket:
+            return self._json_response(
+                {"ok": False, "error": "ticket_required"}, status=400
+            )
+        try:
+            opened = self.media_registry.consume(ticket)
+        except MediaTicketError as exc:
+            return self._json_response(
+                {"ok": False, "error": str(exc)}, status=404
+            )
+        except Exception as exc:
+            return self._json_response(
+                {"ok": False, "error": f"media_unavailable: {exc}"}, status=500
+            )
+        return web.FileResponse(
+            path=opened.path,
+            headers={
+                "Content-Type": opened.media_type,
+                "Cache-Control": "no-store",
+                "X-Content-Type-Options": "nosniff",
+            },
+        )
+
     async def _async_start(self) -> None:
         app = web.Application(middlewares=[self._cors_middleware, self._auth_middleware])
         app.router.add_get(self._api_path("/health"), self._handle_health)
+        # Keep /health also available without trailing prefix mismatches for probes.
         app.router.add_get(
             self._api_path("/runtime/status"), self._handle_runtime_status
         )
+        app.router.add_post(
+            self._api_path("/runtime/control"), self._handle_runtime_control
+        )
         app.router.add_get(self._api_path("/settings"), self._handle_settings_get)
+        app.router.add_get(self._api_path("/models"), self._handle_models_get)
+        app.router.add_post(self._api_path("/models/upsert"), self._handle_models_upsert)
+        app.router.add_post(self._api_path("/models/delete"), self._handle_models_delete)
+        app.router.add_post(self._api_path("/models/providers/upsert"), self._handle_providers_upsert)
+        app.router.add_post(self._api_path("/models/providers/delete"), self._handle_providers_delete)
+        app.router.add_post(self._api_path("/models/router"), self._handle_models_router_save)
         app.router.add_get(self._api_path("/dashboard"), self._handle_dashboard_get)
+        app.router.add_get(self._api_path("/characters"), self._handle_characters_list)
+        app.router.add_get(self._api_path("/characters/get"), self._handle_characters_get)
+        app.router.add_post(self._api_path("/characters/upsert"), self._handle_characters_upsert)
+        app.router.add_post(self._api_path("/characters/delete"), self._handle_characters_delete)
+        app.router.add_post(self._api_path("/characters/activate"), self._handle_characters_activate)
+        app.router.add_post(
+            self._api_path("/characters/costumes/upsert"),
+            self._handle_characters_costume_upsert,
+        )
+        app.router.add_post(
+            self._api_path("/characters/costumes/delete"),
+            self._handle_characters_costume_delete,
+        )
+        app.router.add_post(
+            self._api_path("/characters/costumes/wear"),
+            self._handle_characters_costume_wear,
+        )
+        app.router.add_get(
+            self._api_path("/characters/badge/current"),
+            self._handle_characters_badge_current,
+        )
+        app.router.add_get(
+            self._api_path("/characters/badge"),
+            self._handle_characters_badge_get,
+        )
+        app.router.add_post(
+            self._api_path("/characters/badge/import"),
+            self._handle_characters_badge_import,
+        )
+        app.router.add_post(
+            self._api_path("/characters/badge/update"),
+            self._handle_characters_badge_update,
+        )
+        app.router.add_post(
+            self._api_path("/characters/badge/clear"),
+            self._handle_characters_badge_clear,
+        )
         app.router.add_get(
             self._api_path("/characters/costume-meta"),
             self._handle_character_costume_meta,
@@ -1463,11 +3057,82 @@ class GuiHttpServer:
         app.router.add_post(
             self._api_path("/plugins/config"), self._handle_plugin_config_save
         )
+        app.router.add_post(
+            self._api_path("/plugins/settings"), self._handle_plugin_config_save
+        )
         app.router.add_get(
             self._api_path("/dependencies"), self._handle_dependency_scan
         )
         app.router.add_post(
             self._api_path("/dependencies/install"), self._handle_dependency_install
+        )
+        app.router.add_get(self._api_path("/diary"), self._handle_diary_list)
+        app.router.add_get(self._api_path("/diary/get"), self._handle_diary_get)
+        app.router.add_post(self._api_path("/diary/upsert"), self._handle_diary_upsert)
+        app.router.add_post(self._api_path("/diary/delete"), self._handle_diary_delete)
+        app.router.add_post(self._api_path("/diary/export"), self._handle_diary_export)
+        app.router.add_get(self._api_path("/knowledge"), self._handle_knowledge_list)
+        app.router.add_get(self._api_path("/knowledge/stats"), self._handle_knowledge_stats)
+        app.router.add_get(self._api_path("/knowledge/search"), self._handle_knowledge_search)
+        app.router.add_post(self._api_path("/knowledge/search"), self._handle_knowledge_search)
+        app.router.add_post(self._api_path("/knowledge/dirs"), self._handle_knowledge_save_dirs)
+        app.router.add_post(self._api_path("/knowledge/import"), self._handle_knowledge_import)
+        app.router.add_post(self._api_path("/knowledge/rebuild"), self._handle_knowledge_rebuild)
+        app.router.add_post(
+            self._api_path("/knowledge/delete-dirs"), self._handle_knowledge_delete_dirs
+        )
+        app.router.add_post(self._api_path("/knowledge/learn"), self._handle_knowledge_learn)
+        app.router.add_post(
+            self._api_path("/knowledge/create-doc"), self._handle_knowledge_create_doc
+        )
+        app.router.add_get(self._api_path("/memory/core"), self._handle_memory_core_list)
+        app.router.add_get(
+            self._api_path("/memory/core/profile"), self._handle_memory_core_profile
+        )
+        app.router.add_get(self._api_path("/memory/core/get"), self._handle_memory_core_get)
+        app.router.add_post(
+            self._api_path("/memory/core/upsert"), self._handle_memory_core_upsert
+        )
+        app.router.add_post(
+            self._api_path("/memory/core/delete"), self._handle_memory_core_delete
+        )
+        app.router.add_post(
+            self._api_path("/memory/core/category"), self._handle_memory_core_category
+        )
+        app.router.add_get(
+            self._api_path("/memory/vector/status"), self._handle_memory_vector_status
+        )
+        app.router.add_post(
+            self._api_path("/memory/vector/rebuild"), self._handle_memory_vector_rebuild
+        )
+        app.router.add_post(
+            self._api_path("/memory/embedding/test"), self._handle_memory_embedding_test
+        )
+        app.router.add_get(
+            self._api_path("/memory/embedding"), self._handle_memory_embedding_get
+        )
+        app.router.add_post(
+            self._api_path("/memory/embedding"), self._handle_memory_embedding_save
+        )
+        app.router.add_get(
+            self._api_path("/memory/ollama"), self._handle_memory_ollama_status
+        )
+        app.router.add_post(
+            self._api_path("/memory/ollama/ensure"), self._handle_memory_ollama_ensure
+        )
+        app.router.add_get(
+            self._api_path("/external-services"), self._handle_external_services_list
+        )
+        app.router.add_post(
+            self._api_path("/external-services"), self._handle_external_services_save
+        )
+        app.router.add_post(
+            self._api_path("/external-services/ensure"),
+            self._handle_external_services_ensure,
+        )
+        app.router.add_post(
+            self._api_path("/external-services/stop"),
+            self._handle_external_services_stop,
         )
         app.router.add_get(self._api_path("/memory/items"), self._handle_memory_items)
         app.router.add_post(
@@ -1502,6 +3167,27 @@ class GuiHttpServer:
         app.router.add_post(
             self._api_path("/qq/profiles/delete"), self._handle_qq_profile_delete
         )
+        app.router.add_get(self._api_path("/qq/gateway"), self._handle_qq_gateway_get)
+        app.router.add_post(self._api_path("/qq/gateway"), self._handle_qq_gateway_save)
+        app.router.add_get(self._api_path("/theme"), self._handle_theme_get)
+        app.router.add_post(self._api_path("/theme"), self._handle_theme_save)
+        app.router.add_get(self._api_path("/app-rules"), self._handle_app_rules_list)
+        app.router.add_post(self._api_path("/app-rules"), self._handle_app_rules_save)
+        app.router.add_post(self._api_path("/app-rules/test"), self._handle_app_rules_test)
+        app.router.add_get(self._api_path("/logs"), self._handle_logs_list)
+        app.router.add_get(self._api_path("/logs/tail"), self._handle_logs_tail)
+        app.router.add_post(self._api_path("/logs/tail"), self._handle_logs_tail)
+        app.router.add_get(self._api_path("/codex"), self._handle_codex_get)
+        app.router.add_post(self._api_path("/codex"), self._handle_codex_save)
+        app.router.add_get(self._api_path("/status-screen"), self._handle_status_screen_get)
+        app.router.add_post(self._api_path("/status-screen"), self._handle_status_screen_save)
+        app.router.add_post(
+            self._api_path("/status-screen/test"), self._handle_status_screen_test
+        )
+        app.router.add_post(
+            self._api_path("/status-screen/convert"),
+            self._handle_status_screen_convert,
+        )
         app.router.add_get(self._api_path("/events"), self._handle_events)
         app.router.add_get(self._api_path("/outbound"), self._handle_outbound_records)
         app.router.add_get(self._api_path("/reply-effects"), self._handle_reply_effects)
@@ -1511,8 +3197,69 @@ class GuiHttpServer:
         app.router.add_get(
             self._api_path("/activity-events"), self._handle_activity_events
         )
+        app.router.add_get(
+            self._api_path("/activity-config"), self._handle_activity_config
+        )
+        app.router.add_get(self._api_path("/sedentary"), self._handle_sedentary_get)
+        app.router.add_post(self._api_path("/sedentary"), self._handle_sedentary_save)
+        app.router.add_post(
+            self._api_path("/sedentary/preview"), self._handle_sedentary_preview
+        )
+        app.router.add_get(self._api_path("/info-sources"), self._handle_info_sources_list)
+        app.router.add_get(
+            self._api_path("/info-sources/endpoint"),
+            self._handle_info_sources_endpoint_get,
+        )
+        app.router.add_post(
+            self._api_path("/info-sources/endpoint"),
+            self._handle_info_sources_endpoint_save,
+        )
+        app.router.add_post(
+            self._api_path("/info-sources/token"), self._handle_info_sources_token
+        )
+        app.router.add_post(
+            self._api_path("/info-sources/draft"), self._handle_info_sources_draft
+        )
+        app.router.add_post(
+            self._api_path("/info-sources/test"), self._handle_info_sources_test
+        )
+        app.router.add_get(
+            self._api_path("/expression-library"), self._handle_expression_list
+        )
+        app.router.add_get(
+            self._api_path("/expression-library/get"), self._handle_expression_get
+        )
+        app.router.add_post(
+            self._api_path("/expression-library/upsert"), self._handle_expression_upsert
+        )
+        app.router.add_post(
+            self._api_path("/expression-library/delete"), self._handle_expression_delete
+        )
+        app.router.add_post(
+            self._api_path("/expression-library/set-enabled"),
+            self._handle_expression_set_enabled,
+        )
+        app.router.add_get(
+            self._api_path("/expression-library/runtime"),
+            self._handle_expression_runtime_get,
+        )
+        app.router.add_post(
+            self._api_path("/expression-library/runtime"),
+            self._handle_expression_runtime_save,
+        )
+        app.router.add_get(self._api_path("/meme-pack"), self._handle_meme_list)
+        app.router.add_get(self._api_path("/meme-pack/get"), self._handle_meme_get)
+        app.router.add_get(self._api_path("/meme-pack/stats"), self._handle_meme_stats)
+        app.router.add_post(self._api_path("/meme-pack/update"), self._handle_meme_update)
+        app.router.add_post(
+            self._api_path("/meme-pack/set-enabled"), self._handle_meme_set_enabled
+        )
+        app.router.add_post(self._api_path("/meme-pack/delete"), self._handle_meme_delete)
         app.router.add_post(
             self._api_path("/activity-ingest"), self._handle_activity_ingest
+        )
+        app.router.add_get(
+            self._api_path("/media/{ticket}"), self._handle_media_download
         )
         app.router.add_route("OPTIONS", "/{tail:.*}", self._handle_health)
         app.router.add_post(
@@ -1531,6 +3278,12 @@ class GuiHttpServer:
             self._api_path("/settings/mcp"),
             lambda request: self._handle_settings_save(request, "mcpConfig"),
         )
+        # Catch-all JSON 404 for unknown /gui paths (after concrete routes).
+        not_found = self._api_path("/{tail:.*}")
+        app.router.add_get(not_found, self._handle_not_found)
+        app.router.add_post(not_found, self._handle_not_found)
+        app.router.add_put(not_found, self._handle_not_found)
+        app.router.add_delete(not_found, self._handle_not_found)
 
         requested_port = self.port
         self._runner = web.AppRunner(app, access_log=None)

@@ -59,7 +59,11 @@ async def emit_short_reaction(
             feedback_reaction,
         )
 
-    short_meta: dict[str, Any] = {"path": "short_reaction"}
+    short_meta: dict[str, Any] = {
+        "path": "short_reaction",
+        "source": chat_log_source,
+        **transcript_meta,
+    }
     if memory_session_id:
         short_meta["session_id"] = memory_session_id
     await add_memory_safe("user", user_text, meta=short_meta)
@@ -165,6 +169,7 @@ async def emit_non_stream_reply(
     memory_session_id: Optional[str],
     feedback_type: str,
     feedback_reaction: str,
+    triggered: bool,
     learning: Any,
     live2d_enabled: bool,
     start_emo: str,
@@ -255,7 +260,12 @@ async def emit_non_stream_reply(
         if codex_mode:
             set_codex_task_state(ctx, "finalize", summary=final_reply[:200])
 
-        chat_meta: dict[str, Any] = {"path": "chat"}
+        chat_meta: dict[str, Any] = {
+            "path": "chat",
+            "source": chat_log_source,
+            "tool": bool(triggered),
+            **transcript_meta,
+        }
         if memory_session_id:
             chat_meta["session_id"] = memory_session_id
         await add_memory_safe("user", user_text, meta=chat_meta)
@@ -334,7 +344,11 @@ async def emit_stream_reply(
             stream_context.feedback_reaction,
         )
 
-    stream_chat_meta: dict[str, Any] = {"path": "chat"}
+    stream_chat_meta: dict[str, Any] = {
+        "path": "chat",
+        "source": stream_context.chat_log_source,
+        **stream_context.transcript_meta,
+    }
     if stream_context.memory_session_id:
         stream_chat_meta["session_id"] = stream_context.memory_session_id
     await add_memory_safe("user", user_text, meta=stream_chat_meta)

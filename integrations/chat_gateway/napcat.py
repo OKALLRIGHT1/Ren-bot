@@ -214,10 +214,20 @@ class NapCatOneBotAdapter(BaseChatAdapter):
         return True
 
     def _allow_group_without_at(self, raw_message: str) -> bool:
-        if not self.group_no_at_keywords:
-            return False
         text = str(raw_message or "").strip()
         if not text:
+            return False
+        # Explicit slash/bang commands should not require @ in group chat.
+        # NapCat may leave a leading @token before the command; strip it first.
+        probe = text
+        if probe.startswith("[CQ:at"):
+            # e.g. [CQ:at,qq=123] /画图 ...
+            end = probe.find("]")
+            if end >= 0:
+                probe = probe[end + 1 :].strip()
+        if probe.startswith(("/", "!", "！")):
+            return True
+        if not self.group_no_at_keywords:
             return False
         low = text.lower()
         for key in self.group_no_at_keywords:
@@ -660,15 +670,17 @@ class NapCatOneBotAdapter(BaseChatAdapter):
         if not self._passes_filter(message_type, user_id, payload.get("group_id")):
             return None
 
+        targets_self = False
         if message_type == "group":
             if not self.allow_group:
                 return None
-            if self.group_require_at and not self._message_targets_self(
-                payload, self_id
-            ):
+            targets_self = self._message_targets_self(payload, self_id)
+            if self.group_require_at and not targets_self:
                 if not self._allow_group_without_at(raw_message):
                     return None
             session_id = f"group:{payload.get('group_id')}"
+            # 展示文本去掉 @，但必须把“已@我”写进 metadata，
+            # 否则下游插件 access_control 会误判为未 @。
             raw_message = self._strip_self_mentions(raw_message, self_id).strip()
             if not raw_message:
                 return None
@@ -681,37 +693,50 @@ class NapCatOneBotAdapter(BaseChatAdapter):
         sender_name = str(sender.get("card") or sender.get("nickname") or user_id)
         is_owner = bool(user_id and user_id in self.owner_user_ids)
 
+        metadata: Dict[str, Any] = {
+            "adapter": "napcat_qq",
+            "message_type": message_type,
+            "group_id": payload.get("group_id"),
+            "self_id": self_id,
+            "message_id": payload.get("message_id"),
+            "sender_name": sender_name,
+            "sender": sender,
+            "is_owner": is_owner,
+            "owner_label": self.owner_label,
+            "sender_role": "owner" if is_owner else "contact",
+            "images": images,
+            "has_image": bool(images),
+            "image_count": len(images),
+            "files": files,
+            "has_file": bool(files),
+            "file_count": len(files),
+            "reply": reply_meta,
+            "components": components,
+            "qq_card_links": qq_card_links,
+            "has_links": bool(qq_card_links),
+            "image_vision_enabled": self.image_vision_enabled,
+            "image_prompt": self.image_prompt,
+            "filter_mode": self.filter_mode,
+        }
+        if message_type == "group":
+            metadata.update(
+                {
+                    "targets_self": bool(targets_self),
+                    "mentioned": bool(targets_self),
+                    "is_mentioned": bool(targets_self),
+                    "is_at": bool(targets_self),
+                    "at_me": bool(targets_self),
+                    "to_me": bool(targets_self),
+                }
+            )
+
         return ChatMessageEvent(
             source="qq_gateway",
             channel="qq",
             user_id=user_id,
             session_id=session_id,
             text=raw_message,
-            metadata={
-                "adapter": "napcat_qq",
-                "message_type": message_type,
-                "group_id": payload.get("group_id"),
-                "self_id": self_id,
-                "message_id": payload.get("message_id"),
-                "sender_name": sender_name,
-                "sender": sender,
-                "is_owner": is_owner,
-                "owner_label": self.owner_label,
-                "sender_role": "owner" if is_owner else "contact",
-                "images": images,
-                "has_image": bool(images),
-                "image_count": len(images),
-                "files": files,
-                "has_file": bool(files),
-                "file_count": len(files),
-                "reply": reply_meta,
-                "components": components,
-                "qq_card_links": qq_card_links,
-                "has_links": bool(qq_card_links),
-                "image_vision_enabled": self.image_vision_enabled,
-                "image_prompt": self.image_prompt,
-                "filter_mode": self.filter_mode,
-            },
+            metadata=metadata,
         )
 
     async def fetch_message_by_id(self, session_id: str, message_id: str, **kwargs: Any) -> Any:

@@ -66,30 +66,35 @@ class AppLogger:
 
         return self.log_file
 
-    def info(self, msg: str, **kwargs):
+    def info(self, msg: str, *args, **kwargs):
         """Log INFO level message."""
         if self.logger:
-            self.logger.info(msg, **kwargs)
+            self.logger.info(msg, *args, **kwargs)
 
-    def warning(self, msg: str, **kwargs):
+    def warning(self, msg: str, *args, **kwargs):
         """Log WARNING level message."""
         if self.logger:
-            self.logger.warning(msg, **kwargs)
+            self.logger.warning(msg, *args, **kwargs)
 
-    def error(self, msg: str, **kwargs):
+    def error(self, msg: str, *args, **kwargs):
         """Log ERROR level message."""
         if self.logger:
-            self.logger.error(msg, **kwargs)
+            self.logger.error(msg, *args, **kwargs)
 
-    def debug(self, msg: str, **kwargs):
+    def debug(self, msg: str, *args, **kwargs):
         """Log DEBUG level message."""
         if self.logger:
-            self.logger.debug(msg, **kwargs)
+            self.logger.debug(msg, *args, **kwargs)
 
-    def critical(self, msg: str, **kwargs):
+    def critical(self, msg: str, *args, **kwargs):
         """Log CRITICAL level message."""
         if self.logger:
-            self.logger.critical(msg, **kwargs)
+            self.logger.critical(msg, *args, **kwargs)
+
+    def exception(self, msg: str, *args, **kwargs):
+        """Log an ERROR message with exception context."""
+        if self.logger:
+            self.logger.exception(msg, *args, **kwargs)
 
 
 def setup_logging(log_dir: str = "./logs", log_name: str = "app", level: str = "INFO") -> AppLogger:

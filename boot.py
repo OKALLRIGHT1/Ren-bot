@@ -63,7 +63,9 @@ def main():
     import __main__
 
     __main__.app_instance = app
-    app.run()
+    exit_code = app.run()
+    if exit_code:
+        raise SystemExit(exit_code)
 
 
 if __name__ == "__main__":

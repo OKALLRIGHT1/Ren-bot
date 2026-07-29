@@ -9,6 +9,7 @@ from typing import Any, Callable, Dict, Iterable, Optional
 
 from services.info_sources.models import InfoSourceResult
 from services.info_sources.providers.alapi import AlapiProvider
+from services.info_sources.providers.anilist import AnilistAnimeProvider
 
 Fetcher = Callable[..., Any]
 
@@ -39,6 +40,7 @@ class InfoSourceService:
         endpoint_dir: str | Path | None = None,
         source_root: str | Path | None = None,
         daily_fallbacks: Optional[Dict[str, Any]] = None,
+        include_default_providers: bool = True,
     ):
         self.token_getter = token_getter
         self.alapi_provider = alapi_provider
@@ -49,6 +51,10 @@ class InfoSourceService:
             self.providers.insert(0, self.alapi_provider)
         if source_root is not None:
             self.providers.extend(self._load_providers_from_root(source_root))
+        if include_default_providers and not any(
+            getattr(provider, "name", "") == "anilist" for provider in self.providers
+        ):
+            self.providers.append(AnilistAnimeProvider())
         if self.alapi_provider is None:
             for provider in self.providers:
                 if getattr(provider, "name", "") == "alapi":

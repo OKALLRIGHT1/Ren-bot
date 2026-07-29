@@ -1,7 +1,28 @@
 import json
+from datetime import date
 from pathlib import Path
 
 import pytest
+
+
+def test_daily_info_cache_reads_only_today_and_cleans_old_files(tmp_path):
+    from services.info_sources.daily_cache import DailyInfoCache
+
+    cache = DailyInfoCache(tmp_path / "cache")
+    today = date(2026, 7, 7)
+    old_dir = tmp_path / "cache" / "today_anime"
+    old_dir.mkdir(parents=True)
+    (old_dir / "2026-07-06.json").write_text(
+        json.dumps({"date": "2026-07-06", "data": [{"title": "old"}]}),
+        encoding="utf-8",
+    )
+
+    assert cache.read_today("today_anime", today=today) is None
+    assert not (old_dir / "2026-07-06.json").exists()
+
+    cache.write_today("today_anime", [{"title": "today"}], today=today)
+
+    assert cache.read_today("today_anime", today=today) == [{"title": "today"}]
 
 
 @pytest.mark.asyncio
@@ -112,6 +133,7 @@ async def test_info_source_service_fetches_daily_bundle_with_fallbacks():
     service = InfoSourceService(
         token_getter=lambda: "",
         alapi_provider=None,
+        include_default_providers=False,
         daily_fallbacks={
             "hitokoto": {"hitokoto": "fallback", "from": "local"},
             "moyu": [{"name": "休息", "days_left": 1}],
@@ -145,6 +167,83 @@ async def test_info_source_service_fetches_daily_bundle_with_fallbacks():
     assert bundle["moyu_list"] == [{"name": "休息", "days_left": 1}]
     assert bundle["world_news"] == ["World"]
     assert bundle["it_news"] == ["IT"]
+
+
+@pytest.mark.asyncio
+async def test_anilist_provider_exposes_today_anime():
+    from services.info_sources.providers.anilist import AnilistAnimeProvider
+
+    calls = []
+
+    async def fake_request(url, payload, timeout_sec):
+        calls.append((url, payload, timeout_sec))
+        return {
+            "data": {
+                "Page": {
+                    "airingSchedules": [
+                        {
+                            "media": {
+                                "title": {
+                                    "native": "测试番剧",
+                                    "romaji": "Test Anime",
+                                    "english": None,
+                                },
+                                "coverImage": {
+                                    "large": "https://img.example/large.jpg",
+                                    "medium": "https://img.example/medium.jpg",
+                                },
+                            }
+                        }
+                    ]
+                }
+            }
+        }
+
+    provider = AnilistAnimeProvider(request_func=fake_request)
+
+    result = await provider.fetch("today_anime", limit=1)
+
+    assert result.ok is True
+    assert result.provider == "anilist"
+    assert result.data == [
+        {"title": "测试番剧", "image": "https://img.example/large.jpg"}
+    ]
+    assert calls[0][0] == "https://graphql.anilist.co"
+    assert calls[0][1]["variables"]["perPage"] == 1
+
+
+@pytest.mark.asyncio
+async def test_info_source_service_can_fetch_today_anime_from_provider():
+    from services.info_sources.providers.anilist import AnilistAnimeProvider
+    from services.info_sources.service import InfoSourceService
+
+    async def fake_request(url, payload, timeout_sec):
+        return {
+            "data": {
+                "Page": {
+                    "airingSchedules": [
+                        {
+                            "media": {
+                                "title": {"native": "统一新番"},
+                                "coverImage": {"medium": "https://img.example/a.jpg"},
+                            }
+                        }
+                    ]
+                }
+            }
+        }
+
+    service = InfoSourceService(
+        token_getter=lambda: "",
+        providers=[AnilistAnimeProvider(request_func=fake_request)],
+        include_default_providers=False,
+    )
+
+    result = await service.fetch("today_anime", limit=1)
+
+    assert result.ok is True
+    assert result.provider == "anilist"
+    assert result.data == [{"title": "统一新番", "image": "https://img.example/a.jpg"}]
 
 
 @pytest.mark.asyncio
@@ -197,7 +296,11 @@ async def test_info_source_service_fetches_daily_alapi_aliases_without_internal_
         token_getter=lambda: "tok",
         request_func=fake_request,
     )
-    service = InfoSourceService(token_getter=lambda: "tok", alapi_provider=provider)
+    service = InfoSourceService(
+        token_getter=lambda: "tok",
+        alapi_provider=provider,
+        include_default_providers=False,
+    )
 
     bundle = await service.fetch_daily_bundle(
         max_anime_count=1,
@@ -278,7 +381,11 @@ async def test_info_source_service_loads_multiple_provider_categories(tmp_path):
         name="weatherapi",
         token_param="key",
     )
-    service = InfoSourceService(token_getter=lambda: "tok", providers=[provider])
+    service = InfoSourceService(
+        token_getter=lambda: "tok",
+        providers=[provider],
+        include_default_providers=False,
+    )
 
     result = await service.fetch("now", city="上海")
 

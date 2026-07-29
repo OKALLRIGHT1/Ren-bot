@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sqlite3
 import threading
 import time
@@ -37,6 +38,9 @@ DEFAULT_DB_PATH = os.getenv(
 
 LEGACY_PROFILE_JSON = os.getenv("LEGACY_PROFILE_JSON", "./memory_db/profile.json")
 LEGACY_EVENTS_DB = os.getenv("LEGACY_EVENTS_DB", "./data/events.sqlite")
+
+_BROKEN_COSTUME_MESSAGE_PREFIX = "鐢ㄦ埛涓轰綘鏇存崲浜嗘湇瑁"
+_FIXED_COSTUME_MESSAGE_PREFIX = "用户为你更换了服装，文件路径为: "
 
 
 def _now_iso() -> str:
@@ -83,6 +87,7 @@ class MemorySQLite:
         self._local = threading.local()
         self._init_db()
         self._bootstrap_from_legacy_if_empty()
+        self.repair_known_transcript_mojibake()
 
     def _connect(self) -> sqlite3.Connection:
         """获取连接（线程本地复用，性能优化）"""
@@ -394,6 +399,7 @@ class MemorySQLite:
                 """
                 CREATE TABLE IF NOT EXISTS expression_patterns (
                     id TEXT PRIMARY KEY,
+                    character_id TEXT NOT NULL DEFAULT '',
                     character_name TEXT NOT NULL DEFAULT '',
                     scene TEXT NOT NULL DEFAULT 'chat',
                     situation TEXT NOT NULL DEFAULT '',
@@ -421,6 +427,16 @@ class MemorySQLite:
                 "expression_patterns",
                 "content_list_json",
                 "content_list_json TEXT NOT NULL DEFAULT '[]'",
+            )
+            self._ensure_column(
+                conn,
+                "expression_patterns",
+                "character_id",
+                "character_id TEXT NOT NULL DEFAULT ''",
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_expression_patterns_char_id_scene "
+                "ON expression_patterns(character_id, scene, enabled)"
             )
             conn.commit()
 
@@ -508,20 +524,48 @@ class MemorySQLite:
         meta: Optional[dict] = None,
         ts: Optional[int] = None,
         session_id: Optional[str] = None,
-    ) -> None:
+    ) -> Optional[int]:
         content = (content or "").strip()
         if not content:
-            return
+            return None
         role = (role or "unknown").strip() or "unknown"
         ts_i = int(ts if ts is not None else time.time())
         ts_iso = _now_iso()
         with self._lock:
             with self._connect() as conn:
-                conn.execute(
+                cursor = conn.execute(
                     "INSERT INTO transcript(ts, ts_iso, session_id, role, content, meta_json) VALUES(?,?,?,?,?,?)",
                     (ts_i, ts_iso, session_id, role, content, _j(meta or {})),
                 )
                 conn.commit()
+                return int(cursor.lastrowid)
+
+    def repair_known_transcript_mojibake(self) -> int:
+        """Repair the known costume-change message that was stored from a bad literal."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT id,content FROM transcript WHERE role='system' AND content LIKE ?",
+                (f"{_BROKEN_COSTUME_MESSAGE_PREFIX}%",),
+            ).fetchall()
+        updates = []
+        for row in rows:
+            content = str(row["content"] or "")
+            path_match = re.search(r"[A-Za-z]:[/\\\\].*$", content)
+            if path_match is None:
+                continue
+            repaired = _FIXED_COSTUME_MESSAGE_PREFIX + path_match.group(0)
+            if repaired != content:
+                updates.append((repaired, int(row["id"])))
+        if not updates:
+            return 0
+        with self._lock:
+            with self._connect() as conn:
+                conn.executemany(
+                    "UPDATE transcript SET content=? WHERE id=?",
+                    updates,
+                )
+                conn.commit()
+        return len(updates)
 
     def _activity_event_values(self, event: Dict[str, Any]) -> Tuple[Any, ...]:
         event_id = str(event.get("event_id") or uuid.uuid4().hex).strip()
@@ -544,7 +588,7 @@ class MemorySQLite:
             str(browser.get("page_title") or ""),
             str(browser.get("url") or ""),
             str(browser.get("domain") or ""),
-            str(event.get("source") or "rust-agent"),
+            str(event.get("source") or ""),
             _j(event),
         )
 
@@ -566,7 +610,7 @@ class MemorySQLite:
 
     def upsert_activity_latest(self, event: Dict[str, Any]) -> None:
         values = self._activity_event_values(event)
-        source = str(event.get("source") or "rust-agent").strip() or "rust-agent"
+        source = str(event.get("source") or "").strip()
         with self._lock:
             with self._connect() as conn:
                 conn.execute(
@@ -677,6 +721,7 @@ class MemorySQLite:
         offset: int = 0,
         session_id: Optional[str] = None,
         session_scope: str = "all",
+        context_session_id: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         limit = max(1, min(1000, int(limit)))
         offset = max(0, int(offset))
@@ -684,15 +729,23 @@ class MemorySQLite:
         role = (role or "").strip() or None
         session_scope = str(session_scope or "all").strip().lower() or "all"
         session_id = (session_id or "").strip() or None
+        context_session_id = (context_session_id or "").strip() or None
 
-        def _append_session_filters(sql: str, args: List[Any]) -> tuple[str, List[Any]]:
+        def _append_session_filters(
+            sql: str, args: List[Any], *, table_alias: str = ""
+        ) -> tuple[str, List[Any]]:
+            prefix = f"{table_alias}." if table_alias else ""
+            if context_session_id:
+                sql += f" AND json_extract({prefix}meta_json, '$.context_session_id')=?"
+                args.append(context_session_id)
+                return sql, args
             if session_scope == "specific":
                 if not session_id:
                     return sql + " AND 1=0", args
-                sql += " AND session_id=?"
+                sql += f" AND {prefix}session_id=?"
                 args.append(session_id)
             elif session_scope == "global":
-                sql += " AND (session_id IS NULL OR session_id='')"
+                sql += f" AND ({prefix}session_id IS NULL OR {prefix}session_id='')"
             return sql, args
 
         with self._connect() as conn:
@@ -704,14 +757,7 @@ class MemorySQLite:
                     if role:
                         sql += " AND t.role=?"
                         args.append(role)
-                    if session_scope == "specific":
-                        if not session_id:
-                            sql += " AND 1=0"
-                        else:
-                            sql += " AND t.session_id=?"
-                            args.append(session_id)
-                    elif session_scope == "global":
-                        sql += " AND (t.session_id IS NULL OR t.session_id='')"
+                    sql, args = _append_session_filters(sql, args, table_alias="t")
                     sql += " ORDER BY t.id DESC LIMIT ? OFFSET ?"
                     args += [limit, offset]
                     rows = conn.execute(sql, args).fetchall()
@@ -1354,6 +1400,7 @@ class MemorySQLite:
             str(pattern.get("id") or "").strip()
             or f"xp_{uuid.uuid4().hex[:10]}"
         )
+        character_id = str(pattern.get("character_id") or "").strip()
         character_name = str(pattern.get("character_name") or "").strip()
         scene = str(pattern.get("scene") or "chat").strip().lower() or "chat"
         situation = str(pattern.get("situation") or "").strip()
@@ -1380,11 +1427,11 @@ class MemorySQLite:
             with self._connect() as conn:
                 conn.execute(
                     "INSERT INTO expression_patterns("
-                    "id, character_name, scene, situation, style, example, content_list_json, source, "
+                    "id, character_id, character_name, scene, situation, style, example, content_list_json, source, "
                     "quality_score, use_count, enabled, meta_json, created_at, updated_at"
-                    ") VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?) "
+                    ") VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) "
                     "ON CONFLICT(id) DO UPDATE SET "
-                    "character_name=excluded.character_name, scene=excluded.scene, "
+                    "character_id=excluded.character_id, character_name=excluded.character_name, scene=excluded.scene, "
                     "situation=excluded.situation, style=excluded.style, "
                     "example=excluded.example, content_list_json=excluded.content_list_json, source=excluded.source, "
                     "quality_score=excluded.quality_score, use_count=excluded.use_count, "
@@ -1392,6 +1439,7 @@ class MemorySQLite:
                     "updated_at=excluded.updated_at",
                     (
                         _id,
+                        character_id,
                         character_name,
                         scene,
                         situation,
@@ -1415,6 +1463,7 @@ class MemorySQLite:
             before,
             {
                 "id": _id,
+                "character_id": character_id,
                 "character_name": character_name,
                 "scene": scene,
                 "situation": situation,
@@ -1446,6 +1495,7 @@ class MemorySQLite:
         content_list = self._deserialize_expression_content_list(row, meta)
         return {
             "id": row["id"],
+            "character_id": row["character_id"] or "",
             "character_name": row["character_name"] or "",
             "scene": row["scene"] or "chat",
             "situation": row["situation"] or "",
@@ -1464,26 +1514,42 @@ class MemorySQLite:
     def list_expression_patterns(
         self,
         *,
+        character_id: str = "",
         character_name: str = "",
         scene: str = "",
+        person_id: str = "",
         enabled_only: bool = False,
         query: str = "",
         limit: int = 200,
         offset: int = 0,
     ) -> List[Dict[str, Any]]:
+        character_id = str(character_id or "").strip()
         character_name = str(character_name or "").strip()
         scene = str(scene or "").strip().lower()
+        person_id = str(person_id or "").strip()
         query = str(query or "").strip()
         limit = max(1, min(1000, int(limit)))
         offset = max(0, int(offset))
         where: List[str] = []
         args: List[Any] = []
-        if character_name:
+        if character_id:
+            if character_name:
+                where.append(
+                    "(character_id=? OR (character_id='' AND (character_name=? OR character_name='')))"
+                )
+                args.extend([character_id, character_name])
+            else:
+                where.append("(character_id=? OR (character_id='' AND character_name=''))")
+                args.append(character_id)
+        elif character_name:
             where.append("character_name=?")
             args.append(character_name)
         if scene:
             where.append("scene=?")
             args.append(scene)
+        if person_id:
+            where.append("(person_id=? OR person_id='')")
+            args.append(person_id)
         if enabled_only:
             where.append("enabled=1")
         if query:
@@ -1506,6 +1572,7 @@ class MemorySQLite:
             out.append(
                 {
                     "id": row["id"],
+                    "character_id": row["character_id"] or "",
                     "character_name": row["character_name"] or "",
                     "scene": row["scene"] or "chat",
                     "situation": row["situation"] or "",
@@ -1516,6 +1583,8 @@ class MemorySQLite:
                     "quality_score": float(row["quality_score"] or 0),
                     "use_count": int(row["use_count"] or 0),
                     "enabled": bool(row["enabled"]),
+                    "person_id": row["person_id"] if "person_id" in row.keys() else "",
+                    "session_id": row["session_id"] if "session_id" in row.keys() else "",
                     "meta": meta,
                     "created_at": row["created_at"],
                     "updated_at": row["updated_at"],

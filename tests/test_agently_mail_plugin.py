@@ -7,6 +7,8 @@ from pathlib import Path
 
 import pytest
 
+from modules.plugin_model_gateway import PluginModelCallResult
+
 
 PLUGIN_DIR = Path("plugins/agently_mail")
 
@@ -32,6 +34,43 @@ def test_agently_mail_config_allows_qq_owner_direct_tool():
     assert config["access_control"]["allow_qq_owner"] is True
     assert config["access_control"]["allow_qq_others"] is False
     assert "邮件" in config["aliases"]
+    assert config["settings"]["model_queue"]["purpose"] == ["tool_reasoning"]
+
+
+@pytest.mark.asyncio
+async def test_agently_mail_intent_uses_selected_main_model():
+    Plugin = load_plugin_class()
+    plugin = Plugin()
+    plugin.settings = {"model_queue": {"default": ["reason-a"]}}
+
+    class FakeGateway:
+        def __init__(self):
+            self.calls = []
+
+        async def invoke_text(self, messages, **kwargs):
+            self.calls.append((messages, kwargs))
+            return PluginModelCallResult(
+                ok=True,
+                text=json.dumps(
+                    {
+                        "action": "send",
+                        "to": "foo@example.com",
+                        "subject": "Hi",
+                        "body": "Hello",
+                        "confidence": 0.9,
+                    }
+                ),
+                model_id="reason-a",
+            )
+
+    gateway = FakeGateway()
+    result = await plugin._resolve_intent_with_llm(
+        "给 foo@example.com 发邮件",
+        {"model_gateway": gateway},
+    )
+
+    assert result["action"] == "send"
+    assert gateway.calls[0][1]["selected_ids"] == ["reason-a"]
 
 
 def test_agently_mail_outer_timeout_covers_intent_and_cli_steps():
@@ -73,7 +112,7 @@ def test_agently_mail_natural_language_requires_clear_mail_intent():
 
     assert plugin.should_handle_direct("我最近收到了哪些邮件？", {"source": "text_input"}, "邮件")
     assert plugin.should_handle_direct("查一下邮箱", {"source": "text_input"}, "邮箱")
-    assert plugin.should_handle_direct("发一封上海本周天气邮件到1132824061@qq.com", {"source": "qq_gateway"}, "邮件")
+    assert plugin.should_handle_direct("发一封上海本周天气邮件到123456789@qq.com", {"source": "qq_gateway"}, "邮件")
     assert plugin.should_handle_direct("给foo@example.com邮箱发送问候", {"source": "qq_gateway"}, "邮件")
     assert not plugin.should_handle_direct("把这个文件邮寄给我", {"source": "text_input"}, "邮件")
     assert not plugin.should_handle_direct("邮件这个词只是举例", {"source": "text_input"}, "邮件")
@@ -375,12 +414,12 @@ async def test_send_natural_language_with_missing_body_asks_for_body():
     plugin.settings["llm_intent_enabled"] = {"default": False}
 
     result = await plugin.run(
-        "发一封上海本周天气邮件到1132824061@qq.com",
+        "发一封上海本周天气邮件到123456789@qq.com",
         {"source": "qq_gateway"},
     )
 
     assert "正文(body=)" in result
-    assert "to=1132824061@qq.com" in result
+    assert "to=123456789@qq.com" in result
     assert "subject=上海本周天气" in result
     assert runner.calls == []
 
@@ -399,7 +438,7 @@ async def test_send_uses_llm_intent_resolver_for_natural_language_body():
                             "confirmation_token": "ctk_456",
                             "summary": {
                                 "action": "send",
-                                "to": ["1132824061@qq.com"],
+                                "to": ["123456789@qq.com"],
                                 "subject": "上海本周天气",
                             },
                         },
@@ -411,7 +450,7 @@ async def test_send_uses_llm_intent_resolver_for_natural_language_body():
         ],
         intent_payload={
             "action": "send",
-            "to": "1132824061@qq.com",
+            "to": "123456789@qq.com",
             "subject": "上海本周天气",
             "body": "上海本周天气以多云为主，气温约 25-32 度。",
             "confidence": 0.9,
@@ -419,7 +458,7 @@ async def test_send_uses_llm_intent_resolver_for_natural_language_body():
     )
 
     result = await plugin.run(
-        "发一封上海本周天气邮件到1132824061@qq.com",
+        "发一封上海本周天气邮件到123456789@qq.com",
         {"source": "qq_gateway"},
     )
 
@@ -429,7 +468,7 @@ async def test_send_uses_llm_intent_resolver_for_natural_language_body():
         "message",
         "+send",
         "--to",
-        "1132824061@qq.com",
+        "123456789@qq.com",
         "--subject",
         "上海本周天气",
         "--body",
@@ -560,7 +599,7 @@ async def test_send_with_named_persona_handles_user_phrase_fa_yi_feng():
                             "confirmation_token": "ctk_mujica",
                             "summary": {
                                 "action": "send",
-                                "to": ["1132824061@qq.com"],
+                                "to": ["123456789@qq.com"],
                                 "subject": "Mujica的假面舞会邀请",
                             },
                         },
@@ -572,7 +611,7 @@ async def test_send_with_named_persona_handles_user_phrase_fa_yi_feng():
         ],
         intent_payload={
             "action": "send",
-            "to": "1132824061@qq.com",
+            "to": "123456789@qq.com",
             "subject": "Mujica的假面舞会邀请",
             "body": "诚邀您参加Mujica的假面舞会，愿夜色与面具一同见证这场优雅的相逢，desuwa。",
             "confidence": 0.9,
@@ -581,7 +620,7 @@ async def test_send_with_named_persona_handles_user_phrase_fa_yi_feng():
     )
 
     result = await plugin.run(
-        "让小祥发一封邮件到1132824061@qq.com，邀请她参见mujica的假面舞会",
+        "让小祥发一封邮件到123456789@qq.com，邀请她参见mujica的假面舞会",
         {"source": "qq_gateway"},
     )
 
@@ -591,7 +630,7 @@ async def test_send_with_named_persona_handles_user_phrase_fa_yi_feng():
         "message",
         "+send",
         "--to",
-        "1132824061@qq.com",
+        "123456789@qq.com",
         "--subject",
         "Mujica的假面舞会邀请",
         "--body",
@@ -776,3 +815,283 @@ async def test_confirm_agent_action_sends_with_token():
 
     assert "已提交发送" in reply
     assert runner.calls[0][0][-2:] == ["--confirmation-token", "ctk_123"]
+
+
+def test_agently_mail_notification_settings_exist():
+    config = json.loads((PLUGIN_DIR / "config.json").read_text(encoding="utf-8-sig"))
+    settings = config["settings"]
+
+    assert settings["enable_notifications"]["default"] is True
+    assert settings["notification_target_sessions"]["default"] == []
+    assert settings["notification_character_name"]["default"] == "丰川祥子"
+    assert settings["notification_character_name"]["type"] == "choice"
+    assert settings["notification_character_name"]["choices_source"] == "characters"
+    assert int(settings["notification_check_interval_sec"]["default"]) >= 30
+
+
+def test_mail_list_card_renders_without_overlap_metrics():
+    Plugin = load_plugin_class()
+    plugin = Plugin()
+    items = [
+        {
+            "message_id": "msg_long",
+            "subject": "特别长的中文主题用来验证按像素宽度截断而不是按字符数乱切",
+            "from": {"name": "爱丽丝", "email": "alice@example.com"},
+            "created_at": "2026-07-28T10:00:00+08:00",
+            "snippet": "摘要内容" * 20,
+            "is_read": False,
+        }
+    ]
+    image_path = plugin._render_mail_list_card("最近邮件", items, has_more=False)
+    assert image_path.endswith(".png")
+    assert os.path.exists(image_path)
+    assert os.path.getsize(image_path) > 1000
+    os.remove(image_path)
+
+
+def test_mail_detail_card_renders_body():
+    Plugin = load_plugin_class()
+    plugin = Plugin()
+    image_path = plugin._render_mail_detail_card(
+        {
+            "message_id": "msg_body",
+            "subject": "正文卡片",
+            "from": {"name": "Alice", "email": "a@example.com"},
+            "created_at": "2026-07-28T10:00:00+08:00",
+            "body": "第一行\n第二行是更长的中文内容，用来检查换行。" * 5,
+            "attachments": [{"filename": "a.pdf"}],
+        },
+        body_limit=300,
+    )
+    assert os.path.exists(image_path)
+    assert os.path.getsize(image_path) > 1000
+    os.remove(image_path)
+
+
+def test_mail_detail_card_strips_html_body():
+    Plugin = load_plugin_class()
+    plugin = Plugin()
+    plain = plugin._html_to_plain_text(
+        '<div style="font-family: apple-system;">你还好吗</div>'
+    )
+    assert plain == "你还好吗"
+    assert "<div" not in plain
+
+    image_path = plugin._render_mail_detail_card(
+        {
+            "message_id": "msg_html",
+            "subject": "你还好吗",
+            "from": {"name": "李曜同", "email": "123456789@qq.com"},
+            "created_at": "2026-07-28T02:26:21Z",
+            "body": '<div style="font-family:apple-system, system-ui; font-size: 14px; color: rgb(0, 0, 0); line-height: 1.43;">你还好吗</div>',
+        },
+        body_limit=500,
+    )
+    assert os.path.exists(image_path)
+    # 渲染应成功；进一步靠 plain-text helper 保证不再塞 HTML 原文
+    os.remove(image_path)
+
+
+def test_notification_summary_merges_trailing_particle():
+    Plugin = load_plugin_class()
+    plugin = Plugin()
+    text = plugin._normalize_notification_summary(
+        "李曜同发来的邮件，标题是“你还好吗”，感觉他/她可能是在关心我的近况呢\ndesuwa"
+    )
+    assert "\n" not in text
+    assert text.endswith("desuwa")
+    assert "desuwa" in text
+    # 不应再单独成行
+    assert text.count("desuwa") == 1
+
+
+@pytest.mark.asyncio
+async def test_notification_baseline_keeps_unread_for_push(tmp_path, monkeypatch):
+    Plugin = load_plugin_class()
+    runner = FakeCliRunner(
+        [
+            {
+                "returncode": 0,
+                "stdout": json.dumps(
+                    {
+                        "ok": True,
+                        "data": {
+                            "data": [
+                                {
+                                    "message_id": "msg_unread",
+                                    "subject": "未读邮件",
+                                    "from": {"name": "A", "email": "a@example.com"},
+                                    "created_at": "2026-07-28T09:00:00+08:00",
+                                    "snippet": "unread",
+                                    "is_read": False,
+                                },
+                                {
+                                    "message_id": "msg_read",
+                                    "subject": "已读邮件",
+                                    "from": {"name": "B", "email": "b@example.com"},
+                                    "created_at": "2026-07-28T08:00:00+08:00",
+                                    "snippet": "read",
+                                    "is_read": True,
+                                },
+                            ],
+                            "pagination": {"has_more": False},
+                        },
+                    },
+                    ensure_ascii=False,
+                ),
+                "stderr": "",
+            },
+            {
+                "returncode": 0,
+                "stdout": json.dumps(
+                    {
+                        "ok": True,
+                        "data": {
+                            "message_id": "msg_unread",
+                            "subject": "未读邮件",
+                            "from": {"name": "A", "email": "a@example.com"},
+                            "created_at": "2026-07-28T09:00:00+08:00",
+                            "body": "未读正文",
+                            "attachments": [],
+                        },
+                    },
+                    ensure_ascii=False,
+                ),
+                "stderr": "",
+            },
+        ]
+    )
+    plugin = Plugin(cli_runner=runner)
+    plugin.settings = {
+        "enable_notifications": True,
+        "notification_target_sessions": ["private:123456789"],
+        "notification_character_name": "丰川祥子",
+        "notification_poll_limit": 10,
+        "request_timeout_sec": 20,
+        "cli_path": "agently-cli",
+        "seen_state_path": str(tmp_path / "seen.json"),
+    }
+
+    class FakeChat:
+        def __init__(self):
+            self.chat_gateway = object()
+            self.replies = []
+
+        async def _send_gateway_reply(self, text, ctx, emotion=None):
+            self.replies.append(("text", text, ctx))
+            return True
+
+        async def _send_gateway_image_reply(self, image_path, ctx, caption=""):
+            self.replies.append(("image", image_path, ctx))
+            return True
+
+    chat = FakeChat()
+    plugin._chat_service = chat
+
+    async def fake_summary(mail, character_name):
+        return f"【{character_name}】{mail.get('subject')}"
+
+    monkeypatch.setattr(plugin, "_generate_notification_summary", fake_summary)
+    await plugin._check_new_mails_once()
+    assert len(chat.replies) == 2
+    assert "msg_unread" in plugin._seen_ids
+    assert "msg_read" in plugin._seen_ids
+
+
+@pytest.mark.asyncio
+async def test_notification_pushes_summary_and_body_image(tmp_path, monkeypatch):
+    Plugin = load_plugin_class()
+    runner = FakeCliRunner(
+        [
+            {
+                "returncode": 0,
+                "stdout": json.dumps(
+                    {
+                        "ok": True,
+                        "data": {
+                            "data": [
+                                {
+                                    "message_id": "msg_new",
+                                    "subject": "新邮件主题",
+                                    "from": {"name": "Bob", "email": "b@example.com"},
+                                    "created_at": "2026-07-28T12:00:00+08:00",
+                                    "snippet": "新内容",
+                                    "is_read": False,
+                                }
+                            ],
+                            "pagination": {"has_more": False},
+                        },
+                    },
+                    ensure_ascii=False,
+                ),
+                "stderr": "",
+            },
+            {
+                "returncode": 0,
+                "stdout": json.dumps(
+                    {
+                        "ok": True,
+                        "data": {
+                            "message_id": "msg_new",
+                            "subject": "新邮件主题",
+                            "from": {"name": "Bob", "email": "b@example.com"},
+                            "created_at": "2026-07-28T12:00:00+08:00",
+                            "body": "这是新邮件正文，用于推送图片。",
+                            "attachments": [],
+                        },
+                    },
+                    ensure_ascii=False,
+                ),
+                "stderr": "",
+            },
+        ]
+    )
+    plugin = Plugin(cli_runner=runner)
+    seen_path = tmp_path / "seen.json"
+    seen_path.write_text(
+        json.dumps({"seen_ids": ["msg_old"]}, ensure_ascii=False), encoding="utf-8"
+    )
+    plugin.settings = {
+        "enable_notifications": True,
+        "notification_target_sessions": ["private:123456789"],
+        "notification_character_name": "丰川祥子",
+        "notification_poll_limit": 10,
+        "notification_body_chars": 800,
+        "request_timeout_sec": 20,
+        "cli_path": "agently-cli",
+        "seen_state_path": str(seen_path),
+        "model_queue": [],
+    }
+
+    class FakeChat:
+        def __init__(self):
+            self.chat_gateway = object()
+            self.replies = []
+
+        async def _send_gateway_reply(self, text, ctx, emotion=None):
+            self.replies.append(("text", text, ctx.get("channel_meta", {}).get("session_id")))
+            return True
+
+        async def _send_gateway_image_reply(self, image_path, ctx, caption=""):
+            self.replies.append(
+                ("image", os.path.exists(image_path), ctx.get("channel_meta", {}).get("session_id"))
+            )
+            return True
+
+    chat = FakeChat()
+    plugin._chat_service = chat
+
+    async def fake_summary(mail, character_name):
+        return f"【{character_name}】有新邮件：{mail.get('subject')}"
+
+    monkeypatch.setattr(plugin, "_generate_notification_summary", fake_summary)
+    plugin._load_seen_ids()
+    await plugin._check_new_mails_once()
+
+    assert len(chat.replies) == 2
+    assert chat.replies[0][0] == "text"
+    assert "丰川祥子" in chat.replies[0][1]
+    assert chat.replies[0][2] == "private:123456789"
+    assert chat.replies[1][0] == "image"
+    assert chat.replies[1][1] is True
+    assert "msg_new" in plugin._seen_ids

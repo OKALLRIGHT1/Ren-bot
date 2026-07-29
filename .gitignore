@@ -71,8 +71,8 @@ output/
 *.sqlite
 *.sqlite-*
 *.sqlite3
-memory/
-memory_db/
+/memory/
+/memory_db/
 userdata.db
 learning_tmp.db
 data/codex_session.json
@@ -119,3 +119,4 @@ plugins/Isuzu_news/
 plugins/meme_pack/assets/
 plugins/meme_pack/data/
 scripts/
+.superpowers/

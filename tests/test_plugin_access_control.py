@@ -197,7 +197,10 @@ async def test_direct_command_alias_with_prefix_can_run_allowed_plugin():
 
     assert handled is True
     assert result == "tool-ok"
-    assert plugin.calls == [("/日报", _qq_ctx(owner=True))]
+    assert plugin.calls[0][0] == "/日报"
+    assert plugin.calls[0][1]["source"] == "qq_gateway"
+    assert plugin.calls[0][1]["channel_meta"] == _qq_ctx(owner=True)["channel_meta"]
+    assert plugin.calls[0][1]["model_gateway"] is manager.model_gateway
 
 
 @pytest.mark.asyncio
@@ -218,7 +221,10 @@ async def test_direct_command_should_handle_receives_raw_prefixed_text():
 
     assert handled is True
     assert result == "tool-ok"
-    assert plugin.calls == [("/access now", _qq_ctx(owner=True))]
+    assert plugin.calls[0][0] == "/access now"
+    assert plugin.calls[0][1]["source"] == "qq_gateway"
+    assert plugin.calls[0][1]["channel_meta"] == _qq_ctx(owner=True)["channel_meta"]
+    assert plugin.calls[0][1]["model_gateway"] is manager.model_gateway
 
 
 @pytest.mark.asyncio

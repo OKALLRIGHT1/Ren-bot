@@ -549,7 +549,23 @@ class KnowledgeManagerDialog(QtWidgets.QDialog):
         try:
             stats = brain.get_knowledge_stats()
             chunk_count = int(stats.get("chunk_count", 0))
-            self.stats_label.setText(f"知识片段数：{chunk_count}")
+            embedding = dict(stats.get("embedding") or {})
+            state = {
+                "ready": "可用",
+                "unverified": "未验证",
+                "error": "错误",
+                "disabled": "已禁用",
+                "unconfigured": "未配置",
+            }.get(str(embedding.get("state") or ""), "未知")
+            rebuild_text = " · 需要重建" if stats.get("rebuild_required") else ""
+            self.stats_label.setText(
+                f"知识片段数：{chunk_count} · "
+                f"{embedding.get('model') or 'Embedding 未配置'}/"
+                f"{embedding.get('dimension') or '?'} · {state} · "
+                f"调用 {int(embedding.get('calls') or 0)} / "
+                f"失败 {int(embedding.get('failures') or 0)}"
+                f"{rebuild_text}"
+            )
         except Exception:
             self.stats_label.setText("知识片段数：读取失败")
         self._refresh_recent_dirs()

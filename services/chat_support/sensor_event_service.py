@@ -5,6 +5,8 @@ import random
 from dataclasses import dataclass
 from typing import Any, Callable, Optional
 
+from services.chat_support.sensor_event_guard import revalidate_focus_for_sensor
+
 
 @dataclass(frozen=True)
 class SensorGenerationContext:
@@ -183,7 +185,10 @@ class SensorEventService:
         try:
             reply = await asyncio.to_thread(
                 chat_with_ai,
-                [{"role": "system", "content": prompt}],
+                [
+                    {"role": "system", "content": prompt},
+                    {"role": "user", "content": "请说一句符合上述要求的话。"},
+                ],
                 task_type="default",
                 caller="sensor_self_talk",
             )
@@ -311,9 +316,10 @@ class SensorEventService:
 		- 不要使用 🌸 或其他装饰 emoji。
 	{context.vision_style_block}
 	{context.recent_sensor_reply_block}
-			【任务】抓住一个最自然的落点，说一句克制的旁边话；关心、提醒、疑问、轻吐槽都可以。
-	【字数限制】最多 36 个字，1 到 2 句短句。不要加引号，不要动不动关心。
-			【情绪标签】先由你判断这句话该带什么表情；必须在开头加 <emo=happy|sad|angry|shy|flustered|confused|think|neutral>。不要解释标签。"""
+【任务】抓住一个最自然的落点，说一句克制的旁边话；关心、提醒、疑问、轻吐槽都可以。
+		【聚焦】只围绕当前活跃窗口说；不要把近期观察里的其他软件当成现在的主视角。
+		【字数限制】最多 36 个字，1 到 2 句短句。不要加引号，不要动不动关心。
+				【情绪标签】先由你判断这句话该带什么表情；必须在开头加 <emo=happy|sad|angry|shy|flustered|confused|think|neutral>。不要解释标签。"""
 
     async def run_vision_direct_generation(
         self,
@@ -362,18 +368,19 @@ class SensorEventService:
 
 【重要设定】描述中如果明确提到“AI助手的形象/Live2D形象/你的配置界面/你的模型”，那就是你自己或用户正在改你。普通网页、群聊或图片主体里的动漫角色不一定是你。
 
-	【任务】
-		基于上面的事实，像你（当前角色）在旁边当场低声接一句。
-		不强制吐槽；可以关心、提醒、疑问、陪一句，也可以轻轻戳他。
-	可以适当用疑问句或轻反问，不要每次都写成陈述判断。
-		不要评价页面“实用/详尽/清晰”，要说 Master 正在看这件事给你的感觉。
-		不要复述画面，不要总结，不要说“用户正在/屏幕上/画面中/我看到”。
-		不要使用 🌸 或其他装饰 emoji。
-	{context.vision_style_block}
-	{context.recent_sensor_reply_block}
-	【字数限制】最多 36 个字，1 到 2 句短句。不要加引号，不要动不动关心。
-		【情绪标签】先由你判断这句话该带什么表情；必须在开头加 <emo=happy|sad|angry|shy|flustered|confused|think|neutral>。不要解释标签。
-"""
+【任务】
+			基于上面的事实，像你（当前角色）在旁边当场低声接一句。
+			不强制吐槽；可以关心、提醒、疑问、陪一句，也可以轻轻戳他。
+		可以适当用疑问句或轻反问，不要每次都写成陈述判断。
+			不要评价页面“实用/详尽/清晰”，要说 Master 正在看这件事给你的感觉。
+			不要复述画面，不要总结，不要说“用户正在/屏幕上/画面中/我看到”。
+			不要使用 🌸 或其他装饰 emoji。
+		{context.vision_style_block}
+		{context.recent_sensor_reply_block}
+		【聚焦】只围绕当前活跃窗口说；不要把近期观察里的其他软件当成现在的主视角。
+		【字数限制】最多 36 个字，1 到 2 句短句。不要加引号，不要动不动关心。
+			【情绪标签】先由你判断这句话该带什么表情；必须在开头加 <emo=happy|sad|angry|shy|flustered|confused|think|neutral>。不要解释标签。
+	"""
 
     async def run_vision_separate_generation(
         self,
@@ -416,6 +423,10 @@ class SensorEventService:
                             "不要回应本条格式要求。"
                         ),
                     },
+                    {
+                        "role": "user",
+                        "content": "请给出一句符合上述要求的临场回应。",
+                    },
                 ],
                 task_type="sensor_vision_talk",
                 caller="sensor_vision_talk",
@@ -429,6 +440,27 @@ class SensorEventService:
             self._log_warning(f"Vision separate failed: {exc}")
             return SensorReplyGenerationResult(reason="failed", branch="vision_separate")
 
+    def _sensor_vision_capture_target(self) -> str:
+        try:
+            import config
+
+            target = str(
+                getattr(config, "SENSOR_VISION_CAPTURE_TARGET", "active_monitor") or ""
+            ).strip().lower()
+        except Exception:
+            target = "active_monitor"
+        if target in {
+            "primary",
+            "active_monitor",
+            "foreground_monitor",
+            "focus_monitor",
+            "active_window",
+            "window",
+            "all",
+        }:
+            return target
+        return "active_monitor"
+
     async def run_vision_generation(
         self,
         *,
@@ -437,20 +469,64 @@ class SensorEventService:
         vision_mode: str,
         analyze_image: Callable[..., Any],
         chat_with_ai: Callable[..., str],
-        take_screenshot_base64: Optional[Callable[[], str]] = None,
+        display_app: str = "",
+        take_screenshot_base64: Optional[Callable[..., str]] = None,
+        active_title_getter: Optional[Callable[[], str]] = None,
     ) -> SensorReplyGenerationResult:
         try:
+            focus = revalidate_focus_for_sensor(
+                event_title=clean_title,
+                app_name=display_app,
+                active_title_getter=active_title_getter,
+            )
+            if not focus.ok:
+                self._log_info(
+                    f"🛑 [Sensor] 视觉采样前焦点已变，跳过: event={clean_title} active={focus.active_title}"
+                )
+                return SensorReplyGenerationResult(
+                    reason="focus_mismatch",
+                    branch="guard",
+                )
+
+            capture_target = self._sensor_vision_capture_target()
             if take_screenshot_base64 is None:
-                from modules.vision.capture import take_screenshot_base64 as capture_screenshot_base64
+                from modules.vision.capture import (
+                    take_screenshot_base64 as capture_screenshot_base64,
+                )
 
-                take_screenshot_base64 = capture_screenshot_base64
+                def _default_capture(max_size=1024, target=capture_target, monitor_index=1):
+                    return capture_screenshot_base64(
+                        max_size=max_size, target=target, monitor_index=monitor_index
+                    )
 
-            print("📸 [Sensor] 正在视觉采样...")
-            image_base64 = await asyncio.to_thread(take_screenshot_base64)
+                take_screenshot_base64 = _default_capture
+
+            print(f"📸 [Sensor] 正在视觉采样... target={capture_target}")
+            try:
+                image_base64 = await asyncio.to_thread(
+                    take_screenshot_base64, 1024, capture_target
+                )
+            except TypeError:
+                # Backward-compatible fakes / older callables without target args.
+                image_base64 = await asyncio.to_thread(take_screenshot_base64)
             if not image_base64:
                 return SensorReplyGenerationResult(
                     reason="empty_screenshot",
                     branch="vision",
+                )
+
+            focus_after = revalidate_focus_for_sensor(
+                event_title=clean_title,
+                app_name=display_app,
+                active_title_getter=active_title_getter,
+            )
+            if not focus_after.ok:
+                self._log_info(
+                    f"🛑 [Sensor] 截图后焦点已变，丢弃画面: event={clean_title} active={focus_after.active_title}"
+                )
+                return SensorReplyGenerationResult(
+                    reason="focus_mismatch",
+                    branch="guard",
                 )
 
             if vision_mode == "direct":
@@ -489,17 +565,18 @@ class SensorEventService:
 
     用户刚切换到窗口: [{clean_title}] ({category})，这是今天第 {count} 次。
 
-	【任务】像你（当前角色）在旁边看见他切窗口一样，直接对 Master 说一句。
-		不强制吐槽；根据使用时长、次数和上下文选择关心、提醒、疑问、陪一句或轻轻戳他。
-		可以适当用疑问句或轻反问，不要每次都写成陈述判断。
-		不要评价页面“实用/详尽/清晰”，要说他正在看这件事给你的感觉。
-		不要总结他的行为，不要说“用户正在/屏幕上/当前窗口显示”。
-		不要使用 🌸 或其他装饰 emoji。
-	{context.text_style_block}
-	{context.recent_sensor_reply_block}
-	【字数限制】最多 36 个字，1 到 2 句短句。用符合你当前人设的说法表达即可。不要加引号，不要动不动关心。
-		【情绪标签】先由你判断这句话该带什么表情；必须在开头加 <emo=happy|sad|angry|shy|flustered|confused|think|neutral>。不要解释标签。
-	"""
+【任务】像你（当前角色）在旁边看见他切窗口一样，直接对 Master 说一句。
+			不强制吐槽；根据使用时长、次数和上下文选择关心、提醒、疑问、陪一句或轻轻戳他。
+			可以适当用疑问句或轻反问，不要每次都写成陈述判断。
+			不要评价页面“实用/详尽/清晰”，要说他正在看这件事给你的感觉。
+			不要总结他的行为，不要说“用户正在/屏幕上/当前窗口显示”。
+			不要使用 🌸 或其他装饰 emoji。
+		{context.text_style_block}
+		{context.recent_sensor_reply_block}
+【聚焦】只围绕当前活跃窗口说；不要把近期观察里的其他软件当成现在的主视角。
+			【字数限制】最多 36 个字，1 到 2 句短句。用符合你当前人设的说法表达即可。不要加引号，不要动不动关心。
+				【情绪标签】先由你判断这句话该带什么表情；必须在开头加 <emo=happy|sad|angry|shy|flustered|confused|think|neutral>。不要解释标签。
+		"""
 
     async def run_text_generation(
         self,
@@ -520,7 +597,10 @@ class SensorEventService:
             context.record_observation(clean_title, "text")
             reply = await asyncio.to_thread(
                 chat_with_ai,
-                [{"role": "system", "content": prompt}],
+                [
+                    {"role": "system", "content": prompt},
+                    {"role": "user", "content": "请说一句符合上述要求的话。"},
+                ],
                 task_type="default",
                 caller="sensor_text_talk",
             )
@@ -547,7 +627,24 @@ class SensorEventService:
         current_stay_sec: float | int | None,
         chat_with_ai: Callable[..., str],
         analyze_image: Callable[..., Any],
+        active_title_getter: Optional[Callable[[], str]] = None,
+        take_screenshot_base64: Optional[Callable[..., str]] = None,
     ) -> SensorReplyGenerationResult:
+        if category != "self":
+            focus = revalidate_focus_for_sensor(
+                event_title=clean_title,
+                app_name=display_app,
+                active_title_getter=active_title_getter,
+            )
+            if not focus.ok:
+                self._log_info(
+                    f"🛑 [Sensor] 焦点已变，跳过吐槽: event={clean_title} active={focus.active_title}"
+                )
+                return SensorReplyGenerationResult(
+                    reason="focus_mismatch",
+                    branch="guard",
+                )
+
         context = self.build_generation_context(
             clean_title=clean_title,
             display_app=display_app,
@@ -587,8 +684,13 @@ class SensorEventService:
                 vision_mode=vision_mode,
                 analyze_image=analyze_image,
                 chat_with_ai=chat_with_ai,
+                display_app=display_app,
+                take_screenshot_base64=take_screenshot_base64,
+                active_title_getter=active_title_getter,
             )
             if vision_generation.reply:
+                return vision_generation
+            if vision_generation.reason == "focus_mismatch":
                 return vision_generation
 
         return await self.run_text_generation(

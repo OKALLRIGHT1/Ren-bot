@@ -88,7 +88,8 @@ class GPTSoVITSTTS(BaseTTS):
             except Exception as e:
                 self.enable_lip_sync = False
 
-        self._init_model()
+        if all(self.runtime_cfg.get(key) for key in ("gpt_w", "sov_w", "ref_wav")):
+            self._init_model()
 
     def apply_runtime_config(self, cfg: Optional[dict] = None):
         cfg = cfg if isinstance(cfg, dict) else {}

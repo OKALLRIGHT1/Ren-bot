@@ -125,8 +125,11 @@ class ReplyStyleService:
         match = self.emo_tag_re.search(raw)
         if match:
             emo = self.normalize_emo(match.group(1))
-            clean = self.emo_tag_re.sub("", raw, count=1).strip()
+            clean = self.strip_emo_tags_anywhere(raw).strip()
             return emo, clean
+        clean = self.strip_emo_tags_anywhere(raw)
+        if clean != raw:
+            return None, clean.strip()
         return None, raw
 
     def looks_structured_reply(self, text: str) -> bool:

@@ -24,12 +24,24 @@
     "type": "delegate",
     "description": "联网搜索插件，优先使用 Grok 代理做提示式联网检索；也兼容 Exa，并可在失败时回退到 DDG。",
     "example_arg": "今天北京天气",
-    "timeout_sec": 20,
+    "timeout_sec": 60,
     "settings": {
+        "model_queue": {
+            "type": "model_queue",
+            "label": "联网搜索模型（按顺序尝试）",
+            "description": "从主程序「模型与路由」中选择用途为「联网搜索」的模型。留空时先读取 web_search 任务路由；任务路由也为空时兼容旧 Grok/Exa 配置。",
+            "purpose": [
+                "web_search"
+            ],
+            "max_items": 3,
+            "default": [
+                "grok-4.20-0309-non-reasoning"
+            ]
+        },
         "provider": {
             "type": "text",
-            "label": "搜索源",
-            "description": "填写 grok 或 exa。默认 grok。",
+            "label": "兼容搜索源",
+            "description": "仅在主程序联网搜索模型和 web_search 任务路由都未配置时使用。",
             "default": "grok"
         },
         "grok_base_url": {
@@ -47,8 +59,8 @@
         "grok_model": {
             "type": "text",
             "label": "Grok 模型",
-            "description": "用于联网搜索的模型名。建议先用 grok-4.20-0309-non-reasoning 或 fast 类模型。",
-            "default": "grok-4.20-multi-agent-xhigh"
+            "description": "用于联网搜索的模型名。搜索工具优先用低延迟 non-reasoning：grok-4.20-0309-non-reasoning。通用最强可用 grok-4.5，但不建议作为默认搜索模型。",
+            "default": "grok-4.20-0309-non-reasoning"
         },
         "grok_use_active_character": {
             "type": "bool",
@@ -123,8 +135,8 @@
         "request_timeout_sec": {
             "type": "number",
             "label": "请求超时(秒)",
-            "description": "单次 HTTP 请求超时时间。",
-            "default": 20,
+            "description": "单次 HTTP 请求超时时间。应小于插件总超时，给 Grok/Exa 失败后的 DDG 回退留时间。推荐 18，总超时 60。",
+            "default": 18,
             "min": 3,
             "max": 60
         },

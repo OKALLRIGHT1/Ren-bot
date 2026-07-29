@@ -9,6 +9,9 @@ import time
 from pathlib import Path
 from typing import Any, Optional
 
+from modules.model_catalog import normalize_model_selection
+from modules.plugin_model_gateway import get_plugin_model_gateway
+
 PLUGIN_DIR = Path(__file__).resolve().parent
 if str(PLUGIN_DIR) not in sys.path:
     sys.path.insert(0, str(PLUGIN_DIR))
@@ -140,6 +143,7 @@ class Plugin:
         user_text: str,
         reply_text: str,
         inferred_emotion: str,
+        ctx: Optional[dict] = None,
     ) -> tuple[Optional[Any], str]:
         if not candidates:
             return None, ""
@@ -188,22 +192,24 @@ class Plugin:
             f"[MemePack] LLM selector start: emotion={inferred_emotion}, "
             f"candidates={len(candidates)}"
         )
-        try:
-            from modules.llm import chat_with_ai
-
-            response = await asyncio.to_thread(
-                chat_with_ai,
-                [
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt},
-                ],
-                task_type="default",
-                caller="meme_pack_selector",
-                timeout_sec=18,
-            )
-        except Exception as exc:
-            print(f"[MemePack] LLM selector failed: {exc}")
-            return None, ""
+        gateway = (ctx or {}).get("model_gateway") or get_plugin_model_gateway()
+        result = await gateway.invoke_text(
+            [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            selected_ids=normalize_model_selection(
+                self._setting("model_queue", [])
+            ),
+            required_purpose="chat",
+            task_type="default",
+            caller="meme_pack_selector",
+            timeout_sec=18,
+        )
+        if not result.ok:
+            print(f"[MemePack] LLM selector failed: {result.error_message}")
+            return None, result.error_code
+        response = result.text
 
         data = self._extract_json_object(response)
         if not data:
@@ -425,6 +431,7 @@ class Plugin:
                 user_text=user_text,
                 reply_text=reply_text,
                 inferred_emotion=inferred_emotion,
+                ctx=ctx,
             )
         elif force_pick:
             asset = candidates[0][1] if candidates else None

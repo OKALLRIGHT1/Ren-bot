@@ -11,6 +11,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from integrations.gui_http import GuiHttpServer
+from integrations.gui_ws import GuiWebSocketServer
 from integrations.mcp.bridge import _build_stdio_env
 import modules.memory_sqlite as memory_sqlite
 from modules.plugin_manager import PluginManager
@@ -309,6 +310,20 @@ def test_gui_http_rejects_query_token() -> None:
     assert server._extract_token(bearer_request) == "secret"
 
 
+def test_gui_ws_rejects_query_token() -> None:
+    server = GuiWebSocketServer(access_token="secret")
+    query_only = SimpleNamespace(request_headers={}, path="/gui?token=secret")
+    header_ok = SimpleNamespace(request_headers={"X-GUI-Token": "secret"}, path="/gui")
+    bearer_ok = SimpleNamespace(
+        request_headers={"Authorization": "Bearer secret"},
+        path="/gui",
+    )
+    assert server._extract_token(query_only, "/gui?token=secret") == ""
+    assert server._authorized(query_only, "/gui?token=secret") is False
+    assert server._extract_token(header_ok, "/gui") == "secret"
+    assert server._extract_token(bearer_ok, "/gui") == "secret"
+
+
 def test_gui_http_origin_uses_exact_loopback_match() -> None:
     server = GuiHttpServer(host="127.0.0.1", port=8097, access_token="secret")
     assert server._origin_allowed("http://localhost:8097") is True
@@ -487,7 +502,7 @@ def test_activity_events_list_uses_insert_order_for_mixed_timestamp_formats() ->
                     "kind": "activity_sample",
                     "presence": "active",
                     "app": {"name": "chrome.exe"},
-                    "source": "rust-agent",
+                    "source": "live2d-tauri",
                 }
             )
 
@@ -514,6 +529,7 @@ def main() -> None:
     test_sensitive_text_redaction()
     test_config_safe_env_parsing()
     test_gui_http_rejects_query_token()
+    test_gui_ws_rejects_query_token()
     test_gui_http_origin_uses_exact_loopback_match()
     test_workspace_ops_list_changes_does_not_echo_confirm_token()
     test_gui_dependency_install_requires_confirmation()

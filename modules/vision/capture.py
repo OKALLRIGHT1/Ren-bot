@@ -64,15 +64,150 @@ def _resize_if_needed(image: Image.Image, max_size=1024) -> Image.Image:
 
 
 def get_active_window_title() -> str:
-    if gw is None:
-        return ""
-    try:
-        win = gw.getActiveWindow()
-        if not win:
-            return ""
-        return str(win.title or "").strip()
-    except Exception:
-        return ""
+    info = get_active_window_info()
+    return str(info.get("title") or "").strip()
+
+
+def get_active_window_info() -> Dict[str, object]:
+    """Return current foreground window title and bounds when available."""
+    info: Dict[str, object] = {
+        "title": "",
+        "left": None,
+        "top": None,
+        "right": None,
+        "bottom": None,
+    }
+
+    if gw is not None:
+        try:
+            win = gw.getActiveWindow()
+            if win is not None:
+                title = str(getattr(win, "title", "") or "").strip()
+                left = getattr(win, "left", None)
+                top = getattr(win, "top", None)
+                width = getattr(win, "width", None)
+                height = getattr(win, "height", None)
+                if left is not None and top is not None and width is not None and height is not None:
+                    left_i = int(left)
+                    top_i = int(top)
+                    right_i = left_i + int(width)
+                    bottom_i = top_i + int(height)
+                    info.update(
+                        {
+                            "title": title,
+                            "left": left_i,
+                            "top": top_i,
+                            "right": right_i,
+                            "bottom": bottom_i,
+                        }
+                    )
+                    return info
+                if title:
+                    info["title"] = title
+        except Exception:
+            pass
+
+    if os.name == "nt":
+        try:
+            from ctypes import wintypes
+
+            user32 = ctypes.windll.user32
+            hwnd = user32.GetForegroundWindow()
+            if not hwnd:
+                return info
+
+            length = int(user32.GetWindowTextLengthW(hwnd) or 0)
+            title = ""
+            if length > 0:
+                buf = ctypes.create_unicode_buffer(length + 1)
+                user32.GetWindowTextW(hwnd, buf, length + 1)
+                title = str(buf.value or "").strip()
+
+            class RECT(ctypes.Structure):
+                _fields_ = [
+                    ("left", ctypes.c_long),
+                    ("top", ctypes.c_long),
+                    ("right", ctypes.c_long),
+                    ("bottom", ctypes.c_long),
+                ]
+
+            rect = RECT()
+            if user32.GetWindowRect(hwnd, ctypes.byref(rect)):
+                info.update(
+                    {
+                        "title": title or str(info.get("title") or ""),
+                        "left": int(rect.left),
+                        "top": int(rect.top),
+                        "right": int(rect.right),
+                        "bottom": int(rect.bottom),
+                    }
+                )
+            elif title:
+                info["title"] = title
+        except Exception:
+            return info
+
+    return info
+
+
+def find_monitor_for_point(
+    x: int, y: int, displays: Optional[List[Dict[str, int]]] = None
+) -> Optional[Dict[str, int]]:
+    regions = list(displays or get_display_regions())
+    if not regions:
+        return None
+    for item in regions:
+        try:
+            left = int(item.get("left", 0))
+            top = int(item.get("top", 0))
+            right = int(item.get("right", 0))
+            bottom = int(item.get("bottom", 0))
+        except Exception:
+            continue
+        if left <= int(x) < right and top <= int(y) < bottom:
+            return item
+    return next((item for item in regions if bool(item.get("is_primary"))), regions[0])
+
+
+def find_monitor_for_rect(
+    left: int,
+    top: int,
+    right: int,
+    bottom: int,
+    displays: Optional[List[Dict[str, int]]] = None,
+) -> Optional[Dict[str, int]]:
+    regions = list(displays or get_display_regions())
+    if not regions:
+        return None
+
+    best = None
+    best_area = -1
+    for item in regions:
+        try:
+            m_left = int(item.get("left", 0))
+            m_top = int(item.get("top", 0))
+            m_right = int(item.get("right", 0))
+            m_bottom = int(item.get("bottom", 0))
+        except Exception:
+            continue
+        inter_left = max(int(left), m_left)
+        inter_top = max(int(top), m_top)
+        inter_right = min(int(right), m_right)
+        inter_bottom = min(int(bottom), m_bottom)
+        width = inter_right - inter_left
+        height = inter_bottom - inter_top
+        if width <= 0 or height <= 0:
+            continue
+        area = width * height
+        if area > best_area:
+            best = item
+            best_area = area
+    if best is not None:
+        return best
+
+    cx = int((int(left) + int(right)) / 2)
+    cy = int((int(top) + int(bottom)) / 2)
+    return find_monitor_for_point(cx, cy, displays=regions)
 
 
 def get_display_regions() -> List[Dict[str, int]]:
@@ -157,23 +292,116 @@ def get_display_regions() -> List[Dict[str, int]]:
     return regions
 
 
-def _grab_screenshot_image(target: str = "primary", monitor_index: int = 1) -> Tuple[Optional[Image.Image], Optional[Dict[str, int]], List[Dict[str, int]]]:
-    displays = get_display_regions()
+def _primary_display(displays: List[Dict[str, int]]) -> Optional[Dict[str, int]]:
     if not displays:
+        return None
+    return next((item for item in displays if bool(item.get("is_primary"))), displays[0])
+
+
+def _active_window_bbox(info: Optional[Dict[str, object]] = None) -> Optional[Tuple[int, int, int, int]]:
+    window = info if isinstance(info, dict) else get_active_window_info()
+    try:
+        left = window.get("left")
+        top = window.get("top")
+        right = window.get("right")
+        bottom = window.get("bottom")
+        if left is None or top is None or right is None or bottom is None:
+            return None
+        left_i = int(left)
+        top_i = int(top)
+        right_i = int(right)
+        bottom_i = int(bottom)
+    except Exception:
+        return None
+    if right_i <= left_i or bottom_i <= top_i:
+        return None
+    return left_i, top_i, right_i, bottom_i
+
+
+def _resolve_screenshot_selection(
+    *,
+    target: str = "primary",
+    monitor_index: int = 1,
+    displays: Optional[List[Dict[str, int]]] = None,
+    active_info: Optional[Dict[str, object]] = None,
+) -> Tuple[Optional[Dict[str, int]], Optional[Tuple[int, int, int, int]], List[Dict[str, int]]]:
+    regions = list(displays or get_display_regions())
+    if not regions:
         return None, None, []
 
     normalized_target = str(target or "primary").strip().lower()
+    window_bbox: Optional[Tuple[int, int, int, int]] = None
+    selected: Optional[Dict[str, int]] = None
+
     if normalized_target in {"all", "all_screens", "allscreens"}:
         selected = None
     elif normalized_target in {"monitor", "display", "screen"}:
-        selected = next((item for item in displays if int(item.get("index", 0)) == int(monitor_index or 1)), None)
+        selected = next(
+            (
+                item
+                for item in regions
+                if int(item.get("index", 0)) == int(monitor_index or 1)
+            ),
+            None,
+        )
         if selected is None:
-            return None, None, displays
+            return None, None, regions
+    elif normalized_target in {"active_window", "window", "foreground_window"}:
+        window_bbox = _active_window_bbox(active_info)
+        if window_bbox is None:
+            selected = _primary_display(regions)
+        else:
+            selected = find_monitor_for_rect(*window_bbox, displays=regions) or _primary_display(
+                regions
+            )
+    elif normalized_target in {"active_monitor", "foreground_monitor", "focus_monitor"}:
+        window_bbox = _active_window_bbox(active_info)
+        if window_bbox is not None:
+            selected = find_monitor_for_rect(*window_bbox, displays=regions)
+        if selected is None:
+            selected = _primary_display(regions)
+        window_bbox = None
     else:
-        selected = next((item for item in displays if bool(item.get("is_primary"))), displays[0])
+        selected = _primary_display(regions)
+
+    return selected, window_bbox, regions
+
+
+def _grab_screenshot_image(
+    target: str = "primary", monitor_index: int = 1
+) -> Tuple[Optional[Image.Image], Optional[Dict[str, int]], List[Dict[str, int]]]:
+    active_info = None
+    normalized_target = str(target or "primary").strip().lower()
+    if normalized_target in {
+        "active_monitor",
+        "foreground_monitor",
+        "focus_monitor",
+        "active_window",
+        "window",
+        "foreground_window",
+    }:
+        active_info = get_active_window_info()
+
+    selected, window_bbox, displays = _resolve_screenshot_selection(
+        target=target,
+        monitor_index=monitor_index,
+        active_info=active_info,
+    )
+    if not displays:
+        return None, None, []
+    if (
+        selected is None
+        and window_bbox is None
+        and normalized_target
+        not in {"all", "all_screens", "allscreens"}
+    ):
+        return None, None, displays
 
     try:
         if ImageGrab is not None:
+            if window_bbox is not None:
+                image = ImageGrab.grab(bbox=window_bbox, all_screens=(os.name == "nt"))
+                return image, selected, displays
             if selected is None:
                 image = ImageGrab.grab(all_screens=True)
             else:
@@ -183,7 +411,7 @@ def _grab_screenshot_image(target: str = "primary", monitor_index: int = 1) -> T
                     int(selected["right"]),
                     int(selected["bottom"]),
                 )
-                image = ImageGrab.grab(bbox=bbox, all_screens=(os.name == 'nt'))
+                image = ImageGrab.grab(bbox=bbox, all_screens=(os.name == "nt"))
             return image, selected, displays
 
         if pyautogui is not None:
@@ -196,12 +424,15 @@ def _grab_screenshot_image(target: str = "primary", monitor_index: int = 1) -> T
     return None, selected, displays
 
 
-def take_screenshot_base64(max_size=1024) -> str:
+def take_screenshot_base64(max_size=1024, target: str = "primary", monitor_index: int = 1) -> str:
     """
     截取屏幕，缩放至长边不超过 max_size，并转为 base64。
+    target 默认 primary，保持旧行为；sensor 可传 active_monitor。
     """
     try:
-        screenshot, _selected, _displays = _grab_screenshot_image(target="primary", monitor_index=1)
+        screenshot, _selected, _displays = _grab_screenshot_image(
+            target=target, monitor_index=monitor_index
+        )
         if screenshot is None:
             print("❌ [Vision] 截图依赖不可用")
             return None
@@ -214,6 +445,28 @@ def take_screenshot_base64(max_size=1024) -> str:
     except Exception as e:
         print(f"❌ [Vision] 截图失败: {e}")
         return None
+
+
+def take_screenshot_base64_with_meta(
+    max_size=1024, target: str = "primary", monitor_index: int = 1
+) -> Dict[str, object]:
+    """Capture screenshot and return lightweight focus metadata."""
+    active_info = get_active_window_info()
+    active_title = str(active_info.get("title") or "").strip()
+    selected, _window_bbox, _displays = _resolve_screenshot_selection(
+        target=target,
+        monitor_index=monitor_index,
+        active_info=active_info,
+    )
+    image_b64 = take_screenshot_base64(
+        max_size=max_size, target=target, monitor_index=monitor_index
+    )
+    return {
+        "image_b64": image_b64,
+        "active_title": active_title,
+        "target": str(target or "primary").strip().lower() or "primary",
+        "monitor_index": int((selected or {}).get("index") or monitor_index or 1),
+    }
 
 
 def take_screenshot_file(max_size=1600, format="JPEG", target="primary", monitor_index=1) -> str:

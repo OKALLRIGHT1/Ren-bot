@@ -5,6 +5,7 @@ import shutil
 import subprocess
 import sys
 import time
+from contextlib import contextmanager
 from pathlib import Path
 
 
@@ -63,6 +64,41 @@ def _creationflags() -> int:
     return subprocess.CREATE_NO_WINDOW
 
 
+def _frozen_bundle_dir() -> str:
+    if os.name != "nt" or not getattr(sys, "frozen", False):
+        return ""
+    return str(getattr(sys, "_MEIPASS", "") or "")
+
+
+def _set_dll_directory(path: str | None) -> None:
+    import ctypes
+
+    if not ctypes.windll.kernel32.SetDllDirectoryW(path):
+        raise ctypes.WinError()
+
+
+@contextmanager
+def _external_process_dll_search():
+    """Prevent external children from loading DLLs out of PyInstaller's _MEI dir."""
+    bundle_dir = _frozen_bundle_dir()
+    if not bundle_dir:
+        yield
+        return
+    try:
+        _set_dll_directory(None)
+    except OSError as exc:
+        _log(f"could not clear frozen DLL directory: {exc}")
+        yield
+        return
+    try:
+        yield
+    finally:
+        try:
+            _set_dll_directory(bundle_dir)
+        except OSError as exc:
+            _log(f"could not restore frozen DLL directory: {exc}")
+
+
 def _candidate_commands() -> list[list[str]]:
     commands: list[list[str]] = []
 
@@ -105,17 +141,18 @@ def _start_process() -> tuple[subprocess.Popen | None, str]:
             LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
             log_fp = LOG_PATH.open("ab")
             _log(f"try start: {cmd!r} cwd={ROOT}")
-            proc = subprocess.Popen(
-                cmd,
-                cwd=str(ROOT),
-                env=env,
-                stdin=subprocess.DEVNULL,
-                stdout=log_fp,
-                stderr=subprocess.STDOUT,
-                startupinfo=_startupinfo(),
-                creationflags=_creationflags(),
-                close_fds=True,
-            )
+            with _external_process_dll_search():
+                proc = subprocess.Popen(
+                    cmd,
+                    cwd=str(ROOT),
+                    env=env,
+                    stdin=subprocess.DEVNULL,
+                    stdout=log_fp,
+                    stderr=subprocess.STDOUT,
+                    startupinfo=_startupinfo(),
+                    creationflags=_creationflags(),
+                    close_fds=True,
+                )
             _log(f"started pid={proc.pid}")
             return proc, ""
         except Exception as exc:

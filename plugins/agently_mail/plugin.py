@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import html
 import json
+import logging
 import os
 import re
 import subprocess
@@ -10,13 +12,18 @@ import textwrap
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Dict, List, Optional
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
 
 from PIL import Image, ImageDraw, ImageFont
+
+from core.logger import get_logger
+from modules.model_catalog import normalize_model_selection
+from modules.plugin_model_gateway import get_plugin_model_gateway
 
 
 CliRunner = Callable[[List[str], float], Awaitable[Dict[str, Any]]]
 IntentResolver = Callable[[str, Dict[str, Any]], Awaitable[Dict[str, Any]]]
+logger = get_logger("AgentlyMailPlugin")
 
 
 @dataclass(frozen=True)
@@ -40,8 +47,10 @@ class Plugin:
         "发邮件",
         "回邮件",
         "转发邮件",
+        "测试邮件通知",
+        "邮件通知测试",
     ]
-    description = "通过本机 agently-cli 查询、读取、搜索和按确认流程发送邮件。"
+    description = "通过本机 agently-cli 查询、读取、搜索和按确认流程发送邮件；支持新邮件 QQ 私聊通知。"
     example_arg = "最近邮件"
     _FONT_CANDIDATES = (
         "msyh.ttc",
@@ -50,6 +59,9 @@ class Plugin:
         "simsun.ttc",
         "NotoSansCJK-Regular.ttc",
     )
+    _CARD_WIDTH = 920
+    _CARD_PADDING = 48
+    _CARD_CONTENT_WIDTH = 824
 
     def __init__(
         self,
@@ -60,6 +72,496 @@ class Plugin:
         self._cli_runner = cli_runner or self._run_cli
         self._intent_resolver = intent_resolver or self._resolve_intent_with_llm
         self._persona_resolver = persona_resolver
+        self._chat_service = None
+        self._notify_task: Optional[asyncio.Task] = None
+        self._seen_ids: set[str] = set()
+        self._seen_loaded = False
+        self._notify_fail_count = 0
+
+    async def start(self, ctx: Optional[Dict[str, Any]] = None):
+        self._capture_context(ctx)
+        await self._sync_notifier()
+
+    async def stop(self):
+        if self._notify_task and not self._notify_task.done():
+            self._notify_task.cancel()
+            try:
+                await self._notify_task
+            except (asyncio.CancelledError, Exception):
+                pass
+        self._notify_task = None
+
+    def reload_config(self):
+        """GUI 保存插件配置后热更新通知开关。"""
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        loop.create_task(self._sync_notifier())
+
+    async def _sync_notifier(self):
+        if self._bool_setting("enable_notifications", True):
+            await self._ensure_notifier()
+            return
+        await self.stop()
+
+    def _capture_context(self, ctx: Optional[Dict[str, Any]]):
+        if not isinstance(ctx, dict):
+            return
+        chat_service = ctx.get("chat_service")
+        if chat_service is not None:
+            self._chat_service = chat_service
+
+    async def _ensure_notifier(self):
+        if self._notify_task and not self._notify_task.done():
+            return
+        self._notify_task = asyncio.create_task(self._notification_loop())
+        logger.info("Agent Mail 新邮件通知已启动")
+
+    async def _notification_loop(self):
+        while True:
+            try:
+                if self._bool_setting("enable_notifications", True):
+                    await self._check_new_mails_once()
+                interval = max(
+                    30, int(self._setting("notification_check_interval_sec", 120) or 120)
+                )
+                await asyncio.sleep(interval)
+            except asyncio.CancelledError:
+                break
+            except Exception as exc:
+                logger.warning("Agent Mail 通知轮询异常: %s", exc)
+                await asyncio.sleep(30)
+
+    def _seen_state_path(self) -> Path:
+        path = Path(str(self._setting("seen_state_path", "data/agently_mail_seen.json") or "data/agently_mail_seen.json"))
+        if not path.is_absolute():
+            path = Path.cwd() / path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        return path
+
+    def _load_seen_ids(self):
+        if self._seen_loaded:
+            return
+        self._seen_loaded = True
+        path = self._seen_state_path()
+        try:
+            if path.exists():
+                data = json.loads(path.read_text(encoding="utf-8"))
+                ids = data.get("seen_ids") if isinstance(data, dict) else data
+                if isinstance(ids, list):
+                    self._seen_ids = {str(item).strip() for item in ids if str(item).strip()}
+        except Exception:
+            self._seen_ids = set()
+
+    def _save_seen_ids(self):
+        path = self._seen_state_path()
+        ids = list(self._seen_ids)[-200:]
+        self._seen_ids = set(ids)
+        path.write_text(
+            json.dumps({"seen_ids": ids}, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+
+    async def _check_new_mails_once(self):
+        self._load_seen_ids()
+        cli_path = str(self._setting("cli_path", "agently-cli") or "agently-cli").strip() or "agently-cli"
+        timeout_sec = float(self._setting("request_timeout_sec", 20))
+        limit = max(1, min(20, int(self._setting("notification_poll_limit", 10) or 10)))
+        payload = await self._call(
+            [cli_path, "message", "+list", "--dir", "inbox", "--limit", str(limit)],
+            timeout_sec,
+        )
+        if not payload.get("ok", True):
+            self._notify_fail_count += 1
+            if self._notify_fail_count >= 3:
+                logger.warning(
+                    "Agent Mail 轮询连续失败 %s 次: %s",
+                    self._notify_fail_count,
+                    payload.get("error"),
+                )
+            return
+        self._notify_fail_count = 0
+        items, _ = self._extract_list_items(payload)
+        if not items:
+            return
+
+        current_ids: List[str] = []
+        for item in items:
+            message_id = str(item.get("message_id") or "").strip()
+            if message_id:
+                current_ids.append(message_id)
+
+        if not self._seen_ids:
+            # 首次启动：已读邮件记入基线，避免历史轰炸；
+            # 未读邮件仍视为待通知，避免“启动前收到的未读”被静默吞掉。
+            baseline_ids = {
+                str(item.get("message_id") or "").strip()
+                for item in items
+                if str(item.get("message_id") or "").strip()
+                and item.get("is_read") is not False
+            }
+            self._seen_ids.update(baseline_ids)
+            self._save_seen_ids()
+            unread_count = sum(
+                1
+                for item in items
+                if str(item.get("message_id") or "").strip()
+                and item.get("is_read") is False
+            )
+            logger.info(
+                "Agent Mail 通知基线已建立：已读 %s 封，待通知未读 %s 封",
+                len(baseline_ids),
+                unread_count,
+            )
+
+        new_items = [
+            item
+            for item in reversed(items)
+            if str(item.get("message_id") or "").strip()
+            and str(item.get("message_id") or "").strip() not in self._seen_ids
+        ]
+        if not new_items:
+            # 同步最新窗口里的 ID，避免已读集合过旧。
+            self._seen_ids.update(current_ids)
+            if len(self._seen_ids) > 200:
+                self._save_seen_ids()
+            return
+
+        for item in new_items:
+            message_id = str(item.get("message_id") or "").strip()
+            if not message_id:
+                continue
+            try:
+                await self._notify_new_mail(item, cli_path, timeout_sec)
+            except Exception as exc:
+                logger.warning("推送新邮件通知失败 %s: %s", message_id, exc)
+            finally:
+                self._seen_ids.add(message_id)
+        self._save_seen_ids()
+
+    async def _run_test_notification(
+        self,
+        cli_path: str,
+        timeout_sec: float,
+        ctx: Dict[str, Any],
+    ) -> str:
+        """手动触发：推送最新一封邮件通知，便于验证 QQ 推送链路。"""
+        if not self._bool_setting("enable_notifications", True):
+            return "新邮件通知当前是关闭的。请先在插件设置里启用“启用新邮件通知”。"
+        targets = self._notification_targets()
+        if not targets:
+            return "未配置通知目标。请在插件设置里填写 notification_target_sessions，例如 private:<QQ号>。"
+
+        limit = max(1, min(5, int(self._setting("notification_poll_limit", 10) or 10)))
+        payload = await self._call(
+            [cli_path, "message", "+list", "--dir", "inbox", "--limit", str(limit)],
+            timeout_sec,
+        )
+        if not payload.get("ok", True):
+            return f"测试通知失败：无法读取收件箱。{payload.get('error') or ''}".strip()
+        items, _ = self._extract_list_items(payload)
+        if not items:
+            return "收件箱是空的，没法测试推送。先发一封邮件到 agent 邮箱再试。"
+
+        # 优先推最新未读；没有未读就推最新一封。
+        candidate = next((item for item in items if item.get("is_read") is False), items[0])
+        message_id = str(candidate.get("message_id") or "").strip()
+        try:
+            await self._notify_new_mail(candidate, cli_path, timeout_sec)
+        except Exception as exc:
+            logger.warning("测试邮件通知失败: %s", exc)
+            return f"测试通知推送失败：{exc}"
+
+        # 测试后也记入 seen，避免下一轮轮询重复推同一封。
+        if message_id:
+            self._load_seen_ids()
+            self._seen_ids.add(message_id)
+            self._save_seen_ids()
+
+        character_name = str(
+            self._setting("notification_character_name", "丰川祥子") or "丰川祥子"
+        ).strip() or "丰川祥子"
+        subject = str(candidate.get("subject") or "(无主题)")
+        target_text = "、".join(targets)
+        source_hint = "QQ 私聊" if self._is_qq_context(ctx) else "配置的目标会话"
+        return (
+            f"已按通知流程推送一封测试邮件。\n"
+            f"角色：{character_name}\n"
+            f"主题：{subject}\n"
+            f"目标：{target_text}\n"
+            f"通道：{source_hint}\n"
+            f"如果 QQ 没收到，请确认 NapCat 网关已连接，且目标会话正确。"
+        )
+
+    async def _notify_new_mail(
+        self,
+        list_item: Dict[str, Any],
+        cli_path: str,
+        timeout_sec: float,
+    ):
+        targets = self._notification_targets()
+        if not targets:
+            logger.warning("Agent Mail 新邮件通知已启用，但未配置 notification_target_sessions")
+            return
+        if self._chat_service is None or not getattr(self._chat_service, "chat_gateway", None):
+            logger.warning("Agent Mail 通知缺少 chat_service/chat_gateway，跳过本次推送")
+            return
+
+        message_id = str(list_item.get("message_id") or "").strip()
+        mail = dict(list_item)
+        if message_id:
+            detail = await self._call(
+                [cli_path, "message", "+read", "--id", message_id],
+                timeout_sec,
+            )
+            if detail.get("ok", True) and isinstance(detail.get("data"), dict):
+                mail.update(detail.get("data") or {})
+
+        character_name = str(
+            self._setting("notification_character_name", "丰川祥子") or "丰川祥子"
+        ).strip() or "丰川祥子"
+        summary = await self._generate_notification_summary(mail, character_name)
+        body_limit = int(self._setting("notification_body_chars", 1600) or 1600)
+        image_path = self._render_mail_detail_card(mail, body_limit=body_limit)
+
+        for session_id in targets:
+            ctx = {
+                "source": "qq_gateway",
+                "channel_meta": {
+                    "session_id": session_id,
+                    "adapter": "napcat_qq",
+                },
+            }
+            try:
+                await self._chat_service._send_gateway_reply(
+                    summary, ctx, emotion="happy"
+                )
+            except Exception as exc:
+                logger.warning("推送邮件摘要到 %s 失败: %s", session_id, exc)
+                continue
+            try:
+                send_image = getattr(self._chat_service, "_send_gateway_image_reply", None)
+                if callable(send_image):
+                    await send_image(image_path, ctx, caption="")
+                else:
+                    await self._chat_service._send_gateway_reply(
+                        self._format_read({"ok": True, "data": mail}),
+                        ctx,
+                        emotion="neutral",
+                    )
+            except Exception as exc:
+                logger.warning("推送邮件正文图片到 %s 失败: %s", session_id, exc)
+
+        try:
+            if image_path and Path(image_path).exists():
+                Path(image_path).unlink(missing_ok=True)
+        except Exception:
+            pass
+
+    def _notification_targets(self) -> List[str]:
+        raw = self._setting("notification_target_sessions", [])
+        if isinstance(raw, str):
+            items = [part.strip() for part in re.split(r"[\n,;]+", raw) if part.strip()]
+        elif isinstance(raw, list):
+            items = [str(item).strip() for item in raw if str(item).strip()]
+        else:
+            items = []
+        normalized: List[str] = []
+        for item in items:
+            if item.isdigit():
+                normalized.append(f"private:{item}")
+            elif ":" in item:
+                normalized.append(item)
+            else:
+                normalized.append(item)
+        return normalized
+
+    async def _generate_notification_summary(
+        self,
+        mail: Dict[str, Any],
+        character_name: str,
+    ) -> str:
+        fallback = self._fallback_notification_summary(mail, character_name)
+        persona = self._resolve_character_persona(character_name)
+        sender = mail.get("from") if isinstance(mail.get("from"), dict) else {}
+        sender_text = str(sender.get("name") or sender.get("email") or "未知发件人")
+        subject = str(mail.get("subject") or "(无主题)")
+        body = self._mail_plain_text(mail, limit=1200)
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    f"你正在扮演“{persona['name']}”。\n"
+                    f"人设：\n{persona['prompt']}\n\n"
+                    "任务：用这个角色的口吻，告诉用户刚收到一封新邮件。\n"
+                    "要求：\n"
+                    "1. 简短自然，1-3 句连成一段，不要列表。\n"
+                    "2. 说明发件人、主题，以及你对这封邮件的简要理解。\n"
+                    "3. 如果要用角色口癖（如 desuwa / 呢 / 哦），必须接在句子末尾，"
+                    "绝对不要单独成行，也不要单独作为一条消息。\n"
+                    "4. 不要输出 JSON，不要加系统说明，不要暴露你是 AI。"
+                ),
+            },
+            {
+                "role": "user",
+                "content": (
+                    f"发件人: {sender_text}\n"
+                    f"主题: {subject}\n"
+                    f"时间: {mail.get('created_at') or ''}\n"
+                    f"邮件摘要/正文:\n{body or '（无正文）'}"
+                ),
+            },
+        ]
+        try:
+            gateway = get_plugin_model_gateway()
+            result = await gateway.invoke_text(
+                messages,
+                selected_ids=normalize_model_selection(self._setting("model_queue", [])),
+                required_purpose="tool_reasoning",
+                task_type="gatekeeper",
+                caller="agently_mail_notify",
+                timeout_sec=12,
+            )
+            text = str(result.text or "").strip() if result.ok else ""
+            if text:
+                return self._normalize_notification_summary(text)
+        except Exception as exc:
+            logger.warning("生成新邮件人设摘要失败，使用兜底文案: %s", exc)
+        return fallback
+
+    def _fallback_notification_summary(
+        self,
+        mail: Dict[str, Any],
+        character_name: str,
+    ) -> str:
+        sender = mail.get("from") if isinstance(mail.get("from"), dict) else {}
+        sender_text = str(sender.get("name") or sender.get("email") or "未知发件人")
+        subject = str(mail.get("subject") or "(无主题)")
+        name = character_name or "助手"
+        return self._normalize_notification_summary(
+            f"{name}这边刚收到一封邮件，发件人是{sender_text}，标题是“{subject}”，"
+            f"我先把正文整理成图片给你，desuwa。"
+        )
+
+    def _normalize_notification_summary(self, text: str) -> str:
+        """合并单独成行的口癖，避免 QQ 里出现只有 desuwa 的第二条消息。"""
+        raw = str(text or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+        if not raw:
+            return ""
+        # 去掉常见包裹
+        raw = re.sub(r'^["“]|["”]$', "", raw).strip()
+        lines = [line.strip() for line in raw.split("\n") if line.strip()]
+        if not lines:
+            return ""
+
+        particle_only = re.compile(
+            r"^(?P<p>desuwa|desu|ね|呢|哦|呀|啦|哟|嘛|呐|哈|哼|哼哼|……|…|\.{2,}|~+|～+)$",
+            flags=re.IGNORECASE,
+        )
+        merged: List[str] = []
+        for line in lines:
+            match = particle_only.match(line)
+            if match and merged:
+                particle = match.group("p")
+                prev = merged[-1].rstrip(" \t")
+                # 仅当句末已经是同一个口癖时跳过；desuwa 不要因为已有“呢/哦”被丢掉
+                same_tail = re.compile(
+                    rf"(?:{re.escape(particle)})[。！？!?.…~～]*$",
+                    flags=re.IGNORECASE,
+                )
+                if same_tail.search(prev):
+                    continue
+                if particle.lower() in {"desuwa", "desu"}:
+                    # 大小姐口癖接到句末：去掉尾部句号后再补 “，desuwa”
+                    if prev.endswith(("。", "！", "？", "!", "?", "…", ".")):
+                        prev = prev[:-1].rstrip()
+                    if prev.endswith(("，", ",", "、")):
+                        merged[-1] = f"{prev}{particle}"
+                    else:
+                        merged[-1] = f"{prev}，{particle}"
+                elif prev.endswith(("。", "！", "？", "!", "?", "…", ".", "~", "～")):
+                    merged[-1] = prev + particle
+                else:
+                    merged[-1] = f"{prev}，{particle}"
+            else:
+                merged.append(line)
+
+        # QQ gateway 会按换行拆气泡，通知摘要强制合成一段。
+        return " ".join(merged[:3]).strip()
+
+    def _html_to_plain_text(self, value: Any) -> str:
+        if value is None:
+            return ""
+        if isinstance(value, dict):
+            for key in ("text", "content", "raw", "html", "body"):
+                if value.get(key):
+                    return self._html_to_plain_text(value.get(key))
+            return ""
+        text = str(value)
+        if not text.strip():
+            return ""
+        # 常见块级标签先转行
+        text = re.sub(r"(?i)<\s*br\s*/?\s*>", "\n", text)
+        text = re.sub(r"(?i)</\s*(p|div|li|tr|h[1-6]|section|article)\s*>", "\n", text)
+        text = re.sub(r"(?i)<\s*(p|div|li|tr|h[1-6]|section|article)[^>]*>", "\n", text)
+        text = re.sub(r"(?i)<\s*style[^>]*>[\s\S]*?<\s*/\s*style\s*>", "", text)
+        text = re.sub(r"(?i)<\s*script[^>]*>[\s\S]*?<\s*/\s*script\s*>", "", text)
+        text = re.sub(r"<[^>]+>", "", text)
+        text = html.unescape(text)
+        text = text.replace("\xa0", " ").replace("\u200b", "")
+        lines = [re.sub(r"[ \t]+", " ", line).strip() for line in text.splitlines()]
+        # 压缩连续空行
+        cleaned: List[str] = []
+        blank = False
+        for line in lines:
+            if not line:
+                if cleaned and not blank:
+                    cleaned.append("")
+                    blank = True
+                continue
+            cleaned.append(line)
+            blank = False
+        return "\n".join(cleaned).strip()
+
+    def _mail_plain_text(self, mail: Dict[str, Any], *, limit: Optional[int] = None) -> str:
+        raw_body = mail.get("body")
+        plain = self._html_to_plain_text(raw_body)
+        if not plain:
+            plain = self._html_to_plain_text(mail.get("snippet"))
+        if not plain:
+            plain = self._html_to_plain_text(mail.get("text"))
+        if not plain:
+            plain = self._html_to_plain_text(mail.get("html"))
+        plain = plain or ""
+        if limit is not None and limit > 0 and len(plain) > limit:
+            plain = plain[:limit].rstrip() + "\n\n（正文已截断）"
+        return plain
+
+    def _resolve_character_persona(self, character_name: str) -> Dict[str, str]:
+        name = str(character_name or "").strip() or "丰川祥子"
+        try:
+            from modules.character_manager import character_manager
+
+            characters = character_manager.get_all_characters() or {}
+            for char in characters.values():
+                if not isinstance(char, dict):
+                    continue
+                if str(char.get("name") or "").strip() == name:
+                    prompt = str(char.get("prompt") or "").strip()
+                    return {"name": name, "prompt": prompt or f"你是{name}。"}
+            for char in characters.values():
+                if not isinstance(char, dict):
+                    continue
+                if name in str(char.get("name") or ""):
+                    prompt = str(char.get("prompt") or "").strip()
+                    return {
+                        "name": str(char.get("name") or name),
+                        "prompt": prompt or f"你是{name}。",
+                    }
+        except Exception:
+            pass
+        return {"name": name, "prompt": f"你是{name}。"}
 
     def should_handle_direct(self, text: str, context: Dict[str, Any], key: str) -> bool:
         raw = str(text or "").strip()
@@ -67,6 +569,8 @@ class Plugin:
         if not raw:
             return False
         if any(word in lowered for word in ("agently_mail", "agent mail")):
+            return True
+        if any(word in raw for word in ("测试邮件通知", "邮件通知测试", "测试新邮件通知")):
             return True
         if re.search(r"\b(?:mail|email)\b", lowered) and any(
             word in lowered
@@ -96,6 +600,7 @@ class Plugin:
 
     async def run(self, args: str, ctx: Dict[str, Any]) -> str:
         ctx = dict(ctx or {})
+        self._capture_context(ctx)
         args, actor_or_error = self._extract_tool_actor(args, ctx)
         if isinstance(actor_or_error, str):
             return actor_or_error
@@ -105,6 +610,8 @@ class Plugin:
         if not cli_path:
             cli_path = "agently-cli"
 
+        if intent.action == "test_notify":
+            return await self._run_test_notification(cli_path, timeout_sec, ctx)
         if intent.action == "me":
             payload = await self._call([cli_path, "+me"], timeout_sec)
             return self._format_me(payload)
@@ -349,44 +856,41 @@ class Plugin:
         return result
 
     async def _resolve_intent_with_llm(self, text: str, ctx: Dict[str, Any]) -> Dict[str, Any]:
-        def run_blocking() -> str:
-            from modules.llm import chat_with_ai
-
-            persona_prompt = self._current_persona_prompt(ctx)
-            user_content = str(text or "")
-            source_mail = ctx.get("source_mail") if isinstance(ctx, dict) else None
-            if isinstance(source_mail, dict) and source_mail:
-                user_content += (
-                    "\n\n[原邮件信息]\n"
-                    + json.dumps(source_mail, ensure_ascii=False, indent=2)
-                )
-            messages = [
-                {
-                    "role": "system",
-                    "content": (
-                        "你是邮件意图解析器。只输出 JSON，不要解释。\n"
-                        "字段: action(send/reply/forward/trash/list/search/read/me/unknown), "
-                        "to, subject, body, id, confidence。\n"
-                        "如果用户要发邮件但正文需要你根据请求生成，可以按照当前角色人设生成简短正文草稿；"
-                        "邮件正文只写邮件内容，不要添加 Agent/AI 署名或系统说明。\n"
-                        f"当前角色人设:\n{persona_prompt}\n"
-                        "不要执行发送，不要编造收件人。"
-                    ),
-                },
-                {"role": "user", "content": user_content},
-            ]
-            return str(
-                chat_with_ai(
-                    messages,
-                    task_type="gatekeeper",
-                    caller="agently_mail_intent",
-                    timeout_sec=12,
-                )
-                or ""
+        persona_prompt = self._current_persona_prompt(ctx)
+        user_content = str(text or "")
+        source_mail = ctx.get("source_mail") if isinstance(ctx, dict) else None
+        if isinstance(source_mail, dict) and source_mail:
+            user_content += (
+                "\n\n[原邮件信息]\n"
+                + json.dumps(source_mail, ensure_ascii=False, indent=2)
             )
-
-        raw = await asyncio.to_thread(run_blocking)
-        return self._parse_llm_json(raw)
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    "你是邮件意图解析器。只输出 JSON，不要解释。\n"
+                    "字段: action(send/reply/forward/trash/list/search/read/me/unknown), "
+                    "to, subject, body, id, confidence。\n"
+                    "如果用户要发邮件但正文需要你根据请求生成，可以按照当前角色人设生成简短正文草稿；"
+                    "邮件正文只写邮件内容，不要添加 Agent/AI 署名或系统说明。\n"
+                    f"当前角色人设:\n{persona_prompt}\n"
+                    "不要执行发送，不要编造收件人。"
+                ),
+            },
+            {"role": "user", "content": user_content},
+        ]
+        gateway = (ctx or {}).get("model_gateway") or get_plugin_model_gateway()
+        result = await gateway.invoke_text(
+            messages,
+            selected_ids=normalize_model_selection(
+                self._setting("model_queue", [])
+            ),
+            required_purpose="tool_reasoning",
+            task_type="gatekeeper",
+            caller="agently_mail_intent",
+            timeout_sec=12,
+        )
+        return self._parse_llm_json(result.text) if result.ok else {}
 
     def _current_persona_prompt(self, ctx: Optional[Dict[str, Any]] = None) -> str:
         actor = (ctx or {}).get("tool_actor") if isinstance(ctx, dict) else None
@@ -505,6 +1009,8 @@ class Plugin:
     def _parse_intent(self, text: str) -> MailIntent:
         raw = str(text or "").strip()
         lowered = raw.lower()
+        if any(word in raw for word in ("测试邮件通知", "邮件通知测试", "测试新邮件通知")):
+            return MailIntent("test_notify", {})
         if any(word in raw for word in ("当前邮箱", "邮箱账号", "邮箱授权")) or "+me" in lowered:
             return MailIntent("me", {})
         if any(word in raw for word in ("发邮件", "发送邮件", "发送一封邮件", "发一封邮件")):
@@ -772,7 +1278,7 @@ class Plugin:
             "suppress_fallback_reply": False,
         }
 
-    def _extract_list_items(self, payload: Dict[str, Any]) -> tuple[List[Dict[str, Any]], bool]:
+    def _extract_list_items(self, payload: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], bool]:
         envelope = payload.get("data") if isinstance(payload.get("data"), dict) else {}
         raw_items = envelope.get("data") if isinstance(envelope, dict) else []
         items = [item for item in raw_items if isinstance(item, dict)]
@@ -784,84 +1290,332 @@ class Plugin:
         source = str((ctx or {}).get("source") or "").strip().lower()
         return source in {"qq_gateway", "napcat_qq"}
 
+    def _card_output_path(self, prefix: str) -> Path:
+        output_dir = Path(tempfile.gettempdir()) / "live2d_llm_agently_mail"
+        output_dir.mkdir(parents=True, exist_ok=True)
+        return output_dir / f"{prefix}_{int(time.time() * 1000)}.png"
+
+    def _text_size(self, draw: ImageDraw.ImageDraw, text: str, font: ImageFont.ImageFont) -> Tuple[int, int]:
+        text = str(text or "")
+        if hasattr(draw, "textbbox"):
+            left, top, right, bottom = draw.textbbox((0, 0), text, font=font)
+            return max(0, right - left), max(0, bottom - top)
+        if hasattr(font, "getbbox"):
+            left, top, right, bottom = font.getbbox(text)
+            return max(0, right - left), max(0, bottom - top)
+        return font.getsize(text)
+
+    def _measure_text_width(self, draw: ImageDraw.ImageDraw, text: str, font: ImageFont.ImageFont) -> int:
+        return self._text_size(draw, text, font)[0]
+
+    def _wrap_text_to_width(
+        self,
+        draw: ImageDraw.ImageDraw,
+        text: str,
+        font: ImageFont.ImageFont,
+        max_width: int,
+        *,
+        max_lines: Optional[int] = None,
+    ) -> List[str]:
+        raw = str(text or "").replace("\r\n", "\n").replace("\r", "\n")
+        paragraphs = raw.split("\n") if raw else [""]
+        lines: List[str] = []
+        for paragraph in paragraphs:
+            content = paragraph.strip() if paragraph.strip() else paragraph
+            if not content:
+                lines.append("")
+                if max_lines and len(lines) >= max_lines:
+                    break
+                continue
+            current = ""
+            for char in content:
+                candidate = current + char
+                if self._measure_text_width(draw, candidate, font) <= max_width or not current:
+                    current = candidate
+                    continue
+                lines.append(current)
+                current = char
+                if max_lines and len(lines) >= max_lines:
+                    break
+            if max_lines and len(lines) >= max_lines:
+                if current:
+                    # 最后一行尽量补上省略号
+                    overflow = current
+                    base = lines[-1]
+                    ellipsis = "..."
+                    while base and self._measure_text_width(draw, base + ellipsis, font) > max_width:
+                        base = base[:-1]
+                    lines[-1] = (base + ellipsis) if base else ellipsis
+                break
+            if current:
+                lines.append(current)
+            if max_lines and len(lines) >= max_lines:
+                break
+        if max_lines and len(lines) > max_lines:
+            lines = lines[:max_lines]
+        return lines or [""]
+
+    def _fit_text_by_width(
+        self,
+        draw: ImageDraw.ImageDraw,
+        text: str,
+        font: ImageFont.ImageFont,
+        max_width: int,
+    ) -> str:
+        clean = " ".join(str(text or "").replace("\r", " ").replace("\n", " ").split())
+        if not clean:
+            return ""
+        if self._measure_text_width(draw, clean, font) <= max_width:
+            return clean
+        ellipsis = "..."
+        kept = clean
+        while kept and self._measure_text_width(draw, kept + ellipsis, font) > max_width:
+            kept = kept[:-1]
+        return (kept + ellipsis) if kept else ellipsis
+
+    def _draw_text_lines(
+        self,
+        draw: ImageDraw.ImageDraw,
+        x: int,
+        y: int,
+        lines: List[str],
+        font: ImageFont.ImageFont,
+        fill: Tuple[int, int, int],
+        line_gap: int = 6,
+    ) -> int:
+        cursor = y
+        for line in lines:
+            draw.text((x, cursor), line, fill=fill, font=font)
+            _, h = self._text_size(draw, line or " ", font)
+            cursor += h + line_gap
+        return cursor
+
     def _render_mail_list_card(
         self, title: str, items: List[Dict[str, Any]], *, has_more: bool = False
     ) -> str:
-        output_dir = Path(tempfile.gettempdir()) / "live2d_llm_agently_mail"
-        output_dir.mkdir(parents=True, exist_ok=True)
-        output_path = output_dir / f"mail_card_{int(time.time() * 1000)}.png"
+        output_path = self._card_output_path("mail_list")
+        width = self._CARD_WIDTH
+        content_width = self._CARD_CONTENT_WIDTH
+        left = self._CARD_PADDING
+        right = width - self._CARD_PADDING
+        title_font = self._load_font(32, bold=True)
+        meta_font = self._load_font(18)
+        subject_font = self._load_font(22, bold=True)
+        body_font = self._load_font(18)
+        small_font = self._load_font(16)
 
-        width = 920
-        row_height = 142
+        # 先用临时画布测量每行真实高度，避免固定行高导致中文重叠/溢出。
+        measure = ImageDraw.Draw(Image.new("RGB", (width, 10), (255, 255, 255)))
         visible_items = items[:10]
-        height = 150 + max(1, len(visible_items)) * row_height + 44
+        row_layouts: List[Dict[str, Any]] = []
+        for index, item in enumerate(visible_items, 1):
+            sender = item.get("from") if isinstance(item.get("from"), dict) else {}
+            sender_text = str(sender.get("name") or sender.get("email") or "未知发件人")
+            subject = str(item.get("subject") or "(无主题)")
+            created_at = str(item.get("created_at") or "")
+            snippet = self._html_to_plain_text(item.get("snippet") or item.get("body") or "")
+            message_id = str(item.get("message_id") or "")
+            is_unread = item.get("is_read") is False
+            state = "未读" if is_unread else "已读"
+            inner_width = content_width - 40
+            subject_line = self._fit_text_by_width(
+                measure, f"{index}. {subject}", subject_font, inner_width
+            )
+            meta_line = self._fit_text_by_width(
+                measure,
+                f"{sender_text} · {created_at} · {state}",
+                small_font,
+                inner_width,
+            )
+            snippet_lines = self._wrap_text_to_width(
+                measure, snippet, body_font, inner_width, max_lines=2
+            )
+            id_line = self._fit_text_by_width(
+                measure, f"ID: {message_id}", small_font, inner_width
+            )
+            subject_h = self._text_size(measure, subject_line, subject_font)[1]
+            meta_h = self._text_size(measure, meta_line, small_font)[1]
+            snippet_h = 0
+            for line in snippet_lines:
+                snippet_h += self._text_size(measure, line or " ", body_font)[1] + 4
+            if snippet_lines:
+                snippet_h = max(0, snippet_h - 4)
+            id_h = self._text_size(measure, id_line, small_font)[1]
+            row_height = 18 + subject_h + 8 + meta_h + 8 + snippet_h + 8 + id_h + 16
+            row_layouts.append(
+                {
+                    "is_unread": is_unread,
+                    "subject_line": subject_line,
+                    "meta_line": meta_line,
+                    "snippet_lines": snippet_lines,
+                    "id_line": id_line,
+                    "height": max(118, row_height),
+                }
+            )
+
+        header_h = 110
+        footer_h = 46
+        gap = 12
+        rows_h = sum(row["height"] for row in row_layouts) + gap * max(0, len(row_layouts) - 1)
+        height = 24 + header_h + rows_h + footer_h + 24
         image = Image.new("RGB", (width, height), (248, 250, 252))
         draw = ImageDraw.Draw(image)
-        title_font = self._load_font(34, bold=True)
-        meta_font = self._load_font(20)
-        subject_font = self._load_font(24, bold=True)
-        body_font = self._load_font(19)
-        small_font = self._load_font(17)
 
         draw.rounded_rectangle(
-            (24, 24, width - 24, height - 24),
+            (20, 20, width - 20, height - 20),
             radius=18,
             fill=(255, 255, 255),
             outline=(226, 232, 240),
             width=2,
         )
         unread_count = sum(1 for item in visible_items if item.get("is_read") is False)
-        draw.text((48, 42), title, fill=(15, 23, 42), font=title_font)
+        draw.text((left, 40), title, fill=(15, 23, 42), font=title_font)
         summary = f"{len(items)} 封邮件 · {unread_count} 封未读"
         if has_more:
             summary += " · 还有更多"
-        draw.text((48, 90), summary, fill=(71, 85, 105), font=meta_font)
+        draw.text((left, 84), summary, fill=(71, 85, 105), font=meta_font)
 
-        y = 132
-        for index, item in enumerate(visible_items, 1):
+        y = 24 + header_h
+        for row in row_layouts:
             top = y
-            bottom = y + row_height - 16
-            is_unread = item.get("is_read") is False
-            accent = (37, 99, 235) if is_unread else (148, 163, 184)
+            bottom = y + row["height"]
+            accent = (37, 99, 235) if row["is_unread"] else (148, 163, 184)
             draw.rounded_rectangle(
-                (48, top, width - 48, bottom),
+                (left, top, right, bottom),
                 radius=12,
                 fill=(248, 250, 252),
                 outline=(226, 232, 240),
                 width=1,
             )
-            draw.rounded_rectangle((48, top, 55, bottom), radius=4, fill=accent)
-            sender = item.get("from") if isinstance(item.get("from"), dict) else {}
-            sender_text = str(sender.get("name") or sender.get("email") or "未知发件人")
-            subject = str(item.get("subject") or "(无主题)")
-            created_at = str(item.get("created_at") or "")
-            snippet = str(item.get("snippet") or "")
-            message_id = str(item.get("message_id") or "")
-            state = "未读" if is_unread else "已读"
-
-            draw.text((72, top + 14), f"{index}. {self._fit_text(subject, 30)}", fill=(15, 23, 42), font=subject_font)
-            draw.text(
-                (72, top + 50),
-                self._fit_text(f"{sender_text} · {created_at} · {state}", 64),
-                fill=(71, 85, 105),
-                font=small_font,
+            draw.rounded_rectangle((left, top, left + 6, bottom), radius=4, fill=accent)
+            text_x = left + 20
+            cursor = top + 14
+            draw.text((text_x, cursor), row["subject_line"], fill=(15, 23, 42), font=subject_font)
+            cursor += self._text_size(draw, row["subject_line"], subject_font)[1] + 8
+            draw.text((text_x, cursor), row["meta_line"], fill=(71, 85, 105), font=small_font)
+            cursor += self._text_size(draw, row["meta_line"], small_font)[1] + 8
+            cursor = self._draw_text_lines(
+                draw,
+                text_x,
+                cursor,
+                row["snippet_lines"],
+                body_font,
+                (51, 65, 85),
+                line_gap=4,
             )
-            draw.text(
-                (72, top + 78),
-                self._fit_text(snippet, 76),
-                fill=(51, 65, 85),
-                font=body_font,
-            )
-            draw.text(
-                (72, top + 106),
-                self._fit_text(f"ID: {message_id}", 82),
-                fill=(100, 116, 139),
-                font=small_font,
-            )
-            y += row_height
+            draw.text((text_x, cursor), row["id_line"], fill=(100, 116, 139), font=small_font)
+            y = bottom + gap
 
         footer = "回复“读邮件 msg_xxx”可查看正文"
-        draw.text((48, height - 52), footer, fill=(100, 116, 139), font=small_font)
+        draw.text((left, height - 52), footer, fill=(100, 116, 139), font=small_font)
+        image.save(output_path, "PNG", optimize=True)
+        return str(output_path)
+
+    def _render_mail_detail_card(
+        self,
+        mail: Dict[str, Any],
+        *,
+        body_limit: int = 1600,
+    ) -> str:
+        output_path = self._card_output_path("mail_detail")
+        width = self._CARD_WIDTH
+        content_width = self._CARD_CONTENT_WIDTH
+        left = self._CARD_PADDING
+        right = width - self._CARD_PADDING
+        title_font = self._load_font(30, bold=True)
+        subject_font = self._load_font(24, bold=True)
+        meta_font = self._load_font(18)
+        body_font = self._load_font(18)
+        small_font = self._load_font(16)
+
+        sender = mail.get("from") if isinstance(mail.get("from"), dict) else {}
+        sender_text = str(sender.get("name") or sender.get("email") or "未知发件人")
+        if sender.get("email") and sender.get("name"):
+            sender_text = f"{sender.get('name')} <{sender.get('email')}>"
+        subject = str(mail.get("subject") or "(无主题)")
+        created_at = str(mail.get("created_at") or "")
+        message_id = str(mail.get("message_id") or "")
+        body = self._mail_plain_text(mail, limit=body_limit) or "（无正文内容）"
+        attachments = mail.get("attachments") if isinstance(mail.get("attachments"), list) else []
+
+        measure = ImageDraw.Draw(Image.new("RGB", (width, 10), (255, 255, 255)))
+        subject_lines = self._wrap_text_to_width(
+            measure, subject, subject_font, content_width, max_lines=3
+        )
+        meta_lines = [
+            self._fit_text_by_width(measure, f"发件人：{sender_text}", meta_font, content_width),
+            self._fit_text_by_width(measure, f"时间：{created_at}", meta_font, content_width),
+            self._fit_text_by_width(measure, f"ID：{message_id}", small_font, content_width),
+        ]
+        if attachments:
+            names = []
+            for attachment in attachments[:6]:
+                if not isinstance(attachment, dict):
+                    continue
+                names.append(str(attachment.get("filename") or attachment.get("attachment_id") or "附件"))
+            if names:
+                meta_lines.append(
+                    self._fit_text_by_width(
+                        measure,
+                        f"附件：{len(attachments)} 个 · " + "、".join(names),
+                        small_font,
+                        content_width,
+                    )
+                )
+        body_lines = self._wrap_text_to_width(
+            measure, body, body_font, content_width - 24, max_lines=40
+        )
+
+        def _block_height(lines: List[str], font: ImageFont.ImageFont, gap: int) -> int:
+            total = 0
+            for line in lines:
+                total += self._text_size(measure, line or " ", font)[1] + gap
+            return max(0, total - gap) if lines else 0
+
+        header_h = 56
+        subject_h = _block_height(subject_lines, subject_font, 6)
+        meta_h = _block_height(meta_lines, meta_font, 6)
+        body_h = _block_height(body_lines, body_font, 6)
+        height = 28 + header_h + 18 + subject_h + 16 + meta_h + 20 + body_h + 36
+        height = max(420, min(2200, height))
+
+        image = Image.new("RGB", (width, height), (248, 250, 252))
+        draw = ImageDraw.Draw(image)
+        draw.rounded_rectangle(
+            (20, 20, width - 20, height - 20),
+            radius=18,
+            fill=(255, 255, 255),
+            outline=(226, 232, 240),
+            width=2,
+        )
+        draw.rounded_rectangle((left, 36, left + 10, 72), radius=4, fill=(37, 99, 235))
+        draw.text((left + 22, 40), "新邮件正文", fill=(15, 23, 42), font=title_font)
+
+        y = 28 + header_h
+        y = self._draw_text_lines(draw, left, y, subject_lines, subject_font, (15, 23, 42), line_gap=6)
+        y += 10
+        y = self._draw_text_lines(draw, left, y, meta_lines, meta_font, (71, 85, 105), line_gap=6)
+        y += 12
+        draw.line((left, y, right, y), fill=(226, 232, 240), width=1)
+        y += 14
+        body_box_top = y - 8
+        body_box_bottom = min(height - 28, y + body_h + 16)
+        draw.rounded_rectangle(
+            (left - 4, body_box_top, right + 4, body_box_bottom),
+            radius=12,
+            fill=(248, 250, 252),
+            outline=(226, 232, 240),
+            width=1,
+        )
+        self._draw_text_lines(
+            draw,
+            left + 12,
+            y,
+            body_lines,
+            body_font,
+            (30, 41, 59),
+            line_gap=6,
+        )
         image.save(output_path, "PNG", optimize=True)
         return str(output_path)
 
@@ -879,17 +1633,24 @@ class Plugin:
         return ImageFont.load_default()
 
     def _fit_text(self, text: str, width: int) -> str:
+        # 兼容旧调用：按字符数粗略截断；新渲染统一走 _fit_text_by_width。
         clean = " ".join(str(text or "").replace("\r", " ").replace("\n", " ").split())
         if len(clean) <= width:
             return clean
         return textwrap.shorten(clean, width=width, placeholder="...")
+
+    def _bool_setting(self, key: str, default: bool = False) -> bool:
+        raw = self._setting(key, default)
+        if isinstance(raw, str):
+            return raw.strip().lower() in {"1", "true", "yes", "on"}
+        return bool(raw)
 
     def _format_read(self, payload: Dict[str, Any]) -> str:
         if not payload.get("ok", True):
             return f"读取邮件失败：{payload.get('error')}"
         data = payload.get("data") if isinstance(payload.get("data"), dict) else {}
         sender = data.get("from") if isinstance(data.get("from"), dict) else {}
-        body = str(data.get("body") or "")
+        body = self._mail_plain_text(data)
         limit = int(self._setting("max_body_chars", 2400))
         truncated = ""
         if len(body) > limit:
@@ -1002,5 +1763,6 @@ class Plugin:
             "- 最近邮件\n"
             "- 搜索邮件 关键词\n"
             "- 读邮件 msg_xxx\n"
-            "- 当前邮箱"
+            "- 当前邮箱\n"
+            "- 测试邮件通知"
         )

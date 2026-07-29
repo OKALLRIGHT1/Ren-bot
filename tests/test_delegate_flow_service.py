@@ -3,6 +3,7 @@ import pytest
 from services.chat_support.delegate_flow_service import (
     DELEGATE_MODE_WORKSPACE_READ,
     choose_delegate_execution,
+    run_delegate_flow,
     run_delegate_round,
     should_use_background_delegate,
 )
@@ -127,3 +128,89 @@ def test_workspace_read_capability_is_not_background_delegate():
         )
         is False
     )
+
+
+def test_explicit_search_delegate_uses_direct_search_mode():
+    decision = choose_delegate_execution(
+        route_reason="intent_keyword_matched",
+        delegate_triggers=["search_web"],
+        ctx={"source": "qq_gateway"},
+        user_text="查一下宝可梦风波的最新信息",
+        followup_search_query="",
+        is_search_delegate=lambda triggers, text: "search_web" in triggers,
+    )
+
+    assert decision.mode == "search"
+    assert decision.background_delegate is False
+
+
+@pytest.mark.asyncio
+async def test_direct_search_mode_uses_user_text_without_reasoning_model():
+    search_calls = []
+
+    async def run_search_delegate_query(*, query, ctx):
+        search_calls.append((query, dict(ctx or {})))
+        return True, "", ["宝可梦风波搜索结果"], ["search_web"]
+
+    async def unexpected_chat_call(*args, **kwargs):
+        raise AssertionError("direct search must not call tool reasoning")
+
+    result = await run_delegate_flow(
+        decision=choose_delegate_execution(
+            route_reason="intent_keyword_matched",
+            delegate_triggers=["search_web"],
+            ctx={"source": "qq_gateway"},
+            user_text="查一下宝可梦风波的最新信息",
+            followup_search_query="",
+            is_search_delegate=lambda triggers, text: "search_web" in triggers,
+        ),
+        user_text="查一下宝可梦风波的最新信息",
+        ctx={"source": "qq_gateway"},
+        context_messages=[],
+        delegate_triggers=["search_web"],
+        task_reasoning="tool_reasoning",
+        plugin_manager=_DelegatePluginManager([]),
+        chat_with_ai=unexpected_chat_call,
+        extract_workspace_read_path=lambda text: "",
+        run_search_delegate_query=run_search_delegate_query,
+        followup_search_query="",
+    )
+
+    assert search_calls == [
+        ("查一下宝可梦风波的最新信息", {"source": "qq_gateway"})
+    ]
+    assert result.mode == "search"
+    assert result.triggered is True
+    assert result.results == ["宝可梦风波搜索结果"]
+    assert result.used == ["search_web"]
+
+
+@pytest.mark.asyncio
+async def test_direct_search_mode_returns_explicit_failure_when_tool_does_not_start():
+    async def run_search_delegate_query(*, query, ctx):
+        return False, "", [], []
+
+    result = await run_delegate_flow(
+        decision=choose_delegate_execution(
+            route_reason="intent_keyword_matched",
+            delegate_triggers=["search_web"],
+            ctx={"source": "qq_gateway"},
+            user_text="查一下宝可梦风波的最新信息",
+            followup_search_query="",
+            is_search_delegate=lambda triggers, text: "search_web" in triggers,
+        ),
+        user_text="查一下宝可梦风波的最新信息",
+        ctx={"source": "qq_gateway"},
+        context_messages=[],
+        delegate_triggers=["search_web"],
+        task_reasoning="tool_reasoning",
+        plugin_manager=_DelegatePluginManager([]),
+        chat_with_ai=lambda *args, **kwargs: "",
+        extract_workspace_read_path=lambda text: "",
+        run_search_delegate_query=run_search_delegate_query,
+        followup_search_query="",
+    )
+
+    assert result.triggered is True
+    assert result.results == ["联网搜索未能启动，请检查搜索插件是否启用及当前来源权限。"]
+    assert result.used == ["search_web"]

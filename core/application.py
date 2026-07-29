@@ -1,5 +1,5 @@
 """
-搴旂敤涓荤被
+应用主类
 绠＄悊鏁翠釜搴旂敤鐨勭敓鍛藉懆鏈熷拰缁勪欢鍒濆鍖?
 """
 
@@ -154,6 +154,23 @@ from integrations.chat_gateway import (
 from integrations.gui_ws import GuiWebSocketServer
 from integrations.gui_http import GuiHttpServer
 from integrations.gui_access import get_or_create_gui_access_token
+from integrations.gui_media import GuiMediaRegistry
+from modules.live2d_transport import (
+    GuiWebSocketTransport,
+    LegacyLocalWebSocketTransport,
+    Live2DTransportBus,
+    configure_live2d_transport,
+)
+
+
+LIVE2D_ONLY_APP_ID = "com.live2d-only.app"
+LIVE2D_ACTIVITY_SETTING_KEYS = (
+    "gui_activity_endpoint",
+    "gui_access_token",
+    "sedentary_reminder_minutes",
+    "sedentary_break_minutes",
+    "sedentary_cooldown_minutes",
+)
 
 try:
     from modules.live2d import go_idle
@@ -175,14 +192,14 @@ class Live2DApplication:
     # Live2D application.
 
     def __init__(self):
-        # 鏍稿績缁勪欢
+        # 核心组件
         self.container = ServiceContainer()
         self.event_bus = EventBus()
         self.state_machine = AgentStateMachine()
         self.logger = None
         self.event_logger = None
 
-        # 涓氬姟缁勪欢
+        # 业务组件
         self.brain = None
         self.memory_store = None
         self.emotion_controller = None
@@ -199,7 +216,7 @@ class Live2DApplication:
 
         # [鏂板] 灞忓箷鎰熺煡涓庤闊崇粍浠?
         self.screen_sensor = None
-        self.voice_sensor = None  # 馃煝 璇煶浼犳劅鍣?
+        self.voice_sensor = None  # 🎤 璇煶浼犳劅鍣?
 
         # GUI鐩稿叧
         self.qt_ui = None
@@ -209,11 +226,16 @@ class Live2DApplication:
         self.display_mqtt_client = None
         self.display_state_config_path = Path("./data/display_state_config.json")
         self.display_mqtt_last_error = "未初始化"
+        self._runtime_mode = ""
+        self._headless_stop_event = threading.Event()
+        self._requested_exit_code = 0
+        # Restart must not kill NapCat/Ollama/etc.; only real exit stops managed ones.
+        self._skip_external_stop_on_cleanup = False
 
         # 鏃ヨ鐘舵€佹爣璁帮紝闃叉閲嶅璁板綍
         self.last_summary_date = None
 
-        # 閰嶇疆
+        # 配置
         self.tts_enabled = bool(TTS_ENABLED)
         self.runtime_settings_path = Path("./data/runtime_settings.json")
         self.think_motion_enabled = True
@@ -225,7 +247,7 @@ class Live2DApplication:
         except Exception:
             self.think_motion_name = "think"
 
-        # 闊充箰閰嶇疆
+        # 音乐配置
         self.music_sensor = None
 
     def _load_runtime_settings(self) -> Dict[str, Any]:
@@ -238,8 +260,45 @@ class Live2DApplication:
             return data if isinstance(data, dict) else {}
         except Exception as e:
             if self.logger:
-                self.logger.warning(f"鍔犺浇杩愯鏃惰缃け璐? {e}")
+                self.logger.warning(f"加载运行时设置失败: {e}")
             return {}
+
+    def _maybe_autostart_external_services(self) -> None:
+        """Start enabled external services (Ollama/GPT-SoVITS/NapCat).
+
+        Runs non-blocking so backend boot is not delayed by warmup.
+        """
+        settings = self._load_runtime_settings()
+        import threading
+
+        def _worker() -> None:
+            try:
+                from modules.external_services import ensure_enabled_services
+
+                payload = ensure_enabled_services(settings)
+                for item in payload.get("results") or []:
+                    if not self.logger:
+                        continue
+                    label = item.get("id") or "service"
+                    if item.get("running"):
+                        self.logger.info(
+                            "External service %s: %s",
+                            label,
+                            item.get("message") or "ready",
+                        )
+                    elif item.get("started") or item.get("error"):
+                        self.logger.warning(
+                            "External service %s failed: %s",
+                            label,
+                            item.get("message") or item.get("error") or "unknown",
+                        )
+            except Exception as exc:
+                if self.logger:
+                    self.logger.warning(f"External services autostart error: {exc}")
+
+        threading.Thread(
+            target=_worker, name="external-services-autostart", daemon=True
+        ).start()
 
     def _save_runtime_settings(self, settings: Dict[str, Any]):
         path = self.runtime_settings_path
@@ -249,7 +308,7 @@ class Live2DApplication:
                 json.dump(settings, f, ensure_ascii=False, indent=2)
         except Exception as e:
             if self.logger:
-                self.logger.warning(f"淇濆瓨杩愯鏃惰缃け璐? {e}")
+                self.logger.warning(f"保存运行时设置失败: {e}")
 
     def _publish_gui_activity_endpoint(self) -> None:
         server = getattr(self, "gui_http_server", None)
@@ -271,12 +330,62 @@ class Live2DApplication:
             "gui_http_prefix": getattr(server, "path_prefix", GUI_HTTP_PREFIX),
             "gui_activity_endpoint": endpoint,
         }
-        if all(settings.get(key) == value for key, value in patch.items()):
-            return
-        settings.update(patch)
-        self._save_runtime_settings(settings)
+        access_token = str(getattr(server, "access_token", "") or "").strip()
+        if access_token:
+            patch["gui_access_token"] = access_token
+        if not all(settings.get(key) == value for key, value in patch.items()):
+            settings.update(patch)
+            self._save_runtime_settings(settings)
+            if self.logger:
+                self.logger.info(f"GUI activity endpoint published: {endpoint}")
+        self._sync_live2d_activity_settings(settings)
+
+    def _live2d_activity_settings_path(self) -> Optional[Path]:
+        appdata = str(os.getenv("APPDATA") or "").strip()
+        if not appdata:
+            return None
+        return Path(appdata) / LIVE2D_ONLY_APP_ID / "runtime_settings.json"
+
+    def _sync_live2d_activity_settings(self, settings: Dict[str, Any]) -> bool:
+        path = self._live2d_activity_settings_path()
+        if path is None:
+            return False
+        patch = {
+            key: settings[key]
+            for key in LIVE2D_ACTIVITY_SETTING_KEYS
+            if key in settings and settings[key] not in (None, "")
+        }
+        if not patch:
+            return False
+        current: Dict[str, Any] = {}
+        if path.exists():
+            try:
+                loaded = json.loads(path.read_text(encoding="utf-8"))
+                if isinstance(loaded, dict):
+                    current = loaded
+            except Exception as exc:
+                if self.logger:
+                    self.logger.warning(
+                        f"Live2D activity settings read failed: {exc}"
+                    )
+        if all(current.get(key) == value for key, value in patch.items()):
+            return True
+        current.update(patch)
+        temp_path = path.with_suffix(path.suffix + ".tmp")
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            temp_path.write_text(
+                json.dumps(current, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            os.replace(temp_path, path)
+        except Exception as exc:
+            if self.logger:
+                self.logger.warning(f"Live2D activity settings sync failed: {exc}")
+            return False
         if self.logger:
-            self.logger.info(f"GUI activity endpoint published: {endpoint}")
+            self.logger.info("Live2D activity settings synchronized")
+        return True
 
     @staticmethod
     def _build_gui_activity_endpoint(host: str, port: int, path_prefix: str) -> str:
@@ -330,7 +439,7 @@ class Live2DApplication:
                 json.dump(cfg, f, ensure_ascii=False, indent=2)
         except Exception as e:
             if self.logger:
-                self.logger.warning(f"淇濆瓨鐘舵€佸睆閰嶇疆澶辫触: {e}")
+                self.logger.warning(f"保存状态屏配置失败: {e}")
 
     def _load_external_runtime_settings(self) -> Dict[str, Any]:
         return self._normalize_external_runtime_settings(self._load_runtime_settings())
@@ -454,7 +563,7 @@ class Live2DApplication:
             ),
             "napcat_owner_user_ids": owner_ids,
             "napcat_owner_label": str(
-                settings.get("napcat_owner_label", "涓讳汉") or "涓讳汉"
+                settings.get("napcat_owner_label", "主人") or "主人"
             ),
             "napcat_image_vision_enabled": bool(
                 settings.get("napcat_image_vision_enabled", True)
@@ -498,12 +607,28 @@ class Live2DApplication:
                 1,
                 min(8, expression_max_prompt_items),
             ),
+            "activity_monitor_enabled": bool(
+                settings.get("activity_monitor_enabled", True)
+            ),
+            "activity_include_process_path": bool(
+                settings.get("activity_include_process_path", False)
+            ),
+            "activity_include_window_title": bool(
+                settings.get("activity_include_window_title", True)
+            ),
+            "activity_include_browser_context": bool(
+                settings.get("activity_include_browser_context", True)
+            ),
+            "activity_config_revision": max(
+                0,
+                _int_setting("activity_config_revision", 0, 0),
+            ),
             "sedentary_reminder_minutes": _int_setting(
                 "sedentary_reminder_minutes", SEDENTARY_REMINDER_MINUTES, 1
             ),
             "sedentary_break_minutes": _int_setting(
                 "sedentary_break_minutes",
-                int(getattr(config, "ACTIVITY_AGENT_SEDENTARY_BREAK_MINUTES", 5)),
+                int(getattr(config, "SEDENTARY_BREAK_MINUTES", 5)),
                 1,
             ),
             "sedentary_cooldown_minutes": _int_setting(
@@ -788,15 +913,148 @@ class Live2DApplication:
             self.loop,
         )
 
+
+    def get_activity_client_config(self) -> Dict[str, Any]:
+        settings = self._load_runtime_settings()
+        try:
+            revision = int(settings.get("activity_config_revision") or 0)
+        except Exception:
+            revision = 0
+
+        def _int(key: str, default: int) -> int:
+            try:
+                value = int(settings.get(key, default) or default)
+            except Exception:
+                value = int(default)
+            return max(1, value)
+
+        return {
+            "revision": max(0, revision),
+            "monitor_enabled": bool(settings.get("activity_monitor_enabled", True)),
+            "sedentary_reminder_minutes": _int(
+                "sedentary_reminder_minutes",
+                int(getattr(config, "SEDENTARY_REMINDER_MINUTES", 60) or 60),
+            ),
+            "sedentary_break_minutes": _int(
+                "sedentary_break_minutes",
+                int(getattr(config, "SEDENTARY_BREAK_MINUTES", 5) or 5),
+            ),
+            "sedentary_cooldown_minutes": _int(
+                "sedentary_cooldown_minutes",
+                int(getattr(config, "SEDENTARY_REMINDER_COOLDOWN_MINUTES", 60) or 60),
+            ),
+            "include_process_path": bool(
+                settings.get("activity_include_process_path", False)
+            ),
+            "include_window_title": bool(
+                settings.get("activity_include_window_title", True)
+            ),
+            "include_browser_context": bool(
+                settings.get("activity_include_browser_context", True)
+            ),
+        }
+
+    def notify_activity_config_changed(self, revision: int) -> None:
+        payload = {
+            "type": "activity_config_changed",
+            "revision": int(revision),
+        }
+        server = getattr(self, "gui_ws_server", None)
+        if server is None:
+            return
+        if hasattr(server, "emit_capability"):
+            try:
+                server.emit_capability("activity.config.v1", payload)
+                return
+            except Exception:
+                pass
+        if hasattr(server, "emit"):
+            try:
+                server.emit(payload)
+            except Exception:
+                pass
+
+    def _activity_client_fingerprint(self, settings: Dict[str, Any]) -> tuple:
+        def _int(key: str, default: int) -> int:
+            try:
+                value = int(settings.get(key, default) or default)
+            except Exception:
+                value = int(default)
+            return max(1, value)
+
+        return (
+            bool(settings.get("activity_monitor_enabled", True)),
+            _int(
+                "sedentary_reminder_minutes",
+                int(getattr(config, "SEDENTARY_REMINDER_MINUTES", 60) or 60),
+            ),
+            _int(
+                "sedentary_break_minutes",
+                int(getattr(config, "SEDENTARY_BREAK_MINUTES", 5) or 5),
+            ),
+            _int(
+                "sedentary_cooldown_minutes",
+                int(getattr(config, "SEDENTARY_REMINDER_COOLDOWN_MINUTES", 60) or 60),
+            ),
+            bool(settings.get("activity_include_process_path", False)),
+            bool(settings.get("activity_include_window_title", True)),
+            bool(settings.get("activity_include_browser_context", True)),
+        )
+
+    def _bump_activity_config_revision_if_needed(
+        self, before: Dict[str, Any], after: Dict[str, Any]
+    ) -> int:
+        if self._activity_client_fingerprint(before) == self._activity_client_fingerprint(
+            after
+        ):
+            try:
+                return max(0, int(after.get("activity_config_revision") or 0))
+            except Exception:
+                return 0
+        try:
+            current = int(after.get("activity_config_revision") or 0)
+        except Exception:
+            current = 0
+        revision = max(0, current) + 1
+        after["activity_config_revision"] = revision
+        try:
+            self._save_runtime_settings(after)
+        except Exception:
+            pass
+        return revision
+
     def apply_external_settings(
         self, settings: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
         if isinstance(settings, dict):
             merged_settings = self._load_runtime_settings()
+            before_settings = dict(merged_settings)
             merged_settings.update(settings)
         else:
             merged_settings = self._load_runtime_settings()
+            before_settings = dict(merged_settings)
         external_settings = self._normalize_external_runtime_settings(merged_settings)
+        activity_before_fp = self._activity_client_fingerprint(before_settings)
+        activity_after_fp = self._activity_client_fingerprint(merged_settings)
+        activity_revision = self._bump_activity_config_revision_if_needed(
+            before_settings, merged_settings
+        )
+        self._sync_live2d_activity_settings(
+            {
+                **merged_settings,
+                "gui_activity_endpoint": external_settings["gui_activity_endpoint"],
+                "sedentary_reminder_minutes": external_settings[
+                    "sedentary_reminder_minutes"
+                ],
+                "sedentary_break_minutes": external_settings["sedentary_break_minutes"],
+                "sedentary_cooldown_minutes": external_settings[
+                    "sedentary_cooldown_minutes"
+                ],
+            }
+        )
+        # live2d-only file sync remains compatibility-only; enhanced uses /activity-config.
+        if activity_before_fp != activity_after_fp:
+            self.notify_activity_config_changed(activity_revision)
         result = {
             "mcp_enabled": bool(external_settings["mcp_enabled"]),
             "napcat_enabled": bool(external_settings["napcat_enabled"]),
@@ -815,7 +1073,7 @@ class Live2DApplication:
         config.SEDENTARY_REMINDER_MINUTES = int(
             external_settings["sedentary_reminder_minutes"]
         )
-        config.ACTIVITY_AGENT_SEDENTARY_BREAK_MINUTES = int(
+        config.SEDENTARY_BREAK_MINUTES = int(
             external_settings["sedentary_break_minutes"]
         )
         config.SEDENTARY_REMINDER_COOLDOWN_MINUTES = int(
@@ -958,7 +1216,7 @@ class Live2DApplication:
 
     def initialize(self):
         # Initialize application.
-        # 1. 璁剧疆鏃ュ織
+        # 1. 设置日志
         try:
             from core.console_capture import install_console_capture
 
@@ -979,6 +1237,12 @@ class Live2DApplication:
         except Exception:
             pass
         self.logger.info(f"TTS startup state: {'on' if self.tts_enabled else 'off'}")
+
+        # Optional: auto-start external services (Ollama / GPT-SoVITS / NapCat).
+        try:
+            self._maybe_autostart_external_services()
+        except Exception as e:
+            self.logger.warning(f"External services autostart skipped: {e}")
 
         # 2. 鍒濆鍖栦簨浠舵棩蹇?
         self.event_logger = EventLogger("./data/events.sqlite")
@@ -1033,12 +1297,12 @@ class Live2DApplication:
             rhubarb_abs = os.path.abspath(RHUBARB_PATH)
             if os.path.exists(rhubarb_abs):
                 self.logger.info(
-                    f"鍙ｅ瀷鍚屾宸插惎鐢?(Rhubarb: {rhubarb_abs}, 骞虫粦绐楀彛: {LIP_SYNC_SMOOTH_WINDOW})"
+                    f"口型同步已启用 (Rhubarb: {rhubarb_abs}, 平滑窗口: {LIP_SYNC_SMOOTH_WINDOW})"
                 )
             else:
-                self.logger.warning(f"鍙ｅ瀷鍚屾宸插紑鍚絾 Rhubarb 涓嶅瓨鍦? {rhubarb_abs}")
+                self.logger.warning(f"口型同步已开启但 Rhubarb 不存在: {rhubarb_abs}")
         else:
-            self.logger.info("鍙ｅ瀷鍚屾鏈惎鐢?(LIP_SYNC_ENABLED=0)")
+            self.logger.info("口型同步未启用 (LIP_SYNC_ENABLED=0)")
 
         async def _bubble_to_event(
             text: str, emo: Optional[str], duration_ms: Optional[int]
@@ -1108,6 +1372,7 @@ class Live2DApplication:
         )
 
         gui_access_token = get_or_create_gui_access_token()
+        self.gui_media_registry = GuiMediaRegistry()
         self.gui_ws_server = GuiWebSocketServer(
             host=initial_external_settings.get("gui_ws_host", GUI_WS_HOST),
             port=initial_external_settings.get("gui_ws_port", GUI_WS_PORT),
@@ -1116,6 +1381,18 @@ class Live2DApplication:
             access_token=gui_access_token,
         )
         self.gui_ws_server.set_message_handler(self._on_gui_ws_message)
+        configure_live2d_transport(
+            Live2DTransportBus(
+                [
+                    LegacyLocalWebSocketTransport(),
+                    GuiWebSocketTransport(
+                        self.gui_ws_server,
+                        media_registry=self.gui_media_registry,
+                    ),
+                ],
+                logger=self.logger,
+            )
+        )
         self.gui_http_server = GuiHttpServer(
             host=initial_external_settings.get("gui_http_host", GUI_HTTP_HOST),
             port=initial_external_settings.get("gui_http_port", GUI_HTTP_PORT),
@@ -1123,6 +1400,7 @@ class Live2DApplication:
             logger=self.logger,
             app_ref=self,
             access_token=gui_access_token,
+            media_registry=self.gui_media_registry,
         )
         if MusicSensor:
             self.music_sensor = MusicSensor(self.chat_service)
@@ -1134,11 +1412,11 @@ class Live2DApplication:
                 self.chat_service.screen_sensor_ref = self.screen_sensor
                 self.logger.info("ScreenSensor initialized")
             except Exception as e:
-                self.logger.error(f"鉂?ScreenSensor 鍒濆鍖栧け璐? {e}")
+                self.logger.error(f"❌ ScreenSensor 初始化失败: {e}")
         else:
             self.logger.warning("ScreenSensor module not loaded")
 
-        # 馃煝 8.5 鍒濆鍖栬闊虫劅鐭?        self._init_voice_sensor_if_configured()
+        # 🎤 8.5 鍒濆鍖栬闊虫劅鐭?        self._init_voice_sensor_if_configured()
 
         # 9. 娉ㄥ唽浜嬩欢澶勭悊鍣?
         self._wire_events()
@@ -1167,7 +1445,7 @@ class Live2DApplication:
                 self.logger.warning("modules.voice_sensor not found; voice disabled")
         except Exception as e:
             if self.logger:
-                self.logger.error(f"鉂?VoiceSensor 鍒濆鍖栧け璐? {e}")
+                self.logger.error(f"❌ VoiceSensor 初始化失败: {e}")
         self.voice_sensor = None
         return None
 
@@ -1203,7 +1481,7 @@ class Live2DApplication:
         self.event_bus.on(Events.ASSISTANT_STREAM_FEED, self._on_stream_feed)
         self.event_bus.on(Events.ASSISTANT_STREAM_END, self._on_stream_end)
 
-        # 鏃ュ織浜嬩欢
+        # 日志事件
         self.event_bus.on(Events.CHAT_LOG, self._on_chat_log)
         self.event_bus.on(
             Events.MEMORY_ADD_OK, lambda p: print("[Memory] added")
@@ -1215,7 +1493,7 @@ class Live2DApplication:
         # [鍙€塢 鐩戝惉琚拷鐣ョ殑娑堟伅
         self.event_bus.on(
             "chat.ignored",
-            lambda p: print(f"馃毇 [Gatekeeper] 宸插拷鐣? {p.get('content', '')[:20]}..."),
+            lambda p: print(f"🚫 [Gatekeeper] 已忽略: {p.get('content', '')[:20]}..."),
         )
 
     async def _on_ui_bubble(self, payload: Dict[str, Any]):
@@ -1238,7 +1516,7 @@ class Live2DApplication:
             try:
                 self.qt_ui.set_status(payload.get("text", ""))
             except Exception as e:
-                self.logger.warning(f"璁剧疆UI鐘舵€佸け璐? {e}")
+                self.logger.warning(f"设置UI状态失败: {e}")
 
         self._emit_gui_ws(
             {
@@ -1371,6 +1649,16 @@ class Live2DApplication:
         msg_type = str(payload.get("type") or "").strip().lower()
         if msg_type == "hello":
             await self._send_gui_snapshot(ws)
+            # Live2D clients may boot with a local default/last costume.
+            # Backend authority re-sends the active costume when they connect.
+            try:
+                if self.gui_ws_server and self.gui_ws_server.client_has_capability(
+                    ws, "live2d.protocol.v1"
+                ):
+                    self.sync_active_character_live2d(force=True)
+            except Exception as exc:
+                if self.logger:
+                    self.logger.warning(f"hello costume resync failed: {exc}")
             return
         if msg_type != "command":
             return
@@ -1687,13 +1975,13 @@ class Live2DApplication:
                 }
             )
             self.logger.debug(
-                f"馃幁 [Emotion] 鏀跺埌鎯呯华璇锋眰: {emo} (prefer_motion={prefer_motion})"
+                f"🎭 [Emotion] 收到情绪请求: {emo} (prefer_motion={prefer_motion})"
             )
 
             # 鏍囪娲诲姩锛堥€€鍑虹┖闂叉ā寮忥級
             self.emotion_controller.mark_activity(reason or "emotion_request")
 
-            # 閫氳繃 EmotionController 澶勭悊鎯呯华璇锋眰
+            # 通过 EmotionController 处理情绪请求
             await self.emotion_controller.request_emotion(
                 label=emo,
                 intensity=intensity,
@@ -1701,10 +1989,10 @@ class Live2DApplication:
                 reason=reason,
             )
 
-            self.logger.debug(f"鉁?[Emotion] 鎯呯华澶勭悊瀹屾垚: {emo}")
+            self.logger.debug(f"✅[Emotion] 情绪处理完成: {emo}")
 
         except Exception as e:
-            self.logger.error(f"鉂?[Emotion] 澶勭悊澶辫触: {e}", exc_info=True)
+            self.logger.error(f"❌[Emotion] 处理失败: {e}", exc_info=True)
 
     async def _on_live2d_motion(self, payload: Dict[str, Any]):
         # Handle Live2D motion events.
@@ -1743,7 +2031,7 @@ class Live2DApplication:
         state_name = payload.get("state")
         reason = payload.get("reason", "unknown")
 
-        self.logger.debug(f"鏀跺埌鐘舵€佸彉鍖栦簨浠? {state_name} (鍘熷洜: {reason})")
+        self.logger.debug(f"收到状态变化事件: {state_name} (原因: {reason})")
 
         # 灏嗗瓧绗︿覆鐘舵€佽浆鎹负 AgentState 鏋氫妇
         state_map = {
@@ -1756,7 +2044,7 @@ class Live2DApplication:
         if target_state:
             await self.state_machine.set_state(target_state, reason=reason)
         else:
-            self.logger.warning(f"鏈煡鐘舵€? {state_name}")
+            self.logger.warning(f"未知状态: {state_name}")
 
     async def _on_state_machine_change(
         self, new_state: AgentState, prev_state: AgentState, meta: dict
@@ -1764,7 +2052,7 @@ class Live2DApplication:
         # Handle state machine transitions.
         reason = meta.get("reason", "unknown")
         self.logger.debug(
-            f"馃攧 [State] {prev_state.value} -> {new_state.value} (鍘熷洜: {reason})"
+            f"🔄 [State] {prev_state.value} -> {new_state.value} (原因: {reason})"
         )
 
         try:
@@ -1782,13 +2070,13 @@ class Live2DApplication:
 
                 if self.think_motion_enabled:
                     self.logger.debug(
-                        f"馃幀 [State] 瑙﹀彂鎬濊€冨姩浣? {self.think_motion_name}"
+                        f"🧠 [State] 瑙﹀彂鎬濊€冨姩浣? {self.think_motion_name}"
                     )
 
                     # 鏍囪娲诲姩锛堥€€鍑虹┖闂诧級
                     self.emotion_controller.mark_activity("thinking")
 
-                    # 鐩存帴閫氳繃 EmotionController 瑙﹀彂鍔ㄤ綔
+                    # 直接通过 EmotionController 触发动作
                     asyncio.create_task(
                         self.emotion_controller.request_emotion(
                             label=self.think_motion_name,
@@ -1817,7 +2105,7 @@ class Live2DApplication:
                     asyncio.create_task(self.event_bus.emit(Events.LIVE2D_GO_IDLE))
 
         except Exception as e:
-            self.logger.error(f"鉂?[State] 鐘舵€佷簨浠堕敊璇? {e}", exc_info=True)
+            self.logger.error(f"❌ [State] 状态事件错误: {e}", exc_info=True)
 
     async def _on_assistant_utter(self, payload: Dict[str, Any]):
         # Handle assistant utter event.
@@ -1948,15 +2236,18 @@ class Live2DApplication:
 
     def restart_app(self):
         # Trigger restart flow.
-        print("鈾伙笍 [App] 鎺ユ敹鍒伴噸鍚姹?..")
+        print("🔁 [App] 接收到重启请求...")
 
         if not self._watchdog_is_running():
             self._spawn_delayed_watchdog_restart()
 
-        # 1. 鍏堝仛娓呯悊 (淇濆瓨鏃ヨ銆佸叧闂暟鎹簱杩炴帴绛?
-        self.cleanup()
+        # Restart should NOT stop external services. Keep NapCat/Ollama/etc.
+        # running across backend restarts; only full exit closes managed ones.
+        # Flag also protects the outer finally-cleanup path after sys.exit.
+        self._skip_external_stop_on_cleanup = True
+        self.cleanup(stop_external_services=False)
 
-        # 2. 閫€鍑鸿繘绋嬶紝杩斿洖 100 缁欏畧鎶よ繘绋?
+        # Exit code 100 signals the outer watchdog to relaunch.
         import sys
 
         sys.exit(100)
@@ -2099,7 +2390,7 @@ class Live2DApplication:
             AUTO_DIARY_ENABLED = False
             AUTO_DIARY_TIME = "23:30"
 
-        self.logger.info("鈴?瀹氭椂浠诲姟璋冨害鍣ㄥ凡鍚姩")
+        self.logger.info("⏰定时任务调度器已启动")
 
         # 鍐呭瓨鏍囪锛堥槻姝㈠崟娆¤繍琛屼腑姣?0绉掓煡涓€娆℃暟鎹簱锛屾氮璐规€ц兘锛?
         _last_makeup_check_date = None
@@ -2110,7 +2401,7 @@ class Live2DApplication:
                 current_time_str = now.strftime("%H:%M")
                 current_date_str = now.strftime("%Y-%m-%d")
 
-                # ================= 鍦烘櫙 A: 鍑嗙偣瑙﹀彂 (23:30) =================
+                # ================= 场景 A: 准点触发 (23:30) =================
                 if AUTO_DIARY_ENABLED and current_time_str == AUTO_DIARY_TIME:
                     if self.memory_store:
                         today_stats = (
@@ -2136,7 +2427,7 @@ class Live2DApplication:
                                     )
 
                 # ================= 鍦烘櫙 B: 琛ュ綍鏄ㄥぉ (鍏ㄥぉ鍊欐鏌? =================
-                # 馃煝 [淇敼] 鍘绘帀浜?and now.hour < 12
+                # 🎤 [淇敼] 鍘绘帀浜?and now.hour < 12
                 # 鍙浠婂ぉ杩樻病妫€鏌ヨ繃琛ュ綍(鍐呭瓨鏍囪)锛屽氨鍘绘鏌ヤ竴娆?
                 if AUTO_DIARY_ENABLED and _last_makeup_check_date != current_date_str:
                     _last_makeup_check_date = (
@@ -2146,23 +2437,42 @@ class Live2DApplication:
 
                 await asyncio.sleep(30)
             except Exception as e:
-                self.logger.error(f"璋冨害鍣ㄥ嚭閿? {e}")
+                self.logger.error(f"调度器出错: {e}")
                 import traceback
 
                 traceback.print_exc()
                 await asyncio.sleep(60)
 
     # 閫€鍑烘竻鐞?(澶勭悊鍏虫満淇濆瓨)
-    def cleanup(self):
+    def cleanup(self, *, stop_external_services: bool = True):
         # Cleanup before application exit.
-        print("馃洃 姝ｅ湪鍏抽棴搴旂敤...")
+        print("🛑 正在关闭应用...")
+
+        # Stop external services only on real shutdown (not restart).
+        # And only services that this process started with autostop enabled.
+        if stop_external_services:
+            try:
+                from modules.external_services import stop_managed_services
+
+                stopped = stop_managed_services(self._load_runtime_settings())
+                for item in stopped.get("results") or []:
+                    if item.get("stopped") and self.logger:
+                        self.logger.info(
+                            "Stopped external service %s: %s",
+                            item.get("id"),
+                            item.get("message") or "ok",
+                        )
+            except Exception as e:
+                print(f"关闭外部服务出错: {e}")
+        elif self.logger:
+            self.logger.info("Restart cleanup: keep external services running")
 
         # 🟢 停止语音监听，释放麦克风
         if self.voice_sensor:
             try:
                 self.voice_sensor.stop()
             except Exception as e:
-                print(f"鍏抽棴璇煶浼犳劅鍣ㄥ嚭閿? {e}")
+                print(f"关闭语音传感器出错: {e}")
 
         if self.plugin_manager and self.loop and self.loop.is_running():
             try:
@@ -2189,16 +2499,16 @@ class Live2DApplication:
                 try:
                     self.chat_gateway_server.stop()
                 except Exception as e:
-                    print(f"鍏抽棴 NapCat webhook 鍑洪敊: {e}")
+                    print(f"关闭 NapCat webhook 出错: {e}")
             current_date = datetime.now().strftime("%Y-%m-%d")
             # 濡傛灉閰嶇疆寮€鍚紝涓斾粖澶╄繕娌¤褰曪紝涓斾紶鎰熷櫒鏈夋暟鎹?
             if self.last_summary_date != current_date and self.screen_sensor:
-                print("馃摑 妫€娴嬪埌閫€鍑烘椂浠婃棩灏氭湭鍐欐棩璁帮紝姝ｅ湪灏濊瘯淇濆瓨鏁版嵁...")
+                print("📔 检测到退出时今日尚未写日记，正在尝试保存数据...")
                 report = self.screen_sensor.get_formatted_report()
                 if len(report) > 20:
-                    self.logger.info(f"銆愰€€鍑哄瓨妗ｃ€戜粖鏃ユ湭褰掓。鏁版嵁:\n{report}")
+                    self.logger.info(f"【退出存档】今日未归档数据:\n{report}")
         except Exception as e:
-            print(f"閫€鍑烘竻鐞嗗嚭閿? {e}")
+            print(f"退出清理出错: {e}")
 
     def _has_daily_log_for_date(self, date_str: str) -> bool:
         if not self.memory_store:
@@ -2289,7 +2599,7 @@ class Live2DApplication:
                     self.emotion_controller.start(self.loop)
                     self.logger.info("Emotion controller loop started")
                 except Exception as e:
-                    self.logger.error(f"鉂?鎯呯华鎺у埗鍣ㄥ惎鍔ㄥけ璐? {e}")
+                    self.logger.error(f"❌ 情绪控制器启动失败: {e}")
 
             # 3. 鍚姩鎵€鏈夋彃浠?
             self.loop.create_task(
@@ -2307,9 +2617,9 @@ class Live2DApplication:
                     self.logger.info("Starting MusicSensor thread")
                     self.music_sensor.start(self.loop)
                 except Exception as e:
-                    self.logger.error(f"鉂?MusicSensor 鍚姩澶辫触: {e}")
+                    self.logger.error(f"❌MusicSensor 启动失败: {e}")
 
-            # 馃煝 7. 鍚姩璇煶鐩戝惉 (濡傛灉閰嶇疆涓哄紑鍚?
+            # 🎤 7. 鍚姩璇煶鐩戝惉 (濡傛灉閰嶇疆涓哄紑鍚?
             import config
 
             if getattr(config, "VOICE_SENSOR_ENABLED", False):
@@ -2321,7 +2631,7 @@ class Live2DApplication:
                     self.logger.info("Starting VoiceSensor thread")
                     self.voice_sensor.start(self.loop)
                 except Exception as e:
-                    self.logger.error(f"鉂?VoiceSensor 鍚姩澶辫触: {e}")
+                    self.logger.error(f"❌VoiceSensor 启动失败: {e}")
 
             # 8. 运行循环
             try:
@@ -2352,7 +2662,7 @@ class Live2DApplication:
                     )
                     self.screen_sensor.start(self.loop)
                 except Exception as e:
-                    self.logger.error(f"鉂?ScreenSensor 鍚姩澶辫触: {e}")
+                    self.logger.error(f"❌ScreenSensor 启动失败: {e}")
 
             self.loop.run_forever()
 
@@ -2395,7 +2705,7 @@ class Live2DApplication:
             try:
                 f.result()
             except Exception as e:
-                self.logger.error(f"鍗忕▼寮傚父: {repr(e)}")
+                self.logger.error(f"协程异常: {repr(e)}")
 
         fut.add_done_callback(_done)
 
@@ -2454,16 +2764,20 @@ class Live2DApplication:
                     await asyncio.to_thread(
                         self.brain.add_memory,
                         "system",
-                        f"鐢ㄦ埛涓轰綘鏇存崲浜嗘湇瑁咃紝鏂囦欢璺緞涓? {path}",
+                        f"用户为你更换了服装，文件路径为: {path}",
                     )
             except Exception as e:
                 self.logger.error(f"换装失败: {e}")
 
         asyncio.run_coroutine_threadsafe(_do(), self.loop)
 
-    def sync_active_character_live2d(self):
+    def sync_active_character_live2d(self, force: bool = False):
         try:
             from modules.character_manager import character_manager
+            from modules.live2d import (
+                get_current_costume_model_path,
+                is_same_costume_model_path,
+            )
 
             active_id = character_manager.data.get("active_id")
             if not active_id:
@@ -2476,6 +2790,10 @@ class Live2DApplication:
             costume_path = str(costume_cfg.get("path") or "").strip()
             if not costume_path:
                 return False
+            if not force and is_same_costume_model_path(
+                costume_path, get_current_costume_model_path()
+            ):
+                return True
             runtime_cfg = character_manager.get_costume_runtime_config(
                 active_id, current_costume
             )
@@ -2690,7 +3008,7 @@ class Live2DApplication:
             try:
                 current_costume = character_manager.get_current_costume_name(char_id)
                 self.logger.info(
-                    f"[RoleSync] 鍒囨崲瑙掕壊: {char_id} -> {char.get('name', char_id)} | costume={current_costume}"
+                    f"[RoleSync] 切换角色: {char_id} -> {char.get('name', char_id)} | costume={current_costume}"
                 )
                 if getattr(self, "qt_ui", None):
                     if current_costume and hasattr(
@@ -2709,7 +3027,7 @@ class Live2DApplication:
             return True
         except Exception as e:
             if self.logger:
-                self.logger.warning(f"鍒囨崲瑙掕壊杩愯鏃跺け璐? {e}")
+                self.logger.warning(f"切换角色运行时失败: {e}")
             return False
 
     def on_gui_preview_motion(self, motion_name: str, motion_type: int = 0):
@@ -2771,13 +3089,16 @@ class Live2DApplication:
             # 鍒濆鍖?
             self.initialize()
 
-            self.logger.info("=== 浜斿崄閾冩€?Live2D Agent 鍚姩 ===")
+            self.logger.info("=== 五十铃怜 Live2D Agent 启动 ===")
 
             # 启动异步循环
             self.start_async_loop()
 
-            # 鏍规嵁閰嶇疆閫夋嫨GUI
-            backend = (GUI_BACKEND or "auto").strip().lower()
+            # 根据配置选择GUI
+            backend = (
+                getattr(config, "GUI_BACKEND", GUI_BACKEND) or "auto"
+            ).strip().lower()
+            self._runtime_mode = backend
 
             if backend == "tk":
                 self._run_tk_gui()
@@ -2785,8 +3106,10 @@ class Live2DApplication:
                 try:
                     self._run_qt_gui()
                 except Exception as e:
-                    self.logger.warning(f"Qt鍚姩澶辫触锛屽洖閫€鍒癟k: {e}")
+                    self.logger.warning(f"Qt启动失败，回退到tk: {e}")
                     self._run_tk_gui()
+            elif backend == "headless":
+                self._run_headless()
             else:  # auto
                 try:
                     self._run_qt_gui()
@@ -2797,8 +3120,28 @@ class Live2DApplication:
         except KeyboardInterrupt:
             pass
         finally:
-            # 馃煝 閫€鍑烘椂瑙﹀彂娓呯悊
-            self.cleanup()
+            # Real exit stops managed external services; restart keeps them alive.
+            stop_external = not bool(
+                getattr(self, "_skip_external_stop_on_cleanup", False)
+            )
+            self.cleanup(stop_external_services=stop_external)
+        return self._requested_exit_code
+
+    def _run_headless(self):
+        self.logger.info("Headless runtime started; desktop GUI is disabled")
+        self._headless_stop_event.wait()
+
+    def request_runtime_control(self, action: str) -> tuple[bool, str]:
+        action = str(action or "").strip().lower()
+        if action not in {"shutdown", "restart"}:
+            return False, "invalid_action"
+        if self._runtime_mode != "headless":
+            return False, "headless_required"
+        # restart => exit 100 and skip external stop; shutdown => stop managed services
+        self._requested_exit_code = 100 if action == "restart" else 0
+        self._skip_external_stop_on_cleanup = action == "restart"
+        self._headless_stop_event.set()
+        return True, ""
 
     def _run_tk_gui(self):
         # Run Tk GUI.
@@ -2820,7 +3163,7 @@ class Live2DApplication:
         self.qt_ui = QtChatTrayApp(
             on_send_callback=self.on_gui_send,
             on_tts_toggle_callback=self.set_tts_enabled,
-            on_voice_toggle_callback=self.set_voice_sensor_enabled,  # 馃煝 浼犻€掕闊虫帶鍒跺洖璋?
+            on_voice_toggle_callback=self.set_voice_sensor_enabled,  # 🎤 浼犻€掕闊虫帶鍒跺洖璋?
             on_costume_callback=self.on_gui_change_costume,
             on_preview_motion_callback=self.on_gui_preview_motion,
             on_preview_expression_callback=self.on_gui_preview_expression,
@@ -2869,7 +3212,7 @@ class Live2DApplication:
     def _init_display_mqtt(self):
         if not MQTT_DISPLAY_ENABLED or mqtt is None:
             self.display_mqtt_last_error = (
-                "鏈惎鐢?MQTT_DISPLAY"
+                "未启用 MQTT_DISPLAY"
                 if not MQTT_DISPLAY_ENABLED
                 else "缂哄皯 paho-mqtt 渚濊禆"
             )

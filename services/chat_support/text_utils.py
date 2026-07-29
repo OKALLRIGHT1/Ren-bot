@@ -18,6 +18,10 @@ _INTERNAL_PROMPT_INSTRUCTION_LINE_RE = re.compile(
     re.IGNORECASE,
 )
 
+_EMO_TAG_ANY_RE = re.compile(
+    r"<\s*/?\s*emo(?:\s*=\s*[a-zA-Z_]+)?\s*>", re.IGNORECASE
+)
+
 
 def clean_text_for_tts(text: str) -> str:
     if not text:
@@ -60,6 +64,9 @@ def strip_search_followup_fillers(text: str) -> str:
     fillers = [
         "你",
         "她",
+        "请",
+        "可以",
+        "能不能",
         "帮我",
         "帮忙",
         "麻烦",
@@ -93,10 +100,11 @@ def strip_search_followup_fillers(text: str) -> str:
         "后再回答",
         "好吗",
         "行吗",
+        "吗",
         "吧",
     ]
     cleaned = raw
-    for token in fillers:
+    for token in sorted(fillers, key=len, reverse=True):
         cleaned = cleaned.replace(token, " ")
     cleaned = re.sub(r"[\s，。,！!？?：:;；、】【\"'“”‘’()（）\-]+", "", cleaned)
     return cleaned.strip()
@@ -126,9 +134,9 @@ def is_generic_search_followup_request(text: str) -> bool:
     )
     if is_search_retry_correction_request(raw):
         return True
-    if not has_context_ref and not has_reply_followup:
-        return False
     residual = strip_search_followup_fillers(raw)
+    if not has_context_ref and not has_reply_followup:
+        return not residual
     if len(residual) >= 8:
         return False
     return True
@@ -288,7 +296,8 @@ def build_share_content(text: str, title: str) -> str:
 
 
 def strip_emo_tags_anywhere(text: str, emo_tag_re: re.Pattern[str]) -> str:
-    return emo_tag_re.sub("", text or "")
+    cleaned = emo_tag_re.sub("", text or "")
+    return _EMO_TAG_ANY_RE.sub("", cleaned)
 
 
 def strip_cmd_anywhere(text: str, cmd_re: re.Pattern[str]) -> str:

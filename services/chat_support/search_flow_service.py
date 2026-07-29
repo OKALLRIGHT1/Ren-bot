@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Optional, Sequence
 
@@ -11,6 +12,41 @@ class SearchFlowDecision:
     followup_query: str = ""
     should_force_route: bool = False
     route_text: str = ""
+
+
+def build_search_acknowledgement(user_text: str) -> str:
+    raw = re.sub(r"\s+", " ", str(user_text or "")).strip()
+    topic = re.sub(
+        r"^(?:请|麻烦)?(?:你)?(?:帮我|帮忙)?"
+        r"(?:查一下|查一查|查查|搜索一下|搜一下|搜一搜|搜索|查询|查|搜)\s*",
+        "",
+        raw,
+        count=1,
+    )
+    topic = re.sub(
+        r"(?:的)?(?:最新|最近|实时)(?:消息|信息|新闻|进展|情况)?[。！？?!]*$",
+        "",
+        topic,
+    ).strip(" ，,。！？?!：:")
+    topic = topic[:20].strip()
+
+    if not topic:
+        fallbacks = (
+            "嗯，我去看看最近有什么新消息",
+            "等我一下，我查查最新情况",
+            "我去找找最近有没有新进展",
+            "好，我先看看现在是什么情况",
+        )
+        return fallbacks[sum(ord(char) for char in raw) % len(fallbacks)]
+
+    templates = (
+        "我去看看{topic}，确认一下最新情况",
+        "嗯，我查查{topic}现在怎么样了",
+        "等我一下，我找找关于{topic}的新消息",
+        "我先看看{topic}现在是什么情况",
+    )
+    template = templates[sum(ord(char) for char in raw) % len(templates)]
+    return template.format(topic=topic)
 
 
 def build_initial_search_decision(
