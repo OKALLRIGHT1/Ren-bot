@@ -1,6 +1,5 @@
 import json
 import os
-import time
 import uuid
 from copy import deepcopy
 from typing import Any, Dict, Optional
@@ -297,18 +296,23 @@ class CharacterManager:
                 if isinstance(raw_cfg, dict):
                     path = raw_cfg.get("path", "")
                     emotion_map = raw_cfg.get("emotion_map", {})
+                    assistant_badge = raw_cfg.get("assistant_badge")
                     if not isinstance(emotion_map, dict):
                         emotion_map = {}
                         changed = True
                 else:
                     path = str(raw_cfg)
                     emotion_map = {}
+                    assistant_badge = None
                     changed = True
 
-                normalized[costume_name] = {
+                normalized_costume = {
                     "path": path,
                     "emotion_map": emotion_map,
                 }
+                if isinstance(assistant_badge, dict):
+                    normalized_costume["assistant_badge"] = assistant_badge
+                normalized[costume_name] = normalized_costume
 
             if normalized != costumes:
                 char_data["costumes"] = normalized
@@ -390,9 +394,7 @@ class CharacterManager:
     def get_character(self, char_id: str) -> Optional[dict]:
         return self.data["characters"].get(char_id)
 
-    # 🔥 核心修改：新建角色时，同步写入 SQLite 档案
     def add_character(self, char_id: str, name: str, prompt: str):
-        # 1. 先存入 JSON (形象管理)
         if char_id in self.data["characters"]:
             return False
 
@@ -419,46 +421,6 @@ class CharacterManager:
             },
         }
         self.save()
-
-        # 2. 同步写入 SQLite (记忆管理)
-        try:
-            from modules.memory_sqlite import get_memory_store
-
-            store = get_memory_store()
-            if store:
-                from datetime import datetime
-
-                # 构造初始档案条目
-                # 条目1: 名字
-                name_id = f"p_init_name_{char_id}_{int(time.time())}"
-                store.upsert_item(
-                    {
-                        "id": name_id,
-                        "type": "agent_profile",
-                        "text": name,
-                        "tags": [f"role:{char_id}", "name"],  # 关键标签
-                        "status": "active",
-                        "updated_at": datetime.now().isoformat(),
-                    }
-                )
-
-                # 条目2: 默认性格占位符 (可选)
-                trait_id = f"p_init_trait_{char_id}_{int(time.time())}"
-                store.upsert_item(
-                    {
-                        "id": trait_id,
-                        "type": "agent_profile",
-                        "text": "温柔 / 冷静 (初始性格)",
-                        "tags": [f"role:{char_id}", "traits"],  # 关键标签
-                        "status": "active",
-                        "updated_at": datetime.now().isoformat(),
-                    }
-                )
-
-                print(f"✅ [Sync] 已同步创建角色档案: {name} (ID: {char_id})")
-        except Exception as e:
-            print(f"⚠️ [Sync] 档案同步失败 (不影响角色创建): {e}")
-
         return True
 
     def delete_character(self, char_id: str):

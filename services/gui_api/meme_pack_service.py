@@ -100,10 +100,12 @@ class MemePackGuiService:
                     if candidate is not None:
                         self._store = candidate
                         return self._store
-                getter = getattr(plugin, "get_store", None)
-                if callable(getter):
-                    self._store = getter()
-                    return self._store
+                for getter_name in ("get_store", "_store_obj"):
+                    getter = getattr(plugin, getter_name, None)
+                    if callable(getter):
+                        self._store = getter()
+                        if self._store is not None:
+                            return self._store
         raise RuntimeError("meme_store_unavailable")
 
     def list_assets(self, *, query: str = "", include_disabled: bool = True, limit: int = 500) -> Dict[str, Any]:

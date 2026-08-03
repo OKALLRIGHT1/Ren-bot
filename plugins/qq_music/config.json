@@ -17,6 +17,16 @@
     "timeout_sec": 90,
     "version": "1.1.0",
     "settings": {
+        "model_queue": {
+            "type": "model_queue",
+            "label": "点歌点评模型（按顺序尝试）",
+            "description": "从主程序模型中选择聊天用途模型。留空时跟随 default 任务路由。",
+            "purpose": [
+                "chat"
+            ],
+            "max_items": 3,
+            "default": []
+        },
         "base_url": {
             "type": "text",
             "label": "API Base URL",

@@ -59,6 +59,10 @@ class GatewayContextService:
         if source not in self.qq_remote_sources:
             return ""
         channel_meta = ctx.get("channel_meta") or {}
+        session_id = str(channel_meta.get("session_id") or "").strip()
+        message_type = str(channel_meta.get("message_type") or "").strip().lower()
         if bool(channel_meta.get("is_owner")):
             return self.owner_shared_session_id
-        return str(channel_meta.get("session_id") or "").strip()
+        if message_type == "group" or session_id.lower().startswith("group:"):
+            return session_id
+        return session_id

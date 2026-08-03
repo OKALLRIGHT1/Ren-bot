@@ -18,6 +18,7 @@ from modules.gui.styles import (
 )
 from modules.gui.settings_pages.sedentary_page import SedentarySettingsPage
 from modules.gui.settings_pages.info_sources_page import InfoSourcesSettingsPage
+from modules.gui.settings_pages.asr_page import AsrSettingsPage
 
 
 try:
@@ -118,6 +119,48 @@ except ImportError:
     NAPCAT_VOICE_REPLY_PROBABILITY = 25
 
     REMOTE_CHAT_UI_APPEND = True
+
+
+try:
+    from modules.model_catalog import (
+        MODEL_PURPOSE_OPTIONS,
+        format_purposes_label,
+        get_model_purposes,
+        list_models_by_purpose,
+        normalize_purposes,
+    )
+except Exception:
+    MODEL_PURPOSE_OPTIONS = [
+        ("chat", "聊天"),
+        ("tool_reasoning", "推理/工具"),
+        ("summary", "总结"),
+        ("vision", "视觉理解"),
+        ("image_gen", "画图"),
+        ("image_edit", "图生图"),
+        ("code", "代码"),
+        ("translation", "翻译"),
+        ("embedding", "向量"),
+    ]
+
+    def get_model_purposes(model_cfg):
+        if not isinstance(model_cfg, dict):
+            return []
+        raw = model_cfg.get("purposes") or model_cfg.get("purpose") or []
+        if isinstance(raw, str):
+            return [x.strip() for x in raw.replace("，", ",").split(",") if x.strip()]
+        if isinstance(raw, (list, tuple, set)):
+            return [str(x).strip() for x in raw if str(x).strip()]
+        return []
+
+    def normalize_purposes(values):
+        return get_model_purposes({"purposes": values})
+
+    def format_purposes_label(purposes):
+        label_map = {k: v for k, v in MODEL_PURPOSE_OPTIONS}
+        return "、".join(label_map.get(p, p) for p in purposes) if purposes else "未设置"
+
+    def list_models_by_purpose(catalog=None, purpose="", **kwargs):
+        return []
 
 
 class ProviderEditDialog(QtWidgets.QDialog):
@@ -228,7 +271,7 @@ class ModelEditDialog(QtWidgets.QDialog):
 
         self.setWindowTitle("编辑模型" if model_id else "添加模型")
 
-        self.setFixedWidth(520)
+        self.setFixedWidth(560)
 
         self.result_data = None
 
@@ -293,6 +336,14 @@ class ModelEditDialog(QtWidgets.QDialog):
 
         form.addRow("API Key:", self.inp_key)
 
+        self.inp_api_key_env = QtWidgets.QLineEdit(
+            str(self._original.get("api_key_env", "") or "")
+        )
+        self.inp_api_key_env.setPlaceholderText(
+            "GROK_API_KEY,XAI_API_KEY（可选）"
+        )
+        form.addRow("Key 环境变量:", self.inp_api_key_env)
+
         self.combo_style = QtWidgets.QComboBox()
 
         self.combo_style.setEditable(True)
@@ -307,6 +358,123 @@ class ModelEditDialog(QtWidgets.QDialog):
         form.addRow("api_style:", self.combo_style)
 
         layout.addLayout(form)
+
+        purpose_card = QtWidgets.QFrame()
+        purpose_card.setObjectName("settingsHeaderCard")
+        purpose_layout = QtWidgets.QVBoxLayout(purpose_card)
+        purpose_layout.setContentsMargins(12, 10, 12, 10)
+        purpose_layout.setSpacing(6)
+        purpose_title = QtWidgets.QLabel("模型用途")
+        purpose_title.setObjectName("settingsPageTitle")
+        purpose_layout.addWidget(purpose_title)
+        purpose_hint = QtWidgets.QLabel(
+            "给模型打标签后，插件/路由可按用途筛选。例如画图插件只会使用勾选了「画图/图生图」的模型。"
+        )
+        purpose_hint.setObjectName("settingsPageDesc")
+        purpose_hint.setWordWrap(True)
+        purpose_layout.addWidget(purpose_hint)
+
+        purpose_grid = QtWidgets.QGridLayout()
+        purpose_grid.setContentsMargins(0, 0, 0, 0)
+        purpose_grid.setHorizontalSpacing(10)
+        purpose_grid.setVerticalSpacing(6)
+        self.purpose_checks = {}
+        selected_purposes = set(get_model_purposes(self._original))
+        for index, (purpose_id, label) in enumerate(MODEL_PURPOSE_OPTIONS):
+            check = QtWidgets.QCheckBox(label)
+            check.setToolTip(purpose_id)
+            check.setChecked(purpose_id in selected_purposes)
+            self.purpose_checks[purpose_id] = check
+            purpose_grid.addWidget(check, index // 3, index % 3)
+        purpose_layout.addLayout(purpose_grid)
+        layout.addWidget(purpose_card)
+
+        self.image_card = QtWidgets.QFrame()
+        self.image_card.setObjectName("settingsHeaderCard")
+        image_layout = QtWidgets.QVBoxLayout(self.image_card)
+        image_layout.setContentsMargins(12, 10, 12, 10)
+        image_layout.setSpacing(6)
+        image_title = QtWidgets.QLabel("生图接口（画图/图生图用途）")
+        image_title.setObjectName("settingsPageTitle")
+        image_layout.addWidget(image_title)
+        image_hint = QtWidgets.QLabel(
+            "画图插件只从这里读模型。可只填 Base URL + 上游模型名；端点留空时默认 /v1/images/generations。"
+        )
+        image_hint.setObjectName("settingsPageDesc")
+        image_hint.setWordWrap(True)
+        image_layout.addWidget(image_hint)
+        image_form = QtWidgets.QFormLayout()
+        self.inp_endpoint = QtWidgets.QLineEdit(
+            str(self._original.get("endpoint_path", "") or "")
+        )
+        self.inp_endpoint.setPlaceholderText("/v1/images/generations")
+        image_form.addRow("文生图路径:", self.inp_endpoint)
+        self.inp_edit_endpoint = QtWidgets.QLineEdit(
+            str(self._original.get("edit_endpoint_path", "") or "")
+        )
+        self.inp_edit_endpoint.setPlaceholderText("/v1/images/edits")
+        image_form.addRow("图生图路径:", self.inp_edit_endpoint)
+        self.inp_api_mode = QtWidgets.QLineEdit(
+            str(self._original.get("api_mode", "") or "")
+        )
+        self.inp_api_mode.setPlaceholderText("images / chat（可选）")
+        image_form.addRow("api_mode:", self.inp_api_mode)
+        image_layout.addLayout(image_form)
+        layout.addWidget(self.image_card)
+
+        self.embedding_card = QtWidgets.QFrame()
+        self.embedding_card.setObjectName("settingsHeaderCard")
+        embedding_layout = QtWidgets.QVBoxLayout(self.embedding_card)
+        embedding_layout.setContentsMargins(12, 10, 12, 10)
+        embedding_layout.setSpacing(6)
+        embedding_title = QtWidgets.QLabel("向量接口（向量用途）")
+        embedding_title.setObjectName("settingsPageTitle")
+        embedding_layout.addWidget(embedding_title)
+        embedding_hint = QtWidgets.QLabel(
+            "向量模型只能单选。维度必须与已有索引一致；更换模型或维度后需要明确重建。"
+        )
+        embedding_hint.setObjectName("settingsPageDesc")
+        embedding_hint.setWordWrap(True)
+        embedding_layout.addWidget(embedding_hint)
+        embedding_form = QtWidgets.QFormLayout()
+        self.inp_embedding_api_url = QtWidgets.QLineEdit(
+            str(self._original.get("embedding_api_url", "") or "")
+        )
+        self.inp_embedding_api_url.setPlaceholderText(
+            "https://host/v1/embeddings（可选）"
+        )
+        embedding_form.addRow("完整接口 URL:", self.inp_embedding_api_url)
+        self.inp_embedding_endpoint = QtWidgets.QLineEdit(
+            str(self._original.get("embedding_endpoint_path", "") or "")
+        )
+        self.inp_embedding_endpoint.setPlaceholderText("/embeddings")
+        embedding_form.addRow("嵌入路径:", self.inp_embedding_endpoint)
+        self.inp_embedding_dimension = QtWidgets.QSpinBox()
+        self.inp_embedding_dimension.setRange(0, 65536)
+        self.inp_embedding_dimension.setSpecialValueText("未设置")
+        self.inp_embedding_dimension.setValue(
+            int(self._original.get("embedding_dimension") or 0)
+        )
+        embedding_form.addRow("向量维度:", self.inp_embedding_dimension)
+        self.combo_embedding_provider = QtWidgets.QComboBox()
+        self.combo_embedding_provider.setEditable(True)
+        self.combo_embedding_provider.addItems(["openai_compatible", "ollama"])
+        self.combo_embedding_provider.setCurrentText(
+            str(
+                self._original.get("embedding_provider")
+                or "openai_compatible"
+            )
+        )
+        embedding_form.addRow("Provider:", self.combo_embedding_provider)
+        self.inp_embedding_timeout = QtWidgets.QSpinBox()
+        self.inp_embedding_timeout.setRange(1, 300)
+        self.inp_embedding_timeout.setValue(
+            int(self._original.get("embedding_timeout") or 12)
+        )
+        self.inp_embedding_timeout.setSuffix(" 秒")
+        embedding_form.addRow("请求超时:", self.inp_embedding_timeout)
+        embedding_layout.addLayout(embedding_form)
+        layout.addWidget(self.embedding_card)
 
         preview_card = QtWidgets.QFrame()
 
@@ -345,7 +513,8 @@ class ModelEditDialog(QtWidgets.QDialog):
         layout.addWidget(preview_card)
 
         tips = QtWidgets.QLabel(
-            '提示：遇到 “/v1/chat/completions 不支持” 的网关，可设 `api_style = "responses"`。'
+            '提示：聊天模型用 api_style；画图和向量模型使用各自的专用接口字段。'
+            " 向量模型在记忆窗口中单独选择，不进入普通模型回退链。"
         )
 
         tips.setWordWrap(True)
@@ -372,6 +541,24 @@ class ModelEditDialog(QtWidgets.QDialog):
 
         self.inp_model.textChanged.connect(self._refresh_request_preview)
 
+        self.inp_endpoint.textChanged.connect(self._refresh_request_preview)
+
+        self.inp_embedding_endpoint.textChanged.connect(
+            self._refresh_request_preview
+        )
+
+        self.inp_embedding_api_url.textChanged.connect(
+            self._refresh_request_preview
+        )
+
+        self.combo_embedding_provider.currentTextChanged.connect(
+            self._refresh_request_preview
+        )
+
+        for check in self.purpose_checks.values():
+            check.toggled.connect(self._refresh_image_fields_visibility)
+
+        self._refresh_image_fields_visibility()
         self._refresh_request_preview()
 
     def _reload_provider_combo(self):
@@ -423,12 +610,52 @@ class ModelEditDialog(QtWidgets.QDialog):
 
         self._refresh_request_preview()
 
+    def _refresh_image_fields_visibility(self):
+        purposes = set(self._selected_purposes())
+        show_image = bool(purposes & {"image_gen", "image_edit"})
+        self.image_card.setVisible(show_image)
+        self.embedding_card.setVisible("embedding" in purposes)
+        self._refresh_request_preview()
+
     def _refresh_request_preview(self):
         base_url = self.inp_url.text().strip()
         style = self.combo_style.currentText().strip().lower()
         model_name = self.inp_model.text().strip()
-        endpoint = self._preview_endpoint(base_url, style)
-        transport = self._preview_transport(style, model_name)
+        purposes = set(self._selected_purposes())
+        if "embedding" in purposes:
+            full_url = self.inp_embedding_api_url.text().strip()
+            path = self.inp_embedding_endpoint.text().strip() or "/embeddings"
+            if full_url:
+                endpoint = full_url
+            else:
+                try:
+                    from modules.model_catalog import join_endpoint_url
+
+                    endpoint = join_endpoint_url(base_url, path) if base_url else path
+                except Exception:
+                    endpoint = base_url.rstrip("/") + "/" + path.lstrip("/")
+            transport = self.combo_embedding_provider.currentText().strip()
+        elif purposes & {"image_gen", "image_edit"}:
+            path = self.inp_endpoint.text().strip() or "/v1/images/generations"
+            try:
+                from modules.model_catalog import join_endpoint_url
+
+                endpoint = (
+                    join_endpoint_url(base_url, path)
+                    if base_url
+                    else (path if path.startswith("/") else "/" + path)
+                )
+            except Exception:
+                if not path.startswith("/"):
+                    path = "/" + path
+                base = base_url.rstrip("/")
+                if base.endswith("/v1") and path.startswith("/v1/"):
+                    path = path[3:]
+                endpoint = (base + path) if base else path
+            transport = "images"
+        else:
+            endpoint = self._preview_endpoint(base_url, style)
+            transport = self._preview_transport(style, model_name)
         self.lbl_transport_preview.setText(
             f"传输方式：{transport}    端点：{endpoint or '(无法判断)'}"
         )
@@ -462,6 +689,13 @@ class ModelEditDialog(QtWidgets.QDialog):
             return base + "/chat/completions"
         return base + "/v1/chat/completions"
 
+    def _selected_purposes(self):
+        selected = []
+        for purpose_id, check in self.purpose_checks.items():
+            if check.isChecked():
+                selected.append(purpose_id)
+        return normalize_purposes(selected)
+
     def _on_save(self):
         mid = self.inp_id.text().strip()
 
@@ -478,6 +712,12 @@ class ModelEditDialog(QtWidgets.QDialog):
 
         merged["api_key"] = self.inp_key.text().strip()
 
+        api_key_env = self.inp_api_key_env.text().strip()
+        if api_key_env:
+            merged["api_key_env"] = api_key_env
+        else:
+            merged.pop("api_key_env", None)
+
         style = self.combo_style.currentText().strip()
 
         if style:
@@ -486,12 +726,95 @@ class ModelEditDialog(QtWidgets.QDialog):
         else:
             merged.pop("api_style", None)
 
+        purposes = self._selected_purposes()
+        if purposes:
+            merged["purposes"] = purposes
+        else:
+            merged.pop("purposes", None)
+        merged.pop("purpose", None)
+
+        if "embedding" in purposes:
+            full_url = self.inp_embedding_api_url.text().strip()
+            if not merged["model"] or not (merged["base_url"] or full_url):
+                QtWidgets.QMessageBox.warning(
+                    self,
+                    "校验失败",
+                    "向量模型必须填写上游模型名，以及 Base URL 或完整接口 URL。",
+                )
+                return
+            dimension = int(self.inp_embedding_dimension.value())
+            if dimension <= 0:
+                QtWidgets.QMessageBox.warning(
+                    self,
+                    "校验失败",
+                    "向量维度必须是正整数。",
+                )
+                return
+            merged["embedding_endpoint_path"] = (
+                self.inp_embedding_endpoint.text().strip() or "/embeddings"
+            )
+            if full_url:
+                merged["embedding_api_url"] = full_url
+            else:
+                merged.pop("embedding_api_url", None)
+            merged["embedding_dimension"] = dimension
+            merged["embedding_provider"] = (
+                self.combo_embedding_provider.currentText().strip()
+                or "openai_compatible"
+            )
+            merged["embedding_timeout"] = int(
+                self.inp_embedding_timeout.value()
+            )
+
+        if purposes and set(purposes) & {"image_gen", "image_edit"}:
+            endpoint = self.inp_endpoint.text().strip()
+            edit_endpoint = self.inp_edit_endpoint.text().strip()
+            api_mode = self.inp_api_mode.text().strip()
+            if endpoint:
+                merged["endpoint_path"] = endpoint
+            else:
+                merged.pop("endpoint_path", None)
+            if edit_endpoint:
+                merged["edit_endpoint_path"] = edit_endpoint
+            else:
+                merged.pop("edit_endpoint_path", None)
+            if api_mode:
+                merged["api_mode"] = api_mode
+            else:
+                merged.pop("api_mode", None)
+        else:
+            for key in (
+                "endpoint_path",
+                "edit_endpoint_path",
+                "api_mode",
+            ):
+                # keep existing values if user unchecks temporarily? clearer to drop only when not image
+                if key in merged and key not in self._original:
+                    merged.pop(key, None)
+
         self.result_data = {"id": mid, "config": merged}
 
         self.accept()
 
 
 class RouterConfigDialog(QtWidgets.QDialog):
+    # task_name -> purpose filter used when building the model pool
+    TASK_PURPOSE_FILTER = {
+        "image_gen": ("image_gen", "image_edit"),
+        "image_edit": ("image_edit", "image_gen"),
+        "vision": ("vision",),
+        "sensor_vision_talk": ("vision", "chat"),
+        "codex": ("code", "chat"),
+        "translation": ("translation", "chat"),
+        "summary": ("summary", "chat"),
+        "web_search": ("web_search",),
+        "tool_reasoning": ("tool_reasoning", "chat"),
+        "default": ("chat",),
+        "reply_polish": ("chat",),
+        "gatekeeper": ("chat", "tool_reasoning"),
+        "screen_classify": ("chat", "vision"),
+    }
+
     def __init__(self, parent=None, task_name="", current_chain=None):
         super().__init__(parent)
 
@@ -499,11 +822,34 @@ class RouterConfigDialog(QtWidgets.QDialog):
 
         self.resize(760, 520)
 
+        self.task_name = str(task_name or "").strip()
+
         self.result_chain = list(current_chain or [])
 
-        self.all_models = sorted(list(MODELS.keys()))
+        self.purpose_filter = self.TASK_PURPOSE_FILTER.get(self.task_name)
+
+        self.all_models = self._collect_pool_models()
 
         self._init_ui()
+
+    def _collect_pool_models(self):
+        keys = sorted(list(MODELS.keys()))
+        if not self.purpose_filter:
+            return keys
+        # 画图/图生图：候选池只显示已标记对应用途的模型；其它任务允许未标记模型。
+        allow_untagged = self.task_name not in {
+            "image_gen",
+            "image_edit",
+            "web_search",
+        }
+        filtered = list_models_by_purpose(
+            MODELS, self.purpose_filter, allow_untagged=allow_untagged
+        )
+        # Always keep models already in the chain so existing configs remain editable.
+        for model_id in self.result_chain:
+            if model_id not in filtered and model_id in MODELS:
+                filtered.append(model_id)
+        return filtered
 
     def _init_ui(self):
         main = QtWidgets.QVBoxLayout(self)
@@ -580,13 +926,19 @@ class RouterConfigDialog(QtWidgets.QDialog):
 
         self._refresh()
 
+    def _model_label(self, model_id: str) -> str:
+        cfg = MODELS.get(model_id) or {}
+        name = str(cfg.get("model") or "???")
+        purpose_text = format_purposes_label(get_model_purposes(cfg))
+        if purpose_text and purpose_text != "未设置":
+            return f"{model_id} ({name}) · {purpose_text}"
+        return f"{model_id} ({name})"
+
     def _refresh(self):
         self.list_chain.clear()
 
         for m in self.result_chain:
-            name = MODELS.get(m, {}).get("model", "???")
-
-            item = QtWidgets.QListWidgetItem(f"{m} ({name})")
+            item = QtWidgets.QListWidgetItem(self._model_label(m))
 
             item.setData(QtCore.Qt.ItemDataRole.UserRole, m)
 
@@ -598,9 +950,7 @@ class RouterConfigDialog(QtWidgets.QDialog):
             if m in self.result_chain:
                 continue
 
-            name = MODELS.get(m, {}).get("model", "???")
-
-            item = QtWidgets.QListWidgetItem(f"{m} ({name})")
+            item = QtWidgets.QListWidgetItem(self._model_label(m))
 
             item.setData(QtCore.Qt.ItemDataRole.UserRole, m)
 
@@ -1258,6 +1608,7 @@ class SettingsDialog(QtWidgets.QDialog):
 
         self.main_app = main_app
 
+        self.setObjectName("SettingsDialog")
         self.setWindowTitle("系统设置中心")
 
         if main_app is not None and hasattr(main_app, "_icon"):
@@ -1326,9 +1677,14 @@ class SettingsDialog(QtWidgets.QDialog):
                 "desc": "管理生成的表情包、本地图片与对应的文本触发词映射。",
             },
             {
+                "nav": "📖 高级 · 日记",
+                "title": "日记",
+                "desc": "单独查看、编辑、删除和导出角色每天生成的日记。",
+            },
+            {
                 "nav": "🧠 高级 · 记忆数据",
                 "title": "记忆数据",
-                "desc": "打开重型记忆编辑器，适合排查 transcript、todo、图记忆等底层数据。",
+                "desc": "管理统一记忆和原始对话；日记已移到独立页面。",
             },
             {
                 "nav": "📟 高级 · 状态屏",
@@ -1344,6 +1700,11 @@ class SettingsDialog(QtWidgets.QDialog):
                 "nav": "⏰ 高级 · 久坐提醒",
                 "title": "久坐提醒",
                 "desc": "调整连续工作判定、休息重置、提醒冷却、弹窗文案和表情包预览。",
+            },
+            {
+                "nav": "🎤 高级 · 语音输入",
+                "title": "语音输入",
+                "desc": "麦克风 ASR：是否需要唤醒词、角色名/别名唤醒、连续对话窗口与自定义词。",
             },
             {
                 "nav": "🩺 高级 · 依赖体检",
@@ -1472,6 +1833,8 @@ class SettingsDialog(QtWidgets.QDialog):
 
         self._safe_init_page(self._init_meme_page, "表情包库")
 
+        self._safe_init_page(self._init_diary_page, "日记")
+
         self._safe_init_page(self._init_memory_page, "记忆数据")
 
         self._safe_init_page(self._init_status_screen_page, "状态屏")
@@ -1479,6 +1842,8 @@ class SettingsDialog(QtWidgets.QDialog):
         self._safe_init_page(self._init_screen_app_rules_page, "应用识别")
 
         self._safe_init_page(self._init_sedentary_page, "久坐提醒")
+
+        self._safe_init_page(self._init_asr_page, "语音输入")
 
         self._safe_init_page(self._init_dependency_page, "依赖体检")
 
@@ -1517,13 +1882,48 @@ class SettingsDialog(QtWidgets.QDialog):
     def showEvent(self, event):
         super().showEvent(event)
         self.ensure_on_screen()
+        # Enhanced GUI may have rewritten data/custom_models.json while this
+        # dialog stayed open — pull latest providers/models into memory.
+        self._reload_catalog_from_disk()
         QtCore.QTimer.singleShot(0, self.ensure_on_screen)
         QtCore.QTimer.singleShot(80, self.ensure_on_screen)
         QtCore.QTimer.singleShot(240, self.ensure_on_screen)
 
+    def _reload_catalog_from_disk(self) -> None:
+        try:
+            import config as runtime_config
+
+            if hasattr(runtime_config, "load_custom_models"):
+                runtime_config.load_custom_models(force=True)
+        except Exception:
+            pass
+        if hasattr(self, "prov_table"):
+            try:
+                self._refresh_prov_table()
+            except Exception:
+                pass
+        if hasattr(self, "_refresh_llm_table"):
+            try:
+                self._refresh_llm_table()
+            except Exception:
+                pass
+        if hasattr(self, "_refresh_router"):
+            try:
+                self._refresh_router()
+            except Exception:
+                pass
+
     def _on_tab_changed(self, row):
         if 0 <= row < self.stack.count():
             self.stack.setCurrentIndex(row)
+            # Re-read shared catalog when switching to provider/model pages so
+            # changes from Enhanced GUI appear without restarting the process.
+            try:
+                title = str((self._tab_meta[row] or {}).get("title") or "")
+            except Exception:
+                title = ""
+            if any(token in title for token in ("提供商", "模型", "路由", "LLM")):
+                self._reload_catalog_from_disk()
 
             self._refresh_page_header(row)
 
@@ -1642,6 +2042,16 @@ class SettingsDialog(QtWidgets.QDialog):
         layout = QtWidgets.QVBoxLayout(page)
         layout.setContentsMargins(0, 0, 0, 0)
         widget = SedentarySettingsPage(main_app=self.main_app)
+        widget.setMinimumSize(0, 0)
+        scroll = self._wrap_in_scroll_area(widget)
+        layout.addWidget(scroll, 1)
+        self.stack.addWidget(page)
+
+    def _init_asr_page(self):
+        page = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout(page)
+        layout.setContentsMargins(0, 0, 0, 0)
+        widget = AsrSettingsPage(main_app=self.main_app)
         widget.setMinimumSize(0, 0)
         scroll = self._wrap_in_scroll_area(widget)
         layout.addWidget(scroll, 1)
@@ -1895,16 +2305,22 @@ class SettingsDialog(QtWidgets.QDialog):
 
         self.llm_table = QtWidgets.QTableWidget()
 
-        self.llm_table.setColumnCount(4)
+        self.llm_table.setColumnCount(5)
 
-        self.llm_table.setHorizontalHeaderLabels(["ID", "模型名", "API 地址", "操作"])
-
-        self.llm_table.horizontalHeader().setSectionResizeMode(
-            2, QtWidgets.QHeaderView.ResizeMode.Stretch
+        self.llm_table.setHorizontalHeaderLabels(
+            ["ID", "模型名", "用途", "API 地址", "操作"]
         )
 
         self.llm_table.horizontalHeader().setSectionResizeMode(
-            3, QtWidgets.QHeaderView.ResizeMode.ResizeToContents
+            2, QtWidgets.QHeaderView.ResizeMode.ResizeToContents
+        )
+
+        self.llm_table.horizontalHeader().setSectionResizeMode(
+            3, QtWidgets.QHeaderView.ResizeMode.Stretch
+        )
+
+        self.llm_table.horizontalHeader().setSectionResizeMode(
+            4, QtWidgets.QHeaderView.ResizeMode.ResizeToContents
         )
 
         self.llm_table.verticalHeader().setVisible(False)
@@ -1964,6 +2380,8 @@ class SettingsDialog(QtWidgets.QDialog):
             ("translation", "翻译", "语言转换"),
             ("screen_classify", "屏幕分类", "画面分类"),
             ("codex", "代码助手", "工作区链路"),
+            ("image_gen", "画图", "点编辑自选顺序，不会自动全选"),
+            ("image_edit", "图生图", "点编辑自选顺序，空则回退画图链"),
         ]
 
         for index, (task, label, desc) in enumerate(route_items):
@@ -2109,8 +2527,11 @@ class SettingsDialog(QtWidgets.QDialog):
                 row, 1, QtWidgets.QTableWidgetItem(str((cfg or {}).get("model", "")))
             )
 
+            purpose_text = format_purposes_label(get_model_purposes(cfg or {}))
+            self.llm_table.setItem(row, 2, QtWidgets.QTableWidgetItem(purpose_text))
+
             self.llm_table.setItem(
-                row, 2, QtWidgets.QTableWidgetItem(str((cfg or {}).get("base_url", "")))
+                row, 3, QtWidgets.QTableWidgetItem(str((cfg or {}).get("base_url", "")))
             )
 
             action_widget = QtWidgets.QWidget()
@@ -2139,7 +2560,7 @@ class SettingsDialog(QtWidgets.QDialog):
 
             h.addStretch()
 
-            self.llm_table.setCellWidget(row, 3, action_widget)
+            self.llm_table.setCellWidget(row, 4, action_widget)
 
     def _refresh_router(self):
         for task, line in self.router_ui.items():
@@ -5301,13 +5722,29 @@ class SettingsDialog(QtWidgets.QDialog):
 
         self._add_embedded_dialog_page(MemeManagerDialog, "表情包库")
 
+    def _init_diary_page(self):
+        from modules.gui.dialogs.diary_manager import DiaryManagerDialog
+
+        page = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout(page)
+        layout.setContentsMargins(0, 0, 0, 0)
+        widget = DiaryManagerDialog(parent=page, embedded=True)
+        widget.setMinimumSize(0, 0)
+        scroll = self._wrap_in_scroll_area(widget)
+        layout.addWidget(scroll, 1)
+        self.stack.addWidget(page)
+
     def _init_memory_page(self):
         from modules.gui.dialogs.memory_editor import MemoryEditorDialog
 
         page = QtWidgets.QWidget()
         layout = QtWidgets.QVBoxLayout(page)
         layout.setContentsMargins(0, 0, 0, 0)
-        widget = MemoryEditorDialog(parent=page, embedded=True)
+        widget = MemoryEditorDialog(
+            parent=page,
+            embedded=True,
+            brain=getattr(self.main_app, "brain", None),
+        )
         widget.setMinimumSize(0, 0)
         scroll = self._wrap_in_scroll_area(widget)
         layout.addWidget(scroll, 1)

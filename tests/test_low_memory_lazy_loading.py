@@ -88,6 +88,64 @@ def test_tts_router_edge_default_does_not_import_gptsovits(monkeypatch):
     assert "modules.tts.gptsovits" not in sys.modules
 
 
+def test_tts_router_applies_role_config_before_rejecting_unready_gptsovits(monkeypatch):
+    sys.modules.pop("modules.tts.router", None)
+    router_module = importlib.import_module("modules.tts.router")
+    applied = []
+
+    class FakeGPTSoVITS:
+        def __init__(self, **kwargs):
+            self.ready = False
+
+        def apply_runtime_config(self, cfg):
+            applied.append(dict(cfg))
+            self.ready = True
+
+    monkeypatch.setattr(
+        router_module,
+        "_load_gptsovits_class",
+        lambda verbose=False: FakeGPTSoVITS,
+    )
+    router = router_module.TTSRouter(
+        edge_cfg={"voice": "zh-CN-XiaoxiaoNeural"},
+        verbose=False,
+    )
+    role_cfg = {
+        "enabled": True,
+        "gpt_w": "G:/voice/model.ckpt",
+        "sov_w": "G:/voice/model.pth",
+        "ref_wav": "G:/voice/ref.wav",
+        "prompt_lang": "ja",
+        "prompt_text": "reference",
+    }
+
+    router.apply_role_tts_config(role_cfg)
+
+    assert applied == [role_cfg]
+    assert router.gpt is not None
+    assert router.gpt.ready is True
+    assert router._active == "gpt"
+
+
+def test_gptsovits_defers_model_init_until_paths_are_configured(monkeypatch):
+    import modules.tts.gptsovits as gptsovits_module
+
+    init_calls = []
+    monkeypatch.setattr(gptsovits_module, "GPT_W", "")
+    monkeypatch.setattr(gptsovits_module, "SOV_W", "")
+    monkeypatch.setattr(gptsovits_module, "REF_WAV", "")
+    monkeypatch.setattr(
+        gptsovits_module.GPTSoVITSTTS,
+        "_init_model",
+        lambda self: init_calls.append(True),
+    )
+
+    backend = gptsovits_module.GPTSoVITSTTS(verbose=False)
+
+    assert init_calls == []
+    assert backend.ready is False
+
+
 def test_gui_app_import_does_not_import_heavy_dialogs(monkeypatch):
     heavy_modules = {
         "modules.gui.dialogs.settings",

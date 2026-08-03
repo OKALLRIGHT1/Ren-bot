@@ -178,7 +178,9 @@ class GuiWebSocketTransport:
             envelope["media"] = dict(message["media"])
         emit_capability = getattr(self._gui_ws_server, "emit_capability", None)
         if callable(emit_capability):
-            emit_capability("live2d.protocol.v1", envelope)
+            delivered = emit_capability("live2d.protocol.v1", envelope)
+            if delivered is False:
+                raise RuntimeError("no capable GUI client is connected")
             return
         # Fallback for unexpected servers without capability routing.
         emit = getattr(self._gui_ws_server, "emit", None)

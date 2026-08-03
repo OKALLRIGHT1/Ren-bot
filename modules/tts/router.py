@@ -138,8 +138,6 @@ class TTSRouter:
                 rhubarb_path=self.rhubarb_path,
                 lip_sync_smooth_window=self.lip_sync_smooth_window,
             )
-            if not getattr(self.gpt, "ready", False):
-                self.gpt = None
         except Exception as e:
             if self.verbose:
                 print(f"⚠️ [TTS] GPT-SoVITS 延迟初始化失败: {e}")

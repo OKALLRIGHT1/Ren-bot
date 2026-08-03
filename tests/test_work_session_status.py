@@ -42,7 +42,7 @@ def test_work_session_refresh_interval_is_responsive():
 
 def test_format_work_session_label_shows_collecting_for_empty_sensor_session():
     assert format_work_session_label(
-        {"active_seconds": 0, "active_minutes": 0, "source": "rust-agent"}
+        {"active_seconds": 0, "active_minutes": 0, "source": "unknown"}
     ) == "久坐时间 采集中"
 
 
@@ -493,6 +493,146 @@ def test_screen_sensor_counts_same_app_title_changes_once():
 
     assert sensor.daily_counts.get("Game.exe") == 1
     assert len(reactions) == 1
+
+
+def test_screen_sensor_does_not_replay_old_foreground_when_latest_sample_changes():
+    sensor = ScreenSensor(DummyChatService())
+    now = time.time()
+    reactions = []
+    sensor.daily_counts = {"Code.exe": 1}
+    sensor._last_rust_event_id = "sample-previous"
+    sensor._last_rust_processed_ts = now - 30
+    sensor._analyze_window_context = lambda app="", title="", domain="": (
+        "coding",
+        app or title or "unknown",
+    )
+    sensor._try_trigger_reaction = lambda *args, **kwargs: reactions.append(
+        (args, kwargs)
+    )
+    sensor._recent_rust_events = lambda limit=20: [
+        {
+            "event_id": "sample-new",
+            "ts": _iso(now),
+            "kind": "activity_sample",
+            "presence": "active",
+            "source": "live2d-tauri",
+            "app": {"name": "Code.exe"},
+            "window_title": "main.py - Visual Studio Code",
+            "browser": {},
+        },
+        {
+            "event_id": "old-switch",
+            "ts": _iso(now - 60),
+            "kind": "foreground_changed",
+            "presence": "active",
+            "source": "live2d-tauri",
+            "app": {"name": "Code.exe"},
+            "window_title": "main.py - Visual Studio Code",
+            "browser": {},
+        },
+    ]
+
+    sensor._process_rust_events_for_reaction(now)
+
+    assert sensor.daily_counts == {"Code.exe": 1}
+    assert reactions == []
+
+
+def test_screen_sensor_pending_multi_app_switch_reacts_only_to_latest():
+    sensor = ScreenSensor(DummyChatService())
+    now = time.time()
+    reactions = []
+    sensor.daily_counts.clear()
+    sensor.daily_durations.clear()
+    sensor._analyze_window_context = lambda app="", title="", domain="": (
+        "other",
+        app or title or "unknown",
+    )
+    sensor._try_trigger_reaction = lambda *args, **kwargs: reactions.append(
+        (args, kwargs)
+    )
+    sensor._recent_rust_events = lambda limit=20: [
+        {
+            "event_id": "switch-c",
+            "ts": _iso(now - 1),
+            "kind": "foreground_changed",
+            "presence": "active",
+            "source": "live2d-tauri",
+            "app": {"name": "C.exe"},
+            "window_title": "Window C",
+            "browser": {},
+        },
+        {
+            "event_id": "switch-b",
+            "ts": _iso(now - 2),
+            "kind": "foreground_changed",
+            "presence": "active",
+            "source": "live2d-tauri",
+            "app": {"name": "B.exe"},
+            "window_title": "Window B",
+            "browser": {},
+        },
+        {
+            "event_id": "switch-a",
+            "ts": _iso(now - 3),
+            "kind": "foreground_changed",
+            "presence": "active",
+            "source": "live2d-tauri",
+            "app": {"name": "A.exe"},
+            "window_title": "Window A",
+            "browser": {},
+        },
+    ]
+
+    sensor._process_rust_events_for_reaction(now)
+
+    assert sensor.last_app_name == "C.exe"
+    assert sensor.last_window_title == "Window C"
+    assert sensor.daily_counts == {"A.exe": 1, "B.exe": 1, "C.exe": 1}
+    assert len(reactions) == 1
+    args, kwargs = reactions[0]
+    assert args[0] == "Window C"
+    assert args[3] == "C.exe"
+    assert kwargs.get("reason") == "switch"
+
+
+def test_screen_sensor_duration_ignores_sample_not_matching_focus():
+    sensor = ScreenSensor(DummyChatService())
+    now = time.time()
+    reactions = []
+    sensor.daily_counts = {"Code.exe": 2, "Chrome.exe": 1}
+    sensor.daily_durations = {"Code.exe": 120.0}
+    sensor.last_app_name = "Code.exe"
+    sensor.last_window_title = "main.py - Visual Studio Code"
+    sensor.current_window_start_time = now - 30 * 60
+    sensor.next_duration_trigger_time = now - 1
+    sensor._last_rust_event_id = "prev"
+    sensor._last_rust_processed_ts = now - 10
+    sensor._analyze_window_context = lambda app="", title="", domain="": (
+        "browser" if "Chrome" in app else "coding",
+        app or title or "unknown",
+    )
+    sensor._try_trigger_reaction = lambda *args, **kwargs: reactions.append(
+        (args, kwargs)
+    )
+    sensor._recent_rust_events = lambda limit=20: [
+        {
+            "event_id": "stale-sample",
+            "ts": _iso(now),
+            "kind": "activity_sample",
+            "presence": "active",
+            "source": "live2d-tauri",
+            "app": {"name": "Chrome.exe"},
+            "window_title": "Docs - Google Chrome",
+            "browser": {},
+        }
+    ]
+
+    sensor._process_rust_events_for_reaction(now)
+
+    assert reactions == []
+    assert sensor.last_app_name == "Code.exe"
+    assert sensor.daily_durations.get("Chrome.exe", 0.0) == 0.0
 
 
 def test_screen_sensor_rust_activity_sample_does_not_trigger_sedentary_popup(monkeypatch):
@@ -1352,6 +1492,52 @@ def test_screen_sensor_processes_backlogged_sedentary_alerts_as_one_popup(monkey
 
     assert calls == [("电脑", 120)]
     assert sensor.next_sedentary_alert_time == now + sensor.sedentary_cooldown_sec
+
+
+def test_screen_sensor_snooze_blocks_rust_sedentary_alert_even_after_app_switch(monkeypatch):
+    sensor = ScreenSensor(DummyChatService())
+    now = time.time()
+    calls = []
+    sensor.use_rust_events_only = True
+    sensor._sedentary_startup_grace_until = now - 1
+    sensor.sedentary_cooldown_sec = 60 * 60
+    sensor.next_sedentary_alert_time = now + 10 * 60
+    sensor._sedentary_user_suppressed_until = now + 10 * 60
+    sensor._last_alert_time = now - 30
+    sensor._last_alert_app = None
+    sensor._try_trigger_reaction = lambda *args, **kwargs: None
+    sensor._analyze_window_context = lambda **kwargs: ("coding", "Code")
+    sensor.set_sedentary_popup_callback(
+        lambda app_name, minutes, image_path="", on_result=None: calls.append(
+            (app_name, minutes)
+        )
+    )
+    sensor._recent_rust_events = lambda limit=20: [
+        {
+            "event_id": "alert-during-snooze",
+            "ts": _iso(now),
+            "kind": "sedentary_alert",
+            "presence": "active",
+            "source": "live2d-tauri",
+            "app": {"name": "Code.exe"},
+            "window_title": "Code",
+            "browser": {},
+            "sedentary": {
+                "active_minutes": 180,
+                "window_minutes": 60,
+                "break_minutes": 5,
+                "cooldown_minutes": 60,
+                "boundary_minute": int(now // 60),
+                "rest_streak": 0,
+            },
+        }
+    ]
+    monkeypatch.setattr(screen_sensor_module.config, "DND_MODE", False)
+
+    sensor._process_rust_events_for_reaction(now)
+
+    assert calls == []
+    assert sensor.next_sedentary_alert_time == now + 10 * 60
 
 
 def test_screen_sensor_does_not_restore_stale_restart_work_session():

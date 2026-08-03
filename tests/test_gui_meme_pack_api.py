@@ -94,6 +94,20 @@ class FakePlugin:
         return self._store
 
 
+class StoreObjectPlugin:
+    def __init__(self, store: FakeMemeStore) -> None:
+        self._store = None
+        self._resolved_store = store
+
+    def _store_obj(self):
+        return self._resolved_store
+
+
+class FakePluginManager:
+    def __init__(self, plugin) -> None:
+        self.plugins = {"meme_pack": plugin}
+
+
 def test_list_and_update_meme():
     store = FakeMemeStore()
     service = MemePackGuiService(store=store)
@@ -125,3 +139,15 @@ def test_enable_and_delete():
     deleted = service.delete_assets([1], delete_files=False)
     assert deleted["ok"] is True
     assert deleted["data"]["deleted"] == 1
+
+
+def test_plugin_manager_resolves_real_meme_plugin_store_interface():
+    store = FakeMemeStore()
+    service = MemePackGuiService(
+        plugin_manager=FakePluginManager(StoreObjectPlugin(store))
+    )
+
+    listed = service.list_assets()
+
+    assert listed["ok"] is True
+    assert listed["data"]["count"] == 1

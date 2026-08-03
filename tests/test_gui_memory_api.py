@@ -84,7 +84,15 @@ class FakeRepo:
         return self.records.pop(record_id, None) is not None
 
     def list_persons(self) -> List[Dict[str, Any]]:
-        return [{"id": "owner", "label": "我"}]
+        # Repository shape uses person_id/display_name; service must normalize.
+        return [
+            {"person_id": "owner", "display_name": "我", "relationship": "owner"},
+            {
+                "person_id": "qq:10001",
+                "display_name": "群友甲",
+                "relationship": "group_member",
+            },
+        ]
 
 
 class FakeCore:
@@ -140,14 +148,68 @@ class FakeBrain:
         return {"state": "ready", "model": "bge", "dimension": 1024}
 
 
-def test_list_core_records_with_category_tree():
+def test_list_core_records_with_category_tree(monkeypatch):
     service = MemoryGuiService(memory_core=FakeCore(), brain=FakeBrain())
+
+    class _FakeCharacterManager:
+        @staticmethod
+        def get_all_characters():
+            return {
+                "char_6aab46": {"name": "高松灯"},
+                "suzu": {"name": "五十铃怜"},
+            }
+
+    import sys
+    import types
+
+    fake_mod = types.ModuleType("modules.character_manager")
+    fake_mod.character_manager = _FakeCharacterManager()
+    monkeypatch.setitem(sys.modules, "modules.character_manager", fake_mod)
+
     data = service.list_core_records(status="active")
     assert data["ok"] is True
     assert len(data["data"]["records"]) == 1
     assert data["data"]["records"][0]["category"] == "likes.music"
     assert any(item["id"] == "likes" for item in data["data"]["categories"])
-    assert data["data"]["persons"][0]["id"] == "owner"
+    person_ids = [item["id"] for item in data["data"]["persons"]]
+    assert person_ids[0] == "owner"
+    assert "character:char_6aab46" in person_ids
+    assert "character:suzu" in person_ids
+    assert "qq:10001" in person_ids
+    labels = {item["id"]: item["label"] for item in data["data"]["persons"]}
+    assert labels["character:char_6aab46"] == "高松灯"
+    assert labels["qq:10001"] == "群友甲"
+    assert data["data"]["category_tree"]
+    likes = next(item for item in data["data"]["category_tree"] if item["id"] == "likes")
+    assert any(child["id"] == "likes.music" for child in likes.get("children") or [])
+
+
+def test_profile_overview_groups_by_category(monkeypatch):
+    service = MemoryGuiService(memory_core=FakeCore(), brain=FakeBrain())
+
+    class _FakeCharacterManager:
+        @staticmethod
+        def get_all_characters():
+            return {"char_6aab46": {"name": "高松灯"}}
+
+    import sys
+    import types
+
+    fake_mod = types.ModuleType("modules.character_manager")
+    fake_mod.character_manager = _FakeCharacterManager()
+    monkeypatch.setitem(sys.modules, "modules.character_manager", fake_mod)
+
+    overview = service.get_profile_overview(person_id="owner")
+    assert overview["ok"] is True
+    assert overview["data"]["person_id"] == "owner"
+    groups = {item["id"]: item for item in overview["data"]["groups"]}
+    assert "likes" in groups
+    music = next(
+        (child for child in groups["likes"]["children"] if child["id"] == "likes.music"),
+        None,
+    )
+    assert music is not None
+    assert any("爵士" in str(row.get("content") or "") for row in music["records"])
 
 
 def test_upsert_and_category_override():
@@ -189,3 +251,49 @@ def test_vector_status_and_rebuild():
     embedding = service.test_embedding()
     assert embedding["ok"] is True
     assert embedding["data"]["state"] == "ready"
+
+
+def test_embedding_selection_roundtrip(tmp_path, monkeypatch):
+    from modules import runtime_settings
+    from services.gui_api.memory_service import MemoryGuiService
+
+    monkeypatch.setattr(
+        runtime_settings,
+        "RUNTIME_SETTINGS_PATH",
+        tmp_path / "runtime.json",
+    )
+    import config
+
+    monkeypatch.setattr(
+        config,
+        "MODELS",
+        {
+            "local-bge": {
+                "model": "bge-m3",
+                "base_url": "http://127.0.0.1:11434/v1",
+                "api_key": "ollama",
+                "purposes": ["embedding"],
+                "embedding_endpoint_path": "/embeddings",
+                "embedding_dimension": 1024,
+                "embedding_provider": "ollama",
+            },
+            "remote-bge": {
+                "model": "BAAI/bge-m3",
+                "base_url": "https://api.siliconflow.cn/v1",
+                "api_key": "sk-test",
+                "purposes": ["embedding"],
+                "embedding_endpoint_path": "/embeddings",
+                "embedding_dimension": 1024,
+                "embedding_provider": "openai_compatible",
+            },
+        },
+    )
+    service = MemoryGuiService(memory_core=FakeCore(), brain=FakeBrain())
+    saved = service.save_embedding_selection(
+        {"model_ids": ["local-bge", "remote-bge"]}
+    )
+    assert saved["ok"] is True
+    assert saved["data"]["model_ids"] == ["local-bge", "remote-bge"]
+    loaded = service.get_embedding_selection()
+    assert loaded["data"]["model_id"] == "local-bge"
+    assert any(item["id"] == "remote-bge" for item in loaded["data"]["candidates"])

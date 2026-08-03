@@ -61,10 +61,10 @@ class FakeApp:
                 settings.get("activity_include_process_path", False)
             ),
             "include_window_title": bool(
-                settings.get("activity_include_window_title", False)
+                settings.get("activity_include_window_title", True)
             ),
             "include_browser_context": bool(
-                settings.get("activity_include_browser_context", False)
+                settings.get("activity_include_browser_context", True)
             ),
         }
 
@@ -132,8 +132,8 @@ async def test_activity_config_defaults_when_settings_missing():
     assert data["sedentary_break_minutes"] == 5
     assert data["sedentary_cooldown_minutes"] == 60
     assert data["include_process_path"] is False
-    assert data["include_window_title"] is False
-    assert data["include_browser_context"] is False
+    assert data["include_window_title"] is True
+    assert data["include_browser_context"] is True
     assert data["revision"] == 0
 
 

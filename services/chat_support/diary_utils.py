@@ -345,6 +345,8 @@ def format_day_transcript_line(
     legacy_owner_private_session_ids: Iterable[str],
     owner_shared_local_sources: Iterable[str],
     qq_remote_sources: Iterable[str],
+    assistant_name: str = "当前角色",
+    owner_label: str = "主人",
 ) -> str:
     if not isinstance(row, dict):
         return ""
@@ -369,23 +371,27 @@ def format_day_transcript_line(
     )
     qq_sources = set(qq_remote_sources or [])
     legacy_sessions = set(legacy_owner_private_session_ids or [])
+    assistant_label = str(assistant_name or "当前角色").strip() or "当前角色"
+    subject_label = str(owner_label or "主人").strip() or "主人"
 
     if role == "assistant":
         if owner_row:
-            speaker = "AI(to Owner)"
+            speaker = f"{assistant_label}（对 {subject_label}）"
         elif source in qq_sources:
             speaker = (
-                "AI(to QQ Group)" if message_type == "group" else "AI(to QQ Contact)"
+                f"{assistant_label}（对 QQ 群）"
+                if message_type == "group"
+                else f"{assistant_label}（对 QQ 联系人）"
             )
         else:
-            speaker = "AI"
+            speaker = assistant_label
     elif role == "system":
         speaker = "System"
     elif owner_row:
         if source in qq_sources or session_id in legacy_sessions:
-            speaker = "Owner(QQ)"
+            speaker = f"{subject_label}（QQ）"
         else:
-            speaker = "Owner(Local)"
+            speaker = f"{subject_label}（本地）"
     elif source in qq_sources:
         if message_type == "group":
             speaker = f"OtherGroupMember({sender_name or 'Unknown'})"
@@ -455,6 +461,8 @@ def fetch_day_chat_history(
     legacy_owner_private_session_ids: Iterable[str],
     owner_shared_local_sources: Iterable[str],
     qq_remote_sources: Iterable[str],
+    assistant_name: str = "当前角色",
+    owner_label: str = "主人",
 ) -> str:
     filtered_rows = [
         row for row in rows if not is_diary_artifact_row(row, target_date=date_str)
@@ -468,6 +476,8 @@ def fetch_day_chat_history(
             legacy_owner_private_session_ids=legacy_owner_private_session_ids,
             owner_shared_local_sources=owner_shared_local_sources,
             qq_remote_sources=qq_remote_sources,
+            assistant_name=assistant_name,
+            owner_label=owner_label,
         )
         for row in filtered_rows
     ]
@@ -484,6 +494,8 @@ def fetch_day_owner_chat_history(
     legacy_owner_private_session_ids: Iterable[str],
     owner_shared_local_sources: Iterable[str],
     qq_remote_sources: Iterable[str],
+    assistant_name: str = "当前角色",
+    owner_label: str = "主人",
 ) -> str:
     filtered_rows = [
         row for row in rows if not is_diary_artifact_row(row, target_date=date_str)
@@ -545,6 +557,8 @@ def fetch_day_owner_chat_history(
             legacy_owner_private_session_ids=legacy_owner_private_session_ids,
             owner_shared_local_sources=owner_shared_local_sources,
             qq_remote_sources=qq_remote_sources,
+            assistant_name=assistant_name,
+            owner_label=owner_label,
         )
         for row in owner_rows
     ]

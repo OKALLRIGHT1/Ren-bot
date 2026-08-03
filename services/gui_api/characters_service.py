@@ -5,6 +5,8 @@ import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from services.gui_api.assistant_badge_service import AssistantBadgeStore, normalize_badge
+
 
 def _load_json(path: Path, fallback: Dict[str, Any]) -> Dict[str, Any]:
     if not path.exists():
@@ -41,6 +43,7 @@ def _costume_list(costumes: Any) -> List[Dict[str, Any]]:
                     "name": str(name),
                     "path": str(row.get("path") or ""),
                     "emotion_map": _as_dict(row.get("emotion_map")),
+                    "assistant_badge": normalize_badge(row.get("assistant_badge")),
                 }
             )
         return sorted(rows, key=lambda item: item["name"])
@@ -53,6 +56,7 @@ def _costume_list(costumes: Any) -> List[Dict[str, Any]]:
                     "name": str(row.get("name") or ""),
                     "path": str(row.get("path") or ""),
                     "emotion_map": _as_dict(row.get("emotion_map")),
+                    "assistant_badge": normalize_badge(row.get("assistant_badge")),
                 }
             )
         return [row for row in rows if row["name"]]
@@ -62,6 +66,7 @@ def _costume_list(costumes: Any) -> List[Dict[str, Any]]:
 class CharactersService:
     def __init__(self, characters_path: Path) -> None:
         self.path = Path(characters_path)
+        self.badges = AssistantBadgeStore(self.path)
 
     def _empty(self) -> Dict[str, Any]:
         return {"active_id": "", "characters": {}}
@@ -121,6 +126,7 @@ class CharactersService:
                 "current_costume": str(row.get("current_costume") or ""),
                 "costumes": _costume_list(row.get("costumes")),
                 "default_emotion_map": _as_dict(row.get("default_emotion_map")),
+                "assistant_badge": normalize_badge(row.get("assistant_badge")),
                 "tts": {
                     "enabled": bool(tts.get("enabled")),
                     "voice": str(tts.get("voice") or ""),
@@ -295,3 +301,150 @@ class CharactersService:
         if not self._write(data):
             return {"ok": False, "error": "write_failed"}
         return self.get_character(character_id)
+
+    def import_badge(
+        self,
+        character_id: str,
+        source_path: str,
+        *,
+        costume_name: str = "",
+        scale: Any = 1.0,
+        offset_x: Any = 0.0,
+        offset_y: Any = 0.0,
+    ) -> Dict[str, Any]:
+        character_id = str(character_id or "").strip()
+        costume_name = str(costume_name or "").strip()
+        data = self._load()
+        if character_id not in data["characters"]:
+            return {"ok": False, "error": "not_found"}
+        character = _as_dict(data["characters"][character_id])
+        costumes = _as_dict(character.get("costumes"))
+        if costume_name and costume_name not in costumes:
+            return {"ok": False, "error": "costume_not_found"}
+        copied = self.badges.import_image(character_id, source_path, costume_name)
+        if not copied.get("ok"):
+            return copied
+        badge = self.badges.record(
+            str(copied["path"]), scale, offset_x, offset_y
+        )
+        if costume_name:
+            costume = _as_dict(costumes[costume_name])
+            costume["assistant_badge"] = badge
+            costumes[costume_name] = costume
+            character["costumes"] = costumes
+        else:
+            character["assistant_badge"] = badge
+        data["characters"][character_id] = character
+        if not self._write(data):
+            return {"ok": False, "error": "write_failed"}
+        return self.get_badge(character_id, costume_name)
+
+    def update_badge(
+        self,
+        character_id: str,
+        *,
+        costume_name: str = "",
+        scale: Any = 1.0,
+        offset_x: Any = 0.0,
+        offset_y: Any = 0.0,
+    ) -> Dict[str, Any]:
+        character_id = str(character_id or "").strip()
+        costume_name = str(costume_name or "").strip()
+        data = self._load()
+        if character_id not in data["characters"]:
+            return {"ok": False, "error": "not_found"}
+        character = _as_dict(data["characters"][character_id])
+        owner = character
+        if costume_name:
+            costumes = _as_dict(character.get("costumes"))
+            if costume_name not in costumes:
+                return {"ok": False, "error": "costume_not_found"}
+            owner = _as_dict(costumes[costume_name])
+        current = normalize_badge(owner.get("assistant_badge"))
+        if current is None:
+            return {"ok": False, "error": "badge_not_found"}
+        owner["assistant_badge"] = self.badges.record(
+            current["path"], scale, offset_x, offset_y
+        )
+        if costume_name:
+            costumes[costume_name] = owner
+            character["costumes"] = costumes
+        data["characters"][character_id] = character
+        if not self._write(data):
+            return {"ok": False, "error": "write_failed"}
+        return self.get_badge(character_id, costume_name)
+
+    def clear_badge(
+        self, character_id: str, *, costume_name: str = ""
+    ) -> Dict[str, Any]:
+        character_id = str(character_id or "").strip()
+        costume_name = str(costume_name or "").strip()
+        data = self._load()
+        if character_id not in data["characters"]:
+            return {"ok": False, "error": "not_found"}
+        character = _as_dict(data["characters"][character_id])
+        if costume_name:
+            costumes = _as_dict(character.get("costumes"))
+            if costume_name not in costumes:
+                return {"ok": False, "error": "costume_not_found"}
+            costume = _as_dict(costumes[costume_name])
+            costume.pop("assistant_badge", None)
+            costumes[costume_name] = costume
+            character["costumes"] = costumes
+        else:
+            character.pop("assistant_badge", None)
+        data["characters"][character_id] = character
+        if not self._write(data):
+            return {"ok": False, "error": "write_failed"}
+        return self.get_badge(character_id, costume_name)
+
+    def get_badge(
+        self, character_id: str, costume_name: str = ""
+    ) -> Dict[str, Any]:
+        character_id = str(character_id or "").strip()
+        costume_name = str(costume_name or "").strip()
+        data = self._load()
+        if character_id not in data["characters"]:
+            return {"ok": False, "error": "not_found"}
+        character = _as_dict(data["characters"][character_id])
+        costumes = _as_dict(character.get("costumes"))
+        if costume_name and costume_name not in costumes:
+            return {"ok": False, "error": "costume_not_found"}
+        costume_badge = normalize_badge(
+            _as_dict(costumes.get(costume_name)).get("assistant_badge")
+        )
+        character_badge = normalize_badge(character.get("assistant_badge"))
+        badge = costume_badge or character_badge
+        source = "costume" if costume_badge else "character" if character_badge else "none"
+        image_data_url = self.badges.image_data_url(badge["path"]) if badge else ""
+        if badge and not image_data_url:
+            badge = None
+            source = "none"
+        return {
+            "ok": True,
+            "data": {
+                "character_id": character_id,
+                "costume_name": costume_name,
+                "source": source,
+                "badge": badge,
+                "image_data_url": image_data_url,
+            },
+        }
+
+    def get_current_badge(self) -> Dict[str, Any]:
+        data = self._load()
+        character_id = str(data.get("active_id") or "").strip()
+        if not character_id or character_id not in data["characters"]:
+            return {
+                "ok": True,
+                "data": {
+                    "character_id": "",
+                    "costume_name": "",
+                    "source": "none",
+                    "badge": None,
+                    "image_data_url": "",
+                },
+            }
+        character = _as_dict(data["characters"][character_id])
+        costume_name = str(character.get("current_costume") or "").strip()
+        return self.get_badge(character_id, costume_name)

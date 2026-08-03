@@ -846,6 +846,27 @@ class PluginEditorDialog(QtWidgets.QDialog):
                 if not isinstance(setting_info, dict):
                     value = schema_field.get("default", value)
 
+            # 动态下拉：从角色库填充，避免手输角色名
+            choices_source = ""
+            if isinstance(setting_info, dict):
+                choices_source = str(
+                    setting_info.get("choices_source")
+                    or setting_info.get("source")
+                    or ""
+                ).strip().lower()
+            if not choices_source and schema_field:
+                choices_source = str(
+                    schema_field.get("choices_source") or schema_field.get("source") or ""
+                ).strip().lower()
+            if choices_source in {"characters", "character", "character_names"}:
+                setting_type = "choice"
+                dynamic_choices = self._character_name_choices()
+                if dynamic_choices:
+                    choices = dynamic_choices
+                current = str(value or "").strip()
+                if current and current not in choices:
+                    choices = [current] + list(choices)
+
             validation_error = self._validate_setting_default(
                 key, setting_type, value, choices
             )
@@ -963,6 +984,29 @@ class PluginEditorDialog(QtWidgets.QDialog):
         if ui_type in {"path", "file"}:
             return ui_type
         return fallback or "string"
+
+    def _character_name_choices(self):
+        """从角色库读取可选角色名，供插件配置下拉框使用。"""
+        names = []
+        try:
+            from modules.character_manager import character_manager
+
+            characters = character_manager.get_all_characters() or {}
+            for char in characters.values():
+                if not isinstance(char, dict):
+                    continue
+                name = str(char.get("name") or "").strip()
+                if name and name not in names:
+                    names.append(name)
+            active = character_manager.get_active_character()
+            if isinstance(active, dict):
+                active_name = str(active.get("name") or "").strip()
+                if active_name and active_name in names:
+                    names.remove(active_name)
+                    names.insert(0, active_name)
+        except Exception:
+            return []
+        return names
 
     def _create_path_item(self, layout, path_value, path_inputs):
         """创建路径列表项（输入框 + 选择按钮 + 删除按钮）"""
@@ -1378,7 +1422,172 @@ class PluginEditorDialog(QtWidgets.QDialog):
             self.config_fields[key] = ("choice", combo)
             widget = combo
 
+        elif setting_type in {"model_queue", "model_list"}:
+            widget = self._create_model_queue_widget(key, setting_info, value)
+
         return widget
+
+    def _create_model_queue_widget(self, key, setting_info, value):
+        """有序模型选择：从模型管理按用途筛选，手动加入执行链。"""
+        purpose = []
+        max_items = 0
+        if isinstance(setting_info, dict):
+            purpose = (
+                setting_info.get("purpose")
+                or setting_info.get("purposes")
+                or ["image_gen", "image_edit"]
+            )
+            max_items = max(0, int(setting_info.get("max_items") or 0))
+        try:
+            from modules.model_catalog import (
+                format_purposes_label,
+                list_model_options,
+                normalize_model_selection,
+                normalize_purposes,
+            )
+            from config import MODELS
+        except Exception:
+            format_purposes_label = None
+            list_model_options = None
+            normalize_model_selection = None
+            normalize_purposes = None
+            MODELS = {}
+
+        options = []
+        if callable(list_model_options):
+            try:
+                options = list_model_options(MODELS, purposes=purpose)
+            except Exception:
+                options = []
+        option_map = {
+            str(item.get("id")): str(item.get("label") or item.get("id"))
+            for item in options
+            if isinstance(item, dict) and item.get("id")
+        }
+
+        if callable(normalize_model_selection):
+            selected = normalize_model_selection(value, max_items=max_items)
+        else:
+            selected = []
+
+        root = QtWidgets.QWidget()
+        root_layout = QtWidgets.QVBoxLayout(root)
+        root_layout.setContentsMargins(0, 0, 0, 0)
+        root_layout.setSpacing(8)
+
+        if not option_map:
+            purpose_label = "声明用途"
+            if callable(format_purposes_label) and callable(normalize_purposes):
+                purpose_label = format_purposes_label(normalize_purposes(purpose))
+            empty = QtWidgets.QLabel(
+                f"还没有可选项。请先到「模型与路由」添加模型并勾选用途「{purpose_label}」。"
+            )
+            empty.setWordWrap(True)
+            empty.setStyleSheet("color:#B45309;")
+            root_layout.addWidget(empty)
+
+        body = QtWidgets.QHBoxLayout()
+        body.setSpacing(8)
+
+        left_box = QtWidgets.QVBoxLayout()
+        left_box.addWidget(QtWidgets.QLabel("可选模型"))
+        list_pool = QtWidgets.QListWidget()
+        list_pool.setMinimumHeight(160)
+        left_box.addWidget(list_pool)
+        body.addLayout(left_box, 1)
+
+        mid = QtWidgets.QVBoxLayout()
+        mid.addStretch()
+        btn_add = QtWidgets.QPushButton("->")
+        btn_rm = QtWidgets.QPushButton("<-")
+        mid.addWidget(btn_add)
+        mid.addWidget(btn_rm)
+        mid.addStretch()
+        body.addLayout(mid)
+
+        right_box = QtWidgets.QVBoxLayout()
+        right_box.addWidget(QtWidgets.QLabel("执行链（上优先）"))
+        list_chain = QtWidgets.QListWidget()
+        list_chain.setMinimumHeight(160)
+        right_box.addWidget(list_chain)
+        sort_row = QtWidgets.QHBoxLayout()
+        btn_up = QtWidgets.QPushButton("上移")
+        btn_down = QtWidgets.QPushButton("下移")
+        sort_row.addWidget(btn_up)
+        sort_row.addWidget(btn_down)
+        right_box.addLayout(sort_row)
+        body.addLayout(right_box, 1)
+        root_layout.addLayout(body)
+
+        state = {"selected": list(selected)}
+
+        def _label_for(model_id: str) -> str:
+            return option_map.get(model_id, model_id)
+
+        def _refresh():
+            list_chain.clear()
+            for mid in state["selected"]:
+                item = QtWidgets.QListWidgetItem(_label_for(mid))
+                item.setData(QtCore.Qt.ItemDataRole.UserRole, mid)
+                list_chain.addItem(item)
+            list_pool.clear()
+            for mid, label in option_map.items():
+                if mid in state["selected"]:
+                    continue
+                item = QtWidgets.QListWidgetItem(label)
+                item.setData(QtCore.Qt.ItemDataRole.UserRole, mid)
+                list_pool.addItem(item)
+
+        def _add():
+            item = list_pool.currentItem()
+            if not item:
+                return
+            if max_items and len(state["selected"]) >= max_items:
+                return
+            mid = item.data(QtCore.Qt.ItemDataRole.UserRole)
+            if mid and mid not in state["selected"]:
+                state["selected"].append(mid)
+                _refresh()
+
+        def _rm():
+            row = list_chain.currentRow()
+            if row < 0 or row >= len(state["selected"]):
+                return
+            state["selected"].pop(row)
+            _refresh()
+
+        def _up():
+            row = list_chain.currentRow()
+            if row <= 0:
+                return
+            state["selected"][row - 1], state["selected"][row] = (
+                state["selected"][row],
+                state["selected"][row - 1],
+            )
+            _refresh()
+            list_chain.setCurrentRow(row - 1)
+
+        def _down():
+            row = list_chain.currentRow()
+            if row < 0 or row >= len(state["selected"]) - 1:
+                return
+            state["selected"][row + 1], state["selected"][row] = (
+                state["selected"][row],
+                state["selected"][row + 1],
+            )
+            _refresh()
+            list_chain.setCurrentRow(row + 1)
+
+        btn_add.clicked.connect(_add)
+        btn_rm.clicked.connect(_rm)
+        btn_up.clicked.connect(_up)
+        btn_down.clicked.connect(_down)
+        list_pool.itemDoubleClicked.connect(lambda *_: _add())
+        list_chain.itemDoubleClicked.connect(lambda *_: _rm())
+        _refresh()
+
+        self.config_fields[key] = ("model_queue", state)
+        return root
 
     def _select_directory(self, line_edit):
         """选择目录对话框"""
@@ -1558,6 +1767,16 @@ class PluginEditorDialog(QtWidgets.QDialog):
                     if error:
                         QtWidgets.QMessageBox.warning(self, "验证失败", error)
                         return
+                    _store_setting_value(key, value)
+                elif field_type == "model_queue":
+                    # widget is a state dict holding selected model ids
+                    value = []
+                    if isinstance(widget, dict):
+                        value = [
+                            str(x).strip()
+                            for x in (widget.get("selected") or [])
+                            if str(x).strip()
+                        ]
                     _store_setting_value(key, value)
                 elif field_type == "secret":
                     value = widget.text().strip()

@@ -1,4 +1,5 @@
 import importlib.util
+import json
 import os
 import sys
 import asyncio
@@ -6,6 +7,7 @@ import time
 from pathlib import Path
 
 from integrations.chat_gateway.napcat import NapCatOneBotAdapter
+from modules.plugin_model_gateway import PluginModelCallResult
 
 
 PLUGIN_DIR = Path("plugins/qq_music")
@@ -55,6 +57,49 @@ def test_qq_music_request_timeout_keeps_margin_under_tool_timeout():
     )
 
     assert timeout == 10
+
+
+def test_qq_music_config_selects_main_models():
+    config = json.loads((PLUGIN_DIR / "config.json").read_text(encoding="utf-8"))
+    setting = config["settings"]["model_queue"]
+
+    assert setting["type"] == "model_queue"
+    assert setting["purpose"] == ["chat"]
+
+
+def test_qq_music_comment_uses_selected_main_model(monkeypatch):
+    Plugin = load_plugin_class()
+    plugin = Plugin()
+    plugin.settings = {"model_queue": {"default": ["chat-a"]}}
+
+    class FakeGateway:
+        def __init__(self):
+            self.calls = []
+
+        async def invoke_text(self, messages, **kwargs):
+            self.calls.append((messages, kwargs))
+            return PluginModelCallResult(
+                ok=True,
+                text="这首歌听起来很克制。",
+                model_id="chat-a",
+            )
+
+    gateway = FakeGateway()
+    monkeypatch.setattr(plugin, "_get_model_gateway", lambda: gateway)
+
+    result = asyncio.run(
+        plugin._generate_song_comment_with_llm(
+            title="春日影",
+            artist="MyGO!!!!!",
+            provider="qqmusic",
+            summary="乐队歌曲",
+            lyric_excerpt="摘录",
+            timeout_sec=10,
+        )
+    )
+
+    assert result == "这首歌听起来很克制。"
+    assert gateway.calls[0][1]["selected_ids"] == ["chat-a"]
 
 
 def test_qq_music_search_attempts_run_concurrently():

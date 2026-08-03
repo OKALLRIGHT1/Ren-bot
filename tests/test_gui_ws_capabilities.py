@@ -112,7 +112,9 @@ def test_emit_capability_uses_event_loop_scheduler():
         assert ready.wait(2.0)
         # Call from outside the loop thread so emit_capability must use
         # run_coroutine_threadsafe rather than touching websockets directly.
-        server.emit_capability("live2d.protocol.v1", {"type": "live2d_protocol"})
+        assert server.emit_capability(
+            "live2d.protocol.v1", {"type": "live2d_protocol"}
+        ) is True
         for _ in range(50):
             if client.sent:
                 break
@@ -122,3 +124,36 @@ def test_emit_capability_uses_event_loop_scheduler():
         loop.call_soon_threadsafe(loop.stop)
         thread.join(timeout=2.0)
         loop.close()
+
+
+def test_emit_capability_reports_no_delivery_without_server_or_client():
+    server = GuiWebSocketServer(access_token="secret")
+    assert (
+        server.emit_capability(
+            "live2d.protocol.v1", {"type": "live2d_protocol"}
+        )
+        is False
+    )
+
+    server._loop = asyncio.new_event_loop()
+    server._server = object()
+    try:
+        assert (
+            server.emit_capability(
+                "live2d.protocol.v1", {"type": "live2d_protocol"}
+            )
+            is False
+        )
+    finally:
+        server._loop.close()
+
+
+def test_client_capability_helpers():
+    server = GuiWebSocketServer(access_token="secret")
+    client = FakeWs()
+    server._clients.add(client)
+    server._client_capabilities[client] = {"gui.v1", "live2d.protocol.v1"}
+    assert server.client_has_capability(client, "live2d.protocol.v1") is True
+    assert server.client_has_capability(client, "activity.config.v1") is False
+    assert server.has_capable_client("live2d.protocol.v1") is True
+    assert server.has_capable_client("activity.config.v1") is False

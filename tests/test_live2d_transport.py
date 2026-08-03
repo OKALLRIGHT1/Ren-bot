@@ -99,3 +99,22 @@ async def test_legacy_transport_writes_command_id_on_payload(monkeypatch):
     payload = __import__("json").loads(sent[0])
     assert payload["command_id"] == "cmd-9"
     assert payload["msg"] == 13200
+
+
+@pytest.mark.asyncio
+async def test_gui_transport_rejects_silent_no_delivery():
+    from modules.live2d_transport import GuiWebSocketTransport
+
+    class OfflineGuiServer:
+        def emit_capability(self, capability, payload):
+            del capability, payload
+            return False
+
+    transport = GuiWebSocketTransport(OfflineGuiServer())
+    with pytest.raises(RuntimeError, match="no capable GUI client"):
+        await transport.deliver(
+            Live2DDelivery(
+                command_id="cmd-offline",
+                message={"msg": 13200, "msgId": 2, "data": {"mtn": "idle"}},
+            )
+        )

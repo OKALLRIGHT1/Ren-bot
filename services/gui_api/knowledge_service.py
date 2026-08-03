@@ -162,6 +162,30 @@ class KnowledgeGuiService:
         except Exception as exc:
             return {"ok": False, "error": str(exc)}
 
+    @staticmethod
+    def _run_maybe_async(func, *args, **kwargs):
+        """Run sync/async plugin helpers without nesting asyncio.run()."""
+        import asyncio
+        import inspect
+
+        result = func(*args, **kwargs)
+        if not inspect.isawaitable(result):
+            return result
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return asyncio.run(result)
+
+        # Already inside GUI/aiohttp loop: execute coroutine on a worker thread
+        # with its own event loop so we never call asyncio.run() in-loop.
+        import concurrent.futures
+
+        def _runner():
+            return asyncio.run(result)
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            return pool.submit(_runner).result()
+
     def learn_configured_dirs(self) -> Dict[str, Any]:
         manager = self.plugin_manager
         plugin = None
@@ -175,12 +199,7 @@ class KnowledgeGuiService:
         if not callable(ingest):
             return {"ok": False, "error": "ingest_unavailable"}
         try:
-            import asyncio
-
-            if asyncio.iscoroutinefunction(ingest):
-                result = asyncio.run(ingest({"brain": brain}))
-            else:
-                result = ingest({"brain": brain})
+            result = self._run_maybe_async(ingest, {"brain": brain})
             return {"ok": True, "data": {"result": str(result)}}
         except Exception as exc:
             return {"ok": False, "error": str(exc)}

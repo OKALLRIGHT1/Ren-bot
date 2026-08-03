@@ -34,8 +34,11 @@ CALLER_TASK_REGISTRY: dict[str, str] = {
     "memory_rerank": "summary",
     "memory_selector": "gatekeeper",
     "agently_mail_intent": "gatekeeper",
+    "agently_mail_notify": "gatekeeper",
     "screen_classify": "screen_classify",
     "meme_pack_selector": "default",
+    "search_web_model": "web_search",
+    "qq_music_comment": "default",
     "chat_record_knowledge_import": "default",
     "chat_record_expression_import": "default",
 }
@@ -73,8 +76,11 @@ CALLER_DESCRIPTIONS: dict[str, str] = {
     "memory_rerank": "长期记忆候选重排。",
     "memory_selector": "记忆是否相关的轻量筛选。",
     "agently_mail_intent": "Agent Mail 自然语言意图解析。",
+    "agently_mail_notify": "Agent Mail 新邮件通知的人设摘要生成。",
     "screen_classify": "屏幕内容分类。",
     "meme_pack_selector": "表情包插件的候选选择。",
+    "search_web_model": "联网搜索插件使用主程序模型执行检索。",
+    "qq_music_comment": "QQ 点歌成功后的简短角色化点评。",
     "chat_record_knowledge_import": "聊天记录导入为知识库时的整理。",
     "chat_record_expression_import": "聊天记录导入为表达库时的整理。",
 }

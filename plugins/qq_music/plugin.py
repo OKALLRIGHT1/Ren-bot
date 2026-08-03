@@ -9,7 +9,8 @@ from urllib import error, parse, request
 
 from config import DEFAULT_PERSONA
 from core.logger import get_logger
-from modules.llm import chat_with_ai
+from modules.model_catalog import normalize_model_selection
+from modules.plugin_model_gateway import get_plugin_model_gateway
 from plugins.plugin_utils import handle_plugin_errors
 
 logger = get_logger()
@@ -285,10 +286,14 @@ class Plugin:
                 return value
         return ""
 
-    def _setting_text(self, settings: Dict[str, Any], key: str, default: str) -> str:
+    def _setting_value(self, settings: Dict[str, Any], key: str, default: Any) -> Any:
         value = settings.get(key, default)
         if isinstance(value, dict):
-            value = value.get("value", value.get("default", default))
+            return value.get("value", value.get("default", default))
+        return default if value is None else value
+
+    def _setting_text(self, settings: Dict[str, Any], key: str, default: str) -> str:
+        value = self._setting_value(settings, key, default)
         text = str(value or "").strip()
         return text or default
 
@@ -607,8 +612,6 @@ class Plugin:
         lyric_excerpt: str,
         timeout_sec: int,
     ) -> str:
-        import asyncio
-
         system_prompt = f"""{self._current_persona_prompt()}
 
 你刚刚为用户点了一首歌。请根据提供的歌曲资料，用当前角色口吻说一句很短的听感点评。
@@ -627,18 +630,23 @@ class Plugin:
             f"歌词摘录：{lyric_excerpt or '无'}\n"
             "现在请给一句自然、克制、准确的评价。"
         )
-        reply = await asyncio.to_thread(
-            chat_with_ai,
+        result = await self._get_model_gateway().invoke_text(
             [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
             ],
-            "default",
-            "qq_music_comment",
-            "",
-            float(timeout_sec),
+            selected_ids=normalize_model_selection(
+                self._setting_value(self.settings, "model_queue", [])
+            ),
+            required_purpose="chat",
+            task_type="default",
+            caller="qq_music_comment",
+            timeout_sec=float(timeout_sec),
         )
-        return self._clean_comment_text(reply)
+        return self._clean_comment_text(result.text) if result.ok else ""
+
+    def _get_model_gateway(self):
+        return get_plugin_model_gateway()
 
     def _current_persona_prompt(self) -> str:
         prompt = DEFAULT_PERSONA

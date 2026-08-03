@@ -7,52 +7,35 @@
         "/画图",
         "/画画"
     ],
-    "description": "仅在 QQ 中用固定斜杠命令触发生图，支持 images 接口和 chat/completions 生图接口，并把结果回发到 QQ。",
+    "description": "仅在 QQ 中用固定斜杠命令触发生图。模型唯一来自「模型与路由」：先给模型勾选画图用途，再在任务路由「画图」里手动选择要用的模型与顺序（不会自动全选）。",
     "example_arg": "/画图 绘制一个丰川祥子在雨后的街道",
     "timeout_sec": 300,
-    "version": "1.1.0",
+    "version": "1.5.0",
     "access_control": {
         "allow_local": false,
         "allow_remote_qq": true,
         "allow_qq_owner": true,
         "allow_qq_others": false,
-        "allow_group_without_at": false
+        "allow_group_without_at": true
     },
     "settings": {
-        "base_url": {
-            "type": "text",
-            "label": "API Base URL",
-            "description": "接口根地址，例如 https://wzw.pp.ua",
-            "default": "http://20.214.141.16:3000"
-        },
-        "endpoint_path": {
-            "type": "text",
-            "label": "接口路径",
-            "description": "按所选模式填写：文生图常见是 /v1/images/generations，图生图编辑常见是 /v1/images/edits，chat 模式常见是 /v1/chat/completions。",
-            "default": "/v1/images/generations"
-        },
-        "edit_endpoint_path": {
-            "type": "text",
-            "label": "图生图接口路径",
-            "description": "当 QQ 消息里带图或引用图时自动走这里，常见填写 /v1/images/edits。",
-            "default": "/v1/images/edits"
-        },
-        "api_key": {
-            "type": "secret",
-            "label": "API Key",
-            "description": "建议在 GUI 里填写，或使用环境变量 GROK_API_KEY。",
-            "default": ""
-        },
-        "model_name": {
-            "type": "text",
-            "label": "模型名",
-            "description": "按你的服务要求填写，例如 grok-2-image。",
-            "default": "gpt-image-2"
+        "model_queue": {
+            "type": "model_queue",
+            "label": "画图模型（按顺序尝试）",
+            "description": "从模型管理里筛选「画图/图生图」用途的模型，手动加入右侧执行链。上方优先，失败才试下面的。连接信息仍来自模型与路由。",
+            "purpose": [
+                "image_gen",
+                "image_edit"
+            ],
+            "default": [
+                "gpt-image-2",
+                "grok-imagine-image"
+            ]
         },
         "size_value": {
             "type": "text",
             "label": "默认尺寸",
-            "description": "例如 1024x1024。",
+            "description": "例如 1024x1024。模型侧也可单独覆盖。",
             "default": "1024x1024"
         },
         "quality": {
@@ -81,21 +64,31 @@
         },
         "request_timeout_sec": {
             "type": "number",
-            "label": "璇锋眰瓒呮椂(绉?)",
-            "description": "QQ 鐢熷浘鎻掍欢绛夊緟鍚庣杩斿洖鐨?HTTP 瓒呮椂銆傚鏋滄湇鍔″櫒宸茬粡鐢熸垚鎴愬姛浣嗚繖杈圭獊鐒舵姤瓒呮椂锛屽彲浠ユ妸杩欓噷璋冨ぇ鍒?180 鎴?240銆?",
-            "default": 180
+            "label": "请求超时(秒)",
+            "description": "单次生图请求 HTTP 超时。慢速上游可调到 300 或 360；超时后会试队列里下一个模型。",
+            "default": 300,
+            "min": 30,
+            "max": 600
         },
         "caption_template": {
             "type": "text",
             "label": "回发说明模板",
-            "description": "{prompt} 会替换成这次的绘图提示词。",
+            "description": "{prompt} 会替换成这次的绘图提示词；{provider} 会替换成实际成功的模型 ID。",
             "default": "已按你的要求画好了：{prompt}"
         },
         "image_to_image_enabled": {
             "type": "bool",
             "label": "启用图生图",
-            "description": "当 QQ 消息里同时带图片时，把第一张图作为输入图一起传给后端。",
+            "description": "当 QQ 消息里同时带图片时，把你发的图片全部作为参考图一起传给后端（可多张）。",
             "default": true
+        },
+        "max_input_images": {
+            "type": "number",
+            "label": "最多参考图数量",
+            "description": "消息里带了几张就传几张，但不会超过这个上限。",
+            "default": 8,
+            "min": 1,
+            "max": 16
         },
         "input_image_field": {
             "type": "text",
@@ -118,7 +111,7 @@
         "debug_logging": {
             "type": "bool",
             "label": "调试日志",
-            "description": "开启后会在日志里记录是否识别到附件图/引用图、请求地址以及返回摘要，方便排查图生图失败。",
+            "description": "开启后会在日志里记录模型队列、请求地址以及返回摘要。",
             "default": false
         }
     }

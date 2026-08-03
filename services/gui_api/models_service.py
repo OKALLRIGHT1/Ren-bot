@@ -8,6 +8,25 @@ from typing import Any, Dict, List, Optional
 from modules.model_catalog import MODEL_PURPOSE_OPTIONS, get_model_purposes, normalize_purposes
 
 
+ROUTE_TASK_OPTIONS = (
+    ("default", "默认回复", "主回复与未单独配置任务的兜底链路", ("chat",), True),
+    ("reply_polish", "回复润色", "回复风格、情绪标签与自然化处理", ("chat",), True),
+    ("tool_reasoning", "工具推理", "工具选择、参数规划与多步任务", ("tool_reasoning", "chat"), True),
+    ("summary", "总结压缩", "长对话、工具结果和记忆摘要", ("summary", "chat"), True),
+    ("gatekeeper", "能力判断", "判断是否需要调用插件或工具", ("chat", "tool_reasoning"), True),
+    ("translation", "翻译", "语言转换与本地化", ("translation", "chat"), True),
+    ("screen_classify", "屏幕分类", "前台应用和画面内容分类", ("chat", "vision"), True),
+    ("sensor_vision_talk", "屏幕视觉回复", "根据截图生成屏幕吐槽", ("vision", "chat"), True),
+    ("codex", "代码助手", "Codex 与工作区任务", ("code", "chat"), True),
+    ("web_search", "联网搜索", "搜索插件的检索与整理", ("web_search",), False),
+    ("image_gen", "文生图", "根据文字生成图片", ("image_gen", "image_edit"), False),
+    ("image_edit", "图像编辑", "图生图和局部修改", ("image_edit", "image_gen"), False),
+    # NOTE: embedding is NOT an LLM_ROUTER task. Memory/knowledge use an ordered
+    # catalog queue in runtime_settings.embedding_model_ids (fallback:
+    # embedding_model_id / EMBEDDING_CONFIG).
+)
+
+
 def _load_json(path: Path, fallback: Dict[str, Any]) -> Dict[str, Any]:
     if not path.exists():
         return dict(fallback)
@@ -132,6 +151,16 @@ class ModelsCatalogService:
             "purpose_options": [
                 {"id": purpose_id, "label": label}
                 for purpose_id, label in MODEL_PURPOSE_OPTIONS
+            ],
+            "route_tasks": [
+                {
+                    "id": task_id,
+                    "label": label,
+                    "description": description,
+                    "purposes": list(purposes),
+                    "allow_untagged": allow_untagged,
+                }
+                for task_id, label, description, purposes, allow_untagged in ROUTE_TASK_OPTIONS
             ],
         }
 

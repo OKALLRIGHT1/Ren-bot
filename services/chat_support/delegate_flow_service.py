@@ -9,10 +9,11 @@ from services.chat_support.tool_flow_service import run_tool_command_loop
 
 
 DELEGATE_MODE_NONE = "none"
-DELEGATE_MODE_SEARCH_FOLLOWUP = "search_followup"
+DELEGATE_MODE_SEARCH = "search"
 DELEGATE_MODE_WORKSPACE_READ = "workspace_read"
 DELEGATE_MODE_BACKGROUND = "background"
 DELEGATE_MODE_ROUND = "round"
+SEARCH_NOT_STARTED_MESSAGE = "联网搜索未能启动，请检查搜索插件是否启用及当前来源权限。"
 
 
 @dataclass(frozen=True)
@@ -76,10 +77,8 @@ def choose_delegate_execution(
     triggers = _non_empty_triggers(delegate_triggers)
     if not triggers:
         return DelegateExecutionDecision()
-    if str(followup_search_query or "").strip() and is_search_delegate(
-        triggers, str(user_text or "")
-    ):
-        return DelegateExecutionDecision(mode=DELEGATE_MODE_SEARCH_FOLLOWUP)
+    if is_search_delegate(triggers, str(user_text or "")):
+        return DelegateExecutionDecision(mode=DELEGATE_MODE_SEARCH)
     if _is_workspace_read_reason(route_reason):
         return DelegateExecutionDecision(mode=DELEGATE_MODE_WORKSPACE_READ)
     background_delegate = should_use_background_delegate(
@@ -240,15 +239,20 @@ async def run_delegate_flow(
     followup_search_query: str,
     logger: Any = None,
 ) -> DelegateFlowResult:
-    if decision.mode == DELEGATE_MODE_SEARCH_FOLLOWUP:
+    if decision.mode == DELEGATE_MODE_SEARCH:
         if run_search_delegate_query is None:
-            return DelegateFlowResult(mode=DELEGATE_MODE_SEARCH_FOLLOWUP)
+            return DelegateFlowResult(mode=DELEGATE_MODE_SEARCH)
+        query = str(followup_search_query or "").strip() or str(user_text or "").strip()
         triggered, clean, results, used = await run_search_delegate_query(
-            query=str(followup_search_query or "").strip(),
+            query=query,
             ctx=ctx,
         )
+        if not triggered and not results:
+            triggered = True
+            results = [SEARCH_NOT_STARTED_MESSAGE]
+            used = ["search_web"]
         return DelegateFlowResult(
-            mode=DELEGATE_MODE_SEARCH_FOLLOWUP,
+            mode=DELEGATE_MODE_SEARCH,
             triggered=bool(triggered),
             clean=str(clean or ""),
             results=list(results or []),

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import base64
 import json
+from io import BytesIO
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional
 
@@ -18,6 +20,70 @@ DEFAULT_CONFIG = {
     "default_icon_h": 32,
     "emotion_icons": {},
 }
+
+
+def image_bytes_to_icon_payload(
+    image_bytes: bytes,
+    *,
+    size: int = 32,
+    threshold: int = 190,
+) -> Dict[str, Any]:
+    """Convert an image into status-screen icon blobs (no Qt dependency)."""
+    try:
+        from PIL import Image
+    except Exception as exc:  # pragma: no cover - environment dependent
+        raise RuntimeError(f"pillow_unavailable: {exc}") from exc
+
+    with Image.open(BytesIO(image_bytes)) as img:
+        rgba = img.convert("RGBA")
+    target = max(8, min(128, int(size or 32)))
+    # Keep aspect ratio, center on white canvas (matches old Qt behavior).
+    fitted = rgba.copy()
+    fitted.thumbnail((target, target), Image.Resampling.NEAREST)
+    canvas = Image.new("RGBA", (target, target), (255, 255, 255, 255))
+    offset = ((target - fitted.width) // 2, (target - fitted.height) // 2)
+    canvas.paste(fitted, offset, fitted)
+
+    bits: list[str] = []
+    byte_val = 0
+    bit_count = 0
+    for y in range(target):
+        for x in range(target):
+            r, g, b, _a = canvas.getpixel((x, y))
+            gray = (int(r) + int(g) + int(b)) // 3
+            bit = 1 if gray < threshold else 0
+            byte_val = (byte_val << 1) | bit
+            bit_count += 1
+            if bit_count == 8:
+                bits.append(f"{byte_val:02x}")
+                byte_val = 0
+                bit_count = 0
+        if bit_count:
+            byte_val <<= 8 - bit_count
+            bits.append(f"{byte_val:02x}")
+            byte_val = 0
+            bit_count = 0
+
+    rgb565: list[str] = []
+    for y in range(target):
+        for x in range(target):
+            r, g, b, _a = canvas.getpixel((x, y))
+            value = ((int(r) >> 3) << 11) | ((int(g) >> 2) << 5) | (int(b) >> 3)
+            rgb565.append(f"{value:04x}")
+
+    # Small preview for control-center cards.
+    preview = canvas.copy()
+    preview.thumbnail((96, 96), Image.Resampling.NEAREST)
+    buf = BytesIO()
+    preview.convert("RGBA").save(buf, format="PNG")
+    preview_url = "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode("ascii")
+    return {
+        "icon_bits": "".join(bits),
+        "icon_rgb565": "".join(rgb565),
+        "icon_w": target,
+        "icon_h": target,
+        "preview_data_url": preview_url,
+    }
 
 
 class StatusScreenGuiService:
@@ -111,6 +177,41 @@ class StatusScreenGuiService:
         except Exception as exc:
             return {"ok": False, "error": str(exc) or "save_failed"}
         return self.get_config()
+
+    def convert_image(
+        self,
+        *,
+        path: str = "",
+        image_base64: str = "",
+        size: int = 32,
+    ) -> Dict[str, Any]:
+        raw: bytes | None = None
+        source_path = str(path or "").strip()
+        if source_path:
+            file_path = Path(source_path).expanduser()
+            if not file_path.is_file():
+                return {"ok": False, "error": "image_not_found"}
+            try:
+                raw = file_path.read_bytes()
+            except Exception as exc:
+                return {"ok": False, "error": str(exc) or "image_read_failed"}
+        elif image_base64:
+            text = str(image_base64 or "").strip()
+            if "," in text and text.lower().startswith("data:"):
+                text = text.split(",", 1)[1]
+            try:
+                raw = base64.b64decode(text)
+            except Exception:
+                return {"ok": False, "error": "invalid_image_base64"}
+        else:
+            return {"ok": False, "error": "empty_image"}
+        if not raw:
+            return {"ok": False, "error": "empty_image"}
+        try:
+            payload = image_bytes_to_icon_payload(raw, size=size)
+        except Exception as exc:
+            return {"ok": False, "error": str(exc) or "convert_failed"}
+        return {"ok": True, "data": payload}
 
     def test_publish(self, payload: Dict[str, Any] | None = None) -> Dict[str, Any]:
         body = _as_dict(payload)

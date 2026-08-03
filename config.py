@@ -155,7 +155,8 @@ MQTT_DISPLAY_TOPIC = os.getenv("MQTT_DISPLAY_TOPIC", "suzu/display/status")
 # "tk"：使用 Tk 版 GUI（modules/gui.py）
 # "qt"：使用 Qt 版 GUI（modules/qt_gui.py，需要 pip install PySide6）
 # "auto"：优先 Qt，失败自动回退 Tk
-GUI_BACKEND = "auto"
+# "headless"：不创建桌面 GUI，由外部控制中心接管
+GUI_BACKEND = os.getenv("GUI_BACKEND", "auto").strip().lower() or "auto"
 START_MINIMIZED_TO_TRAY = get_env_bool("START_MINIMIZED_TO_TRAY", "0")
 GUI_WS_HOST = os.getenv("GUI_WS_HOST", "127.0.0.1")
 GUI_WS_PORT = get_env_int("GUI_WS_PORT", 8096, 1, 65535)
@@ -253,8 +254,14 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 # ==================== 语音监听与唤醒配置 ====================
 VOICE_SENSOR_ENABLED = False
+# 全局兜底唤醒词；运行时还可叠加「当前角色名/别名」与自定义词（见设置 → 语音输入）
 WAKE_KEYWORDS = ["五十铃", "怜", "Suzu", "助手", "500"]
 PLAY_WAKE_SOUND = True
+# 默认需要唤醒词；可在 runtime_settings / 设置页关闭（免唤醒直听）
+ASR_REQUIRE_WAKE_WORD = True
+ASR_USE_CHARACTER_WAKE_WORDS = True
+ASR_INCLUDE_GLOBAL_WAKE_WORDS = True
+ASR_MIN_CHARS = 2
 
 # 强制使用绝对路径绑定模型
 SHERPA_MODEL_CONFIG = {
@@ -302,7 +309,7 @@ SCREEN_GLOBAL_COOLDOWN = 180  # 任何主动发言至少间隔 3 分钟
 
 # 久坐提醒配置
 SEDENTARY_REMINDER_MINUTES = 60  # 久坐提醒间隔（分钟）
-ACTIVITY_AGENT_SEDENTARY_BREAK_MINUTES = 5  # 连续休息达到该分钟数后重置久坐窗口
+SEDENTARY_BREAK_MINUTES = 5  # 连续休息达到该分钟数后重置久坐窗口
 SEDENTARY_REMINDER_COOLDOWN_MINUTES = 60  # 久坐提醒冷却（分钟）
 SEDENTARY_POPUP_ENABLED = True  # 是否弹出久坐确认窗口
 SEDENTARY_POPUP_TITLE = "久坐提醒"
@@ -318,12 +325,14 @@ SCREEN_ACTIVITY_MAX_ITEMS = 200  # 活动片段最大条数
 # 窗口分类关键词映射
 # 格式： "类别": ["关键词1", "关键词2"...]
 WINDOW_CATEGORIES = {
-    "coding": ["Visual Studio", "PyCharm", "Vscode", "Sublime", "Cursor", ".py"],
-    "gaming": ["Genshin", "StarRail", "Minecraft", "Steam", "崩坏", "原神", "终末地"],
+    # Prefer app-process matching in ScreenAppRegistry base rules.
+    # Keep title keywords conservative to avoid webpage false positives.
+    "coding": ["Visual Studio Code", "Visual Studio", "PyCharm", "Sublime Text", "IntelliJ"],
+    "gaming": ["Genshin", "StarRail", "Minecraft", "崩坏", "原神", "终末地"],
     "video": ["Bilibili", "YouTube", "PotPlayer", "VLC", "爱奇艺"],
-    "social": ["WeChat", "QQ", "Discord", "Telegram", "钉钉"],
-    "work": ["Word", "Excel", "PowerPoint", "Feishu", "飞书"],
-    "browser": ["Chrome", "Edge", "Firefox"],
+    "social": ["WeChat", "微信", "Discord", "Telegram", "钉钉"],
+    "work": ["Microsoft Word", "Microsoft Excel", "Microsoft PowerPoint", "Feishu", "飞书"],
+    "browser": ["Google Chrome", "Microsoft Edge", "Mozilla Firefox"],
 }
 # 这些标题必须与你在 GUI 代码里设置的 setWindowTitle 一致
 SELF_WINDOW_TITLES = [
@@ -331,7 +340,7 @@ SELF_WINDOW_TITLES = [
     "系统设置中心",  # 设置界面
     "记忆与档案管理中心",  # 记忆编辑器
     "插件管理",  # 插件界面
-    "L2D"  # 悬浮球的文字模式
+    "L2D",  # 悬浮球的文字模式
     "🧠 记忆与档案管理中心",
 ]
 
@@ -466,6 +475,8 @@ LLM_ROUTER = {
     "tool_reasoning": ["gemini-3-flash", "or-dp"],
     # 记忆总结场景
     "summary": ["glm-4-flash"],
+    # 联网搜索：只应选择 purposes 包含 web_search 的模型
+    "web_search": [],
     # ===>看门人路由，用于判断是否需要回复 <===
     "gatekeeper": ["glm-4-flash", "gemini-3-flash"],
     "translation": ["glm-4-flash", "gemini-3-flash"],
@@ -473,18 +484,24 @@ LLM_ROUTER = {
     "sensor_vision_talk": ["glm-4-flash", "gemini-3-flash"],
     # 代码助手专用链路（优先走专用 API）
     "codex": CODEX_ROUTE_CHAIN,
+    # 生图 / 图生图：填模型 ID 队列；插件会优先只挑 purposes 含画图/图生图 的模型
+    "image_gen": [],
+    "image_edit": [],
 }
 
 SENSOR_VISION_MODEL = "GLM-4V-Flash"
 
 VISION_MODEL_KEY = "GLM-4V-Flash"
-# ==================== 向量数据库配置 ====================
+# ==================== 向量数据库兼容配置 ====================
+# 未在运行时设置中选择 embedding_model_id 时，继续使用这组 EMBEDDING_* 配置。
 EMBEDDING_CONFIG = {
+    "enabled": get_env_bool("EMBEDDING_ENABLED", "1"),
+    "provider": os.getenv("EMBEDDING_PROVIDER", "ollama"),
     "api_url": os.getenv("EMBEDDING_API_URL", "http://127.0.0.1:11434/v1/embeddings"),
     "api_key": os.getenv("EMBEDDING_API_KEY", "ollama"),
     "model_name": os.getenv("EMBEDDING_MODEL_NAME", "bge-m3"),
-    "timeout": int(os.getenv("EMBEDDING_TIMEOUT", "60")),
-    "max_retries": int(os.getenv("EMBEDDING_MAX_RETRIES", "1")),
+    "timeout": int(os.getenv("EMBEDDING_TIMEOUT", "12")),
+    "expected_dimension": int(os.getenv("EMBEDDING_EXPECTED_DIMENSION", "1024")),
 }
 
 # ==================== 记忆系统配置 ====================
@@ -492,6 +509,30 @@ MEMORY_DB_PATH = "./memory_db"  # 记忆数据库路径
 
 # 记忆系统基础设置
 MEMORY_SETTINGS = {
+    # Memory Core 2.0. These are startup settings; restart after changing them.
+    "memory_core_enabled": get_env_bool("MEMORY_CORE_ENABLED", "1"),
+    "memory_core_profile_max_items": int(
+        os.getenv("MEMORY_CORE_PROFILE_MAX_ITEMS", "6")
+    ),
+    "memory_core_candidate_limit": int(
+        os.getenv("MEMORY_CORE_CANDIDATE_LIMIT", "12")
+    ),
+    "memory_core_final_limit": int(os.getenv("MEMORY_CORE_FINAL_LIMIT", "3")),
+    "memory_core_context_max_chars": int(
+        os.getenv("MEMORY_CORE_CONTEXT_MAX_CHARS", "1200")
+    ),
+    "memory_core_impression_window": int(
+        os.getenv("MEMORY_CORE_IMPRESSION_WINDOW", "8")
+    ),
+    "memory_core_profile_learning_enabled": get_env_bool(
+        "MEMORY_CORE_PROFILE_LEARNING_ENABLED", "1"
+    ),
+    "memory_core_expression_learning_enabled": get_env_bool(
+        "MEMORY_CORE_EXPRESSION_LEARNING_ENABLED", "1"
+    ),
+    "memory_core_learning_batch_messages": int(
+        os.getenv("MEMORY_CORE_LEARNING_BATCH_MESSAGES", "10")
+    ),
     # 短期记忆配置
     "max_short_term": 12,  # 短期记忆窗口大小（对话轮数）
     # 长期记忆配置
@@ -627,7 +668,7 @@ BUBBLE_SYNC_WITH_TTS = get_env_bool("BUBBLE_SYNC_WITH_TTS", "1")  # 气泡是否
 HOTKEY_TOGGLE_GUI = "<ctrl>+<alt>+space"
 HOTKEY_TOGGLE_WAKE = "<ctrl>+<alt>+w"
 
-ASR_MIN_CHARS = 2
+# ASR 过滤（VoiceSensor 黑名单仍主要用 GATEKEEPER_BLACKLIST；此列表供后续统一）
 ASR_BLACKLIST = ["嗯", "啊", "哈", "哦", "好的", "好", "对", "是", "不是", "行", "可以"]
 
 
@@ -711,6 +752,8 @@ TTS_AUTO_TRANSLATE = True
 
 # 如果换成direct会是视觉模型直接吐槽
 VISION_MODE = "separate"
+# 屏幕吐槽视觉采样目标：active_monitor 跟随前台窗口所在屏；primary 可回退旧行为
+SENSOR_VISION_CAPTURE_TARGET = "active_monitor"
 
 # ==================== 免打扰模式 (DND) ====================
 DND_MODE = False  # 手动免打扰开关默认关闭
@@ -772,7 +815,14 @@ def load_custom_models(*, force: bool = False) -> bool:
 
             providers_data = custom_data.get("providers", {})
             if isinstance(providers_data, dict):
-                PROVIDERS.update(providers_data)
+                # Replace in-place so both Enhanced GUI and old Qt GUI, which
+                # hold the same PROVIDERS dict reference, see add/edit/delete.
+                PROVIDERS.clear()
+                for provider_id, provider_cfg in providers_data.items():
+                    if isinstance(provider_cfg, dict):
+                        PROVIDERS[str(provider_id)] = dict(provider_cfg)
+                    else:
+                        PROVIDERS[str(provider_id)] = provider_cfg
                 loaded_any = loaded_any or bool(providers_data)
                 if providers_data:
                     logger.info("Loaded %s provider configs", len(providers_data))

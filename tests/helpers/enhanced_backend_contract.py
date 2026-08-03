@@ -55,8 +55,8 @@ class ContractApp:
             "sedentary_break_minutes": 8,
             "sedentary_cooldown_minutes": 30,
             "activity_include_process_path": False,
-            "activity_include_window_title": False,
-            "activity_include_browser_context": False,
+            "activity_include_window_title": True,
+            "activity_include_browser_context": True,
             "activity_config_revision": 1,
         }
         self.commands: List[Dict[str, Any]] = []
@@ -80,10 +80,10 @@ class ContractApp:
                 settings.get("activity_include_process_path", False)
             ),
             "include_window_title": bool(
-                settings.get("activity_include_window_title", False)
+                settings.get("activity_include_window_title", True)
             ),
             "include_browser_context": bool(
-                settings.get("activity_include_browser_context", False)
+                settings.get("activity_include_browser_context", True)
             ),
         }
 

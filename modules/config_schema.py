@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import Any, Dict, List
 
+from modules.model_catalog import normalize_purposes
+
 
 SECRET_TOKENS = ("api_key", "token", "secret", "password", "access_key")
 
@@ -37,7 +39,7 @@ def infer_field_schema(name: str, raw: Any) -> Dict[str, Any]:
     if value_type in {"array", "object"}:
         ui_type = "json"
 
-    return {
+    field = {
         "name": key,
         "type": value_type,
         "ui_type": ui_type,
@@ -47,6 +49,12 @@ def infer_field_schema(name: str, raw: Any) -> Dict[str, Any]:
         "required": bool(info.get("required", False)) if isinstance(info, dict) else False,
         "secret": bool(secret),
     }
+    if declared in {"model_queue", "model_list"}:
+        field["purposes"] = normalize_purposes(
+            info.get("purpose") or info.get("purposes") or []
+        )
+        field["max_items"] = max(0, int(info.get("max_items") or 0))
+    return field
 
 
 def build_plugin_config_schema(trigger: str, config: Dict[str, Any]) -> Dict[str, Any]:

@@ -166,3 +166,73 @@ def test_sanitize_screen_stats_removes_polluted_local_entries():
     assert sensor.observation_entries == [
         {"app": "video", "window_title": "Bilibili", "source": "vision"}
     ]
+
+
+def test_reconcile_screen_counts_caps_polluted_counts_to_raw_live2d_events(monkeypatch):
+    sensor = ScreenSensor(DummyChatService())
+    sensor.current_day = "2026-07-09"
+    sensor.daily_counts = {
+        "browser": 116,
+        "linuxdo-accelerator.exe": 67,
+        "Codex.exe": 1,
+        "ghost.exe": 9,
+    }
+
+    raw_events = [
+        {
+            "event_id": f"chrome-{idx}",
+            "ts": f"2026-07-09T10:00:0{idx}+08:00",
+            "kind": "foreground_changed",
+            "presence": "active",
+            "source": "live2d-tauri",
+            "app": {"name": "chrome.exe"},
+            "window_title": "Docs - Google Chrome",
+            "browser": {},
+        }
+        for idx in range(3)
+    ]
+    raw_events.extend(
+        {
+            "event_id": f"linuxdo-{idx}",
+            "ts": f"2026-07-09T10:01:0{idx}+08:00",
+            "kind": "foreground_changed",
+            "presence": "active",
+            "source": "live2d-tauri",
+            "app": {"name": "linuxdo-accelerator.exe"},
+            "window_title": "Linux.do Accelerator",
+            "browser": {},
+        }
+        for idx in range(2)
+    )
+    raw_events.append(
+        {
+            "event_id": "codex",
+            "ts": "2026-07-09T10:02:00+08:00",
+            "kind": "foreground_changed",
+            "presence": "active",
+            "source": "live2d-tauri",
+            "app": {"name": "Codex.exe"},
+            "window_title": "Codex",
+            "browser": {},
+        }
+    )
+
+    class Store:
+        def list_activity_events(self, *, limit=200, date_str="", source=""):
+            assert date_str == "2026-07-09"
+            assert source == "live2d-tauri"
+            return raw_events
+
+    monkeypatch.setattr(screen_sensor_module, "get_memory_store", lambda: Store())
+    sensor._analyze_window_context = lambda app="", title="", domain="": (
+        "browser",
+        "browser",
+    ) if app == "chrome.exe" else ("other", app)
+
+    sensor._reconcile_daily_counts_with_rust_events()
+
+    assert sensor.daily_counts == {
+        "browser": 3,
+        "linuxdo-accelerator.exe": 2,
+        "Codex.exe": 1,
+    }

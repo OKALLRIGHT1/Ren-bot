@@ -23,7 +23,6 @@ from modules.live2d import trigger_motion
 from modules.delegate_task_state import set_task_state as set_delegate_task_state
 from modules.delegate_session import add_event as delegate_add_event
 from modules.personality_system import get_personality_system
-from modules.reply_effect_tracker import ReplyEffectTracker
 from modules.runtime_settings import load_runtime_settings
 from core.message_source import REMOTE_CHAT_SOURCES, build_output_profile
 from services.chat_support import (
@@ -350,13 +349,7 @@ class ChatService:
         self._app_ref = None
         self.debug_enabled = bool(CHAT_DEBUG_PRINTS)
         self.personality = get_personality_system()
-        # 延迟导入以避免循环依赖
-        try:
-            from modules.learning_system import get_learning_system
-
-            self.learning = get_learning_system()
-        except ImportError:
-            self.learning = None
+        self.learning = None
 
         self._last_reply_time = 0  # 记录最后一次回复的时间戳
         self._sensor_min_reply_interval_sec = max(45, int(SCREEN_GLOBAL_COOLDOWN))
@@ -384,7 +377,6 @@ class ChatService:
         self.gateway_voice_renderer: Optional[
             Callable[..., Awaitable[Optional[str]]]
         ] = None
-        self.reply_effect_tracker = ReplyEffectTracker()
         self.qq_private_message_buffer = QqPrivateMessageBuffer(
             enabled=QQ_PRIVATE_CONTINUOUS_MESSAGE_ENABLED,
             debounce_sec=QQ_PRIVATE_CONTINUOUS_DEBOUNCE_SEC,
@@ -696,8 +688,6 @@ class ChatService:
         reply = meta.get("reply") or {}
         if not isinstance(reply, dict):
             return
-        if str(reply.get("text") or reply.get("content") or "").strip():
-            return
         message_id = str(reply.get("message_id") or "").strip()
         if not message_id:
             return
@@ -723,7 +713,7 @@ class ChatService:
             return
         text = str(item.get("content") or item.get("text") or "").strip()
         item_meta = item.get("meta") if isinstance(item.get("meta"), dict) else {}
-        if text:
+        if text and not str(reply.get("text") or reply.get("content") or "").strip():
             reply["text"] = text
         sender_name = str(
             item_meta.get("sender_name")
@@ -733,6 +723,42 @@ class ChatService:
         ).strip()
         if sender_name:
             reply["sender_name"] = sender_name
+        quoted_images = item.get("images")
+        if not isinstance(quoted_images, list):
+            quoted_images = item_meta.get("images")
+        quoted_images = [
+            dict(image) for image in (quoted_images or []) if isinstance(image, dict)
+        ]
+        if quoted_images:
+            reply["images"] = quoted_images
+            merged_images = [
+                dict(image)
+                for image in (meta.get("images") or [])
+                if isinstance(image, dict)
+            ]
+            seen = {
+                str(
+                    image.get("url")
+                    or image.get("file")
+                    or image.get("name")
+                    or image
+                )
+                for image in merged_images
+            }
+            for image in quoted_images:
+                key = str(
+                    image.get("url")
+                    or image.get("file")
+                    or image.get("name")
+                    or image
+                )
+                if key in seen:
+                    continue
+                seen.add(key)
+                merged_images.append(image)
+            meta["images"] = merged_images
+            meta["has_image"] = bool(merged_images)
+            meta["image_count"] = len(merged_images)
 
     async def _enrich_qq_forward_context(self, ctx: Optional[Dict[str, Any]]) -> None:
         if not isinstance(ctx, dict) or not QQ_PRIVATE_CONTINUOUS_ENABLE_FORWARD_CONTEXT:
@@ -1093,8 +1119,7 @@ class ChatService:
         stored = self._load_recent_user_topic_from_store(ctx, current_text=raw)
         if stored:
             return stored
-        brain = getattr(self, "brain", None)
-        memory = getattr(brain, "short_term_memory", None)
+        memory = self._get_short_term_messages(ctx)
         if isinstance(memory, list):
             for item in reversed(memory[-12:]):
                 if not isinstance(item, dict):
@@ -1118,10 +1143,12 @@ class ChatService:
 
     def _observe_reply_effect(self, user_text: str, ctx: Optional[Dict[str, Any]]) -> None:
         try:
-            session_id, user_id = self.gateway_context_service.reply_effect_identity(ctx)
-            record = self.reply_effect_tracker.observe_user_message(
+            session_id, _user_id = self.gateway_context_service.reply_effect_identity(ctx)
+            memory_core = getattr(self.brain, "memory_core", None)
+            if memory_core is None:
+                return
+            record = memory_core.observe_followup(
                 session_id=session_id,
-                user_id=user_id,
                 text=user_text,
                 source=str((ctx or {}).get("source") or ""),
             )
@@ -1135,10 +1162,15 @@ class ChatService:
 
     def _record_reply_effect(self, reply_text: str, ctx: Optional[Dict[str, Any]], *, source: str = "") -> None:
         try:
-            session_id, user_id = self.gateway_context_service.reply_effect_identity(ctx)
-            self.reply_effect_tracker.record_reply(
+            session_id, _user_id = self.gateway_context_service.reply_effect_identity(ctx)
+            memory_core = getattr(self.brain, "memory_core", None)
+            if memory_core is None:
+                return
+            profile = self._get_active_character_profile()
+            memory_core.record_reply(
                 session_id=session_id,
-                user_id=user_id,
+                person_id=self._get_memory_person_id(ctx) or "owner",
+                character_name=str(profile.get("name") or "").strip(),
                 text=reply_text,
                 source=source or str((ctx or {}).get("source") or ""),
             )
@@ -1457,6 +1489,15 @@ class ChatService:
     def _get_memory_session_id(self, ctx: Optional[Dict[str, Any]]) -> str:
         return self.gateway_context_service.memory_session_id(ctx)
 
+    def _get_memory_person_id(self, ctx: Optional[Dict[str, Any]]) -> str:
+        if not self.gateway_context_service.is_qq_source(ctx):
+            return "owner"
+        channel_meta = (ctx or {}).get("channel_meta") or {}
+        if bool(channel_meta.get("is_owner")):
+            return "owner"
+        user_id = str(channel_meta.get("user_id") or "").strip()
+        return f"qq:{user_id}" if user_id else ""
+
     def _wants_detailed_answer(self, text: str) -> bool:
         raw = str(text or "").strip()
         if not raw:
@@ -1529,12 +1570,12 @@ class ChatService:
         return "\n".join(parts)
 
     def _build_reply_effect_style_hint(self, ctx: Optional[Dict[str, Any]]) -> str:
-        tracker = getattr(self, "reply_effect_tracker", None)
-        if tracker is None or not hasattr(tracker, "stats"):
+        memory_core = getattr(self.brain, "memory_core", None)
+        if memory_core is None:
             return ""
         try:
             session_id, _user_id = self.gateway_context_service.reply_effect_identity(ctx)
-            stats = tracker.stats(limit=80, session_id=session_id)
+            stats = memory_core.feedback_stats(session_id=session_id, limit=80)
         except Exception:
             return ""
         count = int(stats.get("count") or 0)
@@ -1578,8 +1619,37 @@ class ChatService:
             pass
         return active_char_name, active_char_id, base_prompt
 
-    def _build_recent_chat_tone_context(self, max_items: int = 4) -> str:
-        memory = getattr(self.brain, "short_term_memory", None) or []
+    def _get_short_term_messages(
+        self, ctx: Optional[Dict[str, Any]] = None
+    ) -> List[Dict[str, Any]]:
+        brain = getattr(self, "brain", None)
+        if brain is None:
+            return []
+        session_id = self.gateway_context_service.conversation_session_key(ctx)
+        if session_id:
+            manager = getattr(brain, "short_term_manager", None)
+            get_context = getattr(manager, "get_context", None)
+            if callable(get_context):
+                try:
+                    return list(get_context(session_id=session_id) or [])
+                except Exception as exc:
+                    self.logger.warning(
+                        f"Load session short-term context failed ({session_id}): {exc}"
+                    )
+                    return []
+            buckets = getattr(brain, "session_short_term_memory", None)
+            if isinstance(buckets, dict):
+                return list(buckets.get(session_id, []) or [])
+            return []
+        memory = getattr(brain, "short_term_memory", None)
+        return list(memory or []) if isinstance(memory, list) else []
+
+    def _build_recent_chat_tone_context(
+        self,
+        max_items: int = 4,
+        ctx: Optional[Dict[str, Any]] = None,
+    ) -> str:
+        memory = self._get_short_term_messages(ctx)
         if not isinstance(memory, list):
             return ""
         lines: List[str] = []
@@ -1727,30 +1797,12 @@ class ChatService:
             "expression_library_max_prompt_items": max(1, min(8, max_items)),
         }
 
-    def _format_expression_pattern_hint(self, pattern: Dict[str, Any]) -> str:
-        situation = str(pattern.get("situation") or "").strip()
-        style = str(pattern.get("style") or "").strip()
-        raw_examples = (
-            pattern.get("content_list")
-            if isinstance(pattern.get("content_list"), list)
-            else []
-        )
-        examples = [str(item).strip() for item in raw_examples if str(item).strip()]
-        example = str(pattern.get("example") or "").strip()
-        if example and example not in examples:
-            examples.insert(0, example)
-        example_preview = " / ".join(examples[:2]).strip()
-        if situation and style and example_preview:
-            return f"{situation}时，{style}；示例可像“{example_preview}”。"
-        if situation and style:
-            return f"{situation}时，{style}。"
-        if situation and example_preview:
-            return f"{situation}时，可以像“{example_preview}”这样短一点。"
-        if style and example_preview:
-            return f"{style}；示例可像“{example_preview}”。"
-        return style or example_preview
-
-    def _load_expression_library_hints(self, scene: str = "chat") -> List[str]:
+    def _load_expression_library_hints(
+        self,
+        user_text: str,
+        scene: str = "chat",
+        ctx: Optional[Dict[str, Any]] = None,
+    ) -> List[str]:
         runtime = self._load_expression_library_runtime()
         if not runtime.get("expression_library_enabled", True):
             return []
@@ -1758,39 +1810,32 @@ class ChatService:
             return []
         if scene != "sensor" and not runtime.get("expression_library_use_in_chat", True):
             return []
-        store = self._get_memory_store()
-        if store is None or not hasattr(store, "select_expression_patterns_for_prompt"):
+        memory_core = getattr(self.brain, "memory_core", None)
+        if memory_core is None:
             return []
         profile = self._get_active_character_profile()
         character_name = str(profile.get("name") or "").strip()
+        _active_name, character_id, _base_prompt = self._get_active_character_context()
         try:
-            rows = store.select_expression_patterns_for_prompt(
+            return memory_core.select_expressions(
+                user_text=user_text,
+                character_id=character_id,
                 character_name=character_name,
                 scene=scene,
-                limit=runtime.get("expression_library_max_prompt_items", 4),
+                recent_messages=self._get_short_term_messages(ctx)[-6:],
+                limit=min(3, runtime.get("expression_library_max_prompt_items", 4)),
+                session_id=self._get_memory_session_id(ctx),
+                person_id=self._get_memory_person_id(ctx) or "owner",
             )
         except Exception:
             return []
-        hints: List[str] = []
-        pattern_ids: List[str] = []
-        for row in rows:
-            if not isinstance(row, dict):
-                continue
-            hint = self._format_expression_pattern_hint(row).strip()
-            if not hint or hint in hints:
-                continue
-            hints.append(hint)
-            row_id = str(row.get("id") or "").strip()
-            if row_id:
-                pattern_ids.append(row_id)
-        if pattern_ids and hasattr(store, "bump_expression_pattern_use"):
-            try:
-                store.bump_expression_pattern_use(pattern_ids)
-            except Exception:
-                pass
-        return hints
 
-    def _build_natural_habits_block(self, scene: str = "chat") -> str:
+    def _build_natural_habits_block(
+        self,
+        user_text: str,
+        scene: str = "chat",
+        ctx: Optional[Dict[str, Any]] = None,
+    ) -> str:
         profile = self._get_active_character_profile()
         name = str(profile.get("name") or "").strip()
         custom_habits = profile.get("expression_habits")
@@ -1799,7 +1844,7 @@ class ChatService:
             scene_items = custom_habits.get(scene)
             if isinstance(scene_items, list):
                 habits.extend(str(item).strip() for item in scene_items if str(item).strip())
-        habits.extend(self._load_expression_library_hints(scene))
+        habits.extend(self._load_expression_library_hints(user_text, scene, ctx))
         fallback_pack = self.NATURAL_REPLY_FALLBACK_HINTS.get(
             name, self.NATURAL_REPLY_FALLBACK_HINTS["default"]
         )
@@ -1885,11 +1930,11 @@ class ChatService:
         profile = self._get_active_character_profile()
         char_name = str(profile.get("name") or "当前角色").strip()
         char_desc = str(profile.get("description") or "").strip()
-        recent_context = self._build_recent_chat_tone_context()
+        recent_context = self._build_recent_chat_tone_context(ctx=ctx)
         recent_sensor_context = (
             self._format_recent_sensor_reply_block() if scene == "sensor" else ""
         )
-        habits_block = self._build_natural_habits_block(scene)
+        habits_block = self._build_natural_habits_block(user_text, scene, ctx)
         source = str((ctx or {}).get("source") or "").strip().lower()
         if scene == "sensor":
             scene_prompt = (
@@ -2020,6 +2065,37 @@ class ChatService:
         if not image_summaries:
             return ""
         return "【QQ图片识别】\n" + "\n".join(image_summaries)
+
+    def _looks_like_image_reference_request(self, user_text: str) -> bool:
+        text = str(user_text or "").strip().lower()
+        if not text:
+            return False
+        if any(
+            marker in text
+            for marker in ("画图", "绘图", "生成图片", "图片接口", "图片设置", "图像模型")
+        ):
+            return False
+        has_image_reference = any(
+            marker in text
+            for marker in ("这张图", "这幅图", "图上", "图里", "图片", "照片", "截图", "画面")
+        )
+        has_image_action = any(
+            marker in text
+            for marker in (
+                "总结",
+                "分析",
+                "看看",
+                "看下",
+                "描述",
+                "识别",
+                "读取",
+                "效果",
+                "内容",
+                "是什么",
+                "怎么样",
+            )
+        )
+        return has_image_reference and has_image_action
 
     def _detect_feedback(self, user_text: str) -> tuple[str, str]:
         return self.reply_style_service.detect_feedback(
@@ -2791,6 +2867,23 @@ class ChatService:
             dict.fromkeys(delegate_triggers)
         )
 
+    def _is_search_delegate_route(self, triggers, raw_text: str) -> bool:
+        normalized = [
+            str(trigger or "").strip()
+            for trigger in (triggers or [])
+            if str(trigger or "").strip()
+        ]
+        if self.tool_result_formatter.is_search_delegate(normalized, raw_text):
+            return True
+        delegate_map = getattr(self.plugin_manager, "delegate_map", {}) or {}
+        return any(
+            str(getattr(delegate_map.get(trigger), "plugin_trigger", "") or "")
+            .strip()
+            .lower()
+            == "search_web"
+            for trigger in normalized
+        )
+
     def _extract_workspace_read_path(self, text: str) -> str:
         raw = str(text or "").strip()
         if not raw:
@@ -2814,6 +2907,7 @@ class ChatService:
         tool: bool = False,
         interrupt: bool = True,
         apply_catchphrase: bool = True,
+        record_chat_log: bool = True,
     ) -> None:
         final_text = self._clean_text_for_tts(
             self._strip_internal_tags(
@@ -2844,12 +2938,13 @@ class ChatService:
         memory_session_id = self._get_memory_session_id(ctx)
         if memory_session_id:
             assistant_log_meta["session_id"] = memory_session_id
-        await self.event_bus.emit(
-            "chat.log",
-            role="assistant",
-            content=final_text,
-            meta=assistant_log_meta,
-        )
+        if record_chat_log:
+            await self.event_bus.emit(
+                "chat.log",
+                role="assistant",
+                content=final_text,
+                meta=assistant_log_meta,
+            )
         if output_profile.get("ui_append", True):
             await self.event_bus.emit("ui.append", role="assistant", text=final_text)
         await self.presenter.present(
@@ -3060,7 +3155,11 @@ class ChatService:
         """安全地添加记忆 (修复参数冲突BUG)"""
         # 🟢 1. 浅拷贝 meta，防止修改原字典
         safe_meta = (meta or {}).copy()
-        session_id = str(safe_meta.get("session_id") or "").strip() or None
+        memory_session_id = str(safe_meta.get("session_id") or "").strip() or None
+        session_id = (
+            str(safe_meta.get("context_session_id", "") or "").strip()
+            or memory_session_id
+        )
 
         # 🟢 2. 检查并处理参数冲突
         # event_bus.emit 已经使用了 'role' 和 'len' 参数
@@ -3078,6 +3177,7 @@ class ChatService:
                 text,
                 session_id=session_id,
                 meta=safe_meta,
+                memory_session_id=memory_session_id,
             )
 
             # 安全发射事件
@@ -3095,7 +3195,9 @@ class ChatService:
             )
 
     # ==================== Gatekeeper 逻辑 ====================
-    async def _should_reply(self, user_text: str) -> bool:
+    async def _should_reply(
+        self, user_text: str, ctx: Optional[Dict[str, Any]] = None
+    ) -> bool:
         """
         判断是否需要回复用户消息
         """
@@ -3103,7 +3205,7 @@ class ChatService:
         if len(text_clean) < 2:
             return False
 
-        # ListenerPlugin 规则并入：直接提及唤醒词，强制回复
+        # Wake-word rule (inlined; former ListenerPlugin module removed): force reply
         lower_text = text_clean.lower()
         wake_words = [
             str(word).lower() for word in (WAKE_KEYWORDS or []) if str(word).strip()
@@ -3115,9 +3217,10 @@ class ChatService:
             self.logger.info("🟢 [Gatekeeper] 明确问题 -> 强制回复")
             return True
 
-        # ListenerPlugin 规则并入：避免 assistant 连续自问自答
-        if self.brain.short_term_memory:
-            last_msg = self.brain.short_term_memory[-1]
+        # Inlined gate: avoid assistant consecutive self-talk
+        short_term_messages = self._get_short_term_messages(ctx)
+        if short_term_messages:
+            last_msg = short_term_messages[-1]
             if last_msg.get("role") == "assistant":
                 self.logger.info("🛑 [Gatekeeper] 上一条为 assistant -> 忽略")
                 return False
@@ -3148,8 +3251,8 @@ class ChatService:
         # 4. LLM 智能判断 (调用 cheap model)
         try:
             last_ai_reply = "无"
-            if self.brain.short_term_memory:
-                for msg in reversed(self.brain.short_term_memory):
+            if short_term_messages:
+                for msg in reversed(short_term_messages):
                     if msg.get("role") == "assistant":
                         last_ai_reply = msg.get("content", "")[:50]
                         break
@@ -3181,79 +3284,6 @@ class ChatService:
         except Exception as e:
             self.logger.error(f"⚠️ [Gatekeeper] 判断出错，默认放行: {e}")
             return True
-
-    #  日期/时间意图嗅探
-    def _contains_date_ref(self, text: str) -> bool:
-        if not text:
-            return False
-        t = text.lower().strip()
-        keywords = [
-            "昨天",
-            "前天",
-            "大前天",
-            "上周",
-            "上个月",
-            "过去",
-            "那一天",
-            "那天",
-            "几号",
-            "星期",
-            "礼拜",
-            "周一",
-            "周二",
-            "周三",
-            "周四",
-            "周五",
-            "周六",
-            "周日",
-            "上午",
-            "早上",
-            "中午",
-            "下午",
-            "晚上",
-            "刚才",
-            "之前",
-            "还记得",
-            "干了什么",
-            "做了什么",
-            "说过",
-            "提过",
-        ]
-        if any(k in t for k in keywords):
-            return True
-        # 绝对日期 (2024-01-01, 1月1日, 5号)
-        if re.search(r"\d{4}[-/年]\d{1,2}[-/月]\d{1,2}", t):
-            return True
-        if re.search(r"\d{1,2}[月]\d{1,2}[日号]", t):
-            return True
-        if re.search(r"\d{1,2}号", t):
-            return True
-        return False
-
-    def _contains_memory_ref(self, text: str) -> bool:
-        if not text:
-            return False
-        t = text.lower().strip()
-        keys = [
-            "还记得",
-            "记得吗",
-            "忘了",
-            "之前说",
-            "我说过",
-            "提过",
-            "我为什么",
-            "怎么会",
-            "当时",
-            "怎么了",
-            "到底为啥",
-            "腹泻",
-            "断食",
-            "体检",
-            "医院",
-            "不舒服",
-            "拉肚子",
-        ]
-        return any(k in t for k in keys)
 
     def _match_followup_topic(self, text: str) -> str:
         t = (text or "").strip().lower()
@@ -3548,6 +3578,8 @@ class ChatService:
             get_memory_session_id=self._get_memory_session_id,
             remote_chat_sources=set(REMOTE_CHAT_SOURCES or set()),
         )
+        ctx["memory_session_id"] = input_ctx.memory_session_id
+        ctx["memory_person_id"] = self._get_memory_person_id(ctx) or "owner"
         input_source = input_ctx.input_source
         channel_meta = input_ctx.channel_meta
         if input_source in {"qq_gateway", "napcat_qq"}:
@@ -3569,7 +3601,11 @@ class ChatService:
                 f"[QQ-IN][{session_label}][{session_preview or 'unknown'}][from={sender_name}] {incoming_preview}"
             )
         self._observe_reply_effect(user_text, ctx)
-        transcript_channel_meta = input_ctx.transcript_channel_meta
+        conversation_session_id = self.gateway_context_service.conversation_session_key(ctx)
+        ctx["conversation_session_id"] = conversation_session_id
+        transcript_channel_meta = dict(input_ctx.transcript_channel_meta)
+        if conversation_session_id:
+            transcript_channel_meta["context_session_id"] = conversation_session_id
         has_external_images = input_ctx.has_external_images
         memory_session_id = input_ctx.memory_session_id
         await self._sync_qq_user_profile(ctx)
@@ -3643,6 +3679,16 @@ class ChatService:
         direct_outcome = await self.agent_runtime.handle_direct_text(user_text, ctx)
         is_direct = direct_outcome.handled
         direct_result = direct_outcome.reply
+        if str(user_text or "").strip().startswith(("/", "!", "！")):
+            preview = str(user_text or "").replace("\n", " ").strip()
+            if len(preview) > 80:
+                preview = preview[:80] + "..."
+            if is_direct:
+                self.logger.info(f"[Direct] 已处理命令: {preview}")
+            else:
+                self.logger.info(
+                    f"[Direct] 未命中命令(可能插件未加载/权限不足/别名不匹配): {preview}"
+                )
 
         if is_direct:
             self._dbg("进入 Direct 命令处理流程")
@@ -3920,6 +3966,36 @@ class ChatService:
             user_text = buffered_user_text
             ctx["user_text"] = user_text
             feedback_type, feedback_reaction = self._detect_feedback(user_text)
+        channel_meta = ctx.get("channel_meta") if isinstance(ctx, dict) else {}
+        current_images = (
+            channel_meta.get("images")
+            if isinstance(channel_meta, dict)
+            and isinstance(channel_meta.get("images"), list)
+            else []
+        )
+        has_external_images = bool(current_images)
+        if (
+            self.gateway_context_service.is_qq_source(ctx)
+            and self._looks_like_image_reference_request(user_text)
+            and not has_external_images
+        ):
+            await output_coordinator.emit_short_reaction(
+                text="我这边没收到你指的图片，引用那张图再发一次吧",
+                emotion="confused",
+                user_text=user_text,
+                ctx=ctx,
+                transcript_meta=transcript_channel_meta,
+                chat_log_source=chat_log_source,
+                output_profile=output_profile,
+                feedback_type=feedback_type,
+                feedback_reaction=feedback_reaction,
+                memory_session_id=memory_session_id,
+                learning=self.learning,
+                emit_assistant_text=self._emit_assistant_text,
+                add_memory_safe=self._add_memory_safe,
+                emit_idle_status_when_safe=self._emit_idle_status_when_safe,
+            )
+            return
         self._remember_search_topic(user_text, ctx)
 
         direct_chat_sources = input_ctx.direct_chat_sources
@@ -3927,7 +4003,7 @@ class ChatService:
         should_reply = (
             True
             if input_ctx.should_bypass_gatekeeper
-            else await self._should_reply(user_text)
+            else await self._should_reply(user_text, ctx)
         )
         if not should_reply:
             print(f"🛑 [系统] Gatekeeper 决定忽略此消息")
@@ -4063,6 +4139,26 @@ class ChatService:
         normal_triggers, delegate_triggers = self._split_delegate_triggers(
             effective_triggers
         )
+        search_delegate_requested = self._is_search_delegate_route(
+            delegate_triggers,
+            user_text,
+        )
+        if search_delegate_requested:
+            search_acknowledgement = search_flow_service.build_search_acknowledgement(
+                user_text
+            )
+            await self._emit_assistant_text(
+                search_acknowledgement,
+                ctx=ctx,
+                emotion="think",
+                transcript_meta=transcript_channel_meta,
+                chat_log_source=chat_log_source,
+                output_profile=output_profile,
+                tool=True,
+                interrupt=False,
+                apply_catchphrase=False,
+                record_chat_log=False,
+            )
         if delegate_triggers:
             self._set_delegate_task_state(
                 ctx,
@@ -4165,34 +4261,6 @@ class ChatService:
         sensor_source_context = self._build_sensor_source_followup_context(user_text)
         if sensor_source_context:
             special_context += f"\n\n{sensor_source_context}"
-        memory_ref = self._contains_memory_ref(user_text)
-        need_history_context = self._contains_date_ref(user_text) or memory_ref
-        if need_history_context:
-            print("📅 [System] 嗅探到历史回忆意图，正在调卷历史档案...")
-            try:
-                store = getattr(self.brain, "sqlite_store", None)
-                if store:
-                    episodes = store.list_episodes(limit=15)
-                    logs = [
-                        f"📅 [{ep.get('title')}] 摘要：{ep.get('summary')}"
-                        for ep in episodes
-                    ]
-                    if logs:
-                        special_context += (
-                            f"\n\n【系统强制注入：近期活动日志】\n" + "\n".join(logs)
-                        )
-                transcript_ctx = self._build_recent_transcript_context(
-                    limit=30,
-                    max_chars=1400,
-                    user_only=memory_ref,
-                    session_id=memory_session_id,
-                )
-                if transcript_ctx:
-                    special_context += (
-                        f"\n\n【系统强制注入：最近对话片段】\n{transcript_ctx}"
-                    )
-            except Exception as e:
-                print(f"❌ 历史回溯失败: {e}")
 
         try:
             from config import PERSONA_PROMPT
@@ -4265,7 +4333,9 @@ class ChatService:
             user_text,
             system_persona=system_text,
             tool_intent=list(effective_triggers),
-            session_id=memory_session_id,
+            session_id=conversation_session_id,
+            memory_session_id=memory_session_id,
+            person_id=self._get_memory_person_id(ctx) or "owner",
         )
         cleaned_context_messages = []
         for message in context_messages:
@@ -4312,18 +4382,23 @@ class ChatService:
             self._dbg("进入非流式回复/工具流程")
             await self.event_bus.emit("ui.status", text="Thinking (Tools)...")
 
-            react_first_pass = await tool_flow_service.run_react_first_pass(
-                context_messages=context_messages,
-                ctx=ctx,
-                need_tools=need_tools,
-                deferred_tool_flow=deferred_tool_flow,
-                task_reasoning=task_reasoning,
-                task_default=task_default,
-                plugin_manager=self.plugin_manager,
-                chat_with_ai=chat_with_ai,
-                contains_cmd=self._contains_cmd,
-                strip_cmd_anywhere=self._strip_cmd_anywhere,
-            )
+            if search_delegate_requested:
+                react_first_pass = tool_flow_service.ReactFirstPassResult(
+                    context_messages=list(context_messages)
+                )
+            else:
+                react_first_pass = await tool_flow_service.run_react_first_pass(
+                    context_messages=context_messages,
+                    ctx=ctx,
+                    need_tools=need_tools,
+                    deferred_tool_flow=deferred_tool_flow,
+                    task_reasoning=task_reasoning,
+                    task_default=task_default,
+                    plugin_manager=self.plugin_manager,
+                    chat_with_ai=chat_with_ai,
+                    contains_cmd=self._contains_cmd,
+                    strip_cmd_anywhere=self._strip_cmd_anywhere,
+                )
             reply1 = react_first_pass.reply
             triggered = react_first_pass.triggered
             clean_thought = react_first_pass.clean_thought
@@ -4422,7 +4497,7 @@ class ChatService:
                     ctx=ctx,
                     user_text=user_text,
                     followup_search_query=followup_search_query,
-                    is_search_delegate=self.tool_result_formatter.is_search_delegate,
+                    is_search_delegate=self._is_search_delegate_route,
                 )
                 background_delegate = delegate_decision.background_delegate
                 delegate_flow_result = await delegate_flow_service.run_delegate_flow(
@@ -4572,6 +4647,7 @@ class ChatService:
                     extract_emo_tag=self._extract_emo_tag,
                     character_sharing_enabled=CHARACTER_SHARING_ENABLED,
                     try_share=self.personality.try_share,
+                    is_model_error_reply=self._looks_like_upstream_error_reply,
                 )
                 final_reply = tool_finalize.final_reply
                 final_emo = tool_finalize.final_emo
@@ -4625,6 +4701,7 @@ class ChatService:
                 memory_session_id=memory_session_id,
                 feedback_type=feedback_type,
                 feedback_reaction=feedback_reaction,
+                triggered=triggered,
                 learning=self.learning,
                 live2d_enabled=live2d_enabled,
                 start_emo=start_emo,

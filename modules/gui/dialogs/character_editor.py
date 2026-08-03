@@ -6,6 +6,7 @@ import requests
 from PySide6 import QtWidgets, QtCore, QtGui
 from modules.character_manager import character_manager, DEFAULT_EMOTION_KEYS
 from modules.live2d import MODEL_DEFAULT_MOTION, STOP_MOTION, update_current_costume_config
+from modules.gui.widgets.assistant_badge_editor import AssistantBadgeEditor
 
 try:
     from modules.gui.styles import get_ui_palette
@@ -316,6 +317,11 @@ class CharacterEditorWidget(QtWidgets.QWidget):
         self.edit_prompt.textChanged.connect(self._save_current_char)
         layout.addWidget(self.edit_prompt)
 
+        self.character_badge_editor = AssistantBadgeEditor(
+            "悬浮球角色默认徽章", on_changed=self._reload_badge_data
+        )
+        layout.addWidget(self.character_badge_editor)
+
         catchphrase_group = QtWidgets.QGroupBox("固定口癖")
         catchphrase_layout = QtWidgets.QFormLayout(catchphrase_group)
         self.catchphrase_enabled = QtWidgets.QCheckBox(
@@ -553,6 +559,11 @@ class CharacterEditorWidget(QtWidgets.QWidget):
         self.lbl_costume_summary.setWordWrap(True)
         left_layout.addWidget(self.lbl_costume_summary)
 
+        self.costume_badge_editor = AssistantBadgeEditor(
+            "服装独立徽章（可选）", on_changed=self._reload_badge_data
+        )
+        left_layout.addWidget(self.costume_badge_editor)
+
         # Right Panel: Emotion mapping table and edit details form
         right_group = QtWidgets.QGroupBox("情绪与动作映射")
         right_layout = QtWidgets.QVBoxLayout(right_group)
@@ -748,6 +759,7 @@ class CharacterEditorWidget(QtWidgets.QWidget):
         self.qq_profile_avatar.blockSignals(True)
 
         self.edit_name.setText(data.get("name", ""))
+        self.character_badge_editor.set_context(cid)
         self.edit_user_address.setText(str(data.get("user_address") or "Master"))
         aliases = data.get("aliases") or []
         if isinstance(aliases, str):
@@ -868,6 +880,14 @@ class CharacterEditorWidget(QtWidgets.QWidget):
         item = self.char_list.currentItem()
         if item:
             item.setText(data["name"])
+
+    def _reload_badge_data(self):
+        self.mgr.load()
+        if self.current_char_id:
+            self.character_badge_editor.set_context(self.current_char_id)
+            self.costume_badge_editor.set_context(
+                self.current_char_id, self.current_costume_name or ""
+            )
 
     def _pick_tts_file(self, line_edit, title: str, file_filter: str):
         path, _ = QtWidgets.QFileDialog.getOpenFileName(self, title, "", file_filter)
@@ -1306,11 +1326,15 @@ class CharacterEditorWidget(QtWidgets.QWidget):
             self._refresh_preview_options([], [])
             self.edit_mapping_group.setEnabled(False)
             self.lbl_selected_emo.setText("无可用服装")
+            self.costume_badge_editor.set_context("", "")
             return
 
         self.edit_mapping_group.setEnabled(True)
         char = self.mgr.get_character(self.current_char_id) or {}
         costume = (char.get("costumes") or {}).get(self.current_costume_name) or {}
+        self.costume_badge_editor.set_context(
+            self.current_char_id, self.current_costume_name
+        )
         model_path = costume.get("path", "")
         costume_map = (
             costume.get("emotion_map", {})

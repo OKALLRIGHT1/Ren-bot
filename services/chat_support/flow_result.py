@@ -1,4 +1,13 @@
-"""Shared result contract for future ChatService flow extraction."""
+"""Shared result contract for future ChatService flow extraction.
+
+STATUS (2026-07-30): Defined but NOT yet used by ChatService.process /
+chat_support flow helpers. Main paths still return ad-hoc values.
+
+Rules until migration lands:
+- Do not invent a second parallel result type for new extracted flows.
+- Prefer ChatFlowResult (or extend ALLOWED_METADATA_KEYS) when wiring a flow.
+- See docs/architecture/project_slimdown.md Flow gate.
+"""
 
 from __future__ import annotations
 

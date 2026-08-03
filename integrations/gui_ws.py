@@ -195,9 +195,15 @@ class GuiWebSocketServer:
         else:
             asyncio.run_coroutine_threadsafe(self.broadcast(payload), self._loop)
 
-    def emit_capability(self, capability: str, payload: Dict[str, Any]) -> None:
+    def emit_capability(self, capability: str, payload: Dict[str, Any]) -> bool:
         if self._loop is None or self._server is None:
-            return
+            return False
+        required = str(capability or "").strip()
+        if not required or not any(
+            required in (self._client_capabilities.get(ws) or set(DEFAULT_CAPABILITIES))
+            for ws in list(self._clients)
+        ):
+            return False
         try:
             current = asyncio.get_running_loop()
         except RuntimeError:
@@ -209,6 +215,34 @@ class GuiWebSocketServer:
                 self.broadcast_capability(capability, payload),
                 self._loop,
             )
+        return True
+
+    def client_capabilities(
+        self, ws: websockets.WebSocketServerProtocol | None
+    ) -> Set[str]:
+        if ws is None:
+            return set(DEFAULT_CAPABILITIES)
+        caps = self._client_capabilities.get(ws)
+        if caps is None:
+            return set(DEFAULT_CAPABILITIES)
+        return set(caps)
+
+    def client_has_capability(
+        self, ws: websockets.WebSocketServerProtocol | None, capability: str
+    ) -> bool:
+        required = str(capability or "").strip()
+        if not required:
+            return False
+        return required in self.client_capabilities(ws)
+
+    def has_capable_client(self, capability: str) -> bool:
+        required = str(capability or "").strip()
+        if not required:
+            return False
+        return any(
+            required in (self._client_capabilities.get(ws) or set(DEFAULT_CAPABILITIES))
+            for ws in list(self._clients)
+        )
 
     async def _dispatch_message(
         self,

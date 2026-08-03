@@ -92,3 +92,24 @@ def test_create_doc_and_import(tmp_path: Path):
     path = Path(created["data"]["path"])
     assert path.exists()
     assert brain.imported
+
+
+def test_learn_configured_dirs_supports_async_in_running_loop():
+    import asyncio
+
+    class AsyncPlugin:
+        async def gui_ingest_configured_dirs(self, context):
+            await asyncio.sleep(0)
+            assert context.get("brain") is not None
+            return "学习完成: 1 文件"
+
+    manager = FakeManager()
+    manager.plugins["knowledge_base"] = AsyncPlugin()
+    service = KnowledgeGuiService(plugin_manager=manager, brain=FakeBrain())
+
+    async def _call_from_loop():
+        return service.learn_configured_dirs()
+
+    result = asyncio.run(_call_from_loop())
+    assert result["ok"] is True
+    assert "学习完成" in str(result["data"]["result"])

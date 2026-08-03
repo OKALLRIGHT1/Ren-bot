@@ -1,4 +1,14 @@
 # modules/advanced_memory.py
+"""Advanced memory facade (runtime entry for conversation memory).
+
+External product code should depend on AdvancedMemorySystem and/or
+modules.memory_sqlite.get_memory_store. Prefer not to construct
+MemoryCoreService / Chroma collections directly from chat/GUI layers
+(tests may still import lower layers).
+
+Profile and graph implementations live under modules.memory.*; this
+module orchestrates SQLite + Memory Core + vectors.
+"""
 import os
 import re
 import json
@@ -10,19 +20,14 @@ import threading
 from datetime import datetime, timezone
 from modules.memory_sqlite import get_memory_store
 from concurrent.futures import ThreadPoolExecutor
-import networkx as nx
 import jieba
 import jieba.analyse
 import chromadb
-from chromadb.utils import embedding_functions
-import requests
-from chromadb import EmbeddingFunction, Documents, Embeddings
 from config import SYSTEM_RULES_PROMPT, DEFAULT_PERSONA
 from modules.character_manager import character_manager
-from config import MEMORY_DB_PATH, EMBEDDING_CONFIG, MEMORY_SETTINGS
+from config import EMBEDDING_CONFIG, MEMORY_DB_PATH, MEMORY_SETTINGS, MODELS
 from modules.memory import (
     GraphMemory as ModularGraphMemory,
-    ProfileStore as ModularProfileStore,
     build_memory_metadata,
     clean_injected_context,
     deserialize_vector_metadata,
@@ -31,6 +36,13 @@ from modules.memory import (
     serialize_vector_metadata,
 )
 from modules.memory.short_term import ShortTermMemoryManager
+from modules.embeddings import (
+    ChromaEmbeddingFunction,
+    EmbeddingUnavailableError,
+    build_configured_embedding_service,
+)
+from modules.runtime_settings import load_runtime_settings_strict
+from modules.memory_core import MemoryCoreService, MemoryVectorIndex
 from modules.memory.knowledge_store import (
     delete_knowledge_by_dirs,
     import_knowledge_from_file as import_knowledge_file_modular,
@@ -47,619 +59,88 @@ except Exception:
     chat_with_ai = None
 
 
-# ========= 1) 远程嵌入函数（保持你原来的方式） =========
-class RemoteBGEFunction(EmbeddingFunction):
-    """远程嵌入函数（增强版）"""
 
-    def __init__(
-        self, api_url, api_key, model_name, fallback_fn=None, timeout=12, max_retries=2
-    ):
-        self._logger = get_logger()
-        if self._logger is None:
-            import logging
-
-            self._logger = logging.getLogger(__name__)
-            self._logger.setLevel(logging.INFO)
-            if not self._logger.handlers:
-                handler = logging.StreamHandler()
-                handler.setFormatter(
-                    logging.Formatter(
-                        "%(asctime)s [%(levelname)s] %(message)s",
-                        datefmt="%Y-%m-%d %H:%M:%S",
-                    )
-                )
-                self._logger.addHandler(handler)
-
-        # ✅ 并发安全：添加线程锁
-        self._lock = threading.Lock()
-
-        # ✅ 性能优化：查询结果缓存
-        self._query_cache = {}
-        self._cache_ttl = 300
-        self._cache_hits = 0
-        self._cache_misses = 0
-
-        self.api_url = api_url
-        self.api_key = api_key
-        self.model_name = model_name
-        self.fallback_fn = fallback_fn
-        self.timeout = timeout
-        self.max_retries = max(1, int(max_retries))
-        self._last_dim = None
-
-    def __call__(self, input: Documents) -> Embeddings:
-        """生成嵌入向量（线程安全版本）"""
-        # ✅ 使用锁保护 API 调用
-        with self._lock:
-            headers = {
-                "Authorization": f"Bearer {self.api_key}",
-                "Content-Type": "application/json",
-            }
-            payload = {"input": input, "model": self.model_name}
-
-            last_err = None
-            for attempt in range(self.max_retries):
-                try:
-                    response = requests.post(
-                        self.api_url,
-                        json=payload,
-                        headers=headers,
-                        timeout=self.timeout,
-                    )
-
-                    if response.status_code == 200:
-                        data = response.json()
-                        if (
-                            isinstance(data, dict)
-                            and isinstance(data.get("data"), list)
-                            and data["data"]
-                        ):
-                            embs = [item.get("embedding") for item in data["data"]]
-                            embs = [e for e in embs if isinstance(e, list) and e]
-
-                            if embs:
-                                self._last_dim = len(embs[0])
-
-                            if len(embs) == len(input):
-                                return embs
-
-                            last_err = (
-                                f"length mismatch: got {len(embs)} expect {len(input)}"
-                            )
-                        else:
-                            last_err = f"invalid response: {data}"
-                    else:
-                        last_err = f"HTTP {response.status_code}: {response.text[:100]}"
-
-                except Exception as e:
-                    last_err = str(e)
-
-                # ✅ 重试前等待
-                if attempt < self.max_retries - 1:
-                    time.sleep(0.2 * (attempt + 1))
-
-            self._logger.warning(f"⚠️ 嵌入接口失败: {last_err}")
-
-            # 1) fallback：本地 embedding
-            if self.fallback_fn is not None:
-                try:
-                    embs = self.fallback_fn(input)
-                    if isinstance(embs, list) and len(embs) == len(input) and embs:
-                        self._logger.info(f"✅ 使用本地 fallback embedding")
-                        return embs
-                except Exception as e:
-                    self._logger.warning(f"⚠️ fallback embedding 失败: {e}")
-
-            # 2) 零向量兜底
-            dim = self._last_dim or 1024
-            self._logger.warning(f"⚠️ 使用零向量兜底 (dim={dim})")
-            return [[0.0] * dim for _ in input]
-
-
-# ========= 2) Profile（用户档案：稳定事实单独存） =========
-# modules/advanced_memory.py 中的 ProfileStore 类
-
-
-class ProfileStore:
-    """
-    用户与助手的静态档案管理 (JSON)
-    支持双角色 (user/agent) 和动态 Likes 分类
-    """
-
-    def __init__(self, path: str):
-        self.path = path
-        # 默认结构：必须包含 user 和 agent
-        self.data = {
-            "user": {
-                "name": "Master",
-                "likes": {"general": []},
-                "dislikes": [],
-                "status": [],
-                "notes": [],
-            },
-            "agent": {
-                "name": "Suzu",
-                "likes": {"general": []},
-                "dislikes": [],
-                "traits": [],
-            },
-            "updated_at": None,
-        }
-        self.load()
-
-    def load(self):
-        try:
-            if os.path.exists(self.path):
-                with open(self.path, "r", encoding="utf-8") as f:
-                    loaded = json.load(f)
-                    # 深度合并，防止某些 key 丢失
-                    for role in ["user", "agent"]:
-                        if role in loaded:
-                            # 如果 likes 是旧的列表格式，转为字典
-                            if "likes" in loaded[role] and isinstance(
-                                loaded[role]["likes"], list
-                            ):
-                                loaded[role]["likes"] = {
-                                    "general": loaded[role]["likes"]
-                                }
-
-                            self.data[role].update(loaded[role])
-
-                    self.data["updated_at"] = loaded.get("updated_at")
-        except Exception as e:
-            print(f"⚠️ [Profile] 加载失败: {e}")
-
-    def save(self):
-        try:
-            os.makedirs(os.path.dirname(self.path), exist_ok=True)
-            self.data["updated_at"] = datetime.now(timezone.utc).isoformat()
-            with open(self.path, "w", encoding="utf-8") as f:
-                json.dump(self.data, f, ensure_ascii=False, indent=2)
-        except Exception as e:
-            print(f"⚠️ [Profile] 保存失败: {e}")
-
-    def extract_and_update(self, role: str, text: str):
-        """
-        使用 LLM 从对话中提取用户/Agent的画像信息 (喜好/状态/性格等)
-        """
-        if not chat_with_ai:
-            return
-
-        # 1. 过滤：太短的句子不提取
-        t = (text or "").strip()
-        if len(t) < 4:
-            return
-
-        # 2. 过滤：如果是指令或系统消息
-        if t.startswith("[") or t.startswith("System:"):
-            return
-
-        # 3. 构造 Prompt
-        target_role_desc = "用户(User)" if role == "user" else "五十铃怜(Assistant)"
-
-        prompt = f"""
-Analyze the following conversation snippet.
-Speaker Role: {target_role_desc}
-Speaker's Words: "{t}"
-
-Task: Extract facts about the Speaker into a STRUCTURED JSON.
-Structure Requirement:
-- "likes": A dictionary with sub-categories:
-    - "music": Songs, artists, bands, genres
-    - "games": Game titles, platforms, types
-    - "food": Food, drinks, flavors
-    - "general": Hobbies, habits, colors, or anything else
-- "dislikes": List of things hated
-- "status": List of current activities (e.g. "writing patent")
-- "name": String
-- "traits": List of personality traits (only if Speaker is Assistant)
-
-Rules:
-1. Classify carefully. "Elden Ring" -> likes.games, "MyGO" -> likes.music.
-2. Output JSON ONLY.
-Example: {{"likes": {{"music": ["MyGO"], "games": ["Minecraft"]}}, "status": ["busy"]}}
-"""
-        try:
-            # 4. 调用 LLM (使用 summary 或 gatekeeper 模型以节省成本)
-            response = chat_with_ai(
-                [{"role": "user", "content": prompt}],
-                task_type="summary",
-                caller="profile_extract",
-            )
-
-            # 5. 解析结果
-            data = self._parse_profile_json(response)
-            if data:
-                if not data:
-                    return
-
-                target_key = "user" if role == "user" else "agent"
-                has_update = False
-
-                # A. 处理 Name
-                # A. 处理 Name (加固版)
-                if "name" in data and data["name"]:
-                    new_name = str(data["name"]).strip()
-                    current_name = self.data[target_key].get("name")
-
-                    # 黑名单：这些绝对不是名字
-                    bad_names = [
-                        "user",
-                        "User",
-                        "USER",
-                        "用户",
-                        "unknown",
-                        "Unknown",
-                        "None",
-                        "我",
-                        "自己",
-                    ]
-                    # 注意：如果您希望它叫您Master，可以把Master从黑名单去掉。
-                    # 但通常建议名字手动改 json，不要让 AI 自动改，防止它改回 "User"
-
-                    is_bad = new_name in bad_names or len(new_name) < 2
-
-                    # 只有当：新名字不在黑名单 AND (当前没名字 OR 当前名字是默认User) 时，才允许改
-                    # 意思是：一旦您手动改成了 "Soyo"，AI 就再也改不动它了
-                    if not is_bad:
-                        if (not current_name) or (
-                            current_name in ["user", "User", "用户"]
-                        ):
-                            self.data[target_key]["name"] = new_name
-                            has_update = True
-                            print(f"📝 [Profile] 自动捕获名字: {new_name}")
-                        else:
-                            # 如果已有名字且不同，记录日志但不覆盖
-                            if current_name != new_name:
-                                print(
-                                    f"🛡️ [Profile] 拦截名字覆盖: {current_name} -> {new_name} (已忽略)"
-                                )
-
-                # B. 处理 Likes (嵌套字典)
-                if "likes" in data and isinstance(data["likes"], dict):
-                    # 确保目标也是字典
-                    if not isinstance(self.data[target_key].get("likes"), dict):
-                        self.data[target_key]["likes"] = {
-                            "music": [],
-                            "games": [],
-                            "food": [],
-                            "general": [],
-                        }
-
-                    for category, items in data["likes"].items():
-                        # 只允许白名单分类
-                        if category not in ["music", "games", "food", "general"]:
-                            category = "general"
-
-                        if isinstance(items, list):
-                            current_list = self.data[target_key]["likes"].get(
-                                category, []
-                            )
-                            for item in items:
-                                if item not in current_list and len(item) < 20:
-                                    current_list.append(item)
-                                    # 限制长度
-                                    limit = 50 if category in ["music", "games"] else 30
-                                    if len(current_list) > limit:
-                                        current_list.pop(0)
-
-                                    # 写回
-                                    self.data[target_key]["likes"][category] = (
-                                        current_list
-                                    )
-                                    has_update = True
-                                    print(
-                                        f"📝 [Profile] 新增档案 ({target_key}.likes.{category}): {item}"
-                                    )
-
-                # C. 处理 Dislikes / Status / Traits (普通列表)
-                for field in ["dislikes", "status", "traits"]:
-                    if field in data and isinstance(data[field], list):
-                        current_list = self.data[target_key].get(field, [])
-                        for item in data[field]:
-                            if item not in current_list and len(item) < 20:
-                                current_list.append(item)
-                                if len(current_list) > 20:
-                                    current_list.pop(0)
-                                self.data[target_key][field] = current_list
-                                has_update = True
-                                print(
-                                    f"📝 [Profile] 新增档案 ({target_key}.{field}): {item}"
-                                )
-
-                if has_update:
-                    self.save()
-
-        except Exception as e:
-            print(f"⚠️ [Profile] 提取失败: {e}")
-
-    def _parse_profile_json(self, response: str):
-        text = str(response or "").strip()
-        if not text:
-            return None
-
-        text = re.sub(r"^```(?:json)?\s*", "", text, flags=re.IGNORECASE)
-        text = re.sub(r"\s*```$", "", text)
-
-        match = re.search(r"\{.*\}", text, flags=re.DOTALL)
-        if not match:
-            return None
-        raw = match.group(0)
-
-        candidates = [raw]
-        candidates.append(re.sub(r",\s*([}\]])", r"\1", raw))
-        candidates.append(re.sub(r"\n\s*//.*", "", raw))
-        candidates.append(re.sub(r"\n\s*#.*", "", raw))
-
-        for candidate in candidates:
-            try:
-                data = json.loads(candidate)
-                if isinstance(data, dict):
-                    return data
-            except Exception:
-                continue
-
-        fixed = re.sub(r",\s*([}\]])", r"\1", raw)
-        fixed = re.sub(r"\n\s*//.*", "", fixed)
-        fixed = re.sub(r"\n\s*#.*", "", fixed)
-        data = json.loads(fixed)
-        return data if isinstance(data, dict) else None
-
-    def format_for_prompt(self) -> str:
-        out = []
-
-        # 🟢 辅助函数：专门用来格式化一个人
-        def _format_one_role(role_key, display_name):
-            data = self.data.get(role_key, {})
-            lines = []
-
-            # 1. 名字 (核心称呼强化)
-            name = data.get("name")
-            if name:
-                # 🟡 修改点：如果是用户，直接强制要求 AI 使用该称呼
-                if role_key == "user":
-                    lines.append(f"【称呼指引】你必须称呼对方为：{name}")
-                else:
-                    lines.append(f"- {display_name}称呼/名字：{name}")
-
-            # 2. 状态 (安全处理列表切片)
-            status = data.get("status")
-            if isinstance(status, list) and status:
-                lines.append(f"- {display_name}当前状态：{'、'.join(status[-3:])}")
-
-            # 3. 喜好 (分类展示，兼容字典)
-            likes = data.get("likes", {})
-            if isinstance(likes, dict):
-                if likes.get("music"):
-                    lines.append(
-                        f"- [{display_name}喜好] 音乐：{'、'.join(likes['music'][-8:])}"
-                    )
-                if likes.get("games"):
-                    lines.append(
-                        f"- [{display_name}喜好] 游戏：{'、'.join(likes['games'][-5:])}"
-                    )
-                if likes.get("food"):
-                    lines.append(
-                        f"- [{display_name}喜好] 食物：{'、'.join(likes['food'][-5:])}"
-                    )
-                if likes.get("general"):
-                    lines.append(
-                        f"- [{display_name}喜好] 其他：{'、'.join(likes['general'][-5:])}"
-                    )
-
-            # 4. 讨厌
-            dislikes = data.get("dislikes")
-            if isinstance(dislikes, list) and dislikes:
-                lines.append(f"- {display_name}雷点/讨厌：{'、'.join(dislikes[-5:])}")
-
-            # 5. 性格 (Agent 独有)
-            traits = data.get("traits")
-            if isinstance(traits, list) and traits:
-                lines.append(f"- {display_name}性格标签：{'、'.join(traits[-5:])}")
-
-            return lines
-
-        # === 生成 User 部分 ===
-        # 🟢 将 display_name 改为 "Master"，即便没搜到名字，也会以此兜底
-        out.extend(_format_one_role("user", "Master"))
-
-        # === 生成 Agent 部分 ===
-        agent_lines = _format_one_role("agent", "我")
-
-        if agent_lines:
-            out.append("\n【五十铃怜的记忆备忘录 (Agent Profile)】")
-            out.extend(agent_lines)
-
-        return "\n".join(out)
-
-
-# ========= 3) 图记忆（关键词关系） =========
-class GraphMemory:
-    def __init__(self, graph_file="graph.json"):
-        self.graph_file = os.path.join(MEMORY_DB_PATH, graph_file)
-        self.G = nx.Graph()
-        self.stopwords = set(
-            [
-                "什么",
-                "怎么",
-                "为什么",
-                "因为",
-                "就是",
-                "然后",
-                "但是",
-                "如果",
-                "我们",
-                "你们",
-                "他们",
-            ]
-        )
-        self.last_decay_day = None
-
-        # ✅ 性能优化：添加关键词关联缓存
-        self._related_cache = {}
-        self._cache_ttl = 600  # 10分钟缓存
-        self._cache_hits = 0
-        self._cache_misses = 0
-
-        self.load_graph()
-
-    def load_graph(self):
-        if os.path.exists(self.graph_file):
-            try:
-                with open(self.graph_file, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                # networkx 兼容：node_link_graph 的 edges key 在不同版本会不一样
-                try:
-                    self.G = nx.node_link_graph(data, edges="links")
-                except Exception:
-                    self.G = nx.node_link_graph(data)
-            except Exception:
-                self.G = nx.Graph()
-
-    def _apply_decay_if_needed(self):
-        decay = float(MEMORY_SETTINGS.get("graph_decay_per_day", 1.0))
-        if decay >= 0.9999:
-            return
-        today = datetime.now().date().isoformat()
-        if self.last_decay_day == today:
-            return
-        self.last_decay_day = today
-
-        # 对边权做衰减
-        for u, v, d in list(self.G.edges(data=True)):
-            w = float(d.get("weight", 1.0))
-            w *= decay
-            if w < 0.05:
-                try:
-                    self.G.remove_edge(u, v)
-                except Exception:
-                    pass
-            else:
-                self.G[u][v]["weight"] = w
-
-    def save_graph(self):
-        os.makedirs(os.path.dirname(self.graph_file), exist_ok=True)  # ✅ 确保目录存在
-        self._apply_decay_if_needed()
-        data = nx.node_link_data(self.G, edges="links")
-        with open(self.graph_file, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
-
-    def maybe_apply_decay(self):
-        """在启动时或定时调用"""
-        self._apply_decay_if_needed()
-        self.save_graph()
-
-    def add_concept_link(self, keyword1, keyword2):
-        if keyword1 == keyword2:
-            return
-
-        cap = int(MEMORY_SETTINGS.get("graph_edge_cap", 12))
-
-        if self.G.has_edge(keyword1, keyword2):
-            w = float(self.G[keyword1][keyword2].get("weight", 1.0))
-            self.G[keyword1][keyword2]["weight"] = min(w + 1.0, cap)
-        else:
-            self.G.add_edge(keyword1, keyword2, weight=1.0)
-
-        self.save_graph()
-
-    def get_related_keywords(self, start_keywords, depth=2, top_k=5):
-        # ✅ 性能优化：检查缓存
-        cache_key = f"{','.join(sorted(start_keywords))}:{depth}:{top_k}"
-        if cache_key in self._related_cache:
-            cached_time, cached_result = self._related_cache[cache_key]
-            if time.time() - cached_time < self._cache_ttl:
-                self._cache_hits += 1
-                return cached_result
-
-        self._cache_misses += 1
-
-        activated_nodes = {}
-        start_keywords = [k for k in start_keywords if k and k not in self.stopwords]
-
-        for kw in start_keywords:
-            if kw in self.G:
-                activated_nodes[kw] = 1.0
-
-        # ✅ 性能优化：使用 NetworkX 的优化算法
-        for kw in start_keywords:
-            if kw in self.G:
-                # ✅ 限制子图大小，避免计算过大
-                degree = self.G.degree(kw)
-                if degree > 50:
-                    # 如果节点连接太多，限制半径并使用子图
-                    subgraph = nx.ego_graph(self.G, kw, radius=1)
-                    # 使用 PageRank 算法评估节点重要性
-                    pr = nx.pagerank(subgraph, max_iter=50, tol=1e-6)
-                    activated_nodes.update({k: v for k, v in pr.items() if v > 0.01})
-                else:
-                    # 正常扩散
-                    current_layer = [kw]
-                    for _ in range(depth):
-                        next_layer = []
-                        for node in current_layer:
-                            if node not in self.G:
-                                continue
-                            score = activated_nodes[node]
-                            if score < 0.2:
-                                continue
-                            for neighbor in self.G.neighbors(node):
-                                if neighbor in self.stopwords:
-                                    continue
-                                edge_weight = float(
-                                    self.G[node][neighbor].get("weight", 1.0)
-                                )
-                                transfer = score * 0.5 * (1 - 1 / (edge_weight + 1))
-                                if neighbor not in activated_nodes:
-                                    activated_nodes[neighbor] = 0.0
-                                    next_layer.append(neighbor)
-                                activated_nodes[neighbor] += transfer
-                        current_layer = next_layer
-
-        result = sorted(activated_nodes.items(), key=lambda x: x[1], reverse=True)
-        filtered = [k for k, v in result if k not in start_keywords][:top_k]
-
-        # ✅ 性能优化：缓存结果
-        self._related_cache[cache_key] = (time.time(), filtered)
-
-        return filtered
-
+# Profile / Graph: use modules.memory.ProfileStore and ModularGraphMemory only.
+# Local duplicate ProfileStore/GraphMemory classes were removed (dead code, 2026-07-30).
 
 class AdvancedMemorySystem:
     def __init__(self):
         self._lock = threading.Lock()
+        self._vector_lock = threading.Lock()
         # 默认 2，后续会从 MEMORY_SETTINGS 覆盖
         self.recall_min_chars = 2
 
         # 🟢 [修正] ThreadPoolExecutor 来自 concurrent.futures，不是 threading
         # max_workers=1 保证写入顺序，避免并发写入导致时序混乱
         self._executor = ThreadPoolExecutor(max_workers=1)
+        self._vector_executor = ThreadPoolExecutor(max_workers=1)
+        self._vector_schedule_lock = threading.Lock()
+        self._vector_sync_future = None
 
         # 1. 数据库连接
         self.sqlite_store = get_memory_store()
+        self.memory_core = MemoryCoreService(
+            self.sqlite_store,
+            llm_call=chat_with_ai,
+            settings=MEMORY_SETTINGS,
+        )
+        self.memory_core.initialize()
 
         # 2. ChromaDB 连接
         self.chroma_client = chromadb.PersistentClient(path=MEMORY_DB_PATH)
-        fallback = embedding_functions.DefaultEmbeddingFunction()
-
-        if EMBEDDING_CONFIG.get("api_url"):
-            self.embedding_fn = RemoteBGEFunction(
-                api_url=EMBEDDING_CONFIG["api_url"],
-                api_key=EMBEDDING_CONFIG.get("api_key", ""),
-                model_name=EMBEDDING_CONFIG["model_name"],
-                fallback_fn=fallback,
-                timeout=int(EMBEDDING_CONFIG.get("timeout", 12)),
-                max_retries=int(EMBEDDING_CONFIG.get("max_retries", 2)),
-            )
-        else:
-            self.embedding_fn = fallback
+        self.embedding_service = build_configured_embedding_service(
+            models=MODELS,
+            runtime_settings=load_runtime_settings_strict(),
+            legacy_config=EMBEDDING_CONFIG,
+        )
+        self.embedding_fn = ChromaEmbeddingFunction(self.embedding_service)
 
         self.memory_collection = self.chroma_client.get_or_create_collection(
             name="waifu_memory_advanced", embedding_function=self.embedding_fn
         )
+        self.knowledge_collection_metadata = {
+            "embedding_model": self.embedding_service.model,
+            "index_version": 1,
+        }
+        if self.embedding_service.expected_dimension:
+            self.knowledge_collection_metadata["embedding_dimension"] = int(
+                self.embedding_service.expected_dimension
+            )
         self.knowledge_collection = self.chroma_client.get_or_create_collection(
-            name="waifu_knowledge_base", embedding_function=self.embedding_fn
+            name="waifu_knowledge_base",
+            embedding_function=self.embedding_fn,
+            metadata=self.knowledge_collection_metadata,
         )
+        self.knowledge_embedding_compatibility = (
+            self._knowledge_collection_compatibility(
+                self.knowledge_collection,
+                model=self.embedding_service.model,
+                dimension=self.embedding_service.expected_dimension,
+            )
+        )
+        self.memory_vector_collection_name = self._memory_vector_collection_name(
+            self.embedding_service.model,
+            self.embedding_service.expected_dimension,
+        )
+        self.memory_vector_collection_metadata = {
+            "embedding_model": self.embedding_service.model,
+            "index_version": 1,
+        }
+        if self.embedding_service.expected_dimension:
+            self.memory_vector_collection_metadata["embedding_dimension"] = int(
+                self.embedding_service.expected_dimension
+            )
+        self.current_memory_collection = self.chroma_client.get_or_create_collection(
+            name=self.memory_vector_collection_name,
+            metadata=self.memory_vector_collection_metadata,
+        )
+        self.memory_vector_index = MemoryVectorIndex(
+            repository=self.memory_core.repository,
+            collection=self.current_memory_collection,
+            embedding_service=self.embedding_service,
+        )
+        self.memory_core.vector_search = self._query_memory_vector
+        self.memory_core.vector_job_notifier = self._schedule_memory_vector_sync
 
         # 3. 图谱
         self.graph = ModularGraphMemory()
@@ -668,8 +149,8 @@ class AdvancedMemorySystem:
         self.profile_path = os.path.join(
             os.path.dirname(MEMORY_DB_PATH), "profile.json"
         )
-        self.profile = ModularProfileStore(self.profile_path)
-        self.profile_enabled = True
+        self.profile = None
+        self.profile_enabled = False
         self.participant_filtering_enabled = bool(
             MEMORY_SETTINGS.get("participant_filtering_enabled", True)
         )
@@ -758,6 +239,162 @@ class AdvancedMemorySystem:
         self._cache_hits = 0
         self._cache_misses = 0
 
+        if self.embedding_service.enabled:
+            self._schedule_memory_vector_sync(limit=10)
+
+    @staticmethod
+    def _memory_vector_collection_name(model: str, dimension: int | None) -> str:
+        identity = f"{str(model or 'unconfigured')}|{int(dimension or 0)}"
+        suffix = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:12]
+        return f"memory_core_v1_{suffix}"
+
+    @staticmethod
+    def _knowledge_collection_compatibility(
+        collection,
+        *,
+        model: str,
+        dimension: int | None,
+    ) -> dict:
+        expected_model = str(model or "").strip()
+        expected_dimension = int(dimension or 0)
+        metadata = dict(getattr(collection, "metadata", None) or {})
+        collection_model = str(metadata.get("embedding_model") or "").strip()
+        try:
+            collection_dimension = int(metadata.get("embedding_dimension") or 0)
+        except (TypeError, ValueError):
+            collection_dimension = 0
+        try:
+            count = int(collection.count())
+        except Exception:
+            count = 0
+
+        model_mismatch = bool(
+            count
+            and collection_model
+            and expected_model
+            and collection_model != expected_model
+        )
+        dimension_mismatch = bool(
+            count
+            and collection_dimension
+            and expected_dimension
+            and collection_dimension != expected_dimension
+        )
+        metadata_incomplete = not collection_model or collection_dimension <= 0
+        unknown_metadata_mismatch = bool(count and metadata_incomplete)
+        rebuild_required = (
+            model_mismatch or dimension_mismatch or unknown_metadata_mismatch
+        )
+        if not rebuild_required:
+            updated = dict(metadata)
+            if expected_model:
+                updated["embedding_model"] = expected_model
+            if expected_dimension > 0:
+                updated["embedding_dimension"] = expected_dimension
+            updated.setdefault("index_version", 1)
+            modifier = getattr(collection, "modify", None)
+            if updated != metadata and callable(modifier):
+                modifier(metadata=updated)
+
+        return {
+            "rebuild_required": rebuild_required,
+            "collection_count": count,
+            "collection_model": collection_model,
+            "collection_dimension": collection_dimension or None,
+            "runtime_model": expected_model,
+            "runtime_dimension": expected_dimension or None,
+        }
+
+    def _ensure_knowledge_collection_compatible(self) -> None:
+        if self.knowledge_embedding_compatibility.get("rebuild_required"):
+            raise EmbeddingUnavailableError(
+                "知识库向量与当前嵌入模型不兼容，请清空并重新导入知识库"
+            )
+
+    def get_memory_vector_status(self) -> dict:
+        return self.memory_vector_index.status()
+
+    def test_embedding_connection(self) -> dict:
+        self.embedding_service.embed(["Live2D-Suzu embedding connection test"])
+        self._schedule_memory_vector_sync(limit=10)
+        return self.embedding_service.status()
+
+    def query_memory_vector(
+        self,
+        text: str,
+        *,
+        person_id: str = "owner",
+        limit: int = 10,
+    ) -> list[dict]:
+        return self._query_memory_vector(
+            text,
+            person_id=person_id,
+            session_id="",
+            limit=limit,
+        )
+
+    def process_memory_vector_jobs(self, limit: int = 100) -> dict:
+        with self._vector_lock:
+            return self.memory_vector_index.process_pending(limit=limit)
+
+    def _schedule_memory_vector_sync(self, limit: int = 100) -> bool:
+        embedding_state = str(
+            (self.embedding_service.status() or {}).get("state") or ""
+        )
+        if embedding_state in {"disabled", "unconfigured", "error"}:
+            return False
+        index_status = dict(self.memory_vector_index.status() or {})
+        if index_status.get("rebuild_required"):
+            return False
+        with self._vector_schedule_lock:
+            if self._vector_sync_future is not None and not self._vector_sync_future.done():
+                return False
+            self._vector_sync_future = self._vector_executor.submit(
+                self.process_memory_vector_jobs,
+                limit=limit,
+            )
+        return True
+
+    def _query_memory_vector(self, text: str, **kwargs) -> list[dict]:
+        embedding_status = dict(self.embedding_service.status() or {})
+        if embedding_status.get("state") in {"disabled", "unconfigured", "error"}:
+            raise EmbeddingUnavailableError(
+                str(embedding_status.get("last_error") or embedding_status.get("state"))
+            )
+        self._schedule_memory_vector_sync(limit=10)
+        with self._vector_lock:
+            index = self.memory_vector_index
+        return index.query(text, **kwargs)
+
+    def rebuild_memory_vector_index(self) -> dict:
+        with self._vector_lock:
+            try:
+                self.chroma_client.delete_collection(
+                    name=self.memory_vector_collection_name
+                )
+            except ValueError:
+                pass
+            self.current_memory_collection = (
+                self.chroma_client.get_or_create_collection(
+                    name=self.memory_vector_collection_name,
+                    metadata=self.memory_vector_collection_metadata,
+                )
+            )
+            self.memory_vector_index = MemoryVectorIndex(
+                repository=self.memory_core.repository,
+                collection=self.current_memory_collection,
+                embedding_service=self.embedding_service,
+            )
+            self.memory_core.vector_search = self._query_memory_vector
+            self.memory_core.vector_job_notifier = self._schedule_memory_vector_sync
+            queued = self.memory_core.rebuild_vector_jobs()
+        if self.embedding_service.enabled:
+            self._schedule_memory_vector_sync(limit=10)
+        return {
+            "queued": queued,
+            "collection": self.memory_vector_collection_name,
+        }
+
     def _extract_keywords(self, text: str):
         """提取关键词，用于图谱扩展"""
         if not text:
@@ -780,19 +417,35 @@ class AdvancedMemorySystem:
             stats["chunk_count"] = int(self.knowledge_collection.count())
         except Exception:
             pass
-        embed_stats = getattr(self.embedding_fn, "stats", None)
-        if isinstance(embed_stats, dict):
-            stats.update(embed_stats)
+        stats["embedding"] = self.embedding_service.status()
+        stats["rebuild_required"] = bool(
+            self.knowledge_embedding_compatibility.get("rebuild_required")
+        )
+        stats["compatibility"] = dict(self.knowledge_embedding_compatibility)
         return stats
 
     def rebuild_knowledge_collection(self) -> bool:
         try:
             self.chroma_client.delete_collection("waifu_knowledge_base")
-        except Exception:
+        except ValueError:
             pass
+        except Exception:
+            active_logger = getattr(self, "_logger", None)
+            if active_logger is not None:
+                active_logger.exception("Failed to delete knowledge collection")
+            return False
         try:
             self.knowledge_collection = self.chroma_client.get_or_create_collection(
-                name="waifu_knowledge_base", embedding_function=self.embedding_fn
+                name="waifu_knowledge_base",
+                embedding_function=self.embedding_fn,
+                metadata=self.knowledge_collection_metadata,
+            )
+            self.knowledge_embedding_compatibility = (
+                self._knowledge_collection_compatibility(
+                    self.knowledge_collection,
+                    model=self.embedding_service.model,
+                    dimension=self.embedding_service.expected_dimension,
+                )
             )
             return True
         except Exception:
@@ -826,7 +479,14 @@ class AdvancedMemorySystem:
 
     # ================= 核心：添加记忆 (异步优化版) =================
 
-    def add_memory(self, role, content, session_id: str = None, meta: dict = None):
+    def add_memory(
+        self,
+        role,
+        content,
+        session_id: str = None,
+        meta: dict = None,
+        memory_session_id: str = None,
+    ):
         """
         主线程只做最快的内存操作(RAM)，慢速 IO 操作(SQLite/Chroma/LLM提取)扔到后台线程池。
         这样可以显著减少 UI 卡顿。
@@ -837,79 +497,56 @@ class AdvancedMemorySystem:
 
         # 2. 提交慢速任务到后台 (SQLite, Chroma, Graph, Profile提取)
         self._executor.submit(
-            self._background_save_memory, role, content, session_id, meta
+            self._background_save_memory,
+            role,
+            content,
+            session_id,
+            memory_session_id,
+            meta,
         )
 
     def _background_save_memory(
-        self, role, content, session_id: str = None, meta: dict = None
+        self,
+        role,
+        content,
+        session_id: str = None,
+        memory_session_id: str = None,
+        meta: dict = None,
     ):
-        """后台慢速任务：处理磁盘 IO、向量计算、LLM 提取等耗时操作"""
+        """Persist real messages through Memory Core's single write path."""
         try:
             safe_meta = dict(meta or {})
-            if session_id:
-                safe_meta.setdefault("session_id", str(session_id))
-            # A. 写入 SQLite (全量日志)
-            if self.sqlite_store:
-                try:
-                    self.sqlite_store.add_transcript(
-                        role, content, meta=safe_meta, session_id=session_id
-                    )
-                except Exception as e:
-                    print(f"❌ [Memory] SQLite 写入失败: {e}")
-
-            # B. 自动提取 Profile 档案 (LLM 操作，较慢)
-            # 如果开启了 Profile 且角色符合 (user/agent)，尝试提取
-            if self.profile_enabled and self.profile:
-                try:
-                    profile_meta = dict(safe_meta)
-                    profile_meta.setdefault("session_id", str(session_id or ""))
-                    self.profile.extract_and_update(role, content, meta=profile_meta)
-                except Exception as e:
-                    print(f"⚠️ [Profile] 后台提取失败: {e}")
-
-            # C. 写入 Vector DB (条件过滤 + Embedding 计算)
-            if self._should_store_long_term(role, content):
-                meta = {
-                    "role": role,
-                    "ts": datetime.now(timezone.utc).isoformat(),
-                    "kind": "chat",
-                }
-                meta.update(safe_meta)
-                meta["role"] = role
-                if session_id:
-                    meta["session_id"] = str(session_id)
-                meta = build_memory_metadata(
-                    content,
-                    meta,
-                    extractor=self._extract_keywords,
-                )
-                # 确保 ID 唯一且有序
-                msg_id = f"mem_{int(time.time() * 1000)}_{role}_{uuid.uuid4().hex[:8]}"
-
-                try:
-                    stored_meta = serialize_vector_metadata(meta)
-                    self.memory_collection.add(
-                        documents=[content],
-                        metadatas=[stored_meta],
-                        ids=[msg_id],
-                    )
-                except Exception as e:
-                    print(f"⚠️ [Memory] 向量库写入失败: {e}")
-
-            # D. 更新图谱 (仅用户，CPU 密集)
-            if role == "user":
-                try:
-                    keywords = self._extract_keywords(content)
-                    for k1, k2 in itertools.combinations(keywords, 2):
-                        self.graph.add_concept_link(k1, k2)
-                except Exception as e:
-                    print(f"⚠️ [Memory] 图记忆更新失败: {e}")
+            persistent_session_id = str(memory_session_id or session_id or "").strip()
+            if persistent_session_id:
+                safe_meta["session_id"] = persistent_session_id
+            user_id = str(safe_meta.get("user_id") or "").strip()
+            is_owner = bool(safe_meta.get("is_owner"))
+            source = str(safe_meta.get("source") or "").strip().lower()
+            person_id = "owner"
+            if user_id and source in {"qq_gateway", "napcat_qq"} and not is_owner:
+                person_id = f"qq:{user_id}"
+            active_character = (
+                character_manager.get_active_character() if character_manager else {}
+            )
+            character_id = str(
+                getattr(character_manager, "data", {}).get("active_id") or ""
+            ).strip()
+            character_name = str(
+                (active_character or {}).get("name") or ""
+            ).strip()
+            self.memory_core.record_message(
+                role,
+                content,
+                session_id=persistent_session_id,
+                person_id=person_id,
+                character_id=character_id,
+                character_name=character_name,
+                meta=safe_meta,
+            )
 
         except Exception as e:
-            print(f"❌ [Background Memory] 后台任务异常: {e}")
-            import traceback
-
-            traceback.print_exc()
+            if self._logger:
+                self._logger.exception(f"Memory Core background write failed: {e}")
 
     def _fetch_profile_from_db(self) -> str:
         """从 SQLite 获取 User 和 当前角色 的档案"""
@@ -1323,6 +960,7 @@ Output ONLY "YES" or "NO".
 
     # ---------- 新增：导入知识（修复 hash(chunk) 不稳定问题） ----------
     def import_knowledge_from_file(self, file_path, progress_callback=None):
+        self._ensure_knowledge_collection_compatible()
         result = import_knowledge_file_modular(
             self.knowledge_collection, self._stable_md5, file_path, progress_callback=progress_callback
         )
@@ -1331,6 +969,7 @@ Output ONLY "YES" or "NO".
         return {"added": int(result or 0), "skipped": 0, "total": int(result or 0)}
 
     def search_knowledge(self, search_text: str, k: int = 3):
+        self._ensure_knowledge_collection_compatible()
         return search_knowledge_modular(self.knowledge_collection, search_text, k=k)
 
     # ---------- 记忆写入 ----------
@@ -1557,7 +1196,13 @@ Output ONLY "YES" or "NO".
             return []
 
     def _retrieve_knowledge(self, search_text: str, k: int = 2):
-        return self.search_knowledge(search_text, k=k)
+        try:
+            return self.search_knowledge(search_text, k=k)
+        except Exception as exc:
+            active_logger = getattr(self, "_logger", None)
+            if active_logger is not None:
+                active_logger.warning("Knowledge recall unavailable: %s", exc)
+            return []
 
     # ---------- 缓存管理（性能优化） ----------
     def clear_query_cache(self):
@@ -1689,23 +1334,23 @@ Output ONLY "YES" or "NO".
         system_persona,
         tool_intent=None,
         session_id: str = None,
+        memory_session_id: str = None,
+        person_id: str = "owner",
     ):
-        print("🔍 [系统] 正在进行双路检索（向量记忆 + 知识库）.")
+        print("🔍 [系统] 正在构建统一记忆上下文.")
 
-        # 0. 提取时间头
         time_header = ""
         if "【当前时间】" in system_persona:
             time_header = system_persona.split("\n")[0]
 
-        # 1. 动态构建 Persona
         active_char = character_manager.get_active_character()
-
+        active_character_id = str(
+            getattr(character_manager, "data", {}).get("active_id") or ""
+        ).strip()
         if active_char and active_char.get("prompt"):
             core_persona = active_char["prompt"]
         else:
             core_persona = DEFAULT_PERSONA
-
-        # 🟢 拼装：时间 + 性格 + 通用规则
         final_system = f"{time_header}\n\n{core_persona}\n\n{SYSTEM_RULES_PROMPT}"
 
         runtime_additions = self._extract_runtime_system_additions(
@@ -1714,7 +1359,6 @@ Output ONLY "YES" or "NO".
         if runtime_additions:
             final_system += "\n\n" + runtime_additions
 
-        # 2. 补全工具说明
         tool_desc = ""
         if "【可用工具能力】" in system_persona:
             parts = system_persona.split("【可用工具能力】")
@@ -1728,116 +1372,114 @@ Output ONLY "YES" or "NO".
         if tool_desc:
             final_system += "\n\n" + tool_desc
 
-        # 3. 准备检索参数
         raw_user = (current_user_text or "").strip()
         tool_mode = bool(tool_intent)
-        recall_intent = self._is_recall_intent_query(raw_user)
-        do_recall = (not tool_mode) and (
-            (len(raw_user) >= self.recall_min_chars) or recall_intent
-        )
-
-        # 4. 图扩散关键词扩展
-        search_text = raw_user
-        if self.graph_expand_enabled and len(raw_user) >= self.graph_expand_min_chars:
-            keywords = self._extract_keywords(raw_user)
-            try:
-                related = self.graph.get_related_keywords(keywords, depth=2, top_k=5)
-                if related:
-                    search_text = raw_user + " " + " ".join(related)
-            except Exception:
-                pass
-
-        # 5. 长期记忆检索 (Vector)
         session_key = str(session_id or "").strip()
-        mem_items = (
-            self._retrieve_memories(search_text, session_id=session_key)
-            if do_recall
-            else []
-        )
-        mem_text = ""
-        if mem_items:
-            mem_text = "\n".join(
-                [self._format_memory_item(m["meta"], m["doc"]) for m in mem_items]
-            )
+        memory_session_key = str(memory_session_id or session_key).strip()
+        if session_key:
+            self._restore_session_short_term_from_db(session_key)
+            short_ctx = list(self.session_short_term_memory.get(session_key, []))
+        else:
+            short_ctx = list(self.short_term_memory)
+        recent_messages = [
+            item
+            for item in short_ctx[-8:]
+            if isinstance(item, dict)
+            and str(item.get("role") or "").strip() in {"user", "assistant"}
+        ]
 
-        # 6. 知识库检索
-        know_items = [] if tool_mode else self._retrieve_knowledge(search_text, k=2)
+        if tool_mode:
+            profile = self.memory_core.get_person_profile(
+                person_id,
+                max_items=self.memory_core.profile_max_items,
+            )
+            memory_intent = "none"
+            profile_text = profile.text
+            mem_text = ""
+        else:
+            memory_context = self.memory_core.build_reply_context(
+                raw_user,
+                session_id=memory_session_key,
+                person_id=person_id,
+                recent_messages=recent_messages,
+            )
+            memory_intent = memory_context.intent
+            profile_text = memory_context.profile_text
+            mem_text = memory_context.memory_text
+
+        character_profile_text = ""
+        if active_character_id:
+            try:
+                character_profile = self.memory_core.get_character_profile(
+                    active_character_id
+                )
+                character_profile_text = character_profile.text
+            except Exception:
+                character_profile_text = ""
+
         know_text = ""
-        if know_items:
-            know_text = "\n".join([f"· {k}" for k in know_items])
+        if not tool_mode and memory_intent == "none" and len(raw_user) >= 8:
+            know_items = self._retrieve_knowledge(raw_user, k=2)
+            if know_items:
+                know_text = "\n".join([f"· {item}" for item in know_items])
 
-        # 🟢 7. 用户档案 (Profile) - 关键修改！
-        # 优先从 SQLite 数据库读取 (CharacterManager 写入的地方)
-        profile_text = self._fetch_profile_from_db()
-
-        # 如果数据库没读到，且开启了 JSON Profile，尝试用 JSON 补充
-        if not profile_text and self.profile_enabled and self.profile:
-            profile_text = self.profile.format_for_prompt()
-
-        # 8. SQLite 记忆源 (Tasks/Notes/Episodes)
-        sqlite_notes_text = ""
         sqlite_tasks_text = ""
-        sqlite_episodes_text = ""
         try:
-            from modules.memory_sqlite import (
-                format_active_tasks_for_prompt,
-                format_notes_for_prompt,
-                format_recent_episodes_for_prompt,
-            )
+            from modules.memory_sqlite import format_active_tasks_for_prompt
 
             if self.sqlite_store:
                 sqlite_tasks_text = format_active_tasks_for_prompt(
                     self.sqlite_store, limit=6
                 )
-                sqlite_notes_text = format_notes_for_prompt(
-                    self.sqlite_store, max_items=24
-                )
-                sqlite_episodes_text = format_recent_episodes_for_prompt(
-                    self.sqlite_store, limit=3
-                )
         except Exception:
             pass
 
-        # 9. 最终组装 System Content
         if profile_text:
-            final_system += "\n\n【用户档案与自我认知】:\n" + profile_text
+            final_system += (
+                "\n\n【当前用户画像】\n"
+                "只把这些信息作为理解用户的背景；当前消息与画像冲突时，以当前消息为准。\n"
+                + profile_text
+            )
+
+        if character_profile_text:
+            final_system += (
+                "\n\n【当前角色补充档案】\n"
+                "这些是你当前角色的自我认知补充，不是用户信息；与核心角色设定冲突时，以核心角色设定为准。\n"
+                + character_profile_text
+            )
 
         if sqlite_tasks_text:
             final_system += "\n\n【当前待办/承诺】:\n" + sqlite_tasks_text
-
-        if sqlite_notes_text:
-            final_system += "\n\n【重要笔记 (Memory Items)】:\n" + sqlite_notes_text
-
-        if sqlite_episodes_text:
-            final_system += "\n\n【近期对话摘要 (Episodes)】:\n" + sqlite_episodes_text
 
         if know_text:
             final_system += "\n\n【相关知识库】:\n" + clean_injected_context(know_text)
 
         if mem_text:
             final_system += (
-                "\n\n【回忆片段】(仅供参考):\n"
-                "当涉及用户既往事实时，优先相信 user 原话；assistant 推断若冲突则降级处理。\n"
+                "\n\n【经筛选的长期记忆】\n"
+                "这些记录只用于回答当前问题，不要逐条复述，也不要补全记录中没有的事实。\n"
                 + mem_text
             )
 
-        # 10. 工具上下文
         tool_ctx = self._format_tool_history(tool_intent)
         if tool_ctx:
             final_system += "\n\n【工具使用记录】:\n" + tool_ctx
 
-        # 构建消息列表
         messages = [{"role": "system", "content": final_system}]
-        if session_key:
-            self._restore_session_short_term_from_db(session_key)
-            short_ctx = list(self.session_short_term_memory.get(session_key, []))
-        else:
-            short_ctx = self.short_term_memory
-        if recall_intent:
+        if memory_intent in {"episode", "profile"}:
             short_ctx = [
                 m for m in short_ctx if (m.get("role") or "").strip() == "user"
-            ]
-        messages += short_ctx
+            ][-4:]
+        while short_ctx:
+            last = short_ctx[-1]
+            if (
+                str(last.get("role") or "").strip() == "user"
+                and str(last.get("content") or "").strip() == raw_user
+            ):
+                short_ctx.pop()
+                continue
+            break
+        messages += short_ctx[-self.max_short_term :]
         messages += [{"role": "user", "content": current_user_text}]
 
         return messages

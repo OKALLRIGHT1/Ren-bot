@@ -240,3 +240,32 @@ async def test_finalize_tool_reply_tells_info_gateway_not_to_guess_empty_data():
     assert "不要猜测" in feedback_message
     assert "只基于工具结果" in feedback_message
     assert "不要说自己没有这个功能" in feedback_message
+
+
+@pytest.mark.asyncio
+async def test_finalize_search_reply_falls_back_to_tool_result_on_model_error():
+    async def chat_with_ai(messages, *, task_type, caller):
+        return "❌ 系统繁忙，无法连接 AI。"
+
+    result = await finalize_tool_reply(
+        clean_thought="我查一下",
+        tool_results=[
+            "[search_meta] provider=GrokChat; query=最近登陆中国的台风\n"
+            "最近登陆中国的台风是台风示例，登陆时间为7月。"
+        ],
+        used_triggers=["search_web"],
+        context_messages=[],
+        route_reason="",
+        task_default="default",
+        start_emo="think",
+        chat_with_ai=chat_with_ai,
+        extract_emo_tag=_extract_emo_tag,
+        character_sharing_enabled=False,
+        try_share=lambda: "",
+        is_model_error_reply=lambda text: "系统繁忙" in str(text),
+    )
+
+    assert "最近登陆中国的台风是台风示例" in result.final_reply
+    assert "系统繁忙" not in result.final_reply
+    assert result.final_emo == "think"
+    assert result.model_emo_seen is True

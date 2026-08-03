@@ -1,6 +1,9 @@
 import asyncio
+import json
 from dataclasses import dataclass
+from pathlib import Path
 
+from modules.plugin_model_gateway import PluginModelCallResult
 from plugins.meme_pack.plugin import Plugin
 
 
@@ -65,6 +68,48 @@ class _FakeChatService:
     async def _send_gateway_image_reply(self, image_path, ctx, caption=""):
         self.sent = True
         return True
+
+
+class _FakeModelGateway:
+    def __init__(self, text):
+        self.text = text
+        self.calls = []
+
+    async def invoke_text(self, messages, **kwargs):
+        self.calls.append((messages, kwargs))
+        return PluginModelCallResult(ok=True, text=self.text, model_id="chat-a")
+
+
+def test_meme_pack_config_selects_main_models():
+    config = json.loads(
+        Path("plugins/meme_pack/config.json").read_text(encoding="utf-8")
+    )
+    setting = config["settings"]["model_queue"]
+
+    assert setting["type"] == "model_queue"
+    assert setting["purpose"] == ["chat"]
+
+
+def test_meme_selector_uses_selected_main_model():
+    plugin = Plugin()
+    plugin.settings = {"model_queue": {"default": ["chat-a"]}}
+    gateway = _FakeModelGateway(
+        '{"send":true,"meme_id":1,"emotion":"提醒","reason":"fit"}'
+    )
+
+    asset, reason = asyncio.run(
+        plugin._select_auto_meme_with_llm(
+            candidates=[(1.0, _Asset())],
+            user_text="坐太久了",
+            reply_text="休息一下吧",
+            inferred_emotion="提醒",
+            ctx={"model_gateway": gateway},
+        )
+    )
+
+    assert asset.id == 1
+    assert reason == "llm:提醒:fit"
+    assert gateway.calls[0][1]["selected_ids"] == ["chat-a"]
 
 
 def test_select_meme_image_path_does_not_send_gateway_image():

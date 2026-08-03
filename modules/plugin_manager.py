@@ -9,6 +9,7 @@ import types
 from typing import Dict, Any, Tuple, List, Optional, Iterable
 from pathlib import Path
 from modules.plugin_secret_store import PluginSecretStore
+from modules.plugin_model_gateway import get_plugin_model_gateway
 from modules.plugin_security_audit import (
     build_plugin_security_matrix,
     summarize_plugin_security_matrix,
@@ -63,6 +64,7 @@ class PluginManager:
             str, str
         ] = {}  # ✅ 新增：存储 llm_command -> trigger 的映射
         self.secret_store = PluginSecretStore()
+        self.model_gateway = get_plugin_model_gateway()
         self.deferred_tool_stats: Dict[str, Dict[str, int]] = {}
         self.load_errors: List[Dict[str, str]] = []
 
@@ -1044,7 +1046,7 @@ class PluginManager:
     # -------------------- Execute --------------------
     async def _run_with_timeout(self, plugin, args: str, context: dict):
         timeout = getattr(plugin, "timeout_sec", None) or self.default_timeout_sec
-        runtime_context = context
+        runtime_context = self._build_runtime_context(context)
         if getattr(plugin, "type", "react") == "delegate":
             runtime_context = self._build_delegate_runtime_context(context)
         task = asyncio.create_task(plugin.run(args, runtime_context))
@@ -1059,8 +1061,13 @@ class PluginManager:
                 pass
             return f"⚠️ 工具超时（>{timeout}s）"
 
-    def _build_delegate_runtime_context(self, context: dict) -> dict:
+    def _build_runtime_context(self, context: dict) -> dict:
         runtime = dict(context or {})
+        runtime.setdefault("model_gateway", self.model_gateway)
+        return runtime
+
+    def _build_delegate_runtime_context(self, context: dict) -> dict:
+        runtime = self._build_runtime_context(context)
         runtime["delegate_mode"] = True
         runtime.setdefault("allow_read", True)
         runtime.setdefault("allow_write", False)
@@ -1120,9 +1127,11 @@ class PluginManager:
                     denied_message = denied_message or self._get_access_denied_message(
                         plugin, context, reason
                     )
+                    _safe_print(f"🔌 [Direct] 插件无权触发: {plugin_name} -> {reason}")
                     self._dbg(f"🔌 [Direct] 插件无权触发: {plugin_name} -> {reason}")
                     continue
 
+                _safe_print(f"🔌 [Direct] 命中关键词 [{key}] -> 触发插件: {plugin_name}")
                 self._dbg(f"🔌 [Direct] 命中关键词 [{key}] -> 触发插件: {plugin_name}")
 
                 # 将用户的原始整句话作为参数传给插件
@@ -1130,9 +1139,11 @@ class PluginManager:
                 try:
                     # 执行插件
                     res = await self._run_with_timeout(plugin, args, context)
+                    _safe_print(f"🔌 [Direct] 执行成功: {plugin_name}")
                     self._dbg("🔌 [Direct] 执行成功")
                     return True, res
                 except Exception as e:
+                    _safe_print(f"🔌 [Direct] 执行失败: {plugin_name} -> {e}")
                     self._dbg(f"🔌 [Direct] 执行失败: {e}")
                     import traceback
 
@@ -1140,6 +1151,7 @@ class PluginManager:
                     return True, f"⚠️ 视觉模块异常: {e}"
 
         if denied_message and has_command_prefix:
+            _safe_print(f"🔌 [Direct] 命令被拒绝: {denied_message}")
             return True, denied_message
 
         return False, None

@@ -262,6 +262,7 @@ async def finalize_tool_reply(
     extract_emo_tag: Callable[[str], tuple[str, str]],
     character_sharing_enabled: bool,
     try_share: Callable[[], str],
+    is_model_error_reply: Callable[[str], bool] | None = None,
 ) -> ToolFinalizeResult:
     messages = list(context_messages)
     final_reply = ""
@@ -318,9 +319,23 @@ async def finalize_tool_reply(
             caller="chat_tool_finalize",
         )
         emo_final, clean_final = extract_emo_tag(reply_final or "")
-        final_reply = clean_final.strip() or clean_first
-        final_emo = emo_final or start_emo
-        model_emo_seen = bool(emo_final)
+        finalize_failed = bool(
+            callable(is_model_error_reply)
+            and is_model_error_reply(str(reply_final or ""))
+        )
+        search_result_available = bool(
+            feedback.strip()
+            and {str(trigger or "").strip().lower() for trigger in used_triggers}
+            & {"search", "search_web"}
+        )
+        if search_result_available and (finalize_failed or not clean_final.strip()):
+            final_reply = feedback.strip()
+            final_emo = start_emo
+            model_emo_seen = True
+        else:
+            final_reply = clean_final.strip() or clean_first
+            final_emo = emo_final or start_emo
+            model_emo_seen = bool(emo_final)
 
     if character_sharing_enabled and compact_hint != "__direct_result__":
         sharing = try_share()

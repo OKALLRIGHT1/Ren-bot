@@ -44,6 +44,30 @@ def estimate_bubble_display_ms(text: str, *, minimum: int = 3200, maximum: int =
     return max(int(minimum), min(int(read_ms), int(maximum)))
 
 
+def normalize_costume_model_path(model_path: Optional[str]) -> str:
+    """Normalize a model path for costume identity comparison."""
+    raw = str(model_path or "").strip().replace("\\", "/")
+    if not raw:
+        return ""
+    try:
+        abs_path = os.path.abspath(raw).replace("\\", "/")
+    except Exception:
+        abs_path = raw
+    if os.name == "nt":
+        return abs_path.lower()
+    return abs_path
+
+
+def is_same_costume_model_path(left: Optional[str], right: Optional[str]) -> bool:
+    left_norm = normalize_costume_model_path(left)
+    right_norm = normalize_costume_model_path(right)
+    return bool(left_norm and right_norm and left_norm == right_norm)
+
+
+def get_current_costume_model_path() -> str:
+    return str(_CURRENT_COSTUME_MODEL_PATH or "").strip()
+
+
 def update_current_costume_config(config: Optional[dict], model_path: Optional[str] = None) -> None:
     """Update the active costume runtime config without reloading the model."""
     safe_cfg = config if isinstance(config, dict) else {}

@@ -1,0 +1,20 @@
+{
+  "name": "记忆与画像查询",
+  "trigger": "memory_tools",
+  "llm_command": "memory_tools",
+  "type": "delegate",
+  "aliases": ["/memory", "/记忆"],
+  "direct_command_aliases": ["/memory", "/记忆"],
+  "description": "查询长期记忆、人物画像和本地活动统计。参数：query/profile/activity ||| 自然语言问题",
+  "example_arg": "query ||| 我上次提过的项目是什么",
+  "timeout_sec": 30,
+  "version": "1.0.0",
+  "access_control": {
+    "allow_local": true,
+    "allow_remote_qq": true,
+    "allow_qq_owner": true,
+    "allow_qq_others": false,
+    "allow_group_without_at": false
+  },
+  "settings": {}
+}

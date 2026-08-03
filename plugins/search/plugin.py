@@ -7,6 +7,8 @@ from urllib import error, request
 from urllib.parse import urlparse
 
 from core.logger import get_logger
+from modules.model_catalog import normalize_model_selection
+from modules.plugin_model_gateway import get_plugin_model_gateway
 from plugins.plugin_utils import handle_plugin_errors
 
 try:
@@ -114,16 +116,29 @@ class Plugin:
 
     async def gui_check_endpoints(self) -> str:
         settings = getattr(self, "settings", {}) or {}
+        try:
+            main_result = await self._search_with_main_models(
+                query="请只回复 ok，不要补充别的内容。",
+                settings=settings,
+                ctx={},
+                show_links=False,
+            )
+            if main_result is not None:
+                return "✅ 主程序联网搜索模型可用"
+        except Exception as exc:
+            return f"❌ 主程序联网搜索模型不可用：{exc}"
         provider = str(self._read_setting(settings, "provider", "grok")).strip().lower()
         timeout_sec = self._to_int(
-            self._read_setting(settings, "request_timeout_sec", 12), 12, 3, 60
+            self._read_setting(settings, "request_timeout_sec", 18), 18, 3, 60
         )
 
         if provider == "grok":
             base_url = self._resolve_grok_base_url(settings)
             api_key = self._resolve_grok_api_key(settings)
             model = str(
-                self._read_setting(settings, "grok_model", "grok-4.20-reasoning")
+                self._read_setting(
+                    settings, "grok_model", "grok-4.20-0309-non-reasoning"
+                )
             ).strip()
             if not api_key:
                 return (
@@ -189,7 +204,7 @@ class Plugin:
         settings = getattr(self, "settings", {}) or {}
         provider = str(self._read_setting(settings, "provider", "grok")).strip().lower()
         timeout_sec = self._to_int(
-            self._read_setting(settings, "request_timeout_sec", 12), 12, 3, 60
+            self._read_setting(settings, "request_timeout_sec", 18), 18, 3, 60
         )
         num_results = self._to_int(
             self._read_setting(settings, "num_results", 5), 5, 1, 10
@@ -198,6 +213,23 @@ class Plugin:
         link_request = self._is_link_request(query, ctx)
 
         logger.info(f"正在搜索: {query}")
+
+        try:
+            main_result = await self._search_with_main_models(
+                query=query,
+                settings=settings,
+                ctx=ctx,
+                show_links=link_request,
+            )
+            if main_result is not None:
+                return main_result
+        except Exception as exc:
+            logger.warning(f"主程序模型搜索失败: {exc}")
+            if fallback_ddg:
+                return await self._ddg_search(
+                    query, num_results, show_links=link_request
+                )
+            return f"主程序模型搜索失败: {exc}"
 
         if provider == "grok":
             try:
@@ -257,6 +289,50 @@ class Plugin:
         if isinstance(value, dict):
             return value.get("default", default)
         return default if value is None else value
+
+    def _selected_model_ids(self, settings: Dict[str, Any]) -> List[str]:
+        return normalize_model_selection(
+            self._read_setting(settings, "model_queue", [])
+        )
+
+    async def _search_with_main_models(
+        self,
+        *,
+        query: str,
+        settings: Dict[str, Any],
+        ctx: Optional[dict],
+        show_links: bool,
+    ) -> Optional[str]:
+        selected_ids = self._selected_model_ids(settings)
+        gateway = (ctx or {}).get("model_gateway") or get_plugin_model_gateway()
+        payload = self._build_grok_chat_payload(
+            query=query,
+            model="",
+            settings=settings,
+            show_links=show_links,
+        )
+        result = await gateway.invoke_text(
+            payload["messages"],
+            selected_ids=selected_ids,
+            required_purpose="web_search",
+            task_type="web_search",
+            caller="search_web_model",
+            timeout_sec=self._to_int(
+                self._read_setting(settings, "request_timeout_sec", 18),
+                18,
+                3,
+                60,
+            ),
+            allow_untagged_route=False,
+        )
+        if not selected_ids and result.error_code == "model_route_empty":
+            return None
+        if not result.ok:
+            raise RuntimeError(result.error_message or result.error_code)
+        return (
+            f"[search_meta] provider=MainModel; model={result.model_id}; "
+            f"query={query[:80]}\n{result.text}"
+        ).strip()
 
     def _to_bool(self, value: Any) -> bool:
         if isinstance(value, bool):
@@ -921,7 +997,9 @@ class Plugin:
         base_url = self._resolve_grok_base_url(settings)
         api_key = self._resolve_grok_api_key(settings)
         model = str(
-            self._read_setting(settings, "grok_model", "grok-4.20-reasoning")
+            self._read_setting(
+                settings, "grok_model", "grok-4.20-0309-non-reasoning"
+            )
         ).strip()
 
         if not api_key:

@@ -1,3 +1,9 @@
+"""Conversation-path diary generation and scheduled daily summary.
+
+Boundary: used by ChatService for auto diary / make-up logs.
+GUI list/edit CRUD lives in services.gui_api.diary_service.DiaryGuiService.
+"""
+
 from __future__ import annotations
 
 import asyncio
@@ -108,7 +114,12 @@ class DiaryService:
             on_error=lambda exc: print(f"[ChatService] Load day transcript failed: {exc}"),
         )
 
-    def _fetch_day_chat_history(self, date_str: str) -> str:
+    def _fetch_day_chat_history(
+        self,
+        date_str: str,
+        assistant_name: str = "当前角色",
+        owner_label: str = "主人",
+    ) -> str:
         return diary_utils.fetch_day_chat_history(
             self.load_day_transcript_rows(date_str),
             date_str,
@@ -116,9 +127,17 @@ class DiaryService:
             legacy_owner_private_session_ids=self.legacy_owner_private_session_ids,
             owner_shared_local_sources=self.owner_shared_local_sources,
             qq_remote_sources=self.qq_remote_sources,
+            assistant_name=assistant_name,
+            owner_label=owner_label,
         )
 
-    def _fetch_day_owner_chat_history(self, date_str: str, mode: str = "all") -> str:
+    def _fetch_day_owner_chat_history(
+        self,
+        date_str: str,
+        mode: str = "all",
+        assistant_name: str = "当前角色",
+        owner_label: str = "主人",
+    ) -> str:
         return diary_utils.fetch_day_owner_chat_history(
             self.load_day_transcript_rows(date_str),
             date_str,
@@ -127,6 +146,8 @@ class DiaryService:
             legacy_owner_private_session_ids=self.legacy_owner_private_session_ids,
             owner_shared_local_sources=self.owner_shared_local_sources,
             qq_remote_sources=self.qq_remote_sources,
+            assistant_name=assistant_name,
+            owner_label=owner_label,
         )
 
     def _get_runtime_owner_label(self) -> str:
@@ -299,18 +320,44 @@ class DiaryService:
                 f"NapCat history backfill skipped for {date_str}: {exc}"
             )
 
-        chat_history = await asyncio.to_thread(self._fetch_day_chat_history, date_str)
+        active_char_name, active_char_id, base_prompt = self.get_active_character_context()
+        active_char_name = active_char_name or "当前角色"
+        active_char_id = active_char_id or "default_char"
+        subject_label = self._resolve_diary_subject_label()
+
+        chat_history = await asyncio.to_thread(
+            self._fetch_day_chat_history,
+            date_str,
+            active_char_name,
+            subject_label,
+        )
         owner_chat_history = await asyncio.to_thread(
-            self._fetch_day_owner_chat_history, date_str
+            self._fetch_day_owner_chat_history,
+            date_str,
+            "all",
+            active_char_name,
+            subject_label,
         )
         owner_local_history = await asyncio.to_thread(
-            self._fetch_day_owner_chat_history, date_str, "local"
+            self._fetch_day_owner_chat_history,
+            date_str,
+            "local",
+            active_char_name,
+            subject_label,
         )
         owner_qq_private_history = await asyncio.to_thread(
-            self._fetch_day_owner_chat_history, date_str, "qq_private"
+            self._fetch_day_owner_chat_history,
+            date_str,
+            "qq_private",
+            active_char_name,
+            subject_label,
         )
         owner_qq_group_history = await asyncio.to_thread(
-            self._fetch_day_owner_chat_history, date_str, "qq_group"
+            self._fetch_day_owner_chat_history,
+            date_str,
+            "qq_group",
+            active_char_name,
+            subject_label,
         )
 
         chat_history = diary_utils.normalize_diary_text_block(chat_history)
@@ -327,10 +374,6 @@ class DiaryService:
             print(f"[Diary] Skip {date_str}: no data")
             return ""
 
-        active_char_name, active_char_id, base_prompt = self.get_active_character_context()
-        active_char_name = active_char_name or "AI Assistant"
-        active_char_id = active_char_id or "default_char"
-        subject_label = self._resolve_diary_subject_label()
         daily_focus = diary_utils.build_diary_focus_digest(
             date_str,
             normalized_stats_payload,
@@ -382,14 +425,15 @@ class DiaryService:
 8. 数据源1里的屏幕内容只能当作“我看到 {subject_label} 在屏幕上做了什么/处理了什么”的线索，不能直接当作现实世界已经发生的事实。
 9. 如果看到天气、锁屏壁纸、宣传文案、网页标题、窗口文字、桌面组件文案，只能写成“屏幕上出现了…… / 我看到 {subject_label} ……”，不要写成“窗外正在…… / 现实里正在……”。
 10. 除非聊天记录里明确提到真实天气或真实环境，否则不要把屏幕里的天气文案改写成现实天气。
-11. 在聊天记录中，只有 `Owner(Local)`、`Owner(QQ)` 明确代表 {subject_label} 本人；`OtherGroupMember(...)`、`OtherQQContact(...)` 都是别人，绝不能当作 {subject_label} 自己说的话或做的事。
-12. `AI(to Owner)` 表示你和 {subject_label} 的直接互动；`AI(to QQ Group)`、`AI(to QQ Contact)` 表示你在和别人交流，不能反推成 {subject_label} 的个人行为。
+11. 在聊天记录中，只有 `{subject_label}（本地）`、`{subject_label}（QQ）` 明确代表 {subject_label} 本人；`OtherGroupMember(...)`、`OtherQQContact(...)` 都是别人，绝不能当作 {subject_label} 自己说的话或做的事。
+12. `{active_char_name}（对 {subject_label}）` 表示你和 {subject_label} 的直接互动；`{active_char_name}（对 QQ 群）`、`{active_char_name}（对 QQ 联系人）` 表示你在和别人交流，不能反推成 {subject_label} 的个人行为。
 13. 必须优先围绕“当日关键点”中至少 2 个具体点来写，避免把不同日期写成同一套模板。
 14. 如果当天有效数据很少，就明确写“今天信息不多/互动不多”，不要用别的日期常见的活动来补足内容。
 15. 默认写成 2 到 3 段短段落，段落之间空一行；不要整篇挤成一大段，也不要拆成很多碎段。
 16. 第一段先写你对这一天的整体感受或开场印象，第二段再落到具体观察和互动，最后可以用一句较轻的收束。
 17. 不要写成工作汇报、问题清单或分析报告，避免“今天的信息主要集中在……”“比较明确的一次互动是……”这种总结腔。
 18. 开头不要单独输出日期、标题或“今日的日记，我……”，直接进入自然叙述。
+19. 你就是 {active_char_name}，不是旁观的系统角色。正文中不要把自己称为“AI”“助手”或“系统”；记录里由 `{active_char_name}` 说过或做过的事，必须用“我说”“我回答”“他让我……”等第一人称表达。
 		 """
 
         try:
@@ -401,7 +445,7 @@ class DiaryService:
                     {"role": "system", "content": system_prompt},
                     {
                         "role": "user",
-                        "content": f"请严格根据上面的数据与要求，以 {active_char_name} 的第一人称记录你观察到的 {subject_label} 的一天，以及你和 {subject_label} 的互动。只有 Owner(Local)/Owner(QQ) 才是 {subject_label} 本人，OtherGroupMember/OtherQQContact 都是别人；不要把别人的发言和行为记到 {subject_label} 身上，也不要把 {subject_label} 的行为直接写成你自己亲自做的事。请优先使用“当日关键点”里的当天独有细节，不要和前一天写成同一篇，直接输出日记正文。",
+                        "content": f"请严格根据上面的数据与要求，以 {active_char_name} 的第一人称记录你观察到的 {subject_label} 的一天，以及你和 {subject_label} 的互动。你就是 {active_char_name}，不要在正文里把自己称为 AI、助手或系统。只有 {subject_label}（本地）/{subject_label}（QQ）才是 {subject_label} 本人，OtherGroupMember/OtherQQContact 都是别人；不要把别人的发言和行为记到 {subject_label} 身上，也不要把 {subject_label} 的行为直接写成你自己亲自做的事。请优先使用“当日关键点”里的当天独有细节，不要和前一天写成同一篇，直接输出日记正文。",
                     },
                 ],
                 task_type="summary",

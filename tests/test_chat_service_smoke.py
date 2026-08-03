@@ -11,17 +11,28 @@ class _Brain:
     def __init__(self):
         self.short_term_memory = []
         self.sqlite_store = None
+        self.last_build_kwargs = {}
 
     def build_prompt(self, user_text, **kwargs):
+        self.last_build_kwargs = dict(kwargs)
         return [
             {"role": "system", "content": kwargs.get("system_persona", "")},
             {"role": "user", "content": user_text},
         ]
 
-    def add_memory(self, role, content, session_id=None, meta=None):
+    def add_memory(
+        self,
+        role,
+        content,
+        session_id=None,
+        meta=None,
+        memory_session_id=None,
+    ):
         item_meta = dict(meta or {})
         if session_id:
             item_meta["session_id"] = session_id
+        if memory_session_id:
+            item_meta["memory_session_id"] = memory_session_id
         self.short_term_memory.append({"role": role, "content": content, "meta": item_meta})
 
 
@@ -384,6 +395,92 @@ async def test_search_flow_result_is_merged_without_duplicate_memory(chat_env, m
     ]
     assert service.brain.short_term_memory[0]["content"].startswith("[tool_use]")
     assert service.brain.short_term_memory[-1]["content"] == "搜索总结"
+
+
+@pytest.mark.asyncio
+async def test_search_delegate_acknowledges_then_returns_result_without_reasoning_command(
+    chat_env, monkeypatch
+):
+    timeline = []
+    model_callers = []
+
+    class SearchPlugin:
+        plugin_trigger = "search_web"
+
+    class TimelinePluginManager(_PluginManager):
+        def __init__(self):
+            super().__init__(
+                command_result=(
+                    True,
+                    "",
+                    ["【search 结果】宝可梦风波搜索结果"],
+                    ["search_web"],
+                )
+            )
+            self.delegate_map = {"search_web": SearchPlugin()}
+
+        def is_delegate_trigger(self, trigger):
+            return trigger in self.delegate_map
+
+        async def execute_commands(
+            self, text, context, allow_tools=True, allowed_types=None
+        ):
+            timeline.append(("tool", text))
+            return await super().execute_commands(
+                text,
+                context,
+                allow_tools=allow_tools,
+                allowed_types=allowed_types,
+            )
+
+    class TimelinePresenter(_Presenter):
+        async def present(self, text, emotion="neutral", **kwargs):
+            timeline.append(("present", text))
+            await super().present(text, emotion, **kwargs)
+
+    async def chat_with_ai(messages, *, task_type, caller):
+        model_callers.append(caller)
+        if caller == "chat_tool_finalize":
+            return "宝可梦风波搜索结果"
+        return "好，我查一下"
+
+    monkeypatch.setattr(chat_service_module, "chat_with_ai", chat_with_ai)
+    presenter = TimelinePresenter()
+    event_bus = _EventBus()
+    service = chat_env(
+        plugin_manager=TimelinePluginManager(),
+        tool_router=_ToolRouter(
+            need_tools=True,
+            triggers=["search_web"],
+            reason="intent_keyword_matched",
+        ),
+        presenter=presenter,
+        event_bus=event_bus,
+    )
+
+    await service.process(
+        "查一下宝可梦风波的最新信息",
+        ctx={"source": "desktop"},
+    )
+
+    acknowledgement = timeline[0][1]
+    assert timeline[0][0] == "present"
+    assert "宝可梦风波" in acknowledgement
+    assert acknowledgement != "好，我查一下"
+    assert len(acknowledgement) <= 36
+    assert timeline[1] == (
+        "tool",
+        "[CMD: search | 查一下宝可梦风波的最新信息]",
+    )
+    assert timeline[-1] == ("present", "宝可梦风波搜索结果")
+    assert model_callers == ["chat_tool_finalize"]
+    assistant_log_texts = [
+        payload.get("content")
+        for name, payload in event_bus.events
+        if name == "chat.log" and payload.get("role") == "assistant"
+    ]
+    assert acknowledgement not in assistant_log_texts
+    assert "宝可梦风波搜索结果" in assistant_log_texts
 
 
 @pytest.mark.asyncio
@@ -804,6 +901,16 @@ async def test_qq_reply_uses_gateway_without_local_presenter(chat_env, monkeypat
     assert gateway.sent_text
     assert gateway.sent_text[0]["session_id"] == "private:10001"
     assert gateway.sent_text[0]["text"] == "QQ回复"
+    assert service.brain.last_build_kwargs["session_id"] == "private:10001"
+    assert service.brain.last_build_kwargs["memory_session_id"] == "owner_shared"
+    assert all(
+        item["meta"].get("session_id") == "private:10001"
+        for item in service.brain.short_term_memory
+    )
+    assert all(
+        item["meta"].get("memory_session_id") == "owner_shared"
+        for item in service.brain.short_term_memory
+    )
 
 
 @pytest.mark.asyncio
@@ -882,6 +989,103 @@ async def test_qq_reply_fetches_missing_quoted_text_before_merge(chat_env, monke
 
     assert len(captured) == 1
     assert '<quoted_message sender="历史发送者">被引用的历史消息</quoted_message>' in captured[0]
+
+
+@pytest.mark.asyncio
+async def test_qq_reply_merges_quoted_images_into_current_context(chat_env):
+    class ImageGateway(_Gateway):
+        async def fetch_message_by_id(
+            self, adapter_name, session_id, message_id, **kwargs
+        ):
+            return {
+                "ok": True,
+                "item": {
+                    "content": "图片说明",
+                    "meta": {
+                        "sender_name": "历史发送者",
+                        "message_id": message_id,
+                        "images": [{"url": "https://example.test/image.jpg"}],
+                    },
+                },
+            }
+
+    service = chat_env(gateway=ImageGateway())
+    ctx = {
+        "source": "qq_gateway",
+        "channel_meta": {
+            "adapter": "napcat_qq",
+            "session_id": "group:100",
+            "message_type": "group",
+            "reply": {"message_id": "r1"},
+            "images": [],
+        },
+    }
+
+    await service._enrich_qq_reply_context(ctx)
+
+    meta = ctx["channel_meta"]
+    assert meta["images"] == [{"url": "https://example.test/image.jpg"}]
+    assert meta["has_image"] is True
+    assert meta["image_count"] == 1
+    assert meta["reply"]["text"] == "图片说明"
+
+
+def test_recent_chat_tone_uses_only_current_group_session(chat_env):
+    class ShortTermManager:
+        def get_context(self, session_id=None, **kwargs):
+            assert session_id == "group:200"
+            return [{"role": "user", "content": "第二个群的内容"}]
+
+    service = chat_env()
+    service.brain.short_term_memory = [
+        {"role": "user", "content": "第一个群不该出现"}
+    ]
+    service.brain.short_term_manager = ShortTermManager()
+    ctx = {
+        "source": "qq_gateway",
+        "channel_meta": {
+            "is_owner": True,
+            "message_type": "group",
+            "session_id": "group:200",
+        },
+    }
+
+    result = service._build_recent_chat_tone_context(ctx=ctx)
+
+    assert "第二个群的内容" in result
+    assert "第一个群不该出现" not in result
+
+
+@pytest.mark.asyncio
+async def test_qq_image_reference_without_image_does_not_reach_llm(
+    chat_env, monkeypatch
+):
+    def fail_chat(*args, **kwargs):
+        raise AssertionError("missing-image request must not reach the LLM")
+
+    monkeypatch.setattr(chat_service_module, "chat_with_ai", fail_chat)
+    gateway = _Gateway()
+    service = chat_env(gateway=gateway)
+
+    await service.process(
+        "帮我总结一下图上的效果",
+        ctx={
+            "source": "qq_gateway",
+            "channel_meta": {
+                "adapter": "napcat_qq",
+                "session_id": "group:100",
+                "message_type": "group",
+                "is_owner": True,
+                "images": [],
+                "has_image": False,
+                "reply": {},
+            },
+        },
+    )
+
+    assert len(gateway.sent_text) == 1
+    assert "没收到" in gateway.sent_text[0]["text"]
+    assert "引用" in gateway.sent_text[0]["text"]
 
 
 @pytest.mark.asyncio

@@ -41,7 +41,6 @@ def _catalog() -> Dict[str, Any]:
         "router": {
             "default": ["chat-a"],
             "tool_reasoning": ["chat-a"],
-            "embedding": ["embed-a"],
         },
     }
 
@@ -69,6 +68,12 @@ def test_list_catalog_masks_providers_and_models(tmp_path: Path):
     assert {item["id"] for item in data["models"]} == {"chat-a", "embed-a"}
     assert data["router"]["default"] == ["chat-a"]
     assert data["purpose_options"]
+    tasks = {item["id"]: item for item in data["route_tasks"]}
+    assert tasks["default"]["label"] == "默认回复"
+    assert tasks["tool_reasoning"]["purposes"] == ["tool_reasoning", "chat"]
+    # embedding is selected via runtime_settings.embedding_model_id, not LLM_ROUTER
+    assert "embedding" not in tasks
+    assert any(item["id"] == "embed-a" for item in data["models"])
 
 
 def test_upsert_model_keep_replace_clear_secret(tmp_path: Path):

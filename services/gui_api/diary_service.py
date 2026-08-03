@@ -1,3 +1,10 @@
+"""GUI HTTP diary list/read/update helpers (CRUD surface).
+
+Boundary: used by integrations.gui_http / gui_api routes.
+Conversation-path diary generation lives in
+services.chat_support.diary_service.DiaryService — do not merge casually.
+"""
+
 from __future__ import annotations
 
 from datetime import datetime

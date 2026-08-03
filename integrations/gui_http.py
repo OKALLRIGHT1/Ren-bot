@@ -610,6 +610,31 @@ class GuiHttpServer:
             apply_settings=apply_settings,
         )
 
+    def _external_services_gui_service(self):
+        from modules.runtime_settings import load_runtime_settings, update_runtime_settings
+        from services.gui_api.external_services_service import ExternalServicesGuiService
+
+        return ExternalServicesGuiService(
+            load_runtime=load_runtime_settings,
+            update_runtime=update_runtime_settings,
+        )
+
+    def _external_services_result_status(self, result: Dict[str, Any]) -> int:
+        error = str(result.get("error") or "")
+        if error in {
+            "command_required",
+            "command_not_found",
+            "cwd_not_found",
+            "start_timeout",
+            "process_exited",
+            "invalid_service_id",
+            "empty_services",
+            "ensure_failed",
+            "stop_failed",
+        }:
+            return 400
+        return 400
+
     def _theme_result_status(self, result: Dict[str, Any]) -> int:
         error = str(result.get("error") or "")
         if error in {"runtime_store_unavailable"}:
@@ -697,7 +722,17 @@ class GuiHttpServer:
         error = str(result.get("error") or "")
         if error in {"publish_unavailable"}:
             return 503
-        if error in {"empty_payload", "save_failed", "publish_failed"}:
+        if error in {
+            "empty_payload",
+            "save_failed",
+            "publish_failed",
+            "empty_image",
+            "image_not_found",
+            "image_read_failed",
+            "invalid_image_base64",
+            "convert_failed",
+            "pillow_unavailable",
+        }:
             return 400
         return 400
 
@@ -1523,16 +1558,28 @@ class GuiHttpServer:
         self._reload_custom_models()
         return self._json_response(result)
 
+    def _runtime_config_module(self):
+        """Return the live process config module (same object old Qt GUI imports).
+
+        Do not load config.py under an alternate module name: that creates a
+        second PROVIDERS/MODELS/LLM_ROUTER namespace and Enhanced GUI writes would
+        never show up in the legacy settings dialog until full restart.
+        """
+        import config as runtime_config
+
+        return runtime_config
+
     def _reload_custom_models(self) -> None:
-        if self.app_ref is None:
-            return
         try:
-            runtime_config = self._load_local_module(
-                "gui_http_runtime_config", ["config.py"]
-            )
-            runtime_config.load_custom_models(force=True)
+            runtime_config = self._runtime_config_module()
+            if hasattr(runtime_config, "load_custom_models"):
+                runtime_config.load_custom_models(force=True)
         except Exception:
-            pass
+            if self.logger is not None:
+                try:
+                    self.logger.exception("reload custom models failed")
+                except Exception:
+                    pass
 
     def _characters_service(self, root: str):
         from services.gui_api.characters_service import CharactersService
@@ -1563,6 +1610,10 @@ class GuiHttpServer:
             "cannot_delete_active",
             "cannot_delete_last_costume",
             "invalid_costume",
+            "badge_not_found",
+            "image_not_found",
+            "invalid_image",
+            "image_copy_failed",
         }:
             return 400
         return 400
@@ -1668,6 +1719,103 @@ class GuiHttpServer:
         character_id = str(payload.get("character_id") or payload.get("id") or "").strip()
         costume_name = str(payload.get("name") or payload.get("costume") or "").strip()
         result = self._characters_service(root).set_current_costume(character_id, costume_name)
+        if not result.get("ok"):
+            return self._json_response(result, status=self._character_write_status(result))
+        self._reload_characters()
+        return self._json_response(result)
+
+    async def _handle_characters_badge_current(
+        self, _request: web.Request
+    ) -> web.Response:
+        root = self._find_backend_root(os.getcwd())
+        if not root:
+            return self._json_response(
+                {"ok": False, "error": "backend_not_found"}, status=404
+            )
+        result = self._characters_service(root).get_current_badge()
+        if not result.get("ok"):
+            return self._json_response(result, status=self._character_write_status(result))
+        return self._json_response(result)
+
+    async def _handle_characters_badge_get(self, request: web.Request) -> web.Response:
+        root = self._find_backend_root(os.getcwd())
+        if not root:
+            return self._json_response(
+                {"ok": False, "error": "backend_not_found"}, status=404
+            )
+        character_id = str(
+            request.query.get("character_id") or request.query.get("id") or ""
+        ).strip()
+        costume_name = str(
+            request.query.get("costume") or request.query.get("costume_name") or ""
+        ).strip()
+        result = self._characters_service(root).get_badge(character_id, costume_name)
+        if not result.get("ok"):
+            return self._json_response(result, status=self._character_write_status(result))
+        return self._json_response(result)
+
+    async def _handle_characters_badge_import(
+        self, request: web.Request
+    ) -> web.Response:
+        root = self._find_backend_root(os.getcwd())
+        if not root:
+            return self._json_response(
+                {"ok": False, "error": "backend_not_found"}, status=404
+            )
+        payload = await self._read_payload(request)
+        result = self._characters_service(root).import_badge(
+            str(payload.get("character_id") or payload.get("id") or ""),
+            str(payload.get("source_path") or payload.get("path") or ""),
+            costume_name=str(
+                payload.get("costume") or payload.get("costume_name") or ""
+            ),
+            scale=payload.get("scale", 1.0),
+            offset_x=payload.get("offset_x", 0.0),
+            offset_y=payload.get("offset_y", 0.0),
+        )
+        if not result.get("ok"):
+            return self._json_response(result, status=self._character_write_status(result))
+        self._reload_characters()
+        return self._json_response(result)
+
+    async def _handle_characters_badge_update(
+        self, request: web.Request
+    ) -> web.Response:
+        root = self._find_backend_root(os.getcwd())
+        if not root:
+            return self._json_response(
+                {"ok": False, "error": "backend_not_found"}, status=404
+            )
+        payload = await self._read_payload(request)
+        result = self._characters_service(root).update_badge(
+            str(payload.get("character_id") or payload.get("id") or ""),
+            costume_name=str(
+                payload.get("costume") or payload.get("costume_name") or ""
+            ),
+            scale=payload.get("scale", 1.0),
+            offset_x=payload.get("offset_x", 0.0),
+            offset_y=payload.get("offset_y", 0.0),
+        )
+        if not result.get("ok"):
+            return self._json_response(result, status=self._character_write_status(result))
+        self._reload_characters()
+        return self._json_response(result)
+
+    async def _handle_characters_badge_clear(
+        self, request: web.Request
+    ) -> web.Response:
+        root = self._find_backend_root(os.getcwd())
+        if not root:
+            return self._json_response(
+                {"ok": False, "error": "backend_not_found"}, status=404
+            )
+        payload = await self._read_payload(request)
+        result = self._characters_service(root).clear_badge(
+            str(payload.get("character_id") or payload.get("id") or ""),
+            costume_name=str(
+                payload.get("costume") or payload.get("costume_name") or ""
+            ),
+        )
         if not result.get("ok"):
             return self._json_response(result, status=self._character_write_status(result))
         self._reload_characters()
@@ -1793,10 +1941,7 @@ class GuiHttpServer:
         if self.app_ref is not None:
             try:
                 if section == "customModels":
-                    runtime_config = self._load_local_module(
-                        "gui_http_runtime_config", ["config.py"]
-                    )
-                    runtime_config.load_custom_models(force=True)
+                    self._reload_custom_models()
                 elif section == "runtimeSettings":
                     self.app_ref.apply_external_settings()
                 elif section == "characters":
@@ -2050,13 +2195,16 @@ class GuiHttpServer:
     async def _handle_knowledge_import(self, request: web.Request) -> web.Response:
         payload = await self._read_payload(request)
         path = str(payload.get("path") or "").strip()
-        result = self._knowledge_gui_service().import_file(path)
+        result = await asyncio.to_thread(
+            self._knowledge_gui_service().import_file, path
+        )
         if not result.get("ok"):
             return self._json_response(result, status=self._knowledge_result_status(result))
         return self._json_response(result)
 
     async def _handle_knowledge_rebuild(self, _request: web.Request) -> web.Response:
-        result = self._knowledge_gui_service().rebuild()
+        # Collection rebuild can touch Chroma on disk; keep the event loop free.
+        result = await asyncio.to_thread(self._knowledge_gui_service().rebuild)
         if not result.get("ok"):
             return self._json_response(result, status=self._knowledge_result_status(result))
         return self._json_response(result)
@@ -2064,13 +2212,18 @@ class GuiHttpServer:
     async def _handle_knowledge_delete_dirs(self, request: web.Request) -> web.Response:
         payload = await self._read_payload(request)
         dirs = payload.get("dirs") if isinstance(payload.get("dirs"), list) else []
-        result = self._knowledge_gui_service().delete_by_dirs(dirs)
+        result = await asyncio.to_thread(
+            self._knowledge_gui_service().delete_by_dirs, dirs
+        )
         if not result.get("ok"):
             return self._json_response(result, status=self._knowledge_result_status(result))
         return self._json_response(result)
 
     async def _handle_knowledge_learn(self, _request: web.Request) -> web.Response:
-        result = self._knowledge_gui_service().learn_configured_dirs()
+        # Long-running ingest must not block the aiohttp event loop.
+        result = await asyncio.to_thread(
+            self._knowledge_gui_service().learn_configured_dirs
+        )
         if not result.get("ok"):
             return self._json_response(result, status=self._knowledge_result_status(result))
         return self._json_response(result)
@@ -2137,6 +2290,15 @@ class GuiHttpServer:
             return self._json_response(result, status=self._memory_result_status(result))
         return self._json_response(result)
 
+    async def _handle_memory_core_profile(self, request: web.Request) -> web.Response:
+        result = self._memory_gui_service().get_profile_overview(
+            person_id=str(request.query.get("person_id") or "owner"),
+            limit=int(request.query.get("limit") or 500),
+        )
+        if not result.get("ok"):
+            return self._json_response(result, status=self._memory_result_status(result))
+        return self._json_response(result)
+
     async def _handle_memory_core_get(self, request: web.Request) -> web.Response:
         record_id = str(request.query.get("id") or request.query.get("record_id") or "").strip()
         result = self._memory_gui_service().get_core_record(record_id)
@@ -2180,10 +2342,78 @@ class GuiHttpServer:
             return self._json_response(result, status=self._memory_result_status(result))
         return self._json_response(result)
 
-    async def _handle_memory_embedding_test(self, _request: web.Request) -> web.Response:
-        result = self._memory_gui_service().test_embedding()
+    async def _handle_memory_embedding_test(self, request: web.Request) -> web.Response:
+        payload = await self._read_payload(request)
+        result = self._memory_gui_service().test_embedding(payload)
         if not result.get("ok"):
             return self._json_response(result, status=self._memory_result_status(result))
+        return self._json_response(result)
+
+    async def _handle_memory_embedding_get(self, _request: web.Request) -> web.Response:
+        result = self._memory_gui_service().get_embedding_selection()
+        if not result.get("ok"):
+            return self._json_response(result, status=self._memory_result_status(result))
+        return self._json_response(result)
+
+    async def _handle_memory_embedding_save(self, request: web.Request) -> web.Response:
+        payload = await self._read_payload(request)
+        result = self._memory_gui_service().save_embedding_selection(payload)
+        if not result.get("ok"):
+            return self._json_response(result, status=self._memory_result_status(result))
+        return self._json_response(result)
+
+    async def _handle_memory_ollama_status(self, _request: web.Request) -> web.Response:
+        result = self._memory_gui_service().get_ollama_status()
+        if not result.get("ok"):
+            return self._json_response(result, status=self._memory_result_status(result))
+        return self._json_response(result)
+
+    async def _handle_memory_ollama_ensure(self, request: web.Request) -> web.Response:
+        payload = await self._read_payload(request)
+        result = await asyncio.to_thread(
+            self._memory_gui_service().ensure_ollama, payload
+        )
+        if not result.get("ok"):
+            return self._json_response(result, status=self._memory_result_status(result))
+        return self._json_response(result)
+
+    async def _handle_external_services_list(self, _request: web.Request) -> web.Response:
+        result = self._external_services_gui_service().list_services()
+        if not result.get("ok"):
+            return self._json_response(
+                result, status=self._external_services_result_status(result)
+            )
+        return self._json_response(result)
+
+    async def _handle_external_services_save(self, request: web.Request) -> web.Response:
+        payload = await self._read_payload(request)
+        result = self._external_services_gui_service().save_services(payload)
+        if not result.get("ok"):
+            return self._json_response(
+                result, status=self._external_services_result_status(result)
+            )
+        return self._json_response(result)
+
+    async def _handle_external_services_ensure(self, request: web.Request) -> web.Response:
+        payload = await self._read_payload(request)
+        result = await asyncio.to_thread(
+            self._external_services_gui_service().ensure, payload
+        )
+        if not result.get("ok"):
+            return self._json_response(
+                result, status=self._external_services_result_status(result)
+            )
+        return self._json_response(result)
+
+    async def _handle_external_services_stop(self, request: web.Request) -> web.Response:
+        payload = await self._read_payload(request)
+        result = await asyncio.to_thread(
+            self._external_services_gui_service().stop, payload
+        )
+        if not result.get("ok"):
+            return self._json_response(
+                result, status=self._external_services_result_status(result)
+            )
         return self._json_response(result)
 
     async def _handle_memory_items(self, request: web.Request) -> web.Response:
@@ -2378,10 +2608,10 @@ class GuiHttpServer:
                 settings.get("activity_include_process_path", False)
             ),
             "include_window_title": bool(
-                settings.get("activity_include_window_title", False)
+                settings.get("activity_include_window_title", True)
             ),
             "include_browser_context": bool(
-                settings.get("activity_include_browser_context", False)
+                settings.get("activity_include_browser_context", True)
             ),
         }
         return self._json_response({"ok": True, "data": data})
@@ -2668,6 +2898,17 @@ class GuiHttpServer:
             return self._json_response(result, status=self._status_screen_result_status(result))
         return self._json_response(result)
 
+    async def _handle_status_screen_convert(self, request: web.Request) -> web.Response:
+        payload = await self._read_payload(request)
+        result = self._status_screen_gui_service().convert_image(
+            path=str(payload.get("path") or "").strip(),
+            image_base64=str(payload.get("image_base64") or payload.get("image") or ""),
+            size=int(payload.get("size") or 32),
+        )
+        if not result.get("ok"):
+            return self._json_response(result, status=self._status_screen_result_status(result))
+        return self._json_response(result)
+
     async def _handle_activity_ingest(self, request: web.Request) -> web.Response:
         store = self._get_memory_store()
         if store is None:
@@ -2768,6 +3009,26 @@ class GuiHttpServer:
             self._handle_characters_costume_wear,
         )
         app.router.add_get(
+            self._api_path("/characters/badge/current"),
+            self._handle_characters_badge_current,
+        )
+        app.router.add_get(
+            self._api_path("/characters/badge"),
+            self._handle_characters_badge_get,
+        )
+        app.router.add_post(
+            self._api_path("/characters/badge/import"),
+            self._handle_characters_badge_import,
+        )
+        app.router.add_post(
+            self._api_path("/characters/badge/update"),
+            self._handle_characters_badge_update,
+        )
+        app.router.add_post(
+            self._api_path("/characters/badge/clear"),
+            self._handle_characters_badge_clear,
+        )
+        app.router.add_get(
             self._api_path("/characters/costume-meta"),
             self._handle_character_costume_meta,
         )
@@ -2825,6 +3086,9 @@ class GuiHttpServer:
             self._api_path("/knowledge/create-doc"), self._handle_knowledge_create_doc
         )
         app.router.add_get(self._api_path("/memory/core"), self._handle_memory_core_list)
+        app.router.add_get(
+            self._api_path("/memory/core/profile"), self._handle_memory_core_profile
+        )
         app.router.add_get(self._api_path("/memory/core/get"), self._handle_memory_core_get)
         app.router.add_post(
             self._api_path("/memory/core/upsert"), self._handle_memory_core_upsert
@@ -2843,6 +3107,32 @@ class GuiHttpServer:
         )
         app.router.add_post(
             self._api_path("/memory/embedding/test"), self._handle_memory_embedding_test
+        )
+        app.router.add_get(
+            self._api_path("/memory/embedding"), self._handle_memory_embedding_get
+        )
+        app.router.add_post(
+            self._api_path("/memory/embedding"), self._handle_memory_embedding_save
+        )
+        app.router.add_get(
+            self._api_path("/memory/ollama"), self._handle_memory_ollama_status
+        )
+        app.router.add_post(
+            self._api_path("/memory/ollama/ensure"), self._handle_memory_ollama_ensure
+        )
+        app.router.add_get(
+            self._api_path("/external-services"), self._handle_external_services_list
+        )
+        app.router.add_post(
+            self._api_path("/external-services"), self._handle_external_services_save
+        )
+        app.router.add_post(
+            self._api_path("/external-services/ensure"),
+            self._handle_external_services_ensure,
+        )
+        app.router.add_post(
+            self._api_path("/external-services/stop"),
+            self._handle_external_services_stop,
         )
         app.router.add_get(self._api_path("/memory/items"), self._handle_memory_items)
         app.router.add_post(
@@ -2893,6 +3183,10 @@ class GuiHttpServer:
         app.router.add_post(self._api_path("/status-screen"), self._handle_status_screen_save)
         app.router.add_post(
             self._api_path("/status-screen/test"), self._handle_status_screen_test
+        )
+        app.router.add_post(
+            self._api_path("/status-screen/convert"),
+            self._handle_status_screen_convert,
         )
         app.router.add_get(self._api_path("/events"), self._handle_events)
         app.router.add_get(self._api_path("/outbound"), self._handle_outbound_records)

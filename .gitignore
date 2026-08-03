@@ -71,8 +71,8 @@ output/
 *.sqlite
 *.sqlite-*
 *.sqlite3
-memory/
-memory_db/
+/memory/
+/memory_db/
 userdata.db
 learning_tmp.db
 data/codex_session.json
@@ -110,6 +110,8 @@ _tmp_probe.py
 _write_probe_root.tmp
 .tmp_rel_test.txt
 recovered_chat_service.py
+_cleanup_*.py
+_review_scan.py
 
 # =========================
 # Local-only project areas
@@ -119,3 +121,14 @@ plugins/Isuzu_news/
 plugins/meme_pack/assets/
 plugins/meme_pack/data/
 scripts/
+dev_scripts/
+tmp_magic_daily/
+.release-docs-cleanup/
+.release-docs-cleanup.bundle
+.superpowers/
+
+# =========================
+# Packaged binaries (local)
+# =========================
+Live2D-Suzu.exe
+*.spec.bak
