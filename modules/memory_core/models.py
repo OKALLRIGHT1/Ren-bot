@@ -19,3 +19,4 @@ class ReplyMemoryContext:
     memory_text: str = ""
     selected_ids: tuple[str, ...] = ()
     diagnostics: dict[str, Any] = field(default_factory=dict)
+

@@ -1,3 +1,9 @@
+"""Conversation-path diary generation and scheduled daily summary.
+
+Boundary: used by ChatService for auto diary / make-up logs.
+GUI list/edit CRUD lives in services.gui_api.diary_service.DiaryGuiService.
+"""
+
 from __future__ import annotations
 
 import asyncio

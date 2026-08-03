@@ -3205,7 +3205,7 @@ class ChatService:
         if len(text_clean) < 2:
             return False
 
-        # ListenerPlugin 规则并入：直接提及唤醒词，强制回复
+        # Wake-word rule (inlined; former ListenerPlugin module removed): force reply
         lower_text = text_clean.lower()
         wake_words = [
             str(word).lower() for word in (WAKE_KEYWORDS or []) if str(word).strip()
@@ -3217,7 +3217,7 @@ class ChatService:
             self.logger.info("🟢 [Gatekeeper] 明确问题 -> 强制回复")
             return True
 
-        # ListenerPlugin 规则并入：避免 assistant 连续自问自答
+        # Inlined gate: avoid assistant consecutive self-talk
         short_term_messages = self._get_short_term_messages(ctx)
         if short_term_messages:
             last_msg = short_term_messages[-1]

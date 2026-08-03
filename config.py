@@ -254,8 +254,14 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 # ==================== 语音监听与唤醒配置 ====================
 VOICE_SENSOR_ENABLED = False
+# 全局兜底唤醒词；运行时还可叠加「当前角色名/别名」与自定义词（见设置 → 语音输入）
 WAKE_KEYWORDS = ["五十铃", "怜", "Suzu", "助手", "500"]
 PLAY_WAKE_SOUND = True
+# 默认需要唤醒词；可在 runtime_settings / 设置页关闭（免唤醒直听）
+ASR_REQUIRE_WAKE_WORD = True
+ASR_USE_CHARACTER_WAKE_WORDS = True
+ASR_INCLUDE_GLOBAL_WAKE_WORDS = True
+ASR_MIN_CHARS = 2
 
 # 强制使用绝对路径绑定模型
 SHERPA_MODEL_CONFIG = {
@@ -662,7 +668,7 @@ BUBBLE_SYNC_WITH_TTS = get_env_bool("BUBBLE_SYNC_WITH_TTS", "1")  # 气泡是否
 HOTKEY_TOGGLE_GUI = "<ctrl>+<alt>+space"
 HOTKEY_TOGGLE_WAKE = "<ctrl>+<alt>+w"
 
-ASR_MIN_CHARS = 2
+# ASR 过滤（VoiceSensor 黑名单仍主要用 GATEKEEPER_BLACKLIST；此列表供后续统一）
 ASR_BLACKLIST = ["嗯", "啊", "哈", "哦", "好的", "好", "对", "是", "不是", "行", "可以"]
 
 

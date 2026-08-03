@@ -1,3 +1,9 @@
+"""App control plugin — currently restart-only.
+
+Triggers local/remote slash commands that return __type__=app_restart.
+Not a general application launcher (see open_app for that).
+"""
+
 from typing import Any, Dict
 
 

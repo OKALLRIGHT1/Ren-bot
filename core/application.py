@@ -1,6 +1,5 @@
 """
-应用主类
-绠＄悊鏁翠釜搴旂敤鐨勭敓鍛藉懆鏈熷拰缁勪欢鍒濆鍖?
+Application root: lifecycle, component wiring, and runtime orchestration.
 """
 
 import asyncio
@@ -2368,7 +2367,8 @@ class Live2DApplication:
             pass
 
     def _register_services(self):
-        # Register services in the container.
+        # Optional registry only: main code uses self.* attributes, not container.get().
+        # Kept so dispose() can discover long-lived components if needed later.
         self.container.register("event_bus", lambda c: self.event_bus)
         self.container.register("state_machine", lambda c: self.state_machine)
         self.container.register("chat_service", lambda c: self.chat_service)
@@ -2377,7 +2377,6 @@ class Live2DApplication:
         self.container.register("brain", lambda c: self.brain)
         self.container.register("emotion_controller", lambda c: self.emotion_controller)
 
-        # [新增] 注册 screen_sensor (如果存在)
         if self.screen_sensor:
             self.container.register("screen_sensor", lambda c: self.screen_sensor)
 
@@ -2576,6 +2575,11 @@ class Live2DApplication:
             if not self.voice_sensor:
                 self.logger.error("⚠️ VoiceSensor 未就绪，无法切换")
                 return
+            try:
+                self.voice_sensor.reload_settings()
+            except Exception as exc:
+                if self.logger:
+                    self.logger.warning(f"VoiceSensor reload_settings failed: {exc}")
             if not self.voice_sensor.running and self.loop:
                 self.logger.info("Voice sensor enabled")
                 self.voice_sensor.start(self.loop)
@@ -2583,6 +2587,30 @@ class Live2DApplication:
             if self.voice_sensor and self.voice_sensor.running:
                 self.logger.info("Voice sensor disabled")
                 self.voice_sensor.stop()
+
+    def apply_asr_settings(self, settings: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """Persist-applied ASR policy hot-reload for VoiceSensor."""
+        try:
+            from modules.asr_settings import load_asr_settings, resolve_wake_words
+
+            cfg = load_asr_settings(settings if isinstance(settings, dict) else None)
+            words = resolve_wake_words(settings=cfg)
+            result: Dict[str, Any] = {
+                "ok": True,
+                "require_wake_word": bool(cfg.get("asr_require_wake_word", True)),
+                "active_window_sec": int(cfg.get("asr_active_window_sec") or 0),
+                "wake_words": list(words),
+                "sensor_reloaded": False,
+            }
+            if self.voice_sensor is not None:
+                reloaded = self.voice_sensor.reload_settings(cfg) or {}
+                result["sensor_reloaded"] = True
+                result.update({k: reloaded[k] for k in reloaded if k not in result})
+            return result
+        except Exception as exc:
+            if self.logger:
+                self.logger.error(f"apply_asr_settings failed: {exc}")
+            return {"ok": False, "error": str(exc)}
 
     def start_async_loop(self):
         # Start async event loop.

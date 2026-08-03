@@ -18,6 +18,7 @@ from modules.gui.styles import (
 )
 from modules.gui.settings_pages.sedentary_page import SedentarySettingsPage
 from modules.gui.settings_pages.info_sources_page import InfoSourcesSettingsPage
+from modules.gui.settings_pages.asr_page import AsrSettingsPage
 
 
 try:
@@ -1701,6 +1702,11 @@ class SettingsDialog(QtWidgets.QDialog):
                 "desc": "调整连续工作判定、休息重置、提醒冷却、弹窗文案和表情包预览。",
             },
             {
+                "nav": "🎤 高级 · 语音输入",
+                "title": "语音输入",
+                "desc": "麦克风 ASR：是否需要唤醒词、角色名/别名唤醒、连续对话窗口与自定义词。",
+            },
+            {
                 "nav": "🩺 高级 · 依赖体检",
                 "title": "依赖体检",
                 "desc": "扫描插件缺失依赖并生成安装命令，适合排查插件为什么不能正常工作。",
@@ -1836,6 +1842,8 @@ class SettingsDialog(QtWidgets.QDialog):
         self._safe_init_page(self._init_screen_app_rules_page, "应用识别")
 
         self._safe_init_page(self._init_sedentary_page, "久坐提醒")
+
+        self._safe_init_page(self._init_asr_page, "语音输入")
 
         self._safe_init_page(self._init_dependency_page, "依赖体检")
 
@@ -2034,6 +2042,16 @@ class SettingsDialog(QtWidgets.QDialog):
         layout = QtWidgets.QVBoxLayout(page)
         layout.setContentsMargins(0, 0, 0, 0)
         widget = SedentarySettingsPage(main_app=self.main_app)
+        widget.setMinimumSize(0, 0)
+        scroll = self._wrap_in_scroll_area(widget)
+        layout.addWidget(scroll, 1)
+        self.stack.addWidget(page)
+
+    def _init_asr_page(self):
+        page = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout(page)
+        layout.setContentsMargins(0, 0, 0, 0)
+        widget = AsrSettingsPage(main_app=self.main_app)
         widget.setMinimumSize(0, 0)
         scroll = self._wrap_in_scroll_area(widget)
         layout.addWidget(scroll, 1)

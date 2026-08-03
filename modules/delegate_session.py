@@ -1,34 +1,23 @@
-import json
-import threading
-from datetime import datetime
+"""Delegate / secondary-brain session event log (data/delegate_session.json)."""
+
+from __future__ import annotations
+
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from modules.json_state_store import JsonListStore, now_iso
 
 DELEGATE_SESSION_PATH = Path("./data/delegate_session.json")
 MAX_ITEMS = 200
-_LOCK = threading.Lock()
+_store = JsonListStore(DELEGATE_SESSION_PATH, max_items=MAX_ITEMS)
 
 
 def _load() -> List[Dict[str, Any]]:
-    if not DELEGATE_SESSION_PATH.exists():
-        return []
-    try:
-        with DELEGATE_SESSION_PATH.open("r", encoding="utf-8") as f:
-            data = json.load(f)
-        return data if isinstance(data, list) else []
-    except Exception:
-        return []
+    return _store.load()
 
 
 def _save(items: List[Dict[str, Any]]) -> bool:
-    try:
-        DELEGATE_SESSION_PATH.parent.mkdir(parents=True, exist_ok=True)
-        with DELEGATE_SESSION_PATH.open("w", encoding="utf-8") as f:
-            json.dump(items[-MAX_ITEMS:], f, ensure_ascii=False, indent=2)
-        return True
-    except Exception:
-        return False
+    return _store.save(items)
 
 
 def add_event(
@@ -40,28 +29,24 @@ def add_event(
     text: str = "",
     meta: Optional[Dict[str, Any]] = None,
 ):
-    with _LOCK:
-        items = _load()
-        items.append(
-            {
-                "time": datetime.now().isoformat(timespec="seconds"),
-                "type": str(event_type or "").strip(),
-                "task_id": str(task_id or "").strip(),
-                "user_text": str(user_text or "")[:600],
-                "triggers": list(triggers or [])[:12],
-                "text": str(text or "")[:1200],
-                "meta": meta or {},
-            }
-        )
-        _save(items)
+    _store.append(
+        {
+            "time": now_iso(),
+            "type": str(event_type or "").strip(),
+            "task_id": str(task_id or "").strip(),
+            "user_text": str(user_text or "")[:600],
+            "triggers": list(triggers or [])[:12],
+            "text": str(text or "")[:1200],
+            "meta": meta or {},
+        }
+    )
 
 
 def get_recent(limit: int = 20, *, task_id: str = "") -> List[Dict[str, Any]]:
-    with _LOCK:
-        items = _load()
-        if task_id:
-            tid = str(task_id or "").strip()
-            items = [
-                item for item in items if str(item.get("task_id") or "").strip() == tid
-            ]
-        return items[-max(1, int(limit)) :]
+    if task_id:
+        tid = str(task_id or "").strip()
+        return _store.recent_filtered(
+            limit,
+            predicate=lambda item: str(item.get("task_id") or "").strip() == tid,
+        )
+    return _store.recent(limit)

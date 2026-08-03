@@ -112,7 +112,7 @@ def test_agently_mail_natural_language_requires_clear_mail_intent():
 
     assert plugin.should_handle_direct("我最近收到了哪些邮件？", {"source": "text_input"}, "邮件")
     assert plugin.should_handle_direct("查一下邮箱", {"source": "text_input"}, "邮箱")
-    assert plugin.should_handle_direct("发一封上海本周天气邮件到123456789@qq.com", {"source": "qq_gateway"}, "邮件")
+    assert plugin.should_handle_direct("发一封上海本周天气邮件到1132824061@qq.com", {"source": "qq_gateway"}, "邮件")
     assert plugin.should_handle_direct("给foo@example.com邮箱发送问候", {"source": "qq_gateway"}, "邮件")
     assert not plugin.should_handle_direct("把这个文件邮寄给我", {"source": "text_input"}, "邮件")
     assert not plugin.should_handle_direct("邮件这个词只是举例", {"source": "text_input"}, "邮件")
@@ -414,12 +414,12 @@ async def test_send_natural_language_with_missing_body_asks_for_body():
     plugin.settings["llm_intent_enabled"] = {"default": False}
 
     result = await plugin.run(
-        "发一封上海本周天气邮件到123456789@qq.com",
+        "发一封上海本周天气邮件到1132824061@qq.com",
         {"source": "qq_gateway"},
     )
 
     assert "正文(body=)" in result
-    assert "to=123456789@qq.com" in result
+    assert "to=1132824061@qq.com" in result
     assert "subject=上海本周天气" in result
     assert runner.calls == []
 
@@ -438,7 +438,7 @@ async def test_send_uses_llm_intent_resolver_for_natural_language_body():
                             "confirmation_token": "ctk_456",
                             "summary": {
                                 "action": "send",
-                                "to": ["123456789@qq.com"],
+                                "to": ["1132824061@qq.com"],
                                 "subject": "上海本周天气",
                             },
                         },
@@ -450,7 +450,7 @@ async def test_send_uses_llm_intent_resolver_for_natural_language_body():
         ],
         intent_payload={
             "action": "send",
-            "to": "123456789@qq.com",
+            "to": "1132824061@qq.com",
             "subject": "上海本周天气",
             "body": "上海本周天气以多云为主，气温约 25-32 度。",
             "confidence": 0.9,
@@ -458,7 +458,7 @@ async def test_send_uses_llm_intent_resolver_for_natural_language_body():
     )
 
     result = await plugin.run(
-        "发一封上海本周天气邮件到123456789@qq.com",
+        "发一封上海本周天气邮件到1132824061@qq.com",
         {"source": "qq_gateway"},
     )
 
@@ -468,7 +468,7 @@ async def test_send_uses_llm_intent_resolver_for_natural_language_body():
         "message",
         "+send",
         "--to",
-        "123456789@qq.com",
+        "1132824061@qq.com",
         "--subject",
         "上海本周天气",
         "--body",
@@ -599,7 +599,7 @@ async def test_send_with_named_persona_handles_user_phrase_fa_yi_feng():
                             "confirmation_token": "ctk_mujica",
                             "summary": {
                                 "action": "send",
-                                "to": ["123456789@qq.com"],
+                                "to": ["1132824061@qq.com"],
                                 "subject": "Mujica的假面舞会邀请",
                             },
                         },
@@ -611,7 +611,7 @@ async def test_send_with_named_persona_handles_user_phrase_fa_yi_feng():
         ],
         intent_payload={
             "action": "send",
-            "to": "123456789@qq.com",
+            "to": "1132824061@qq.com",
             "subject": "Mujica的假面舞会邀请",
             "body": "诚邀您参加Mujica的假面舞会，愿夜色与面具一同见证这场优雅的相逢，desuwa。",
             "confidence": 0.9,
@@ -620,7 +620,7 @@ async def test_send_with_named_persona_handles_user_phrase_fa_yi_feng():
     )
 
     result = await plugin.run(
-        "让小祥发一封邮件到123456789@qq.com，邀请她参见mujica的假面舞会",
+        "让小祥发一封邮件到1132824061@qq.com，邀请她参见mujica的假面舞会",
         {"source": "qq_gateway"},
     )
 
@@ -630,7 +630,7 @@ async def test_send_with_named_persona_handles_user_phrase_fa_yi_feng():
         "message",
         "+send",
         "--to",
-        "123456789@qq.com",
+        "1132824061@qq.com",
         "--subject",
         "Mujica的假面舞会邀请",
         "--body",
@@ -822,7 +822,7 @@ def test_agently_mail_notification_settings_exist():
     settings = config["settings"]
 
     assert settings["enable_notifications"]["default"] is True
-    assert settings["notification_target_sessions"]["default"] == []
+    assert settings["notification_target_sessions"]["default"] == ["private:1132824061"]
     assert settings["notification_character_name"]["default"] == "丰川祥子"
     assert settings["notification_character_name"]["type"] == "choice"
     assert settings["notification_character_name"]["choices_source"] == "characters"
@@ -881,7 +881,7 @@ def test_mail_detail_card_strips_html_body():
         {
             "message_id": "msg_html",
             "subject": "你还好吗",
-            "from": {"name": "李曜同", "email": "123456789@qq.com"},
+            "from": {"name": "李曜同", "email": "1132824061@qq.com"},
             "created_at": "2026-07-28T02:26:21Z",
             "body": '<div style="font-family:apple-system, system-ui; font-size: 14px; color: rgb(0, 0, 0); line-height: 1.43;">你还好吗</div>',
         },
@@ -964,7 +964,7 @@ async def test_notification_baseline_keeps_unread_for_push(tmp_path, monkeypatch
     plugin = Plugin(cli_runner=runner)
     plugin.settings = {
         "enable_notifications": True,
-        "notification_target_sessions": ["private:123456789"],
+        "notification_target_sessions": ["private:1132824061"],
         "notification_character_name": "丰川祥子",
         "notification_poll_limit": 10,
         "request_timeout_sec": 20,
@@ -1053,7 +1053,7 @@ async def test_notification_pushes_summary_and_body_image(tmp_path, monkeypatch)
     )
     plugin.settings = {
         "enable_notifications": True,
-        "notification_target_sessions": ["private:123456789"],
+        "notification_target_sessions": ["private:1132824061"],
         "notification_character_name": "丰川祥子",
         "notification_poll_limit": 10,
         "notification_body_chars": 800,
@@ -1091,7 +1091,7 @@ async def test_notification_pushes_summary_and_body_image(tmp_path, monkeypatch)
     assert len(chat.replies) == 2
     assert chat.replies[0][0] == "text"
     assert "丰川祥子" in chat.replies[0][1]
-    assert chat.replies[0][2] == "private:123456789"
+    assert chat.replies[0][2] == "private:1132824061"
     assert chat.replies[1][0] == "image"
     assert chat.replies[1][1] is True
     assert "msg_new" in plugin._seen_ids

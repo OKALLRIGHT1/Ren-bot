@@ -39,6 +39,8 @@ DEFAULT_DB_PATH = os.getenv(
 LEGACY_PROFILE_JSON = os.getenv("LEGACY_PROFILE_JSON", "./memory_db/profile.json")
 LEGACY_EVENTS_DB = os.getenv("LEGACY_EVENTS_DB", "./data/events.sqlite")
 
+# Historical transcript mojibake repair (UTF-8 mis-decoded costume notices).
+# Keep until old rows may still exist in user DBs; repair_known_transcript_mojibake uses these.
 _BROKEN_COSTUME_MESSAGE_PREFIX = "鐢ㄦ埛涓轰綘鏇存崲浜嗘湇瑁"
 _FIXED_COSTUME_MESSAGE_PREFIX = "用户为你更换了服装，文件路径为: "
 

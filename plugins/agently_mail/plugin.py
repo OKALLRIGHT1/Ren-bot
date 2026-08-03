@@ -251,7 +251,7 @@ class Plugin:
             return "新邮件通知当前是关闭的。请先在插件设置里启用“启用新邮件通知”。"
         targets = self._notification_targets()
         if not targets:
-            return "未配置通知目标。请在插件设置里填写 notification_target_sessions，例如 private:<QQ号>。"
+            return "未配置通知目标。请在插件设置里填写 notification_target_sessions，例如 private:1132824061。"
 
         limit = max(1, min(5, int(self._setting("notification_poll_limit", 10) or 10)))
         payload = await self._call(
@@ -360,13 +360,13 @@ class Plugin:
             pass
 
     def _notification_targets(self) -> List[str]:
-        raw = self._setting("notification_target_sessions", [])
+        raw = self._setting("notification_target_sessions", ["private:1132824061"])
         if isinstance(raw, str):
             items = [part.strip() for part in re.split(r"[\n,;]+", raw) if part.strip()]
         elif isinstance(raw, list):
             items = [str(item).strip() for item in raw if str(item).strip()]
         else:
-            items = []
+            items = ["private:1132824061"]
         normalized: List[str] = []
         for item in items:
             if item.isdigit():

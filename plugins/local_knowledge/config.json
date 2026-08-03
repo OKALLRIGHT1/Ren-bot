@@ -15,6 +15,10 @@
                 {
                     "path": "knowledge_docs",
                     "enabled": true
+                },
+                {
+                    "path": "D:/Desktop/live2d-suzu/live2d-llm/knowledge_docs",
+                    "enabled": false
                 }
             ]
         },
