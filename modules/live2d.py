@@ -4,6 +4,7 @@ import inspect
 import json
 import os
 import random
+import time
 import websockets
 from typing import Optional
 from urllib.parse import urlparse
@@ -121,7 +122,14 @@ def _safe_host_label(host: str) -> str:
 class WebSocketConnectionPool:
     """WebSocket 连接池：复用连接避免频繁创建/关闭，并串行化发送。"""
 
-    def __init__(self, *, health=None, clock=None, jitter=None):
+    def __init__(
+        self,
+        *,
+        health=None,
+        clock=None,
+        wall_clock=None,
+        jitter=None,
+    ):
         self._connection: Optional[websockets.WebSocketClientProtocol] = None
         self._lock = asyncio.Lock()
         self._send_lock = asyncio.Lock()  # ✅ 串行化 ws.send
@@ -134,6 +142,7 @@ class WebSocketConnectionPool:
         self._last_success_at = 0.0
         self._health = health or get_runtime_health()
         self._clock = clock or (lambda: asyncio.get_running_loop().time())
+        self._wall_clock = wall_clock or time.time
         self._jitter = jitter or (
             lambda delay: random.uniform(0.0, min(0.25, delay * 0.1))
         )
@@ -147,6 +156,7 @@ class WebSocketConnectionPool:
         return min(MAX_RECONNECT_DELAY, base + jitter)
 
     def _report(self, state: str, summary: str, *, error: str = "") -> None:
+        retry_remaining = max(0.0, self._next_retry_at - self._clock())
         try:
             self._health.report(
                 "live2d_ws",
@@ -155,7 +165,11 @@ class WebSocketConnectionPool:
                 details={
                     "host": _safe_host_label(self._host or LIVE2D_HOST),
                     "consecutive_failures": self._failure_count,
-                    "next_retry_at": self._next_retry_at or None,
+                    "next_retry_at": (
+                        self._wall_clock() + retry_remaining
+                        if retry_remaining > 0
+                        else None
+                    ),
                     "last_success_at": self._last_success_at or None,
                     "error_category": error,
                 },
@@ -176,7 +190,7 @@ class WebSocketConnectionPool:
     def _record_success(self, now: float) -> None:
         self._failure_count = 0
         self._next_retry_at = 0.0
-        self._last_success_at = now
+        self._last_success_at = self._wall_clock()
         self._report("healthy", "Live2D WebSocket 已连接")
 
     def _raise_if_backing_off(self, now: float) -> None:

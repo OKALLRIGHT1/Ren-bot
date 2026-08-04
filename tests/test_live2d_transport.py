@@ -158,6 +158,7 @@ async def test_connection_pool_backs_off_and_resets_after_success(monkeypatch):
     pool = live2d.WebSocketConnectionPool(
         health=health,
         clock=lambda: clock["now"],
+        wall_clock=lambda: clock["now"] + 900.0,
         jitter=lambda delay: 0.0,
     )
 
@@ -173,13 +174,19 @@ async def test_connection_pool_backs_off_and_resets_after_success(monkeypatch):
         health.snapshot(now=100.0)["components"]["live2d_ws"]["state"]
         == "reconnecting"
     )
+    reconnect_details = health.snapshot(now=100.0)["components"]["live2d_ws"][
+        "details"
+    ]
+    assert reconnect_details["next_retry_at"] == 1001.0
 
     clock["now"] = 101.0
     connection = await pool.get_connection()
     assert isinstance(connection, FakeWs)
     assert pool._failure_count == 0
     assert pool._next_retry_at == 0.0
-    assert health.snapshot(now=101.0)["components"]["live2d_ws"]["state"] == "healthy"
+    healthy = health.snapshot(now=101.0)["components"]["live2d_ws"]
+    assert healthy["state"] == "healthy"
+    assert healthy["details"]["last_success_at"] == 1001.0
 
     await pool.close()
     assert health.snapshot(now=101.0)["components"]["live2d_ws"]["state"] == "offline"

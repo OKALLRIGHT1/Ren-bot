@@ -1478,7 +1478,12 @@ class Live2DApplication:
                 "模型路由已配置" if MODELS else "模型路由未配置",
                 {"configured_models": len(MODELS)},
             ),
-            ("qq_gateway", "offline", "等待 QQ 网关连接", {}),
+            (
+                "qq_gateway",
+                "offline" if NAPCAT_ENABLED else "disabled",
+                "等待 QQ 网关连接" if NAPCAT_ENABLED else "QQ 网关未启用",
+                {},
+            ),
             (
                 "tts",
                 "healthy"

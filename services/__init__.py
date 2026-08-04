@@ -3,8 +3,14 @@
 Services Module Initialization
 """
 
-from .chat_service import ChatService
-
 __all__ = [
-    'ChatService',
+    "ChatService",
 ]
+
+
+def __getattr__(name):
+    if name == "ChatService":
+        from .chat_service import ChatService
+
+        return ChatService
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

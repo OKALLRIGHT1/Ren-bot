@@ -1,4 +1,5 @@
 from integrations.gui_http import GuiHttpServer
+from core.application import Live2DApplication
 from services.runtime_health import RuntimeHealthCenter
 
 
@@ -115,3 +116,19 @@ def test_runtime_status_does_not_probe_components():
 
     status = GuiHttpServer(app_ref=App())._build_runtime_status()
     assert status["overall"] == "healthy"
+
+
+def test_initial_health_marks_disabled_qq_gateway_as_disabled(monkeypatch):
+    health = RuntimeHealthCenter(clock=lambda: 300.0)
+    app = Live2DApplication.__new__(Live2DApplication)
+    app.runtime_health = health
+    app.tts = None
+    app.tts_enabled = False
+    app.voice_sensor = None
+    app.plugin_manager = None
+    monkeypatch.setattr("core.application.NAPCAT_ENABLED", False)
+
+    app._report_initial_runtime_health()
+
+    qq = health.snapshot(now=300.0)["components"]["qq_gateway"]
+    assert qq["state"] == "disabled"
