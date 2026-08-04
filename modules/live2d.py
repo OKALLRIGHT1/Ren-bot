@@ -1,10 +1,12 @@
 # modules/live2d.py
 import asyncio
+import inspect
 import json
 import os
 import random
 import websockets
 from typing import Optional
+from urllib.parse import urlparse
 
 from config import LIVE2D_HOST
 
@@ -25,6 +27,7 @@ except Exception:
 
 from config import TTS_RETURN_IDLE, TTS_IDLE_EMO
 from core.logger import get_logger
+from services.runtime_health import get_runtime_health
 
 _CURRENT_COSTUME_CONFIG = {}
 _CURRENT_COSTUME_EMOTION_MAP = {}
@@ -90,9 +93,11 @@ async def go_idle():
         _get_logger().warning(f"go_idle 失败: {e}")
 
 
-CONNECT_TIMEOUT = 1.0
+CONNECT_TIMEOUT = 5.0
+PING_TIMEOUT = 5.0
 SEND_TIMEOUT = 1.5
 CONNECTION_POOL_MAX_AGE = 300  # 5分钟后重新建立连接
+MAX_RECONNECT_DELAY = 15.0
 
 _RESOLVED_HOST = None
 
@@ -102,14 +107,21 @@ _RESOLVED_HOST = None
 # ==========================================
 
 
-from typing import Optional
-import websockets
+class Live2DConnectionBackoffError(ConnectionError):
+    pass
+
+
+def _safe_host_label(host: str) -> str:
+    parsed = urlparse(str(host or ""))
+    if not parsed.hostname:
+        return "unknown"
+    return f"{parsed.hostname}:{parsed.port}" if parsed.port else parsed.hostname
 
 
 class WebSocketConnectionPool:
     """WebSocket 连接池：复用连接避免频繁创建/关闭，并串行化发送。"""
 
-    def __init__(self):
+    def __init__(self, *, health=None, clock=None, jitter=None):
         self._connection: Optional[websockets.WebSocketClientProtocol] = None
         self._lock = asyncio.Lock()
         self._send_lock = asyncio.Lock()  # ✅ 串行化 ws.send
@@ -117,9 +129,66 @@ class WebSocketConnectionPool:
         self._created_at: Optional[float] = None
         self._is_connected: bool = False
         self._last_ping_at: float = 0.0  # ✅ 可选：降低 ping 频率
+        self._failure_count = 0
+        self._next_retry_at = 0.0
+        self._last_success_at = 0.0
+        self._health = health or get_runtime_health()
+        self._clock = clock or (lambda: asyncio.get_running_loop().time())
+        self._jitter = jitter or (
+            lambda delay: random.uniform(0.0, min(0.25, delay * 0.1))
+        )
+
+    def _backoff_delay(self, failure_count: int) -> float:
+        base = min(
+            MAX_RECONNECT_DELAY,
+            float(2 ** max(0, int(failure_count) - 1)),
+        )
+        jitter = max(0.0, float(self._jitter(base)))
+        return min(MAX_RECONNECT_DELAY, base + jitter)
+
+    def _report(self, state: str, summary: str, *, error: str = "") -> None:
+        try:
+            self._health.report(
+                "live2d_ws",
+                state,
+                summary,
+                details={
+                    "host": _safe_host_label(self._host or LIVE2D_HOST),
+                    "consecutive_failures": self._failure_count,
+                    "next_retry_at": self._next_retry_at or None,
+                    "last_success_at": self._last_success_at or None,
+                    "error_category": error,
+                },
+            )
+        except Exception:
+            pass
+
+    def _record_failure(self, exc: BaseException, now: float) -> None:
+        self._failure_count += 1
+        self._next_retry_at = now + self._backoff_delay(self._failure_count)
+        self._is_connected = False
+        self._report(
+            "reconnecting",
+            "Live2D WebSocket 正在退避重连",
+            error=type(exc).__name__,
+        )
+
+    def _record_success(self, now: float) -> None:
+        self._failure_count = 0
+        self._next_retry_at = 0.0
+        self._last_success_at = now
+        self._report("healthy", "Live2D WebSocket 已连接")
+
+    def _raise_if_backing_off(self, now: float) -> None:
+        remaining = self._next_retry_at - now
+        if remaining > 0:
+            raise Live2DConnectionBackoffError(
+                f"Live2D connection unavailable for {remaining:.1f}s"
+            )
 
     async def get_connection(self) -> websockets.WebSocketClientProtocol:
         async with self._lock:
+            self._raise_if_backing_off(self._clock())
             if await self._should_reconnect():
                 await self._create_connection()
             return self._connection
@@ -128,30 +197,42 @@ class WebSocketConnectionPool:
         """标记连接不可用（带锁，避免竞态）"""
         async with self._lock:
             self._is_connected = False
+            now = self._clock()
+            if self._next_retry_at <= now:
+                self._record_failure(ConnectionError("connection marked broken"), now)
 
     async def _should_reconnect(self) -> bool:
         if self._connection is None or not self._is_connected:
             return True
 
-        loop = asyncio.get_running_loop()
         if self._created_at is not None:
-            age = loop.time() - self._created_at
+            age = self._clock() - self._created_at
             if age > CONNECTION_POOL_MAX_AGE:
                 _get_logger().info(f"连接池连接已使用 {age:.1f} 秒，重新建立连接")
                 return True
 
         # ✅ 降低 ping 频率：最多每 5 秒 ping 一次（避免高频 get_connection 导致卡顿）
-        now = loop.time()
+        now = self._clock()
         if now - self._last_ping_at < 5.0:
             return False
         self._last_ping_at = now
 
         try:
-            await asyncio.wait_for(self._connection.ping(), timeout=1.0)
+            async def _ping() -> None:
+                pong = await self._connection.ping()
+                if inspect.isawaitable(pong):
+                    await pong
+
+            await asyncio.wait_for(_ping(), timeout=PING_TIMEOUT)
+            self._record_success(now)
             return False
         except Exception as e:
-            _get_logger().warning(f"连接健康检查失败: {e}，将重新连接")
-            return True
+            _get_logger().warning(f"连接健康检查失败: {e}，进入退避重连")
+            self._record_failure(e, now)
+            remaining = max(0.0, self._next_retry_at - now)
+            raise Live2DConnectionBackoffError(
+                f"Live2D connection unavailable for {remaining:.1f}s"
+            ) from e
 
     async def _create_connection(self) -> None:
         if self._connection is not None:
@@ -163,9 +244,15 @@ class WebSocketConnectionPool:
         host = await _resolve_host()
         self._host = host
 
-        self._connection = await _ws_connect(host)
+        try:
+            self._connection = await _ws_connect(host)
+        except Exception as exc:
+            self._connection = None
+            self._record_failure(exc, self._clock())
+            raise
         self._is_connected = True
-        self._created_at = asyncio.get_running_loop().time()
+        self._created_at = self._clock()
+        self._record_success(self._created_at)
         _get_logger().debug(f"WebSocket 连接池已创建: {host}")
 
     async def close(self) -> None:
@@ -179,6 +266,7 @@ class WebSocketConnectionPool:
                 finally:
                     self._connection = None
                     self._is_connected = False
+            self._report("offline", "Live2D WebSocket 已关闭")
 
 
 # 全局连接池实例
