@@ -1,4 +1,5 @@
 from integrations.gui_http import GuiHttpServer
+from services.runtime_health import RuntimeHealthCenter
 
 
 class _DummySensor:
@@ -66,3 +67,51 @@ def test_runtime_status_snapshot_is_read_only_when_sensor_raises():
     assert status["screen_sensor"]["use_rust_events_only"] is False
     assert status["work_session"]["error"] == "session unavailable"
     assert status["latest_rust_event"]["error"] == "events unavailable"
+
+
+def test_runtime_status_adds_health_snapshot_and_rust_stale_flag():
+    health = RuntimeHealthCenter(clock=lambda: 200.0)
+    health.report(
+        "rust_activity",
+        "degraded",
+        "Rust 活动事件已过期",
+        details={"stale_for_seconds": 120, "token": "must-not-leak"},
+    )
+    health.report(
+        "model:primary",
+        "cooldown",
+        "模型限流冷却中",
+        details={"cooldown_until": 260.0},
+    )
+
+    class App(_DummyApp):
+        runtime_health = health
+
+    status = GuiHttpServer(app_ref=App())._build_runtime_status()
+
+    assert status["overall"] == "degraded"
+    assert status["screen_sensor"] == {
+        "bound": True,
+        "use_rust_events_only": True,
+        "mode": "rust_only",
+        "activity_stale": True,
+    }
+    assert status["components"]["rust_activity"]["details"]["token"] == "[REDACTED]"
+    assert status["components"]["model:primary"]["state"] == "cooldown"
+    assert status["work_session"]["active_minutes"] == 12
+    assert status["latest_rust_event"]["presence"] == "active"
+
+
+def test_runtime_status_does_not_probe_components():
+    class ReadOnlyHealth:
+        def snapshot(self):
+            return {"overall": "healthy", "components": {}}
+
+    class App(_DummyApp):
+        runtime_health = ReadOnlyHealth()
+
+        def probe_services(self):
+            raise AssertionError("status endpoint must not probe services")
+
+    status = GuiHttpServer(app_ref=App())._build_runtime_status()
+    assert status["overall"] == "healthy"

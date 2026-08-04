@@ -788,6 +788,19 @@ class GuiHttpServer:
     def _build_runtime_status(self) -> Dict[str, Any]:
         app = self.app_ref
         sensor = getattr(app, "screen_sensor", None) if app is not None else None
+        health = getattr(app, "runtime_health", None) if app is not None else None
+
+        health_snapshot: Dict[str, Any] = {
+            "overall": "healthy",
+            "components": {},
+        }
+        if health is not None and hasattr(health, "snapshot"):
+            try:
+                candidate = health.snapshot()
+                if isinstance(candidate, dict):
+                    health_snapshot = candidate
+            except Exception:
+                health_snapshot = {"overall": "degraded", "components": {}}
 
         work_session: Dict[str, Any] = {}
         latest_rust_event: Dict[str, Any] = {}
@@ -806,7 +819,19 @@ class GuiHttpServer:
             except Exception as exc:
                 latest_rust_event = {"error": str(exc)}
 
+        components = health_snapshot.get("components", {})
+        if not isinstance(components, dict):
+            components = {}
+        rust_health = components.get("rust_activity", {})
+        if not isinstance(rust_health, dict):
+            rust_health = {}
+        rust_state = str(
+            rust_health.get("effective_state") or rust_health.get("state") or ""
+        )
+
         return {
+            "overall": str(health_snapshot.get("overall") or "healthy"),
+            "components": components,
             "screen_sensor": {
                 "bound": sensor is not None,
                 "use_rust_events_only": bool(
@@ -814,6 +839,8 @@ class GuiHttpServer:
                 )
                 if sensor is not None
                 else False,
+                "mode": "rust_only" if sensor is not None else "disabled",
+                "activity_stale": rust_state in {"degraded", "offline"},
             },
             "work_session": work_session,
             "latest_rust_event": latest_rust_event,

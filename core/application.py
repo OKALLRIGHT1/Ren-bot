@@ -191,10 +191,13 @@ class Live2DApplication:
     # Live2D application.
 
     def __init__(self):
+        from services.runtime_health import get_runtime_health
+
         # 核心组件
         self.container = ServiceContainer()
         self.event_bus = EventBus()
         self.state_machine = AgentStateMachine()
+        self.runtime_health = get_runtime_health()
         self.logger = None
         self.event_logger = None
 
@@ -1415,7 +1418,9 @@ class Live2DApplication:
         else:
             self.logger.warning("ScreenSensor module not loaded")
 
-        # 🎤 8.5 鍒濆鍖栬闊虫劅鐭?        self._init_voice_sensor_if_configured()
+        # 8.5 初始化语音传感器，并记录本地可发现组件的初始健康状态。
+        self._init_voice_sensor_if_configured()
+        self._report_initial_runtime_health()
 
         # 9. 娉ㄥ唽浜嬩欢澶勭悊鍣?
         self._wire_events()
@@ -1455,6 +1460,64 @@ class Live2DApplication:
                 self.logger.info("VoiceSensor disabled; voice module not preloaded")
             return None
         return self._ensure_voice_sensor_loaded()
+
+    def _report_initial_runtime_health(self) -> None:
+        from config import MODELS
+
+        records = (
+            ("live2d_ws", "offline", "等待 Live2D WebSocket 首次连接", {}),
+            (
+                "rust_activity",
+                "offline",
+                "等待 Rust 活动事件",
+                {"source": "live2d-tauri"},
+            ),
+            (
+                "model_router",
+                "healthy" if MODELS else "disabled",
+                "模型路由已配置" if MODELS else "模型路由未配置",
+                {"configured_models": len(MODELS)},
+            ),
+            ("qq_gateway", "offline", "等待 QQ 网关连接", {}),
+            (
+                "tts",
+                "healthy"
+                if self.tts is not None and self.tts_enabled
+                else "disabled",
+                "TTS 已启用"
+                if self.tts is not None and self.tts_enabled
+                else "TTS 未启用",
+                {},
+            ),
+            (
+                "asr",
+                "healthy" if self.voice_sensor is not None else "disabled",
+                "ASR 已启用" if self.voice_sensor is not None else "ASR 未启用",
+                {},
+            ),
+            (
+                "plugin_manager",
+                "healthy" if self.plugin_manager is not None else "offline",
+                "插件管理器已加载"
+                if self.plugin_manager is not None
+                else "插件管理器不可用",
+                {
+                    "loaded_plugins": len(
+                        getattr(self.plugin_manager, "plugins", {}) or {}
+                    )
+                },
+            ),
+        )
+        for component, state, summary, details in records:
+            try:
+                self.runtime_health.report(
+                    component,
+                    state,
+                    summary,
+                    details=details,
+                )
+            except Exception:
+                continue
 
     def _wire_events(self):
         # Connect events.
