@@ -1914,8 +1914,6 @@ class ScreenSensor:
                     self._last_rust_debug_at = now
                 return
 
-        # Rust activity events carry all screen context needed here.
-        use_vision = False
         self.logger.info(f"👀 [Screen] 触发 ChatService: {app_name} | Vision: False")
 
         if self._loop and self._loop.is_running():
@@ -1928,7 +1926,6 @@ class ScreenSensor:
                     full_title,
                     category,
                     count,
-                    use_vision=use_vision,
                     app_name=app_name,
                     reason=reason,
                     app_duration_sec=app_duration_sec,

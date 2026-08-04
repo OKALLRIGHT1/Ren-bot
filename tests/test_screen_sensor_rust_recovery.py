@@ -63,7 +63,6 @@ def test_screen_reaction_always_uses_text_path(monkeypatch):
 
     assert calls == [
         {
-            "use_vision": False,
             "app_name": "Code.exe",
             "reason": "duration",
             "app_duration_sec": 7200.0,
