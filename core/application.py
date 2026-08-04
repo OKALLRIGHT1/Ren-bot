@@ -214,6 +214,8 @@ class Live2DApplication:
         self.mcp_bridge = None
         self.chat_gateway = None
         self.chat_gateway_server = None
+        self._napcat_enabled = bool(NAPCAT_ENABLED)
+        self._napcat_server_running = False
         self._silent_bubble_seq = 0
 
         # [鏂板] 灞忓箷鎰熺煡涓庤闊崇粍浠?
@@ -1071,6 +1073,8 @@ class Live2DApplication:
             "active_skills": [],
             "sedentary_live_applied": False,
         }
+        self._napcat_enabled = bool(external_settings["napcat_enabled"])
+        self._napcat_server_running = False
 
         config.SEDENTARY_REMINDER_MINUTES = int(
             external_settings["sedentary_reminder_minutes"]
@@ -1195,10 +1199,16 @@ class Live2DApplication:
                         self.chat_gateway_server.call_action
                     )
                 result["napcat_server_running"] = True
+                self._napcat_server_running = True
             except Exception as e:
                 result["napcat_live_applied"] = False
                 if self.logger:
                     self.logger.error(f"NapCat gateway start failed: {e}")
+
+        self._report_qq_gateway_health(
+            enabled=self._napcat_enabled,
+            server_running=self._napcat_server_running,
+        )
 
         if self.logger:
             self.logger.info(
@@ -1464,6 +1474,11 @@ class Live2DApplication:
     def _report_initial_runtime_health(self) -> None:
         from config import MODELS
 
+        napcat_enabled = bool(getattr(self, "_napcat_enabled", NAPCAT_ENABLED))
+        napcat_server_running = bool(
+            getattr(self, "_napcat_server_running", False)
+        )
+
         records = (
             ("live2d_ws", "offline", "等待 Live2D WebSocket 首次连接", {}),
             (
@@ -1477,12 +1492,6 @@ class Live2DApplication:
                 "healthy" if MODELS else "disabled",
                 "模型路由已配置" if MODELS else "模型路由未配置",
                 {"configured_models": len(MODELS)},
-            ),
-            (
-                "qq_gateway",
-                "offline" if NAPCAT_ENABLED else "disabled",
-                "等待 QQ 网关连接" if NAPCAT_ENABLED else "QQ 网关未启用",
-                {},
             ),
             (
                 "tts",
@@ -1523,6 +1532,29 @@ class Live2DApplication:
                 )
             except Exception:
                 continue
+        self._report_qq_gateway_health(
+            enabled=napcat_enabled,
+            server_running=napcat_server_running,
+        )
+
+    def _report_qq_gateway_health(
+        self, *, enabled: bool, server_running: bool
+    ) -> None:
+        if not enabled:
+            state, summary = "disabled", "QQ 网关未启用"
+        elif server_running:
+            state, summary = "healthy", "QQ 网关已启动"
+        else:
+            state, summary = "offline", "QQ 网关等待启动"
+        try:
+            self.runtime_health.report(
+                "qq_gateway",
+                state,
+                summary,
+                details={"listener_running": bool(server_running)},
+            )
+        except Exception:
+            return
 
     def _wire_events(self):
         # Connect events.

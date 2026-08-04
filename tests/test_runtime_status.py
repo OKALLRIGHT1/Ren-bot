@@ -118,17 +118,47 @@ def test_runtime_status_does_not_probe_components():
     assert status["overall"] == "healthy"
 
 
-def test_initial_health_marks_disabled_qq_gateway_as_disabled(monkeypatch):
-    health = RuntimeHealthCenter(clock=lambda: 300.0)
+def _runtime_health_app(health):
     app = Live2DApplication.__new__(Live2DApplication)
     app.runtime_health = health
     app.tts = None
     app.tts_enabled = False
     app.voice_sensor = None
     app.plugin_manager = None
-    monkeypatch.setattr("core.application.NAPCAT_ENABLED", False)
+    return app
+
+
+def test_initial_health_marks_disabled_qq_gateway_as_disabled():
+    health = RuntimeHealthCenter(clock=lambda: 300.0)
+    app = _runtime_health_app(health)
+    app._napcat_enabled = False
+    app._napcat_server_running = False
 
     app._report_initial_runtime_health()
 
     qq = health.snapshot(now=300.0)["components"]["qq_gateway"]
     assert qq["state"] == "disabled"
+
+
+def test_initial_health_uses_enabled_runtime_qq_setting_instead_of_module_default():
+    health = RuntimeHealthCenter(clock=lambda: 300.0)
+    app = _runtime_health_app(health)
+    app._napcat_enabled = True
+    app._napcat_server_running = False
+
+    app._report_initial_runtime_health()
+
+    qq = health.snapshot(now=300.0)["components"]["qq_gateway"]
+    assert qq["state"] == "offline"
+    assert qq["summary"] == "QQ 网关等待启动"
+
+
+def test_qq_gateway_health_becomes_healthy_after_listener_starts():
+    health = RuntimeHealthCenter(clock=lambda: 300.0)
+    app = _runtime_health_app(health)
+
+    app._report_qq_gateway_health(enabled=True, server_running=True)
+
+    qq = health.snapshot(now=300.0)["components"]["qq_gateway"]
+    assert qq["state"] == "healthy"
+    assert qq["summary"] == "QQ 网关已启动"
