@@ -49,6 +49,133 @@ _METRIC_LOCK = threading.Lock()
 _METRICS = []
 _MAX_METRICS = 300
 _UNKNOWN_CALLER_WARNED = set()
+_MODEL_COOLDOWN_LOCK = threading.RLock()
+_MODEL_COOLDOWNS = {}
+_DEFAULT_MODEL_COOLDOWN_SECONDS = 60.0
+_MAX_MODEL_COOLDOWN_SECONDS = 900.0
+_RUNTIME_HEALTH = None
+
+
+def _runtime_health():
+    global _RUNTIME_HEALTH
+    if _RUNTIME_HEALTH is None:
+        from services.runtime_health import get_runtime_health
+
+        _RUNTIME_HEALTH = get_runtime_health()
+    return _RUNTIME_HEALTH
+
+
+def _find_reset_seconds(value):
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if str(key).lower() == "reset_seconds":
+                try:
+                    return float(item)
+                except (TypeError, ValueError):
+                    return None
+            found = _find_reset_seconds(item)
+            if found is not None:
+                return found
+    elif isinstance(value, (list, tuple)):
+        for item in value:
+            found = _find_reset_seconds(item)
+            if found is not None:
+                return found
+    return None
+
+
+def _rate_limit_delay(exc: BaseException):
+    status = getattr(exc, "status_code", None)
+    response = getattr(exc, "response", None)
+    if status is None and response is not None:
+        status = getattr(response, "status_code", None)
+    body = getattr(exc, "body", None)
+    lowered = str(exc or "").lower()
+    markers = ("model_cooldown", "rate limit", "rate_limit")
+    is_limited = (
+        status == 429
+        or "http 429" in lowered
+        or any(marker in lowered for marker in markers)
+    )
+    if not is_limited and body is not None:
+        is_limited = any(marker in str(body).lower() for marker in markers)
+    if not is_limited:
+        return None
+    reset = _find_reset_seconds(body)
+    if reset is None:
+        reset = _DEFAULT_MODEL_COOLDOWN_SECONDS
+    return min(_MAX_MODEL_COOLDOWN_SECONDS, max(1.0, float(reset)))
+
+
+def _set_model_cooldown(model_key: str, *, until: float, reason: str) -> None:
+    with _MODEL_COOLDOWN_LOCK:
+        _MODEL_COOLDOWNS[model_key] = {
+            "until": float(until),
+            "reason": str(reason),
+        }
+    try:
+        _runtime_health().report(
+            f"model:{model_key}",
+            "cooldown",
+            "模型限流冷却中",
+            details={
+                "cooldown_until": float(until),
+                "reason": str(reason),
+            },
+        )
+    except Exception:
+        pass
+
+
+def _start_model_cooldown(model_key: str, exc: BaseException, *, now=None):
+    delay = _rate_limit_delay(exc)
+    if delay is None:
+        return None
+    current = time.time() if now is None else float(now)
+    _set_model_cooldown(
+        model_key,
+        until=current + delay,
+        reason="rate_limit",
+    )
+    return delay
+
+
+def _clear_model_cooldown(model_key: str, *, summary: str) -> None:
+    with _MODEL_COOLDOWN_LOCK:
+        existed = _MODEL_COOLDOWNS.pop(model_key, None) is not None
+    if not existed:
+        return
+    try:
+        _runtime_health().report(
+            f"model:{model_key}",
+            "healthy",
+            summary,
+            details={},
+        )
+    except Exception:
+        pass
+
+
+def _model_cooldown_remaining(model_key: str, *, now=None) -> float:
+    current = time.time() if now is None else float(now)
+    with _MODEL_COOLDOWN_LOCK:
+        record = _MODEL_COOLDOWNS.get(model_key)
+        if not record:
+            return 0.0
+        remaining = float(record["until"]) - current
+        if remaining > 0:
+            return remaining
+        _MODEL_COOLDOWNS.pop(model_key, None)
+    try:
+        _runtime_health().report(
+            f"model:{model_key}",
+            "healthy",
+            "模型冷却已结束",
+            details={},
+        )
+    except Exception:
+        pass
+    return 0.0
 
 
 def _trace_log(*lines):
@@ -489,6 +616,12 @@ async def chat_with_ai_stream(
         model_keys = [preferred_model] + [m for m in model_keys if m != preferred_model]
 
     for idx, key in enumerate(model_keys, 1):
+        remaining = _model_cooldown_remaining(key)
+        if remaining > 0:
+            _trace_log(
+                f"[LLM Stream] 跳过冷却模型 model={key} remaining={remaining:.1f}s"
+            )
+            continue
         config = MODELS.get(key)
         if not config:
             continue
@@ -538,6 +671,7 @@ async def chat_with_ai_stream(
                 else:
                     raise RuntimeError(f"unsupported transport: {method}")
 
+                _clear_model_cooldown(key, summary="模型调用恢复")
                 record_success(key, method)
                 record_task_model_success(task_type, key)
                 _record_metric(
@@ -569,8 +703,11 @@ async def chat_with_ai_stream(
                         "error": safe_error[:300],
                     }
                 )
+                cooldown_delay = _start_model_cooldown(key, e)
                 if yielded_any:
                     return
+                if cooldown_delay is not None:
+                    break
                 continue
 
     yield "（所有模型连接失败，请检查网络或 Key）"
@@ -626,6 +763,12 @@ def chat_with_ai(
         model_keys = [preferred_model] + [m for m in model_keys if m != preferred_model]
 
     for key_idx, key in enumerate(model_keys, 1):
+        remaining = _model_cooldown_remaining(key)
+        if remaining > 0:
+            _trace_log(
+                f"[LLM Sync] 跳过冷却模型 model={key} remaining={remaining:.1f}s ({trace})"
+            )
+            continue
         _trace_log(f"[LLM Sync] 尝试 #{key_idx}: {key} ({trace})")
         config = MODELS.get(key)
         if not config:
@@ -666,6 +809,7 @@ def chat_with_ai(
                 if not content:
                     raise RuntimeError(f"empty content from transport={method}")
 
+                _clear_model_cooldown(key, summary="模型调用恢复")
                 record_success(key, method)
                 record_task_model_success(task_type, key)
                 _record_metric(
@@ -709,6 +853,9 @@ def chat_with_ai(
                     }
                 )
                 _trace_log(f"[LLM Sync] ❌ 失败: {safe_error} (transport={method}) ({trace})")
+                cooldown_delay = _start_model_cooldown(key, e)
+                if cooldown_delay is not None:
+                    break
                 continue
 
     return "❌ 系统繁忙，无法连接 AI。"

@@ -1,12 +1,101 @@
+import asyncio
+from concurrent.futures import Future
+import logging
 import types
 
 import modules.screen_sensor as screen_sensor_module
 from modules.screen_sensor import ScreenSensor
+from services.runtime_health import RuntimeHealthCenter
 
 
 class DummyChatService:
     async def send_active_alert(self, app_name, active_minutes):
         return None
+
+
+def test_screen_reaction_always_uses_text_path(monkeypatch):
+    calls = []
+
+    class ChatService:
+        async def handle_sensor_event(self, *args, **kwargs):
+            calls.append(kwargs)
+            return True
+
+    class RunningLoop:
+        def is_running(self):
+            return True
+
+    loop = RunningLoop()
+    sensor = ScreenSensor.__new__(ScreenSensor)
+    sensor.chat_service = ChatService()
+    sensor._loop = loop
+    sensor.logger = logging.getLogger("screen-rust-only-test")
+    sensor.last_reaction_time = 0.0
+    sensor.category_reaction_times = {}
+    sensor._last_rust_debug_key = ""
+    sensor._last_rust_debug_at = 0.0
+    sensor.debug_verbose = False
+    sensor.daily_durations = {"Code.exe": 7200.0}
+    sensor.current_window_start_time = 0.0
+
+    monkeypatch.setattr("modules.screen_sensor.time.time", lambda: 10_000.0)
+
+    def run_immediately(coroutine, target_loop):
+        assert target_loop is loop
+        completed = Future()
+        completed.set_result(asyncio.run(coroutine))
+        return completed
+
+    monkeypatch.setattr(
+        "modules.screen_sensor.asyncio.run_coroutine_threadsafe",
+        run_immediately,
+    )
+
+    sensor._try_trigger_reaction(
+        "main.py - Code",
+        "coding",
+        30,
+        "Code.exe",
+        reason="duration",
+        app_duration_sec=7200.0,
+        current_stay_sec=1800.0,
+    )
+
+    assert calls == [
+        {
+            "app_name": "Code.exe",
+            "reason": "duration",
+            "app_duration_sec": 7200.0,
+            "current_stay_sec": 1800.0,
+        }
+    ]
+
+
+def test_rust_activity_warning_logs_once_and_recovery_reports_healthy(caplog):
+    health = RuntimeHealthCenter(clock=lambda: 500.0)
+    sensor = ScreenSensor.__new__(ScreenSensor)
+    sensor.logger = logging.getLogger("rust-health-test")
+    sensor.runtime_health = health
+    sensor._rust_health_state = ""
+    sensor._last_rust_event_seen_at = 100.0
+
+    with caplog.at_level(logging.INFO, logger="rust-health-test"):
+        sensor._set_rust_activity_health(
+            state="degraded", now_ts=300.0, stale_threshold_sec=90.0
+        )
+        sensor._set_rust_activity_health(
+            state="degraded", now_ts=301.0, stale_threshold_sec=90.0
+        )
+        sensor._set_rust_activity_health(
+            state="healthy", now_ts=302.0, stale_threshold_sec=90.0
+        )
+
+    messages = [record.getMessage() for record in caplog.records]
+    assert sum("activity events stale" in message for message in messages) == 1
+    assert sum("activity events resumed" in message for message in messages) == 1
+    component = health.snapshot(now=302.0)["components"]["rust_activity"]
+    assert component["state"] == "healthy"
+    assert "window_title" not in component["details"]
 
 
 def test_should_use_rust_events_now_accepts_fresh_live2d_event():

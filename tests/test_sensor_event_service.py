@@ -1,3 +1,5 @@
+import inspect
+
 import pytest
 
 from services.chat_support.sensor_event_guard import titles_soft_match
@@ -131,25 +133,33 @@ def test_titles_soft_match_allows_title_jitter_and_rejects_unrelated():
 
 
 @pytest.mark.asyncio
-async def test_run_event_generation_skips_when_focus_mismatched():
+async def test_text_event_generation_never_probes_focus_or_vision():
+    parameters = inspect.signature(
+        SensorEventService.run_event_generation
+    ).parameters
+    assert "use_vision" not in parameters
+    assert "analyze_image" not in parameters
+    assert "active_title_getter" not in parameters
+    assert "take_screenshot_base64" not in parameters
+
+    def chat_with_ai(messages, *, task_type, caller):
+        if caller == "sensor_gatekeeper":
+            return "YES"
+        return "只根据 Rust 事件生成的文本回复"
+
     result = await _service().run_event_generation(
-        clean_title="main.py - Visual Studio Code",
+        clean_title="main.py - Code",
         display_app="Code.exe",
         category="coding",
         count=3,
         reason="switch",
-        use_vision=False,
-        vision_mode="separate",
         app_duration_sec=10,
-        current_stay_sec=0,
-        chat_with_ai=lambda *args, **kwargs: "should-not-run",
-        analyze_image=lambda *args, **kwargs: "should-not-run",
-        active_title_getter=lambda: "Docs - Google Chrome",
+        current_stay_sec=4,
+        chat_with_ai=chat_with_ai,
     )
 
-    assert result.reason == "focus_mismatch"
-    assert result.branch == "guard"
-    assert result.reply == ""
+    assert result.branch == "text"
+    assert result.reply == "只根据 Rust 事件生成的文本回复"
 
 
 @pytest.mark.asyncio

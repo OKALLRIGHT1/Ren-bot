@@ -4923,14 +4923,13 @@ class ChatService:
         """处理久坐提醒"""
         await self.active_alert_service.send_active_alert(app_name, minutes)
 
-    # ==================== 屏幕感知事件处理 (完整版：含自我意识+视觉+文本) ====================
+    # ==================== Rust 屏幕事件文本处理 ====================
 
     async def handle_sensor_event(
         self,
         window_title: str,
         category: str,
         count: int = 1,
-        use_vision: bool = False,
         app_name: str = "",
         reason: str = "",
         app_duration_sec: float | int | None = None,
@@ -4944,7 +4943,6 @@ class ChatService:
                 window_title,
                 category,
                 count=count,
-                use_vision=use_vision,
                 app_name=app_name,
                 reason=reason,
                 app_duration_sec=app_duration_sec,
@@ -4956,13 +4954,12 @@ class ChatService:
         window_title: str,
         category: str,
         count: int = 1,
-        use_vision: bool = False,
         app_name: str = "",
         reason: str = "",
         app_duration_sec: float | int | None = None,
         current_stay_sec: float | int | None = None,
     ) -> bool:
-        from modules.llm import chat_with_ai, analyze_image
+        from modules.llm import chat_with_ai
 
         guard = sensor_event_guard.check_sensor_event_guard(
             window_title=window_title,
@@ -4988,12 +4985,9 @@ class ChatService:
             category=category,
             count=count,
             reason=reason,
-            use_vision=use_vision,
-            vision_mode=VISION_MODE,
             app_duration_sec=app_duration_sec,
             current_stay_sec=current_stay_sec,
             chat_with_ai=chat_with_ai,
-            analyze_image=analyze_image,
         )
         if not generation.reply:
             return False

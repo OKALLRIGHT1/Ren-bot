@@ -2,6 +2,7 @@ import asyncio
 
 import pytest
 
+from services.runtime_health import RuntimeHealthCenter
 from modules.live2d_transport import (
     Live2DDelivery,
     Live2DDeliveryError,
@@ -118,3 +119,89 @@ async def test_gui_transport_rejects_silent_no_delivery():
                 message={"msg": 13200, "msgId": 2, "data": {"mtn": "idle"}},
             )
         )
+
+
+def test_live2d_connection_timeout_is_five_seconds():
+    import modules.live2d as live2d
+
+    assert live2d.CONNECT_TIMEOUT == 5.0
+    assert live2d.PING_TIMEOUT == 5.0
+
+
+@pytest.mark.asyncio
+async def test_connection_pool_backs_off_and_resets_after_success(monkeypatch):
+    import modules.live2d as live2d
+
+    clock = {"now": 100.0}
+    attempts = []
+    health = RuntimeHealthCenter(clock=lambda: clock["now"])
+
+    class FakeWs:
+        async def close(self):
+            return None
+
+        async def ping(self):
+            return None
+
+    async def fake_resolve_host():
+        return "ws://127.0.0.1:10086/api"
+
+    async def fake_connect(host):
+        attempts.append(host)
+        if len(attempts) == 1:
+            raise ConnectionRefusedError("refused")
+        return FakeWs()
+
+    monkeypatch.setattr(live2d, "_resolve_host", fake_resolve_host)
+    monkeypatch.setattr(live2d, "_ws_connect", fake_connect)
+
+    pool = live2d.WebSocketConnectionPool(
+        health=health,
+        clock=lambda: clock["now"],
+        wall_clock=lambda: clock["now"] + 900.0,
+        jitter=lambda delay: 0.0,
+    )
+
+    with pytest.raises(ConnectionRefusedError):
+        await pool.get_connection()
+    assert pool._failure_count == 1
+    assert pool._next_retry_at == 101.0
+
+    with pytest.raises(live2d.Live2DConnectionBackoffError, match="1.0"):
+        await pool.get_connection()
+    assert len(attempts) == 1
+    assert (
+        health.snapshot(now=100.0)["components"]["live2d_ws"]["state"]
+        == "reconnecting"
+    )
+    reconnect_details = health.snapshot(now=100.0)["components"]["live2d_ws"][
+        "details"
+    ]
+    assert reconnect_details["next_retry_at"] == 1001.0
+
+    clock["now"] = 101.0
+    connection = await pool.get_connection()
+    assert isinstance(connection, FakeWs)
+    assert pool._failure_count == 0
+    assert pool._next_retry_at == 0.0
+    healthy = health.snapshot(now=101.0)["components"]["live2d_ws"]
+    assert healthy["state"] == "healthy"
+    assert healthy["details"]["last_success_at"] == 1001.0
+
+    await pool.close()
+    assert health.snapshot(now=101.0)["components"]["live2d_ws"]["state"] == "offline"
+
+
+def test_connection_backoff_is_capped_at_fifteen_seconds():
+    import modules.live2d as live2d
+
+    pool = live2d.WebSocketConnectionPool(jitter=lambda delay: 0.0)
+    assert [pool._backoff_delay(n) for n in range(1, 8)] == [
+        1.0,
+        2.0,
+        4.0,
+        8.0,
+        15.0,
+        15.0,
+        15.0,
+    ]

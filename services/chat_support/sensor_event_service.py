@@ -327,7 +327,7 @@ class SensorEventService:
         context: SensorGenerationContext,
         clean_title: str,
         image_base64: str,
-        analyze_image: Callable[..., Any],
+        analyze_image: Optional[Callable[..., Any]],
     ) -> SensorReplyGenerationResult:
         prompt = self.build_vision_direct_prompt(
             context=context,
@@ -621,30 +621,10 @@ class SensorEventService:
         category: str,
         count: int,
         reason: str,
-        use_vision: bool,
-        vision_mode: str,
         app_duration_sec: float | int | None,
         current_stay_sec: float | int | None,
         chat_with_ai: Callable[..., str],
-        analyze_image: Callable[..., Any],
-        active_title_getter: Optional[Callable[[], str]] = None,
-        take_screenshot_base64: Optional[Callable[..., str]] = None,
     ) -> SensorReplyGenerationResult:
-        if category != "self":
-            focus = revalidate_focus_for_sensor(
-                event_title=clean_title,
-                app_name=display_app,
-                active_title_getter=active_title_getter,
-            )
-            if not focus.ok:
-                self._log_info(
-                    f"🛑 [Sensor] 焦点已变，跳过吐槽: event={clean_title} active={focus.active_title}"
-                )
-                return SensorReplyGenerationResult(
-                    reason="focus_mismatch",
-                    branch="guard",
-                )
-
         context = self.build_generation_context(
             clean_title=clean_title,
             display_app=display_app,
@@ -663,35 +643,18 @@ class SensorEventService:
                 chat_with_ai=chat_with_ai,
             )
 
-        if not use_vision:
-            gatekeeper_result = await self.run_gatekeeper(
-                context=context,
-                clean_title=clean_title,
-                category=category,
-                count=count,
-                chat_with_ai=chat_with_ai,
+        gatekeeper_result = await self.run_gatekeeper(
+            context=context,
+            clean_title=clean_title,
+            category=category,
+            count=count,
+            chat_with_ai=chat_with_ai,
+        )
+        if not gatekeeper_result.allowed:
+            return SensorReplyGenerationResult(
+                reason=gatekeeper_result.reason or "gatekeeper_blocked",
+                branch="gatekeeper",
             )
-            if not gatekeeper_result.allowed:
-                return SensorReplyGenerationResult(
-                    reason=gatekeeper_result.reason or "gatekeeper_blocked",
-                    branch="gatekeeper",
-                )
-
-        if use_vision:
-            vision_generation = await self.run_vision_generation(
-                context=context,
-                clean_title=clean_title,
-                vision_mode=vision_mode,
-                analyze_image=analyze_image,
-                chat_with_ai=chat_with_ai,
-                display_app=display_app,
-                take_screenshot_base64=take_screenshot_base64,
-                active_title_getter=active_title_getter,
-            )
-            if vision_generation.reply:
-                return vision_generation
-            if vision_generation.reason == "focus_mismatch":
-                return vision_generation
 
         return await self.run_text_generation(
             context=context,
