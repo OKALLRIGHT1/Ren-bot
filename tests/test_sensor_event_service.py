@@ -131,9 +131,28 @@ def test_titles_soft_match_allows_title_jitter_and_rejects_unrelated():
 
 
 @pytest.mark.asyncio
-async def test_run_event_generation_skips_when_focus_mismatched():
+async def test_text_event_generation_never_probes_focus_or_vision():
+    calls = {"focus": 0, "capture": 0, "vision": 0}
+
+    def active_title_getter():
+        calls["focus"] += 1
+        raise AssertionError("local foreground lookup must stay disabled")
+
+    def take_screenshot_base64(**kwargs):
+        calls["capture"] += 1
+        raise AssertionError("screen capture must stay disabled")
+
+    async def analyze_image(*args, **kwargs):
+        calls["vision"] += 1
+        raise AssertionError("vision model must stay disabled")
+
+    def chat_with_ai(messages, *, task_type, caller):
+        if caller == "sensor_gatekeeper":
+            return "YES"
+        return "只根据 Rust 事件生成的文本回复"
+
     result = await _service().run_event_generation(
-        clean_title="main.py - Visual Studio Code",
+        clean_title="main.py - Code",
         display_app="Code.exe",
         category="coding",
         count=3,
@@ -141,15 +160,16 @@ async def test_run_event_generation_skips_when_focus_mismatched():
         use_vision=False,
         vision_mode="separate",
         app_duration_sec=10,
-        current_stay_sec=0,
-        chat_with_ai=lambda *args, **kwargs: "should-not-run",
-        analyze_image=lambda *args, **kwargs: "should-not-run",
-        active_title_getter=lambda: "Docs - Google Chrome",
+        current_stay_sec=4,
+        chat_with_ai=chat_with_ai,
+        analyze_image=analyze_image,
+        active_title_getter=active_title_getter,
+        take_screenshot_base64=take_screenshot_base64,
     )
 
-    assert result.reason == "focus_mismatch"
-    assert result.branch == "guard"
-    assert result.reply == ""
+    assert result.branch == "text"
+    assert result.reply == "只根据 Rust 事件生成的文本回复"
+    assert calls == {"focus": 0, "capture": 0, "vision": 0}
 
 
 @pytest.mark.asyncio

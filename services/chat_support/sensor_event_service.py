@@ -327,7 +327,7 @@ class SensorEventService:
         context: SensorGenerationContext,
         clean_title: str,
         image_base64: str,
-        analyze_image: Callable[..., Any],
+        analyze_image: Optional[Callable[..., Any]],
     ) -> SensorReplyGenerationResult:
         prompt = self.build_vision_direct_prompt(
             context=context,
@@ -630,21 +630,6 @@ class SensorEventService:
         active_title_getter: Optional[Callable[[], str]] = None,
         take_screenshot_base64: Optional[Callable[..., str]] = None,
     ) -> SensorReplyGenerationResult:
-        if category != "self":
-            focus = revalidate_focus_for_sensor(
-                event_title=clean_title,
-                app_name=display_app,
-                active_title_getter=active_title_getter,
-            )
-            if not focus.ok:
-                self._log_info(
-                    f"🛑 [Sensor] 焦点已变，跳过吐槽: event={clean_title} active={focus.active_title}"
-                )
-                return SensorReplyGenerationResult(
-                    reason="focus_mismatch",
-                    branch="guard",
-                )
-
         context = self.build_generation_context(
             clean_title=clean_title,
             display_app=display_app,

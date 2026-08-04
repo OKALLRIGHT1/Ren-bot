@@ -4,7 +4,6 @@ import asyncio
 import json
 import re
 import os
-import random  # 引入随机模块
 
 from datetime import datetime
 from typing import Optional, Dict, Tuple, List, Any
@@ -26,6 +25,7 @@ from config import (
     SCREEN_ACTIVITY_MAX_ITEMS,
 )
 from core.logger import get_logger
+from services.runtime_health import get_runtime_health
 
 try:
     from modules.memory_sqlite import get_memory_store
@@ -101,7 +101,8 @@ class ScreenSensor:
         self._last_rust_debug_at = 0.0
         self._last_rust_sample_ts = 0.0
         self._last_rust_event_seen_at = 0.0
-        self._last_rust_stale_log_at = 0.0
+        self._rust_health_state = ""
+        self.runtime_health = get_runtime_health()
         self._suppress_stats_save = False
         self.debug_verbose = bool(SCREEN_DEBUG_VERBOSE)
         self._load_stats()
@@ -400,14 +401,55 @@ class ScreenSensor:
         if not getattr(self, "use_rust_events_only", False):
             self.logger.info("[Screen] Rust activity events resumed; using Rust events")
             self.use_rust_events_only = True
+        self._set_rust_activity_health(
+            state="healthy",
+            now_ts=now_ts,
+            stale_threshold_sec=stale_threshold_sec,
+        )
         return True
 
-    def _warn_rust_events_stale(self, now_ts: float) -> None:
-        if now_ts - self._last_rust_stale_log_at < 60.0:
+    def _set_rust_activity_health(
+        self, *, state: str, now_ts: float, stale_threshold_sec: float
+    ) -> None:
+        previous = str(getattr(self, "_rust_health_state", "") or "")
+        self._rust_health_state = state
+        last_seen = float(getattr(self, "_last_rust_event_seen_at", 0.0) or 0.0)
+        summary = (
+            "Rust 活动事件正常" if state == "healthy" else "Rust 活动事件已过期"
+        )
+        try:
+            self.runtime_health.report(
+                "rust_activity",
+                state,
+                summary,
+                details={
+                    "source": LIVE2D_ACTIVITY_SOURCE,
+                    "last_event_at": last_seen or None,
+                    "stale_for_seconds": (
+                        max(0.0, now_ts - last_seen) if last_seen else None
+                    ),
+                },
+                stale_after_seconds=stale_threshold_sec,
+                updated_at=now_ts,
+            )
+        except Exception:
+            pass
+        if previous == state:
             return
-        self._last_rust_stale_log_at = now_ts
-        self.logger.warning(
-            "[Screen] Live2D activity events stale; waiting for live2d-tauri source"
+        if state == "healthy" and previous:
+            self.logger.info("[Screen] Live2D activity events resumed")
+        elif state == "degraded":
+            self.logger.warning(
+                "[Screen] Live2D activity events stale; waiting for live2d-tauri source"
+            )
+
+    def _warn_rust_events_stale(
+        self, now_ts: float, stale_threshold_sec: float
+    ) -> None:
+        self._set_rust_activity_health(
+            state="degraded",
+            now_ts=now_ts,
+            stale_threshold_sec=stale_threshold_sec,
         )
 
     def _is_ignored_rust_screen_event(
@@ -1781,7 +1823,7 @@ class ScreenSensor:
                 ):
                     self._process_rust_events_for_reaction(now_ts)
                 else:
-                    self._warn_rust_events_stale(now_ts)
+                    self._warn_rust_events_stale(now_ts, stale_threshold_sec)
                 self._save_stats()
             except Exception as e:
                 self.logger.error(f"[Screen] Live2D activity loop error: {e}")
@@ -1872,55 +1914,10 @@ class ScreenSensor:
                     self._last_rust_debug_at = now
                 return
 
-        # ============================================================
-        # 3. 核心修改：视觉判定逻辑分离
-        # 默认：只是普通文本观测 (use_vision = False)
-        # ============================================================
+        # Rust activity events carry all screen context needed here.
         use_vision = False
+        self.logger.info(f"👀 [Screen] 触发 ChatService: {app_name} | Vision: False")
 
-        # 场景 A: 沉浸时长触发 (reason="duration")
-        # 既然看了这么久没动，大概率是有内容的，强制视觉查岗
-        if reason == "duration":
-            use_vision = True
-            self.logger.info(f"📸 [Sensor] 触发视觉查岗 (原因: 长时间停留)")
-
-        # 场景 B: 切换触发 (reason="switch") -> 掷骰子决定是否升级为视觉
-        else:
-            interesting_cats = [
-                "gaming",
-                "video",
-                "social",
-                "design",
-                "coding",
-                "work",
-                "other",
-            ]
-
-            # 只有在这些分类下，才有概率“升级”为截图
-            if category in interesting_cats:
-                base_prob = 0.15
-                prob_boost = count * 0.05
-                final_prob = min(base_prob + prob_boost, 0.85)
-
-                # 掷骰子！
-                if random.random() < final_prob:
-                    use_vision = True
-                    self.logger.info(
-                        f"🎲 [Sensor] 运气爆棚！升级为视觉查岗 (概率: {final_prob:.2f})"
-                    )
-                else:
-                    # 没抽中，仅作为普通文本事件处理
-                    # self.logger.info(f"ℹ️ [Sensor] 只是普通观测(未触发视觉)")
-                    pass
-
-        self.logger.info(
-            f"👀 [Screen] 触发 ChatService: {app_name} | Vision: {use_vision}"
-        )
-
-        # 4. 执行发送
-        # 无论 use_vision 是 True 还是 False，都发送给 ChatService
-        # - True  -> ChatService 调用 Smart Model (看图+吐槽)
-        # - False -> ChatService 调用 Gatekeeper (判断是否无聊 -> 决定是否吐槽)
         if self._loop and self._loop.is_running():
             if app_duration_sec is None:
                 app_duration_sec = self.daily_durations.get(app_name, 0.0)

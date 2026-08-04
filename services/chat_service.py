@@ -4962,7 +4962,7 @@ class ChatService:
         app_duration_sec: float | int | None = None,
         current_stay_sec: float | int | None = None,
     ) -> bool:
-        from modules.llm import chat_with_ai, analyze_image
+        from modules.llm import chat_with_ai
 
         guard = sensor_event_guard.check_sensor_event_guard(
             window_title=window_title,
@@ -4988,12 +4988,12 @@ class ChatService:
             category=category,
             count=count,
             reason=reason,
-            use_vision=use_vision,
+            use_vision=False,
             vision_mode=VISION_MODE,
             app_duration_sec=app_duration_sec,
             current_stay_sec=current_stay_sec,
             chat_with_ai=chat_with_ai,
-            analyze_image=analyze_image,
+            analyze_image=None,
         )
         if not generation.reply:
             return False
