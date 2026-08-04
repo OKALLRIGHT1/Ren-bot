@@ -19,6 +19,10 @@ from modules.gui.styles import (
     get_memory_dialog_styles,
 )
 from modules.gui.utils import resolve_icon, set_dot_status, classify_status
+from modules.gui.runtime_health_view import (
+    RUNTIME_HEALTH_REFRESH_INTERVAL_MS,
+    overall_presentation,
+)
 from modules.gui.widgets.ball import DraggableBall
 from modules.gui.sedentary_popup import (
     build_sedentary_popup_options,
@@ -106,6 +110,7 @@ class QtChatTrayApp(QtCore.QObject):
         on_apply_external_settings_callback: Optional[Callable[[dict], dict]] = None,
         on_display_state_callback: Optional[Callable[[dict], None]] = None,
         plugin_manager: Optional[Any] = None,
+        runtime_health: Optional[Any] = None,
         cfg: Optional[QtGuiConfig] = None,
     ):
         super().__init__()
@@ -122,7 +127,9 @@ class QtChatTrayApp(QtCore.QObject):
         self.on_apply_external_settings_callback = on_apply_external_settings_callback
         self.on_display_state_callback = on_display_state_callback
         self.plugin_manager = plugin_manager
+        self.runtime_health = runtime_health
         self.screen_sensor = None
+        self._runtime_health_dialog = None
 
         # --- 内部状态 ---
         self._is_ball_mode = True
@@ -166,6 +173,10 @@ class QtChatTrayApp(QtCore.QObject):
         self._work_session_timer.setInterval(WORK_SESSION_REFRESH_INTERVAL_MS)
         self._work_session_timer.timeout.connect(self.refresh_work_session_status)
         self._work_session_timer.start()
+        self._runtime_health_timer = QtCore.QTimer(self)
+        self._runtime_health_timer.setInterval(RUNTIME_HEALTH_REFRESH_INTERVAL_MS)
+        self._runtime_health_timer.timeout.connect(self.refresh_runtime_health_status)
+        self._runtime_health_timer.start()
 
         self._settings_dialog = None
         self._knowledge_dialog = None
@@ -187,6 +198,7 @@ class QtChatTrayApp(QtCore.QObject):
 
         self.set_status("Ready")
         self.refresh_work_session_status()
+        self.refresh_runtime_health_status()
 
     def apply_external_settings(self, settings: Optional[dict] = None):
         if callable(self.on_apply_external_settings_callback):
@@ -341,6 +353,15 @@ class QtChatTrayApp(QtCore.QObject):
         )
         self._lbl_work_session.setTextFormat(QtCore.Qt.TextFormat.PlainText)
 
+        self._btn_runtime_health = QtWidgets.QPushButton("●")
+        self._btn_runtime_health.setObjectName("runtimeHealthButton")
+        self._btn_runtime_health.setFixedSize(20, 20)
+        self._btn_runtime_health.setCursor(
+            QtCore.Qt.CursorShape.PointingHandCursor
+        )
+        self._btn_runtime_health.setToolTip("打开运行健康中心")
+        self._btn_runtime_health.clicked.connect(self._on_runtime_health_clicked)
+
         window_ctl = QtWidgets.QFrame()
         window_ctl.setObjectName("windowCtlGroup")
         window_ctl_layout = QtWidgets.QHBoxLayout(window_ctl)
@@ -368,6 +389,7 @@ class QtChatTrayApp(QtCore.QObject):
         top_bar.addWidget(self._lbl_status)
         top_bar.addWidget(self._lbl_character)
         top_bar.addWidget(self._lbl_work_session)
+        top_bar.addWidget(self._btn_runtime_health)
         top_bar.addStretch(1)
         top_bar.addWidget(window_ctl)
         main_vbox.addWidget(title_bar)
@@ -504,6 +526,57 @@ class QtChatTrayApp(QtCore.QObject):
     def set_screen_sensor(self, screen_sensor: Any) -> None:
         self.screen_sensor = screen_sensor
         self.refresh_work_session_status()
+
+    def set_runtime_health(self, runtime_health: Any) -> None:
+        self.runtime_health = runtime_health
+        if self._runtime_health_dialog is not None:
+            self._runtime_health_dialog.health_center = runtime_health
+        self.refresh_runtime_health_status()
+
+    def refresh_runtime_health_status(self) -> None:
+        if not hasattr(self, "_btn_runtime_health"):
+            return
+        try:
+            if self.runtime_health is None:
+                snapshot = {}
+            else:
+                snapshot = self.runtime_health.snapshot()
+                if not isinstance(snapshot, dict):
+                    raise TypeError("健康中心返回了无效数据")
+            presentation = overall_presentation(snapshot)
+            label = presentation["label"]
+            color = presentation["color"]
+            tooltip = f"{label}，点击查看组件详情"
+        except Exception as exc:
+            label = "状态读取失败"
+            color = "#EF4444"
+            tooltip = f"运行健康状态读取失败：{exc}"
+
+        self._btn_runtime_health.setText("●")
+        self._btn_runtime_health.setToolTip(tooltip)
+        self._btn_runtime_health.setStyleSheet(
+            "QPushButton#runtimeHealthButton {"
+            f"color: {color}; background: transparent; border: none;"
+            "padding: 0px; font-size: 13px; font-weight: 700;"
+            "}"
+            "QPushButton#runtimeHealthButton:hover {"
+            "background: rgba(148, 163, 184, 0.14);"
+            "}"
+        )
+
+    def _on_runtime_health_clicked(self) -> None:
+        if self._runtime_health_dialog is None:
+            from modules.gui.dialogs.runtime_health import RuntimeHealthDialog
+
+            self._runtime_health_dialog = RuntimeHealthDialog(
+                self.runtime_health, parent=None
+            )
+        else:
+            self._runtime_health_dialog.health_center = self.runtime_health
+            self._runtime_health_dialog.refresh_status()
+        self._runtime_health_dialog.showNormal()
+        self._runtime_health_dialog.raise_()
+        self._runtime_health_dialog.activateWindow()
 
     def request_work_session_status_refresh(self) -> None:
         self._bridge.sig_refresh_work_session.emit()
@@ -1214,6 +1287,9 @@ class QtChatTrayApp(QtCore.QObject):
         m.addAction("代码助手").triggered.connect(self._on_codex_clicked)
         m.addAction("模型监控").triggered.connect(self._on_monitor_clicked)
         m.addAction("模式预设").triggered.connect(self._on_mode_menu_clicked)
+        m.addAction("运行健康中心").triggered.connect(
+            self._on_runtime_health_clicked
+        )
         if self.on_restart_callback:
             m.addSeparator()
             m.addAction("🔄 重启程序").triggered.connect(self._handle_restart)

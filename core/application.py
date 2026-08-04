@@ -3267,6 +3267,7 @@ class Live2DApplication:
             on_restart_callback=self.restart_app,
             on_apply_external_settings_callback=self.apply_external_settings,
             on_display_state_callback=self.publish_display_state,
+            runtime_health=self.runtime_health,
             cfg=QtGuiConfig(
                 title="Live2D Agent",
                 start_minimized_to_tray=bool(getattr(config, 'START_MINIMIZED_TO_TRAY', True)),
