@@ -92,7 +92,11 @@ def _rate_limit_delay(exc: BaseException):
     body = getattr(exc, "body", None)
     lowered = str(exc or "").lower()
     markers = ("model_cooldown", "rate limit", "rate_limit")
-    is_limited = status == 429 or any(marker in lowered for marker in markers)
+    is_limited = (
+        status == 429
+        or "http 429" in lowered
+        or any(marker in lowered for marker in markers)
+    )
     if not is_limited and body is not None:
         is_limited = any(marker in str(body).lower() for marker in markers)
     if not is_limited:
@@ -699,9 +703,9 @@ async def chat_with_ai_stream(
                         "error": safe_error[:300],
                     }
                 )
+                cooldown_delay = _start_model_cooldown(key, e)
                 if yielded_any:
                     return
-                cooldown_delay = _start_model_cooldown(key, e)
                 if cooldown_delay is not None:
                     break
                 continue

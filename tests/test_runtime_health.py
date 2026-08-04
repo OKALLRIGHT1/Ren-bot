@@ -60,3 +60,19 @@ def test_offline_component_makes_overall_offline_but_disabled_does_not():
 
     health.report("rust_activity", "offline", "等待活动源")
     assert health.snapshot()["overall"] == "offline"
+
+
+def test_snapshot_details_cannot_mutate_internal_state():
+    health = RuntimeHealthCenter(clock=lambda: 400.0)
+    health.report(
+        "live2d_ws",
+        "healthy",
+        "已连接",
+        details={"nested": {"attempts": 1}},
+    )
+
+    first = health.snapshot()
+    first["components"]["live2d_ws"]["details"]["nested"]["attempts"] = 99
+
+    second = health.snapshot()
+    assert second["components"]["live2d_ws"]["details"]["nested"]["attempts"] == 1

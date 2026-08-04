@@ -30,6 +30,7 @@ def test_rate_limit_delay_uses_structured_reset_and_caps_at_fifteen_minutes():
     assert llm._rate_limit_delay(RateLimitedError(120)) == 120.0
     assert llm._rate_limit_delay(RateLimitedError(5000)) == 900.0
     assert llm._rate_limit_delay(RuntimeError("rate limit")) == 60.0
+    assert llm._rate_limit_delay(RuntimeError("gemini_native HTTP 429")) == 60.0
     assert llm._rate_limit_delay(RuntimeError("socket closed")) is None
 
 
@@ -147,3 +148,56 @@ def test_success_clears_existing_model_cooldown():
     )
     llm._clear_model_cooldown("backup", summary="模型调用恢复")
     assert "backup" not in llm._MODEL_COOLDOWNS
+
+
+@pytest.mark.asyncio
+async def test_partial_stream_rate_limit_still_starts_cooldown(monkeypatch):
+    now = {"value": 5000.0}
+
+    class PartialStream:
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            if not hasattr(self, "yielded"):
+                self.yielded = True
+                delta = type("Delta", (), {"content": "partial"})()
+                choice = type("Choice", (), {"delta": delta})()
+                return type("Chunk", (), {"choices": [choice]})()
+            raise RateLimitedError(90)
+
+    class FakeCompletions:
+        async def create(self, **kwargs):
+            return PartialStream()
+
+    class FakeAsyncOpenAI:
+        def __init__(self, **kwargs):
+            self.chat = type("Chat", (), {"completions": FakeCompletions()})()
+
+    monkeypatch.setattr(llm.time, "time", lambda: now["value"])
+    monkeypatch.setattr(llm, "AsyncOpenAI", FakeAsyncOpenAI)
+    monkeypatch.setattr(llm, "LLM_ROUTER", {"default": ["partial"]})
+    monkeypatch.setattr(
+        llm,
+        "MODELS",
+        {
+            "partial": {
+                "model": "one",
+                "api_key": "x",
+                "base_url": "partial",
+            }
+        },
+    )
+    monkeypatch.setattr(
+        llm,
+        "_build_attempt_order",
+        lambda config, key: ["openai"],
+    )
+
+    chunks = [
+        chunk
+        async for chunk in llm.chat_with_ai_stream([], caller="test")
+    ]
+
+    assert chunks == ["partial"]
+    assert llm._model_cooldown_remaining("partial", now=5000.0) == 90.0

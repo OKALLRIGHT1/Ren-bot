@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import threading
 import time
+from copy import deepcopy
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, Optional
 
@@ -92,7 +93,7 @@ class RuntimeHealthCenter:
     def snapshot(self, *, now: Optional[float] = None) -> Dict[str, Any]:
         current = self._clock() if now is None else float(now)
         with self._lock:
-            records = {key: dict(value) for key, value in self._components.items()}
+            records = deepcopy(self._components)
         components: Dict[str, Dict[str, Any]] = {}
         effective_states = []
         for key, record in sorted(records.items()):
