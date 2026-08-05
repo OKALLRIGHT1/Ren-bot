@@ -11,6 +11,7 @@ from PySide6 import QtWidgets
 
 from modules.memory_core.categories import classify_memory_record
 from modules.memory_core.models import MemoryProfile, ReplyMemoryContext
+from modules.conversation_events.models import AssembledContext
 
 
 def _app():
@@ -121,6 +122,66 @@ def test_advanced_memory_separates_short_context_from_shared_long_term(monkeypat
     assert calls[-1]["session_id"] == "owner_shared"
     assert "第二个群的短期内容" in rendered
     assert "第一个群的短期内容" not in rendered
+
+
+def test_advanced_memory_injects_context_layers_in_priority_order(monkeypatch):
+    import modules.advanced_memory as advanced_memory
+
+    class FakeCore:
+        enabled = True
+
+        def build_reply_context(self, *args, **kwargs):
+            return ReplyMemoryContext(intent="episode", memory_text="长期事实")
+
+        def get_character_profile(self, *args, **kwargs):
+            return MemoryProfile(person_id="character:test")
+
+    class FakeAssembler:
+        def assemble(self, **kwargs):
+            return AssembledContext(
+                recent_event_block="【最近发生的事｜内部参考】\n近因原文",
+                active_session_block="【当前会话状态｜内部参考】\n当前状态",
+                mid_term_block="【中期会话摘要】\n历史片段",
+                long_term_block="长期事实",
+                short_term_messages=(),
+                selected_event_ids=("event-1",),
+                selected_segment_ids=("segment-1",),
+                trace={},
+            )
+
+    brain = advanced_memory.AdvancedMemorySystem.__new__(
+        advanced_memory.AdvancedMemorySystem
+    )
+    brain.memory_core = FakeCore()
+    brain.sqlite_store = None
+    brain.short_term_memory = []
+    brain.session_short_term_memory = {}
+    brain.max_short_term = 12
+    brain.tool_history = []
+    brain.tool_context_max_chars = 500
+    brain.context_assembler = FakeAssembler()
+    brain._retrieve_knowledge = lambda *args, **kwargs: []
+    monkeypatch.setattr(
+        advanced_memory,
+        "character_manager",
+        SimpleNamespace(
+            data={"active_id": "test"},
+            get_active_character=lambda: {"prompt": "角色设定"},
+        ),
+    )
+
+    messages = brain.build_prompt(
+        "我们刚才决定了什么",
+        "系统设定",
+        conversation_scope=SimpleNamespace(),
+    )
+    system = messages[0]["content"]
+
+    recent_at = system.index("【最近发生的事｜内部参考】")
+    active_at = system.index("【当前会话状态｜内部参考】")
+    mid_at = system.index("【中期会话摘要】")
+    long_at = system.index("【经筛选的长期记忆】")
+    assert recent_at < active_at < mid_at < long_at
 
 
 def test_short_term_context_restores_group_from_shared_long_term_session(tmp_path):

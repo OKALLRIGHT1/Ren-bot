@@ -10,6 +10,7 @@ from modules.conversation_events.models import (
     ConversationEventType,
     ConversationScope,
 )
+from modules.conversation_events.mid_term import MidTermRecallResult
 from modules.conversation_events.prompt import (
     LEGACY_SENSOR_EVIDENCE_TITLE,
     LEGACY_SENSOR_ROAST_TITLE,
@@ -155,3 +156,91 @@ def test_short_term_dialog_is_not_rendered_again_in_recent_block(assembler):
 
     assert result.recent_event_block == ""
     assert result.short_term_messages == short
+
+
+def test_assembler_recalls_mid_term_with_raw_event_dedup(assembler):
+    _, store = assembler
+    user_event = _ev(
+        store,
+        ConversationEventType.USER_MESSAGE,
+        "我今天在改登录页",
+    )
+
+    class RecallService:
+        def __init__(self):
+            self.calls = []
+
+        def recall(self, **kwargs):
+            self.calls.append(dict(kwargs))
+            return MidTermRecallResult(
+                active_session_block="【当前会话状态｜内部参考】\n晚饭决定吃面",
+                mid_term_block="【中期会话摘要】\n登录页决定使用蓝色按钮",
+                active_segment_id="active-segment",
+                recalled_segment_ids=("history-segment",),
+            )
+
+    recall = RecallService()
+    asm = ContextAssembler(
+        store=store,
+        max_events=3,
+        max_chars=900,
+        mid_term_enabled=True,
+        mid_term_recall_service=recall,
+    )
+    short = (
+        {
+            "role": "user",
+            "content": user_event.exact_text,
+            "event_id": user_event.event_id,
+        },
+    )
+
+    result = asm.assemble(
+        current_user_text="登录页按钮是什么颜色",
+        scope=_scope(),
+        short_term_messages=short,
+    )
+
+    assert result.active_session_block.startswith("【当前会话状态")
+    assert "蓝色按钮" in result.mid_term_block
+    assert result.selected_segment_ids == (
+        "active-segment",
+        "history-segment",
+    )
+    assert recall.calls[0]["excluded_event_ids"] == {user_event.event_id}
+    assert result.trace["selected_segment_ids"] == [
+        "active-segment",
+        "history-segment",
+    ]
+
+
+def test_mid_term_failure_does_not_drop_recent_context(assembler):
+    _, store = assembler
+    obs = _ev(
+        store,
+        ConversationEventType.SCREEN_OBSERVATION,
+        "屏幕上出现原神",
+    )
+    _ev(
+        store,
+        ConversationEventType.PROACTIVE_UTTERANCE,
+        "又在看原神？",
+        parents=(obs.event_id,),
+    )
+
+    class BrokenRecall:
+        def recall(self, **kwargs):
+            raise RuntimeError("mid-term database unavailable")
+
+    asm = ContextAssembler(
+        store=store,
+        mid_term_enabled=True,
+        mid_term_recall_service=BrokenRecall(),
+    )
+
+    result = asm.assemble(current_user_text="你从哪看到的", scope=_scope())
+
+    assert "原神" in result.recent_event_block
+    assert result.active_session_block == ""
+    assert result.mid_term_block == ""
+    assert "mid-term database unavailable" in result.trace["mid_term_error"]

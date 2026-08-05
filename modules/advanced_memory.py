@@ -190,9 +190,26 @@ class AdvancedMemorySystem:
         if self.conversation_events_enabled and self.sqlite_store is not None:
             try:
                 from modules.conversation_events.store import ConversationEventStore
+                from modules.conversation_events.mid_term import (
+                    MidTermRecallService,
+                    MidTermSegmentStore,
+                )
                 from services.chat_support.context_assembler import ContextAssembler
 
                 event_store = ConversationEventStore(self.sqlite_store)
+                mid_term_recall_service = None
+                if self.mid_term_enabled:
+                    mid_term_recall_service = MidTermRecallService(
+                        segment_store=MidTermSegmentStore(self.sqlite_store),
+                        event_store=event_store,
+                        embedding_service=self.embedding_service,
+                        recall_max_items=int(
+                            MEMORY_SETTINGS.get("mid_term_recall_max_items", 1) or 1
+                        ),
+                        mid_term_max_chars=int(
+                            MEMORY_SETTINGS.get("mid_term_max_chars", 1800) or 1800
+                        ),
+                    )
                 self.context_assembler = ContextAssembler(
                     store=event_store,
                     enabled=True,
@@ -202,6 +219,8 @@ class AdvancedMemorySystem:
                     max_chars=int(
                         MEMORY_SETTINGS.get("recent_event_max_chars", 900) or 900
                     ),
+                    mid_term_enabled=self.mid_term_enabled,
+                    mid_term_recall_service=mid_term_recall_service,
                 )
             except Exception as exc:
                 self.context_assembler = None
@@ -534,7 +553,7 @@ class AdvancedMemorySystem:
         safe_meta = dict(meta or {})
         conversation_id = str(
             safe_meta.get("conversation_id")
-            or safe_meta.get("session_id")
+            or safe_meta.get("context_session_id")
             or session_id
             or "global"
         ).strip()
@@ -682,7 +701,7 @@ class AdvancedMemorySystem:
             builder = MidTermSegmentBuilder(
                 store=store,
                 sqlite_store=sqlite,
-                llm_callable=None,
+                llm_callable=self._summarize_mid_term_events,
             )
             builder.build_from_event_ids(list(event_ids))
         except Exception as exc:
@@ -692,6 +711,38 @@ class AdvancedMemorySystem:
                 )
             except Exception:
                 pass
+
+    def _summarize_mid_term_events(self, events) -> str:
+        if chat_with_ai is None:
+            raise RuntimeError("summary LLM unavailable")
+        rows = []
+        for event in events:
+            rows.append(
+                {
+                    "event_id": str(event.event_id or ""),
+                    "type": event.event_type.value,
+                    "exact_text": str(event.exact_text or ""),
+                    "evidence_summary": str(event.evidence_summary or ""),
+                    "metadata": dict(event.metadata or {}),
+                }
+            )
+        prompt = (
+            "只根据下列带 event_id 的会话事件生成中期摘要 JSON，不得补充来源中没有的事实。\n"
+            "必须输出单个 JSON 对象，字段：source_event_ids、topics、user_state、"
+            "assistant_commitments、unresolved_threads、entities、recall_cues、"
+            "summary、confidence、status。source_event_ids 只能使用输入 ID；"
+            "assistant_commitments 只能来自 assistant/proactive/care 事件；"
+            "status 使用 active。\n事件：\n"
+            + json.dumps(rows, ensure_ascii=False)
+        )
+        return str(
+            chat_with_ai(
+                [{"role": "system", "content": prompt}],
+                task_type="summary",
+                caller="mid_term_segment",
+            )
+            or ""
+        )
 
     def _background_save_memory(
         self,
@@ -1643,24 +1694,11 @@ Output ONLY "YES" or "NO".
         if know_text:
             final_system += "\n\n【相关知识库】:\n" + clean_injected_context(know_text)
 
-        if mem_text:
-            final_system += (
-                "\n\n【经筛选的长期记忆】\n"
-                "这些记录只用于回答当前问题，不要逐条复述，也不要补全记录中没有的事实。"
-                "若记录里没有明确的周几、日期或次数，就直说没查到可靠依据，禁止猜测。"
-                "\n"
-                + mem_text
-            )
-        elif memory_intent in {"episode", "profile"}:
-            final_system += (
-                "\n\n【经筛选的长期记忆】\n"
-                "当前没有找到与这个问题直接相关的可靠记录。"
-                "请明确说没查到可靠记事或依据，不要编造周几、日期、次数或“查了下记事”的假结论。\n"
-            )
-
         # Near-history: only via ContextAssembler (T2 single read path).
         assembled = None
         recent_event_block = ""
+        active_session_block = ""
+        mid_term_block = ""
         context_assembler = getattr(self, "context_assembler", None)
         if context_assembler is not None and not tool_mode:
             try:
@@ -1673,6 +1711,12 @@ Output ONLY "YES" or "NO".
                 self._last_assembled_context = assembled
                 recent_event_block = str(
                     getattr(assembled, "recent_event_block", "") or ""
+                )
+                active_session_block = str(
+                    getattr(assembled, "active_session_block", "") or ""
+                )
+                mid_term_block = str(
+                    getattr(assembled, "mid_term_block", "") or ""
                 )
                 if assembled.short_term_messages:
                     short_ctx = [
@@ -1688,6 +1732,25 @@ Output ONLY "YES" or "NO".
 
         if recent_event_block:
             final_system += "\n\n" + recent_event_block
+        if active_session_block:
+            final_system += "\n\n" + active_session_block
+        if mid_term_block:
+            final_system += "\n\n" + mid_term_block
+
+        if mem_text:
+            final_system += (
+                "\n\n【经筛选的长期记忆】\n"
+                "这些记录只用于回答当前问题，不要逐条复述，也不要补全记录中没有的事实。"
+                "若记录里没有明确的周几、日期或次数，就直说没查到可靠依据，禁止猜测。"
+                "\n"
+                + mem_text
+            )
+        elif memory_intent in {"episode", "profile"}:
+            final_system += (
+                "\n\n【经筛选的长期记忆】\n"
+                "当前没有找到与这个问题直接相关的可靠记录。"
+                "请明确说没查到可靠记事或依据，不要编造周几、日期、次数或“查了下记事”的假结论。\n"
+            )
 
         tool_ctx = self._format_tool_history(tool_intent)
         if tool_ctx:

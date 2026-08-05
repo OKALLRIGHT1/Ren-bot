@@ -65,6 +65,20 @@
 
 人物 / 会话范围必须先过滤再重排。向量不可用时只走文本，并在 diagnostics 说明原因。
 
+## 近史与中期会话连续性
+
+- SQLite `conversation_events` 是“刚才发生了什么”的唯一权威源；普通消息、主动行为、屏幕观察、关怀和工具事件共用同一事件模型。
+- `short_term` 是携带 `event_id` 的热窗投影。裁切后只把事件 ID 交给中期分段构建器；缓存失效时可从 events 重建对话热窗。
+- `mid_term_segments` 是 events 的不可变压缩投影，必须保留 `source_event_ids`，不写回长期 Memory Core。
+- `ContextAssembler` 是近因与中期上下文的唯一读出口。注入优先级固定为：当前消息 > short-term / recent 原始事件 > Active Session State > 历史中期片段 > 长期 Memory Core。
+- 最新 segment 常驻为 Active Session State，并确定性补齐该段之后的原始事件；已经出现在热窗或 recent block 的事件按 `event_id` 去重。
+- 更老 segment 只通过 embedding 相关度按需召回，默认最多 1 条；embedding 不可用或失败时跳过历史中期召回，不使用字符串包含 fallback，也不影响 Active Session 和近因主链。
+- desktop、QQ 私聊、QQ群按 `persona_id + person_id + channel + conversation_id` 硬隔离。长期语义记忆的共享桶 `owner_shared` 不得代替中期会话的 `conversation_id`。
+- LLM 摘要只允许引用其声明的来源事件；数字、日期、路径、URL、实体、助手承诺和工具未决状态必须经来源校验。非法输出降级为只复制来源原文的低置信 `stub`。
+- 中期召回与生成目前由 `mid_term_enabled=0` 默认关闭，待本地长稳和 canary 后开启；`short_term_from_events=0` 仍保留旧热窗回退路径。
+
+`mid_term_segments` 与长期写回的 `memory_records(kind=summary)` 不是同一层：前者只承托当前 conversation 的连续性，后者保存可跨会话使用的长期语义摘要。两者不得互相回写或重复入库。
+
 ## 长期记忆写回（Person Fact / Chat Summary）
 
 实现：`services/memory_writeback.py`，由 `MemoryCoreService.record_message` 在写入 transcript 后触发。

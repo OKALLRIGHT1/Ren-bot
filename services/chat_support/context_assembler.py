@@ -27,6 +27,8 @@ class ContextAssembler:
     max_events: int = 3
     max_chars: int = 900
     list_limit: int = 24
+    mid_term_enabled: bool = False
+    mid_term_recall_service: Any = None
 
     def __post_init__(self) -> None:
         if self.selector is None:
@@ -97,6 +99,43 @@ class ContextAssembler:
             },
         )
         recent_block = format_recent_event_block(selection.events)
+        resolved_active_session_block = str(active_session_block or "")
+        resolved_mid_term_block = str(mid_term_block or "")
+        selected_segment_ids: tuple[str, ...] = ()
+        mid_term_error = ""
+        if (
+            self.mid_term_enabled
+            and self.mid_term_recall_service is not None
+            and scope is not None
+        ):
+            excluded_event_ids = {
+                str(item.get("event_id") or "").strip()
+                for item in short_msgs
+                if str(item.get("event_id") or "").strip()
+            }
+            excluded_event_ids.update(selection.event_ids)
+            try:
+                recall = self.mid_term_recall_service.recall(
+                    current_text=current_user_text,
+                    scope=scope,
+                    available_events=event_list,
+                    excluded_event_ids=excluded_event_ids,
+                )
+                resolved_active_session_block = str(
+                    recall.active_session_block or ""
+                )
+                resolved_mid_term_block = str(recall.mid_term_block or "")
+                selected_segment_ids = tuple(
+                    segment_id
+                    for segment_id in (
+                        recall.active_segment_id,
+                        *recall.recalled_segment_ids,
+                    )
+                    if str(segment_id or "").strip()
+                )
+                mid_term_error = str(recall.error or "")
+            except Exception as exc:
+                mid_term_error = str(exc)
 
         # Dedup: strip observation-like lines from short_term if they fully
         # duplicate selected event exact_text (keep dialog turns).
@@ -123,12 +162,12 @@ class ContextAssembler:
 
         return AssembledContext(
             recent_event_block=recent_block,
-            active_session_block=str(active_session_block or ""),
-            mid_term_block=str(mid_term_block or ""),
+            active_session_block=resolved_active_session_block,
+            mid_term_block=resolved_mid_term_block,
             long_term_block=str(long_term_block or ""),
             short_term_messages=tuple(deduped_short),
             selected_event_ids=tuple(selection.event_ids),
-            selected_segment_ids=(),
+            selected_segment_ids=selected_segment_ids,
             trace={
                 "enabled": True,
                 "candidate_count": len(event_list),
@@ -137,5 +176,7 @@ class ContextAssembler:
                 "dropped_ids": list(selection.dropped_ids),
                 "recent_block_chars": len(recent_block),
                 "total_chars": selection.total_chars,
+                "selected_segment_ids": list(selected_segment_ids),
+                "mid_term_error": mid_term_error,
             },
         )

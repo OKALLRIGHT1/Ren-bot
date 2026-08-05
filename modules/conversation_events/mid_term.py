@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import json
+import math
 import re
+import threading
 import uuid
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Callable, Mapping, Optional, Sequence
 
@@ -132,6 +135,10 @@ def validate_summary(
         return False, "source_event_ids must be non-empty"
     if any(item not in source_ids for item in claimed):
         return False, "source_event_ids must be a subset of input event ids"
+    claimed_ids = set(claimed)
+    claimed_events = [
+        event for event in source_events if event.event_id in claimed_ids
+    ]
 
     try:
         confidence = float(payload.get("confidence", 0.0))
@@ -140,7 +147,11 @@ def validate_summary(
     if confidence < 0.0 or confidence > 1.0:
         return False, "confidence must be in [0, 1]"
 
-    blob = _source_blob(source_events)
+    blob = _source_blob(claimed_events)
+    for entity in _as_str_tuple(payload.get("entities")):
+        if len(entity) >= 2 and entity not in blob:
+            return False, f"unsupported entity not in claimed sources: {entity}"
+
     # Precise tokens in free-text fields must appear in sources.
     text_fields = [
         str(payload.get("summary") or ""),
@@ -161,7 +172,7 @@ def validate_summary(
 
     # assistant_commitments only from assistant-like events
     assistant_blob = _source_blob(
-        [e for e in source_events if e.event_type in _ASSISTANT_LIKE]
+        [e for e in claimed_events if e.event_type in _ASSISTANT_LIKE]
     )
     for commitment in _as_str_tuple(payload.get("assistant_commitments")):
         # Require at least some lexical support from assistant-like text
@@ -177,7 +188,7 @@ def validate_summary(
     if unresolved:
         tool_results = [
             e
-            for e in source_events
+            for e in claimed_events
             if e.event_type is ConversationEventType.TOOL_RESULT
         ]
         if tool_results:
@@ -279,6 +290,260 @@ def format_mid_term_block(segments: Sequence[MidTermSegment], *, max_chars: int 
         if seg.unresolved_threads:
             lines.append("  未决: " + "；".join(seg.unresolved_threads[:4]))
     return "\n".join(lines).strip()
+
+
+@dataclass(frozen=True, slots=True)
+class MidTermRecallResult:
+    active_session_block: str = ""
+    mid_term_block: str = ""
+    active_segment_id: str = ""
+    recalled_segment_ids: tuple[str, ...] = ()
+    error: str = ""
+
+
+def _cosine_similarity(left: Sequence[float], right: Sequence[float]) -> float:
+    if not left or not right or len(left) != len(right):
+        return 0.0
+    dot = sum(float(a) * float(b) for a, b in zip(left, right))
+    left_norm = math.sqrt(sum(float(item) ** 2 for item in left))
+    right_norm = math.sqrt(sum(float(item) ** 2 for item in right))
+    if left_norm <= 0.0 or right_norm <= 0.0:
+        return 0.0
+    return dot / (left_norm * right_norm)
+
+
+def _segment_recall_text(segment: MidTermSegment) -> str:
+    parts = [
+        segment.summary,
+        " ".join(segment.topics),
+        " ".join(segment.entities),
+        " ".join(segment.recall_cues),
+        " ".join(segment.assistant_commitments),
+        " ".join(segment.unresolved_threads),
+    ]
+    return "\n".join(str(item or "").strip() for item in parts if str(item or "").strip())
+
+
+class MidTermRecallService:
+    """Recall scoped mid-term context without a lexical fallback."""
+
+    def __init__(
+        self,
+        *,
+        segment_store: "MidTermSegmentStore",
+        event_store: ConversationEventStore,
+        embedding_service: Any = None,
+        relevance_threshold: float = 0.72,
+        history_limit: int = 20,
+        recall_max_items: int = 1,
+        active_max_chars: int = 1200,
+        mid_term_max_chars: int = 1800,
+        embedding_cache_max_items: int = 128,
+    ) -> None:
+        self.segment_store = segment_store
+        self.event_store = event_store
+        self.embedding_service = embedding_service
+        self.relevance_threshold = max(0.0, min(1.0, float(relevance_threshold)))
+        self.history_limit = max(2, int(history_limit or 20))
+        self.recall_max_items = max(1, int(recall_max_items or 1))
+        self.active_max_chars = max(200, int(active_max_chars or 1200))
+        self.mid_term_max_chars = max(200, int(mid_term_max_chars or 1800))
+        self.embedding_cache_max_items = max(1, int(embedding_cache_max_items or 128))
+        self._segment_embedding_cache: dict[tuple[str, str], tuple[float, ...]] = {}
+        self._segment_embedding_lock = threading.Lock()
+
+    def _active_session_block(
+        self,
+        latest: MidTermSegment,
+        events: Sequence[ConversationEvent],
+        excluded_event_ids: set[str],
+        *,
+        include_segment: bool = True,
+    ) -> str:
+        header_lines = [
+            "【当前会话状态｜内部参考】",
+            "以下是当前会话最近压缩状态及其后发生的原始事件；原始事件优先。",
+        ]
+        detail_lines: list[str] = []
+        if include_segment and latest.assistant_commitments:
+            detail_lines.append(
+                "承诺：" + "；".join(latest.assistant_commitments[:4])
+            )
+        if include_segment and latest.unresolved_threads:
+            detail_lines.append(
+                "未决：" + "；".join(latest.unresolved_threads[:4])
+            )
+        after = [
+            event
+            for event in events
+            if event.scope.as_tuple() == latest.scope.as_tuple()
+            and event.occurred_at > latest.range_end
+            and event.event_id not in excluded_event_ids
+        ]
+        after.sort(key=lambda event: event.occurred_at)
+        after_lines: list[str] = []
+        for event in after[-8:]:
+            text = str(event.exact_text or event.evidence_summary or "").strip()
+            if text:
+                after_lines.append(f"- [{event.event_type.value}] {text}")
+        if not include_segment and not after_lines:
+            return ""
+
+        prefix = "\n".join(header_lines)
+        remaining = max(0, self.active_max_chars - len(prefix) - 1)
+        selected_after: list[str] = []
+        for line in reversed(after_lines):
+            separator = 1 if selected_after else 0
+            if len(line) + separator <= remaining:
+                selected_after.append(line)
+                remaining -= len(line) + separator
+            elif not selected_after and remaining > 0:
+                selected_after.append(line[:remaining])
+                remaining = 0
+            if remaining <= 0:
+                break
+        selected_after.reverse()
+
+        selected_details: list[str] = []
+        for line in detail_lines:
+            separator = 1 if selected_after or selected_details else 0
+            if len(line) + separator > remaining:
+                continue
+            selected_details.append(line)
+            remaining -= len(line) + separator
+
+        summary_budget = max(0, remaining - (1 if selected_after or selected_details else 0))
+        summary = (
+            str(latest.summary or "").strip()[:summary_budget]
+            if include_segment
+            else ""
+        )
+        return "\n".join(
+            item
+            for item in (
+                prefix,
+                summary,
+                *selected_details,
+                *selected_after,
+            )
+            if item
+        ).strip()
+
+    def recall(
+        self,
+        *,
+        current_text: str,
+        scope: ConversationScope,
+        available_events: Optional[Sequence[ConversationEvent]] = None,
+        excluded_event_ids: Optional[set[str]] = None,
+    ) -> MidTermRecallResult:
+        scope.validate()
+        segments = self.segment_store.list_for_scope(
+            scope, limit=self.history_limit
+        )
+        excluded = {
+            str(event_id or "").strip()
+            for event_id in (excluded_event_ids or set())
+            if str(event_id or "").strip()
+        }
+        if not segments:
+            return MidTermRecallResult()
+
+        latest = segments[0]
+        latest_is_raw = bool(excluded.intersection(latest.source_event_ids))
+        events = (
+            list(available_events)
+            if available_events is not None
+            else self.event_store.list_recent(scope, now=_now(), limit=24)
+        )
+        active_block = self._active_session_block(
+            latest,
+            events,
+            excluded,
+            include_segment=not latest_is_raw,
+        )
+        older = [
+            segment
+            for segment in segments[1:]
+            if not excluded.intersection(segment.source_event_ids)
+        ]
+        if not older:
+            return MidTermRecallResult(
+                active_session_block=active_block,
+                active_segment_id=latest.segment_id,
+            )
+        if self.embedding_service is None:
+            return MidTermRecallResult(
+                active_session_block=active_block,
+                active_segment_id=latest.segment_id,
+                error="embedding_unavailable",
+            )
+
+        query = str(current_text or "").strip()
+        documents = [_segment_recall_text(segment) for segment in older]
+        try:
+            keys = [
+                (segment.segment_id, document)
+                for segment, document in zip(older, documents)
+            ]
+            with self._segment_embedding_lock:
+                cached = {
+                    key: self._segment_embedding_cache[key]
+                    for key in keys
+                    if key in self._segment_embedding_cache
+                }
+            missing = [
+                (key, document)
+                for key, document in zip(keys, documents)
+                if key not in cached
+            ]
+            vectors = self.embedding_service.embed(
+                [query, *(document for _key, document in missing)]
+            )
+            if len(vectors) != len(missing) + 1:
+                raise ValueError("embedding result count mismatch")
+            query_vector = vectors[0]
+            if missing:
+                with self._segment_embedding_lock:
+                    for index, (key, _document) in enumerate(missing, start=1):
+                        vector = tuple(float(item) for item in vectors[index])
+                        self._segment_embedding_cache[key] = vector
+                        cached[key] = vector
+                    while (
+                        len(self._segment_embedding_cache)
+                        > self.embedding_cache_max_items
+                    ):
+                        oldest = next(iter(self._segment_embedding_cache))
+                        self._segment_embedding_cache.pop(oldest, None)
+            segment_vectors = [cached[key] for key in keys]
+            ranked = sorted(
+                (
+                    (_cosine_similarity(query_vector, segment_vectors[index]), segment)
+                    for index, segment in enumerate(older)
+                ),
+                key=lambda item: item[0],
+                reverse=True,
+            )
+        except Exception as exc:
+            return MidTermRecallResult(
+                active_session_block=active_block,
+                active_segment_id=latest.segment_id,
+                error=f"embedding_failed:{exc}",
+            )
+
+        recalled = [
+            segment
+            for score, segment in ranked
+            if score >= self.relevance_threshold
+        ][: self.recall_max_items]
+        return MidTermRecallResult(
+            active_session_block=active_block,
+            mid_term_block=format_mid_term_block(
+                recalled, max_chars=self.mid_term_max_chars
+            ),
+            active_segment_id=latest.segment_id,
+            recalled_segment_ids=tuple(segment.segment_id for segment in recalled),
+        )
 
 
 class MidTermSegmentStore:

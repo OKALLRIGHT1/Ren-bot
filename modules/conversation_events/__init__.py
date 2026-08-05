@@ -16,6 +16,8 @@ from modules.conversation_events.models import (
     SelectionResult,
 )
 from modules.conversation_events.mid_term import (
+    MidTermRecallResult,
+    MidTermRecallService,
     MidTermSegmentBuilder,
     MidTermSegmentStore,
     build_stub_summary,
@@ -42,6 +44,8 @@ __all__ = [
     "EventBudget",
     "KNOWN_CATEGORIES",
     "MidTermSegment",
+    "MidTermRecallResult",
+    "MidTermRecallService",
     "MidTermSegmentBuilder",
     "MidTermSegmentStore",
     "RECENT_BLOCK_TITLE",

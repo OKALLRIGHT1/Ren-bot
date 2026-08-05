@@ -67,15 +67,23 @@ async def emit_short_reaction(
     }
     if memory_session_id:
         short_meta["session_id"] = memory_session_id
-    await add_memory_safe("user", user_text, meta=short_meta)
-    await add_memory_safe("assistant", text, meta=short_meta)
+    user_event_id = ""
+    assistant_event_id = ""
     if record_message_pair is not None:
-        await record_message_pair(
+        pair_ids = await record_message_pair(
             ctx=ctx,
             user_text=user_text,
             assistant_text=text,
             metadata=short_meta,
         )
+        if pair_ids:
+            user_event_id, assistant_event_id = pair_ids
+    await add_memory_safe(
+        "user", user_text, meta={**short_meta, "event_id": user_event_id}
+    )
+    await add_memory_safe(
+        "assistant", text, meta={**short_meta, "event_id": assistant_event_id}
+    )
     await emit_idle_status_when_safe(
         output_profile,
         reason="short_reaction",
@@ -278,15 +286,25 @@ async def emit_non_stream_reply(
         if memory_session_id:
             chat_meta["session_id"] = memory_session_id
         # T1 dual-write: transcript via add_memory_safe; events = near-history authority.
-        await add_memory_safe("user", user_text, meta=chat_meta)
-        await add_memory_safe("assistant", final_reply, meta=chat_meta)
+        user_event_id = ""
+        assistant_event_id = ""
         if record_message_pair is not None:
-            await record_message_pair(
+            pair_ids = await record_message_pair(
                 ctx=ctx,
                 user_text=user_text,
                 assistant_text=final_reply,
                 metadata=chat_meta,
             )
+            if pair_ids:
+                user_event_id, assistant_event_id = pair_ids
+        await add_memory_safe(
+            "user", user_text, meta={**chat_meta, "event_id": user_event_id}
+        )
+        await add_memory_safe(
+            "assistant",
+            final_reply,
+            meta={**chat_meta, "event_id": assistant_event_id},
+        )
 
     await emit_idle_status_when_safe(
         output_profile,
@@ -370,15 +388,25 @@ async def emit_stream_reply(
     if stream_context.memory_session_id:
         stream_chat_meta["session_id"] = stream_context.memory_session_id
     # T1 dual-write: transcript via add_memory_safe; events = near-history authority.
-    await add_memory_safe("user", user_text, meta=stream_chat_meta)
-    await add_memory_safe("assistant", full_reply, meta=stream_chat_meta)
+    user_event_id = ""
+    assistant_event_id = ""
     if record_message_pair is not None:
-        await record_message_pair(
+        pair_ids = await record_message_pair(
             ctx=stream_context.ctx,
             user_text=user_text,
             assistant_text=full_reply,
             metadata=stream_chat_meta,
         )
+        if pair_ids:
+            user_event_id, assistant_event_id = pair_ids
+    await add_memory_safe(
+        "user", user_text, meta={**stream_chat_meta, "event_id": user_event_id}
+    )
+    await add_memory_safe(
+        "assistant",
+        full_reply,
+        meta={**stream_chat_meta, "event_id": assistant_event_id},
+    )
     if stream_context.codex_mode:
         set_codex_task_state(stream_context.ctx, "finalize", summary=full_reply[:200])
 

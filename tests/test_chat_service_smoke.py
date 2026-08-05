@@ -55,7 +55,11 @@ class _Brain:
             item_meta["session_id"] = session_id
         if memory_session_id:
             item_meta["memory_session_id"] = memory_session_id
-        self.short_term_memory.append({"role": role, "content": content, "meta": item_meta})
+        item = {"role": role, "content": content, "meta": item_meta}
+        event_id = str(item_meta.get("event_id") or "").strip()
+        if event_id:
+            item["event_id"] = event_id
+        self.short_term_memory.append(item)
 
 
 class _PluginManager:
@@ -519,6 +523,10 @@ async def test_non_stream_reply_records_one_user_and_one_assistant_event(
     assert [event.event_type.value for event in events] == [
         "user_message",
         "assistant_message",
+    ]
+    assert [item.get("event_id") for item in service.brain.short_term_memory] == [
+        events[0].event_id,
+        events[1].event_id,
     ]
 
 
