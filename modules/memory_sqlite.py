@@ -362,6 +362,35 @@ class MemorySQLite:
                 """
             )
 
+            # Mid-term compressed segments (immutable projections of conversation events).
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS mid_term_segments (
+                  segment_id TEXT PRIMARY KEY,
+                  persona_id TEXT NOT NULL,
+                  person_id TEXT NOT NULL,
+                  channel TEXT NOT NULL,
+                  conversation_id TEXT NOT NULL,
+                  range_start TEXT NOT NULL,
+                  range_end TEXT NOT NULL,
+                  summary_json TEXT NOT NULL,
+                  source_event_ids_json TEXT NOT NULL,
+                  confidence REAL NOT NULL,
+                  embedding_json TEXT,
+                  status TEXT NOT NULL DEFAULT 'active',
+                  created_at TEXT NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_mid_term_scope_time
+                ON mid_term_segments(
+                  persona_id, person_id, channel, conversation_id, range_end DESC
+                )
+                """
+            )
+
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS daily_screen_stats (
@@ -599,6 +628,39 @@ class MemorySQLite:
                 CREATE INDEX IF NOT EXISTS idx_conversation_events_scope_time
                 ON conversation_events(
                   persona_id, person_id, channel, conversation_id, occurred_at DESC
+                )
+                """
+            )
+            conn.commit()
+        self.ensure_mid_term_segments_schema()
+
+    def ensure_mid_term_segments_schema(self) -> None:
+        """Idempotent schema ensure for mid_term_segments."""
+        with self._connect() as conn:
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS mid_term_segments (
+                  segment_id TEXT PRIMARY KEY,
+                  persona_id TEXT NOT NULL,
+                  person_id TEXT NOT NULL,
+                  channel TEXT NOT NULL,
+                  conversation_id TEXT NOT NULL,
+                  range_start TEXT NOT NULL,
+                  range_end TEXT NOT NULL,
+                  summary_json TEXT NOT NULL,
+                  source_event_ids_json TEXT NOT NULL,
+                  confidence REAL NOT NULL,
+                  embedding_json TEXT,
+                  status TEXT NOT NULL DEFAULT 'active',
+                  created_at TEXT NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_mid_term_scope_time
+                ON mid_term_segments(
+                  persona_id, person_id, channel, conversation_id, range_end DESC
                 )
                 """
             )

@@ -12,7 +12,15 @@ from modules.conversation_events.models import (
     ConversationEventType,
     ConversationScope,
     EventBudget,
+    MidTermSegment,
     SelectionResult,
+)
+from modules.conversation_events.mid_term import (
+    MidTermSegmentBuilder,
+    MidTermSegmentStore,
+    build_stub_summary,
+    format_mid_term_block,
+    validate_summary,
 )
 from modules.conversation_events.prompt import (
     RECENT_BLOCK_TITLE,
@@ -33,9 +41,15 @@ __all__ = [
     "ConversationScope",
     "EventBudget",
     "KNOWN_CATEGORIES",
+    "MidTermSegment",
+    "MidTermSegmentBuilder",
+    "MidTermSegmentStore",
     "RECENT_BLOCK_TITLE",
     "RecentEventSelector",
     "SelectionResult",
+    "build_stub_summary",
     "detect_dual_inject",
+    "format_mid_term_block",
     "format_recent_event_block",
+    "validate_summary",
 ]

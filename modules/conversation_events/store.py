@@ -157,6 +157,43 @@ class ConversationEventStore:
             return None
         return self._row_to_event(row)
 
+    def list_dialog_window(
+        self,
+        scope: ConversationScope,
+        *,
+        now: Optional[datetime] = None,
+        limit: int = 12,
+    ) -> list[dict[str, str]]:
+        """Project user/assistant message events into short-term style turns."""
+        now = now or datetime.now(timezone.utc)
+        events = self.list_recent(scope, now=now, limit=max(1, int(limit) * 3))
+        dialog_types = {
+            ConversationEventType.USER_MESSAGE,
+            ConversationEventType.ASSISTANT_MESSAGE,
+        }
+        turns: list[dict[str, str]] = []
+        for event in events:
+            if event.event_type not in dialog_types:
+                continue
+            role = (
+                "user"
+                if event.event_type is ConversationEventType.USER_MESSAGE
+                else "assistant"
+            )
+            content = str(event.exact_text or "").strip()
+            if not content:
+                continue
+            turns.append(
+                {
+                    "role": role,
+                    "content": content,
+                    "event_id": str(event.event_id or ""),
+                }
+            )
+        if len(turns) > max(1, int(limit)):
+            turns = turns[-max(1, int(limit)) :]
+        return turns
+
     def list_recent(
         self,
         scope: ConversationScope,

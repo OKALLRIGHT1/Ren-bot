@@ -18,6 +18,7 @@ import hashlib
 import itertools
 import threading
 from datetime import datetime, timezone
+from typing import Optional
 from modules.memory_sqlite import get_memory_store
 from concurrent.futures import ThreadPoolExecutor
 import jieba
@@ -176,8 +177,16 @@ class AdvancedMemorySystem:
         self.conversation_events_enabled = bool(
             MEMORY_SETTINGS.get("conversation_events_enabled", True)
         )
+        self.mid_term_enabled = bool(MEMORY_SETTINGS.get("mid_term_enabled", False))
+        self.mid_term_segment_source_items = max(
+            4,
+            int(MEMORY_SETTINGS.get("mid_term_segment_source_items", 10) or 10),
+        )
         self.context_assembler = None
         self._last_assembled_context = None
+        # conversation_id / session_key -> ordered event_ids awaiting mid-term summary
+        self._pending_mid_term_event_ids: dict[str, list[str]] = {}
+        self._pending_mid_term_lock = threading.Lock()
         if self.conversation_events_enabled and self.sqlite_store is not None:
             try:
                 from modules.conversation_events.store import ConversationEventStore
@@ -498,8 +507,20 @@ class AdvancedMemorySystem:
             self.short_term_manager._session_short_term_loaded
         )
 
-    def _append_short_term_memory(self, role, content, session_id: str = None):
-        self.short_term_manager.append(role, content, session_id=session_id)
+    def _append_short_term_memory(
+        self,
+        role,
+        content,
+        session_id: str = None,
+        *,
+        event_id: str = "",
+    ):
+        evicted = self.short_term_manager.append(
+            role,
+            content,
+            session_id=session_id,
+            event_id=event_id,
+        )
         self.short_term_memory = self.short_term_manager.short_term_memory
         self.session_short_term_memory = (
             self.short_term_manager.session_short_term_memory
@@ -507,6 +528,75 @@ class AdvancedMemorySystem:
         self._session_short_term_loaded = (
             self.short_term_manager._session_short_term_loaded
         )
+        return evicted
+
+    def _bucket_key_for_mid_term(self, session_id: str = None, meta: dict = None) -> str:
+        safe_meta = dict(meta or {})
+        conversation_id = str(
+            safe_meta.get("conversation_id")
+            or safe_meta.get("session_id")
+            or session_id
+            or "global"
+        ).strip()
+        return conversation_id or "global"
+
+    def note_evicted_for_mid_term(
+        self,
+        evicted: Optional[dict],
+        *,
+        session_id: str = None,
+        meta: dict = None,
+    ) -> Optional[list[str]]:
+        """Accumulate evicted short-term turns that carry event_id for mid-term.
+
+        Returns a ready batch of event_ids when the segment source threshold is
+        reached; otherwise None. Does not call the LLM here.
+        """
+        if not getattr(self, "mid_term_enabled", False):
+            return None
+        if not isinstance(evicted, dict):
+            return None
+        event_id = str(evicted.get("event_id") or "").strip()
+        if not event_id:
+            return None
+        bucket_key = self._bucket_key_for_mid_term(session_id=session_id, meta=meta)
+        ready: Optional[list[str]] = None
+        lock = getattr(self, "_pending_mid_term_lock", None)
+        if lock is None:
+            self._pending_mid_term_lock = threading.Lock()
+            lock = self._pending_mid_term_lock
+        with lock:
+            pending = self._pending_mid_term_event_ids.setdefault(bucket_key, [])
+            if event_id not in pending:
+                pending.append(event_id)
+            threshold = int(
+                getattr(self, "mid_term_segment_source_items", 10) or 10
+            )
+            if len(pending) >= max(4, threshold):
+                ready = list(pending[:threshold])
+                del pending[:threshold]
+        return ready
+
+    def drain_pending_mid_term_event_ids(
+        self, bucket_key: str = "", *, max_items: int = 0
+    ) -> list[str]:
+        """Pop pending event ids for a conversation bucket (tests / flush)."""
+        key = str(bucket_key or "global").strip() or "global"
+        limit = int(max_items or 0)
+        lock = getattr(self, "_pending_mid_term_lock", None)
+        if lock is None:
+            return []
+        with lock:
+            pending = self._pending_mid_term_event_ids.get(key) or []
+            if not pending:
+                return []
+            if limit <= 0 or limit >= len(pending):
+                out = list(pending)
+                self._pending_mid_term_event_ids[key] = []
+                return out
+            out = list(pending[:limit])
+            del pending[:limit]
+            return out
 
     # ================= 核心：添加记忆 (异步优化版) =================
 
@@ -517,14 +607,50 @@ class AdvancedMemorySystem:
         session_id: str = None,
         meta: dict = None,
         memory_session_id: str = None,
+        event_id: str = "",
     ):
         """
         主线程只做最快的内存操作(RAM)，慢速 IO 操作(SQLite/Chroma/LLM提取)扔到后台线程池。
         这样可以显著减少 UI 卡顿。
         """
+        safe_meta = dict(meta or {})
+        resolved_event_id = str(
+            event_id or safe_meta.get("event_id") or ""
+        ).strip()
         with self._lock:
             # 1. 极速写入 RAM 短期记忆 (立即生效，供下一轮对话使用)
-            self._append_short_term_memory(role, content, session_id=session_id)
+            evicted = self._append_short_term_memory(
+                role,
+                content,
+                session_id=session_id,
+                event_id=resolved_event_id,
+            )
+
+        ready_batch = self.note_evicted_for_mid_term(
+            evicted, session_id=session_id, meta=safe_meta
+        )
+        if ready_batch and getattr(self, "mid_term_enabled", False):
+            try:
+                self._executor.submit(
+                    self._background_build_mid_term_segment,
+                    ready_batch,
+                    session_id,
+                    safe_meta,
+                )
+            except Exception:
+                # Keep ids for a later flush; do not drop provenance.
+                lock = getattr(self, "_pending_mid_term_lock", None)
+                if lock is not None:
+                    bucket_key = self._bucket_key_for_mid_term(
+                        session_id=session_id, meta=safe_meta
+                    )
+                    with lock:
+                        pending = self._pending_mid_term_event_ids.setdefault(
+                            bucket_key, []
+                        )
+                        for eid in reversed(ready_batch):
+                            if eid not in pending:
+                                pending.insert(0, eid)
 
         # 2. 提交慢速任务到后台 (SQLite, Chroma, Graph, Profile提取)
         self._executor.submit(
@@ -535,6 +661,37 @@ class AdvancedMemorySystem:
             memory_session_id,
             meta,
         )
+
+    def _background_build_mid_term_segment(
+        self,
+        event_ids: list[str],
+        session_id: str = None,
+        meta: dict = None,
+    ) -> None:
+        """Build a mid-term segment from source event ids (non-blocking)."""
+        if not event_ids or not getattr(self, "mid_term_enabled", False):
+            return
+        try:
+            from modules.conversation_events.mid_term import MidTermSegmentBuilder
+            from modules.conversation_events.store import ConversationEventStore
+
+            sqlite = getattr(self, "sqlite_store", None)
+            if sqlite is None:
+                return
+            store = ConversationEventStore(sqlite)
+            builder = MidTermSegmentBuilder(
+                store=store,
+                sqlite_store=sqlite,
+                llm_callable=None,
+            )
+            builder.build_from_event_ids(list(event_ids))
+        except Exception as exc:
+            try:
+                self._logger.warning(
+                    "[MidTerm] background segment build failed: %s", exc
+                )
+            except Exception:
+                pass
 
     def _background_save_memory(
         self,

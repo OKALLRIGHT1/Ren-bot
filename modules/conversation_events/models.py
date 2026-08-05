@@ -97,3 +97,33 @@ class AssembledContext:
     selected_event_ids: tuple[str, ...]
     selected_segment_ids: tuple[str, ...]
     trace: Mapping[str, Any]
+
+
+@dataclass(frozen=True, slots=True)
+class MidTermSegment:
+    """Immutable mid-term conversation segment (compressed projection of events)."""
+
+    segment_id: str
+    scope: ConversationScope
+    range_start: datetime
+    range_end: datetime
+    topics: tuple[str, ...] = ()
+    user_state: tuple[str, ...] = ()
+    assistant_commitments: tuple[str, ...] = ()
+    unresolved_threads: tuple[str, ...] = ()
+    entities: tuple[str, ...] = ()
+    recall_cues: tuple[str, ...] = ()
+    source_event_ids: tuple[str, ...] = ()
+    summary: str = ""
+    confidence: float = 0.0
+    status: str = "active"
+
+    def validate(self) -> None:
+        if not str(self.segment_id or "").strip():
+            raise ValueError("segment_id is required")
+        self.scope.validate()
+        if not self.source_event_ids:
+            raise ValueError("source_event_ids must be non-empty")
+        conf = float(self.confidence)
+        if conf < 0.0 or conf > 1.0:
+            raise ValueError("confidence must be in [0, 1]")
