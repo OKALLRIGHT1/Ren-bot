@@ -14,6 +14,13 @@ ROUTE_TASK_OPTIONS = (
     ("tool_reasoning", "工具推理", "工具选择、参数规划与多步任务", ("tool_reasoning", "chat"), True),
     ("summary", "总结压缩", "长对话、工具结果和记忆摘要", ("summary", "chat"), True),
     ("gatekeeper", "能力判断", "判断是否需要调用插件或工具", ("chat", "tool_reasoning"), True),
+    (
+        "memory_writeback",
+        "记忆写回",
+        "从对话抽取稳定用户事实并写入长期记忆",
+        ("chat", "tool_reasoning", "summary"),
+        True,
+    ),
     ("translation", "翻译", "语言转换与本地化", ("translation", "chat"), True),
     ("screen_classify", "屏幕分类", "前台应用和画面内容分类", ("chat", "vision"), True),
     ("sensor_vision_talk", "屏幕视觉回复", "根据截图生成屏幕吐槽", ("vision", "chat"), True),

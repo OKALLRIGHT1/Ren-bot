@@ -6,21 +6,26 @@
         "启动"
     ],
     "type": "direct",
-    "description": "直接打开本地软件",
+    "description": "直接打开本地软件（仅信任列表；群聊禁用；管理员仅私聊）",
     "example_arg": "计算器",
+    "access_control": {
+        "allow_local": true,
+        "allow_remote_qq": true,
+        "allow_qq_owner": true,
+        "allow_qq_others": false,
+        "allow_group_without_at": false
+    },
     "settings": {
         "app_list": {
             "type": "list",
             "item_type": "app_list",
-            "label": "应用列表",
-            "description": "添加常用的应用程序，可以通过别名快速启动",
+            "label": "应用信任列表",
+            "description": "仅列表内应用可在本地或管理员私聊下免确认启动。格式：显示名|路径",
             "default": [
                 "计算器|calc.exe",
                 "记事本|notepad.exe",
                 "画图|mspaint.exe",
-                "任务管理器|taskmgr.exe",
-                "命令提示符|cmd.exe",
-                "steam|D:/steam/steam.exe"
+                "任务管理器|taskmgr.exe"
             ]
         }
     },

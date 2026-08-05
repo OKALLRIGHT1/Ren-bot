@@ -18,14 +18,36 @@
         "eval"
     ],
     "type": "react",
-    "description": "当用户要求执行代码、计算、数据分析时使用。参数为要执行的Python代码。",
+    "description": "通过本机 Codex CLI / Claude Code 处理代码任务（非内置沙箱）。默认关闭；仅本地或管理员私聊且需确认。参数为代码或任务描述。",
     "example_arg": "print(sum([1,2,3,4,5]))",
     "access_control": {
         "allow_local": true,
-        "allow_remote_qq": false,
-        "allow_qq_owner": false,
-        "allow_qq_others": false
+        "allow_remote_qq": true,
+        "allow_qq_owner": true,
+        "allow_qq_others": false,
+        "allow_group_without_at": false
     },
-    "timeout_sec": 6,
-    "settings": {}
+    "timeout_sec": 300,
+    "settings": {
+        "default_provider": {
+            "default": "codex_cli",
+            "description": "默认外部代理：codex_cli 或 claude_code"
+        },
+        "default_cwd": {
+            "default": ".",
+            "description": "未指定路径时的工作目录"
+        },
+        "timeout_sec": {
+            "default": 300,
+            "description": "外部 CLI 超时秒数"
+        },
+        "codex_cli_command_template": {
+            "default": "",
+            "description": "可选：覆盖 Codex 命令模板，需含 {prompt_stdin} 或 {prompt}"
+        },
+        "claude_code_command_template": {
+            "default": "",
+            "description": "可选：覆盖 Claude Code 命令模板"
+        }
+    }
 }

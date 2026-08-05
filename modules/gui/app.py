@@ -90,6 +90,7 @@ class _Bridge(QtCore.QObject):
     sig_toggle_gui = QtCore.Signal()
     sig_send_text = QtCore.Signal(str)
     sig_sedentary_popup = QtCore.Signal(str, int, str, object)
+    sig_action_confirm = QtCore.Signal(str, str, object)
     sig_refresh_work_session = QtCore.Signal()
 
 
@@ -164,6 +165,7 @@ class QtChatTrayApp(QtCore.QObject):
         self._bridge.sig_toggle_gui.connect(self.toggle_show_hide)
         self._bridge.sig_send_text.connect(self._send_text_from_asr)
         self._bridge.sig_sedentary_popup.connect(self._show_sedentary_popup_ui)
+        self._bridge.sig_action_confirm.connect(self._show_action_confirm_ui)
         self._bridge.sig_refresh_work_session.connect(self.refresh_work_session_status)
 
         # --- 构建 UI ---
@@ -1145,6 +1147,37 @@ class QtChatTrayApp(QtCore.QObject):
             on_result,
         )
 
+    def request_action_confirm(self, title: str, summary: str) -> bool:
+        """Thread-safe modal confirm for ActionGate. Blocks caller until user answers."""
+        import threading
+
+        done = threading.Event()
+        box: dict[str, str] = {"value": "cancel"}
+
+        def _on_result(value: str) -> None:
+            box["value"] = str(value or "cancel")
+            done.set()
+
+        emitted = self._emit_bridge_signal(
+            "sig_action_confirm",
+            str(title or "确认操作"),
+            str(summary or ""),
+            _on_result,
+        )
+        if not emitted:
+            return False
+        # Wait on Qt UI thread response (modal dialog)
+        if not done.wait(timeout=300):
+            return False
+        return str(box.get("value") or "").strip().lower() in {
+            "confirm",
+            "yes",
+            "ok",
+            "true",
+            "1",
+            "确认",
+        }
+
     def _emit_bridge_signal(self, signal_name: str, *args) -> bool:
         try:
             bridge = getattr(self, "_bridge", None)
@@ -1157,6 +1190,28 @@ class QtChatTrayApp(QtCore.QObject):
             if "already deleted" in str(exc):
                 return False
             raise
+
+    @QtCore.Slot(str, str, object)
+    def _show_action_confirm_ui(self, title: str, summary: str, on_result: object):
+        try:
+            from modules.gui.action_confirm_popup import show_action_confirm_dialog
+
+            result = show_action_confirm_dialog(
+                self._win,
+                title=str(title or "确认操作"),
+                summary=str(summary or ""),
+            )
+        except Exception as exc:
+            result = "error"
+            try:
+                self.append("system", f"操作确认弹窗失败: {exc}")
+            except Exception:
+                pass
+        if callable(on_result):
+            try:
+                on_result(str(result or "cancel"))
+            except Exception:
+                pass
 
     @QtCore.Slot(str, int, str, object)
     def _show_sedentary_popup_ui(

@@ -219,29 +219,32 @@ def test_web_reader_blocks_private_urls() -> None:
         raise AssertionError(f"Should be blocked: {url}")
 
 
-def test_code_executor_static_guards_and_env() -> None:
-    executor = CodeExecutorPlugin()
-    payloads = [
-        "__import__('os').system('whoami')",
-        "import importlib; importlib.import_module('os').system('whoami')",
-        "getattr(__builtins__, '__import__')('os').system('whoami')",
-    ]
-    for payload in payloads:
-        result = executor._validate_code(payload)
-        assert not result["valid"], f"Should be rejected: {payload}"
-
-    old_key = os.environ.get("OPENAI_API_KEY")
-    os.environ["OPENAI_API_KEY"] = "should_not_leak"
-    try:
-        env = executor._build_execution_env(tempfile.gettempdir())
-    finally:
-        if old_key is None:
-            os.environ.pop("OPENAI_API_KEY", None)
-        else:
-            os.environ["OPENAI_API_KEY"] = old_key
-    assert "OPENAI_API_KEY" not in env
-    assert env["PYTHONPATH"] == ""
-    assert env["PYTHONNOUSERSITE"] == "1"
+def test_code_executor_uses_external_cli_and_redacts() -> None:
+    """code_executor no longer embeds a Python sandbox; it delegates to local CLI."""
+    executor = CodeExecutorPlugin(
+        runner=None,
+        discoverer=lambda provider: "",
+    )
+    assert getattr(executor, "gated_action", "") == "system.exec_code"
+    # Without confirm, structured confirmation is required (or gate handles it upstream)
+    # Format path still redacts secrets from CLI-like output objects
+    output = executor._format_result(
+        type(
+            "R",
+            (),
+            {
+                "ok": False,
+                "stdout": "",
+                "stderr": "TOKEN=secret-token-value\nOPENAI_API_KEY=sk-testvalue123456789",
+                "exit_code": 1,
+                "duration_sec": 0.01,
+                "command_preview": "codex exec",
+            },
+        )(),
+        "codex_cli",
+    )
+    assert "secret-token-value" not in output
+    assert "sk-testvalue" not in output
 
 
 def test_sensitive_text_redaction() -> None:
@@ -256,15 +259,21 @@ def test_sensitive_text_redaction() -> None:
     assert "hunter2" not in redacted
     assert "[REDACTED]" in redacted or "[REDACTED_KEY]" in redacted
 
-    executor = CodeExecutorPlugin()
-    output = executor._format_output(
-        {
-            "success": False,
-            "stdout": "",
-            "stderr": "TOKEN=secret-token-value\nOPENAI_API_KEY=sk-testvalue123456789",
-            "execution_time": 0.01,
-            "returncode": 1,
-        }
+    executor = CodeExecutorPlugin(discoverer=lambda provider: "")
+    output = executor._format_result(
+        type(
+            "R",
+            (),
+            {
+                "ok": False,
+                "stdout": "",
+                "stderr": "TOKEN=secret-token-value\nOPENAI_API_KEY=sk-testvalue123456789",
+                "exit_code": 1,
+                "duration_sec": 0.01,
+                "command_preview": "codex exec",
+            },
+        )(),
+        "codex_cli",
     )
     assert "secret-token-value" not in output
     assert "sk-testvalue" not in output
@@ -436,7 +445,7 @@ def test_memory_store_delete_methods_write_audit() -> None:
             item_id = store.upsert_item(
                 {
                     "id": "smoke-item",
-                    "type": "note",
+                    "type": "todo",
                     "text": "delete audit smoke item",
                     "source": "security_smoke",
                 }
@@ -525,7 +534,7 @@ def main() -> None:
     test_mcp_tools_remote_allowlist_policy()
     test_mcp_tools_blocks_disallowed_remote_call_before_bridge()
     test_web_reader_blocks_private_urls()
-    test_code_executor_static_guards_and_env()
+    test_code_executor_uses_external_cli_and_redacts()
     test_sensitive_text_redaction()
     test_config_safe_env_parsing()
     test_gui_http_rejects_query_token()

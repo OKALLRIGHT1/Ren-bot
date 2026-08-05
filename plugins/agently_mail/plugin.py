@@ -598,6 +598,21 @@ class Plugin:
         )
         return any(re.search(pattern, raw, flags=re.IGNORECASE) for pattern in mail_intent_patterns)
 
+    def resolve_gated_action(self, args: str, ctx: Optional[Dict[str, Any]] = None) -> str:
+        intent = self._parse_intent(args)
+        action = str(getattr(intent, "action", "") or "").strip().lower()
+        write_map = {
+            "send": "mail.send",
+            "reply": "mail.reply",
+            "forward": "mail.forward",
+            "trash": "mail.trash",
+        }
+        if action in write_map:
+            return write_map[action]
+        if action in {"list", "search", "read", "me"}:
+            return f"mail.{action}" if action != "me" else "mail.me"
+        return "mail.list"
+
     async def run(self, args: str, ctx: Dict[str, Any]) -> str:
         ctx = dict(ctx or {})
         self._capture_context(ctx)

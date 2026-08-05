@@ -1,37 +1,24 @@
-import asyncio
-import ast
+"""Code executor via local Codex CLI / Claude Code (no in-process sandbox)."""
+
+from __future__ import annotations
+
 import re
-import subprocess
-import tempfile
-import os
-import shutil
-import sys
-from pathlib import Path
-from typing import Optional, Dict, Any
+import uuid
+from typing import Any, Callable, Dict, Optional, Tuple
+
 from core.logger import get_logger
+from modules.code_agent import CodeAgentRequest, discover_agent_command, run_code_agent
 from modules.security_redaction import redact_sensitive_text
-from plugins.plugin_utils import handle_plugin_errors, safe_get_context
+from plugins.plugin_utils import handle_plugin_errors
 
-# 导入配置
 try:
-    from config import (
-        CODE_EXECUTOR_ENABLED,
-        CODE_EXECUTOR_MAX_TIME,
-        CODE_EXECUTOR_MAX_LENGTH,
-        CODE_EXECUTOR_MAX_OUTPUT
-    )
+    from config import CODE_EXECUTOR_ENABLED, CODE_EXECUTOR_MAX_TIME
 except ImportError:
-    # 如果配置不存在，使用默认值
     CODE_EXECUTOR_ENABLED = False
-    CODE_EXECUTOR_MAX_TIME = 30
-    CODE_EXECUTOR_MAX_LENGTH = 5000
-    CODE_EXECUTOR_MAX_OUTPUT = 100
+    CODE_EXECUTOR_MAX_TIME = 300
 
-# 不在导入时获取logger，而是在使用时获取
-# logger = get_logger()
 
 def _get_logger():
-    """安全获取logger，如果未初始化则返回None"""
     try:
         return get_logger()
     except Exception:
@@ -40,335 +27,256 @@ def _get_logger():
 
 class Plugin:
     """
-    Python代码执行插件
-    支持在受限环境中执行Python代码，用于数据分析和计算
+    代码执行 / 代码任务插件。
+
+    不再在进程内跑 Python 沙箱，而是委托本机 Codex CLI / Claude Code。
+    高风险：需 ActionGate 确认（local 或管理员 QQ 私聊）。
     """
-    
-    # 安全配置
-    ALLOWED_IMPORTS = {
-        'math', 'random', 'statistics', 'fractions', 'decimal',
-        'datetime', 'json', 'collections', 'itertools', 'functools',
-        'typing', 'dataclasses', 'enum',
-        'numpy', 'pandas', 'matplotlib.pyplot', 'seaborn',
-        'scipy', 'scipy.stats'
-    }
-    
-    RESTRICTED_MODULES = {
-        'os', 'sys', 'subprocess', 'shutil', 'importlib',
-        'eval', 'exec', 'compile', '__import__',
-        'open', 'file', 'input', 'raw_input',
-        'socket', 'urllib', 'http', 'ftplib', 'requests',
-        'sqlite3', 'pickle', 'hashlib', 'tempfile', 'pathlib',
-        'ctypes', 'threading', 'multiprocessing',
-        'webbrowser', 'smtplib', 'telnetlib'
-    }
-    
-    # 从配置文件读取安全限制
-    ENABLED = CODE_EXECUTOR_ENABLED
-    MAX_EXECUTION_TIME = CODE_EXECUTOR_MAX_TIME  # 秒
-    MAX_CODE_LENGTH = CODE_EXECUTOR_MAX_LENGTH   # 字符
-    MAX_OUTPUT_LINES = CODE_EXECUTOR_MAX_OUTPUT   # 行
-    MAX_LINE_LENGTH = 200    # 字符
-    EXECUTION_ENV_ALLOWLIST = {
-        "APPDATA",
-        "COMSPEC",
-        "LOCALAPPDATA",
-        "NUMBER_OF_PROCESSORS",
-        "PATH",
-        "PATHEXT",
-        "PROCESSOR_ARCHITECTURE",
-        "PROGRAMDATA",
-        "PROGRAMFILES",
-        "PROGRAMFILES(X86)",
-        "SYSTEMDRIVE",
-        "SYSTEMROOT",
-        "TEMP",
-        "TMP",
-        "USERPROFILE",
-        "WINDIR",
-    }
-    
+
+    name = "代码执行器"
+    type = "react"
+    gated_action = "system.exec_code"
+    plugin_trigger = "code"
+
+    def __init__(
+        self,
+        *,
+        runner: Callable[[CodeAgentRequest], Any] | None = None,
+        discoverer: Callable[[str], str] | None = None,
+    ) -> None:
+        self._runner = runner or run_code_agent
+        self._discoverer = discoverer or discover_agent_command
+        self.settings: Dict[str, Any] = {}
+        self.ENABLED = bool(CODE_EXECUTOR_ENABLED)
+
     @handle_plugin_errors("代码执行器")
-    async def run(self, args: str, ctx: Dict[str, Any]) -> str:
-        """
-        执行Python代码
-        
-        Args:
-            args: 要执行的Python代码
-            ctx: 上下文信息
-        
-        Returns:
-            执行结果或错误信息
-        """
-        if not args or not args.strip():
-            return "❌ 请提供要执行的Python代码"
-        if not self.ENABLED:
-            return "❌ 代码执行器未启用。需要在本地显式设置 CODE_EXECUTOR_ENABLED=1 后才能执行。"
-        
-        # 提取代码块（支持```python ... ```格式）
-        code = self._extract_code(args)
-        
-        # 验证代码安全
-        validation_result = self._validate_code(code)
-        if not validation_result['valid']:
-            return f"❌ 代码安全检查失败: {validation_result['reason']}"
-        
+    async def run(self, args: str, ctx: Dict[str, Any]) -> Any:
+        if not args or not str(args).strip():
+            return "❌ 请提供要执行/分析的代码或任务描述"
+
+        if not self.ENABLED and not self._setting_bool("force_enabled", False):
+            return (
+                "❌ 代码执行器未启用。请在环境变量设置 CODE_EXECUTOR_ENABLED=1，"
+                "并安装本机 Codex CLI 或 Claude Code。"
+            )
+
+        # Defense in depth: ActionGate should already require confirm; keep explicit check.
+        if not bool((ctx or {}).get("action_confirmed") or (ctx or {}).get("gate_confirmed")):
+            preview = self._preview(args)
+            return {
+                "__agent_result__": "confirmation_required",
+                "trigger": str(
+                    getattr(self, "plugin_trigger", None) or "code"
+                ),
+                "summary": (
+                    "⚠️ 将通过本机 Codex/Claude Code 处理代码任务（高风险）。\n"
+                    f"预览: {preview}"
+                ),
+                "payload": {
+                    "mode": "gate_rerun",
+                    "args": args,
+                    "gated_action": "system.exec_code",
+                    "provider": self._default_provider(),
+                },
+                "expires_in": 300,
+            }
+
+        provider, prompt, cwd = self._parse_args(args, ctx)
+        command_template = self._command_template(provider)
+        if not command_template:
+            return (
+                f"❌ 未找到 {self._provider_label(provider)} 命令。"
+                "请安装 Codex CLI / Claude Code，或在插件设置里配置命令模板。"
+            )
+
+        request = CodeAgentRequest(
+            provider=provider,
+            prompt=self._build_prompt(prompt),
+            cwd=cwd,
+            command_template=command_template,
+            timeout_sec=self._timeout_sec(),
+            allow_write=self._looks_like_modify(prompt),
+            allow_exec=True,  # already gate-confirmed
+            task_id=str((ctx or {}).get("codex_task_id") or uuid.uuid4().hex[:8]),
+        )
+
         log = _get_logger()
         if log:
-            log.info(f"准备执行代码: {len(code)} 字符")
-        
-        # 异步执行代码
+            log.info(
+                "code_executor external CLI provider=%s cwd=%s chars=%s",
+                provider,
+                cwd,
+                len(request.prompt),
+            )
+
         try:
-            result = await self._execute_code(code)
-            return self._format_output(result)
-        except Exception as e:
-            log = _get_logger()
+            result = await self._runner(request)
+            return self._format_result(result, provider)
+        except PermissionError as exc:
+            return f"❌ {redact_sensitive_text(exc)}"
+        except Exception as exc:
             if log:
-                log.error(f"代码执行失败: {redact_sensitive_text(e)}")
-            return f"❌ 执行失败: {redact_sensitive_text(e)}"
-    
+                log.error("code_executor CLI failed: %s", redact_sensitive_text(exc))
+            return f"❌ 外部代码代理执行失败: {redact_sensitive_text(exc)}"
+
+    async def confirm_agent_action(self, payload: Dict[str, Any], ctx: Dict[str, Any]) -> str:
+        runtime = dict(ctx or {})
+        runtime["action_confirmed"] = True
+        runtime["gate_confirmed"] = True
+        args = str(payload.get("args") or "").strip()
+        if not args:
+            # allow payload-built prompt
+            provider = str(payload.get("provider") or self._default_provider())
+            prompt = str(payload.get("prompt") or "").strip()
+            cwd = str(payload.get("cwd") or self._default_cwd(ctx)).strip()
+            if not prompt:
+                return "确认载荷缺少任务内容，已取消。"
+            args = f"{provider} ||| {cwd} ||| {prompt}"
+        result = await self.run(args, runtime)
+        if isinstance(result, dict):
+            return str(result.get("summary") or result)
+        return str(result)
+
+    def _parse_args(self, args: str, ctx: Dict[str, Any]) -> Tuple[str, str, str]:
+        text = str(args or "").strip()
+        # Strip common react wrappers
+        for prefix in ("execute_code", "code", "python", "run"):
+            if text.lower().startswith(prefix + " "):
+                text = text[len(prefix) :].strip()
+                break
+
+        parts = [p.strip() for p in text.split("|||")]
+        if len(parts) >= 3 and self._normalize_provider(parts[0]):
+            provider = self._normalize_provider(parts[0]) or self._default_provider()
+            cwd = parts[1] or self._default_cwd(ctx)
+            prompt = parts[2]
+            return provider, prompt, cwd
+        if len(parts) == 2 and self._normalize_provider(parts[0]):
+            provider = self._normalize_provider(parts[0]) or self._default_provider()
+            return provider, parts[1], self._default_cwd(ctx)
+
+        provider, stripped = self._detect_provider(text)
+        provider = provider or self._default_provider()
+        code = self._extract_code(stripped or text)
+        return provider, code, self._default_cwd(ctx)
+
     def _extract_code(self, text: str) -> str:
-        """从文本中提取Python代码块"""
-        # 匹配 ```python ... ``` 格式
-        code_block = re.search(r'```python\s*?\n(.*?)```', text, re.DOTALL)
+        code_block = re.search(r"```(?:python)?\s*?\n(.*?)```", text, re.DOTALL)
         if code_block:
             return code_block.group(1).strip()
-        
-        # 匹配 ``` ... ``` 格式（无语言标识）
-        code_block = re.search(r'```\s*?\n(.*?)```', text, re.DOTALL)
-        if code_block:
-            return code_block.group(1).strip()
-        
-        # 直接返回文本
-        return text.strip()
-    
-    def _validate_code(self, code: str) -> Dict[str, Any]:
-        """
-        验证代码安全性
-        
-        Returns:
-            {'valid': bool, 'reason': str}
-        """
-        # 检查代码长度
-        if len(code) > self.MAX_CODE_LENGTH:
-            return {
-                'valid': False,
-                'reason': f'代码长度超过限制（{self.MAX_CODE_LENGTH}字符）'
-            }
-        ast_result = self._validate_ast(code)
-        if not ast_result['valid']:
-            return ast_result
-        
-        # 检查导入语句
-        for module in self.RESTRICTED_MODULES:
-            # 检查 import module, from module import, __import__(module)
-            patterns = [
-                rf'\bimport\s+{module}\b',
-                rf'\bfrom\s+{module}\s+import\b',
-                rf'__import__\([\'"]{module}[\'"]\)'
-            ]
-            for pattern in patterns:
-                if re.search(pattern, code, re.MULTILINE):
-                    return {
-                        'valid': False,
-                        'reason': f'禁止使用模块: {module}'
-                    }
-        
-        # 检查危险函数
-        dangerous_patterns = [
-            r'\beval\s*\(', r'\bexec\s*\(', r'\bcompile\s*\(',
-            r'\bopen\s*\(', r'\bfile\s*\(',
-            r'\bsubprocess\.', r'\bos\.system',
-            r'\b__import__\s*\(', r'\bglobals\s*\(', r'\blocals\s*\(',
-            r'\bvars\s*\(', r'__builtins__'
-        ]
-        
-        for pattern in dangerous_patterns:
-            if re.search(pattern, code):
-                return {
-                    'valid': False,
-                    'reason': f'禁止使用危险函数: {pattern}'
-                }
-        
-        # 检查无限循环风险（简单启发式）
-        if re.search(r'while\s+True:', code):
-            if 'break' not in code:
-                return {
-                    'valid': False,
-                    'reason': '检测到潜在无限循环'
-                }
+        return str(text or "").strip()
 
-        return {'valid': True, 'reason': ''}
+    def _build_prompt(self, prompt: str) -> str:
+        body = str(prompt or "").strip()
+        # If it looks like raw code, ask CLI to run/analyze and return output
+        if "\n" in body or re.search(r"\b(def|import|print|class)\b", body):
+            return (
+                "请在当前工作目录用合适方式处理以下 Python/代码任务，"
+                "返回关键结果或错误，不要多余寒暄：\n\n"
+                f"{body}"
+            )
+        return body
 
-    def _validate_ast(self, code: str) -> Dict[str, Any]:
-        try:
-            tree = ast.parse(code)
-        except SyntaxError as exc:
-            return {'valid': False, 'reason': f'语法错误: {exc}'}
+    def _detect_provider(self, text: str) -> Tuple[str, str]:
+        raw = str(text or "")
+        lowered = raw.lower()
+        if "claude code" in lowered or re.search(r"(^|[^\w])claude([^\w]|$)", lowered):
+            cleaned = re.sub(r"claude(?:\s*code)?", "", raw, flags=re.IGNORECASE).strip()
+            return "claude_code", cleaned
+        if "codex" in lowered:
+            cleaned = re.sub("codex", "", raw, flags=re.IGNORECASE).strip()
+            return "codex_cli", cleaned
+        return "", raw.strip()
 
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Import):
-                for alias in node.names:
-                    module = str(alias.name or "")
-                    result = self._validate_import_name(module)
-                    if not result['valid']:
-                        return result
-            elif isinstance(node, ast.ImportFrom):
-                module = str(node.module or "")
-                result = self._validate_import_name(module)
-                if not result['valid']:
-                    return result
-            elif isinstance(node, ast.Call):
-                call_name = self._call_name(node.func)
-                if isinstance(node.func, (ast.Call, ast.Subscript, ast.Lambda)):
-                    return {'valid': False, 'reason': f'禁止动态调用表达式: {call_name or type(node.func).__name__}'}
-                root = call_name.split(".", 1)[0]
-                if call_name in self.RESTRICTED_MODULES or root in self.RESTRICTED_MODULES:
-                    return {'valid': False, 'reason': f'禁止调用: {call_name}'}
-        return {'valid': True, 'reason': ''}
-
-    def _validate_import_name(self, module: str) -> Dict[str, Any]:
-        module = str(module or "").strip()
-        root = module.split(".", 1)[0]
-        if root in self.RESTRICTED_MODULES or module in self.RESTRICTED_MODULES:
-            return {'valid': False, 'reason': f'禁止使用模块: {module}'}
-        if module not in self.ALLOWED_IMPORTS and root not in self.ALLOWED_IMPORTS:
-            return {'valid': False, 'reason': f'未在白名单中的模块: {module}'}
-        return {'valid': True, 'reason': ''}
-
-    def _call_name(self, node: ast.AST) -> str:
-        if isinstance(node, ast.Name):
-            return node.id
-        if isinstance(node, ast.Attribute):
-            parent = self._call_name(node.value)
-            return f"{parent}.{node.attr}" if parent else node.attr
-        if isinstance(node, ast.Call):
-            parent = self._call_name(node.func)
-            return f"{parent}()" if parent else "<call>"
-        if isinstance(node, ast.Subscript):
-            parent = self._call_name(node.value)
-            return f"{parent}[]" if parent else "<subscript>"
-        if isinstance(node, ast.Lambda):
-            return "<lambda>"
+    def _normalize_provider(self, provider: str) -> str:
+        raw = str(provider or "").strip().lower().replace("-", "_").replace(" ", "_")
+        if raw in {"codex", "codex_cli"}:
+            return "codex_cli"
+        if raw in {"claude", "claude_code", "cc"}:
+            return "claude_code"
         return ""
 
-    def _build_execution_env(self, temp_dir: str) -> Dict[str, str]:
-        env: Dict[str, str] = {}
-        for key in self.EXECUTION_ENV_ALLOWLIST:
-            if key in os.environ:
-                env[key] = os.environ[key]
-        env["PYTHONPATH"] = ""
-        env["PYTHONNOUSERSITE"] = "1"
-        env["PYTHONDONTWRITEBYTECODE"] = "1"
-        env["MPLCONFIGDIR"] = temp_dir
-        return env
-    
-    async def _execute_code(self, code: str) -> Dict[str, Any]:
-        """
-        在独立进程中执行代码
-        
-        Returns:
-            {'success': bool, 'stdout': str, 'stderr': str, 'execution_time': float}
-        """
-        # 创建临时工作目录
-        temp_dir = tempfile.mkdtemp(prefix='code_executor_')
-        
-        try:
-            # 写入代码文件
-            code_file = Path(temp_dir) / 'script.py'
-            code_file.write_text(code, encoding='utf-8')
-            
-            # 准备执行环境：只传递运行 Python 所需的最小白名单，避免泄露 API key/token。
-            env = self._build_execution_env(temp_dir)
-            
-            # 执行代码
-            start_time = asyncio.get_event_loop().time()
-            process = await asyncio.create_subprocess_exec(
-                sys.executable,
-                str(code_file),
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                cwd=temp_dir,
-                env=env
+    def _looks_like_modify(self, text: str) -> bool:
+        return bool(
+            re.search(
+                r"(修改|修复|重构|改一下|写入|生成|新增|删除|移动|安装|打包)",
+                str(text or ""),
+                flags=re.IGNORECASE,
             )
-            
+        )
+
+    def _command_template(self, provider: str) -> str:
+        setting_key = f"{provider}_command_template"
+        configured = str(self._setting(setting_key, "") or "").strip()
+        return configured or self._discoverer(provider)
+
+    def _format_result(self, result: Any, provider: str) -> str:
+        ok = bool(getattr(result, "ok", False))
+        status = "完成" if ok else "失败"
+        stdout = str(getattr(result, "stdout", "") or "").strip()
+        stderr = str(getattr(result, "stderr", "") or "").strip()
+        exit_code = getattr(result, "exit_code", "")
+        command_preview = str(getattr(result, "command_preview", "") or "").strip()
+        duration = getattr(result, "duration_sec", None)
+        lines = [
+            f"✅ 外部代码代理{status}"
+            if ok
+            else f"❌ 外部代码代理{status}",
+            f"provider={self._provider_label(provider)} exit={exit_code}",
+        ]
+        if duration is not None:
             try:
-                # 等待完成，带超时
-                stdout, stderr = await asyncio.wait_for(
-                    process.communicate(),
-                    timeout=self.MAX_EXECUTION_TIME
-                )
-                
-                execution_time = asyncio.get_event_loop().time() - start_time
-                
-                return {
-                    'success': process.returncode == 0,
-                    'stdout': stdout.decode('utf-8', errors='replace'),
-                    'stderr': stderr.decode('utf-8', errors='replace'),
-                    'execution_time': execution_time,
-                    'returncode': process.returncode
-                }
-                
-            except asyncio.TimeoutError:
-                # 超时，强制终止进程
-                try:
-                    process.kill()
-                    await process.wait()
-                except Exception:
-                    pass
-                
-                return {
-                    'success': False,
-                    'stdout': '',
-                    'stderr': f'执行超时（超过{self.MAX_EXECUTION_TIME}秒）',
-                    'execution_time': self.MAX_EXECUTION_TIME,
-                    'returncode': -1
-                }
-                
-        finally:
-            # 清理临时目录
-            try:
-                shutil.rmtree(temp_dir, ignore_errors=True)
-            except Exception as e:
-                log = _get_logger()
-                if log:
-                    log.warning(f"清理临时目录失败: {redact_sensitive_text(e)}")
-    
-    def _format_output(self, result: Dict[str, Any]) -> str:
-        """格式化执行结果"""
-        if not result['success']:
-            # 执行失败，显示错误信息
-            if result['stderr']:
-                error_lines = result['stderr'].strip().split('\n')
-                # 只显示最后几行错误
-                error_msg = redact_sensitive_text('\n'.join(error_lines[-5:]))
-                return f"❌ 执行失败:\n```\n{error_msg}\n```"
-            return "❌ 执行失败，无错误信息"
-        
-        # 执行成功
-        output = result['stdout'].strip()
-        
-        if not output:
-            return "✅ 执行成功（无输出）"
-        
-        # 限制输出长度
-        lines = output.split('\n')
-        if len(lines) > self.MAX_OUTPUT_LINES:
-            output = '\n'.join(lines[:self.MAX_OUTPUT_LINES])
-            output += f"\n...（还有 {len(lines) - self.MAX_OUTPUT_LINES} 行）"
-        
-        # 截断过长的行
-        lines = output.split('\n')
-        truncated_lines = []
-        for line in lines:
-            if len(line) > self.MAX_LINE_LENGTH:
-                truncated_lines.append(line[:self.MAX_LINE_LENGTH] + '...')
-            else:
-                truncated_lines.append(line)
-        output = redact_sensitive_text('\n'.join(truncated_lines))
-        
-        # 格式化输出
-        execution_time = result['execution_time']
-        time_str = f"{execution_time:.2f}秒" if execution_time >= 0.1 else f"{execution_time*1000:.0f}毫秒"
-        
-        return f"✅ 执行成功（耗时: {time_str}）:\n```\n{output}\n```"
+                lines.append(f"耗时: {float(duration):.2f}s")
+            except (TypeError, ValueError):
+                pass
+        if command_preview:
+            lines.append(f"命令: {command_preview}")
+        if stdout:
+            lines.append(redact_sensitive_text(stdout))
+        if stderr:
+            lines.append("stderr:\n" + redact_sensitive_text(stderr))
+        return "\n".join(lines)
+
+    def _provider_label(self, provider: str) -> str:
+        if provider == "claude_code":
+            return "Claude Code"
+        return "Codex"
+
+    def _preview(self, args: str) -> str:
+        preview = str(args or "").strip().replace("\n", " ")
+        if len(preview) > 120:
+            preview = preview[:120] + "..."
+        return preview
+
+    def _default_provider(self) -> str:
+        return (
+            self._normalize_provider(str(self._setting("default_provider", "codex_cli")))
+            or "codex_cli"
+        )
+
+    def _default_cwd(self, ctx: Optional[Dict[str, Any]]) -> str:
+        for key in ("code_path", "app_root", "cwd"):
+            value = str((ctx or {}).get(key) or "").strip()
+            if value:
+                return value
+        return str(self._setting("default_cwd", ".") or ".").strip() or "."
+
+    def _timeout_sec(self) -> int:
+        try:
+            configured = int(self._setting("timeout_sec", CODE_EXECUTOR_MAX_TIME or 300))
+        except (TypeError, ValueError):
+            configured = 300
+        # CLI tasks are slower than in-process scripts
+        return max(30, min(3600, configured if configured > 0 else 300))
+
+    def _setting(self, key: str, default: Any) -> Any:
+        value = (self.settings or {}).get(key, default)
+        if isinstance(value, dict):
+            return value.get("default", default)
+        return value
+
+    def _setting_bool(self, key: str, default: bool = False) -> bool:
+        value = self._setting(key, default)
+        if isinstance(value, bool):
+            return value
+        return str(value or "").strip().lower() in {"1", "true", "yes", "on"}

@@ -172,6 +172,37 @@ class AdvancedMemorySystem:
             self.short_term_manager._session_short_term_loaded
         )
 
+        # 6. Near-history ContextAssembler (single read path for recent events)
+        self.conversation_events_enabled = bool(
+            MEMORY_SETTINGS.get("conversation_events_enabled", True)
+        )
+        self.context_assembler = None
+        self._last_assembled_context = None
+        if self.conversation_events_enabled and self.sqlite_store is not None:
+            try:
+                from modules.conversation_events.store import ConversationEventStore
+                from services.chat_support.context_assembler import ContextAssembler
+
+                event_store = ConversationEventStore(self.sqlite_store)
+                self.context_assembler = ContextAssembler(
+                    store=event_store,
+                    enabled=True,
+                    max_events=int(
+                        MEMORY_SETTINGS.get("recent_event_max_items", 3) or 3
+                    ),
+                    max_chars=int(
+                        MEMORY_SETTINGS.get("recent_event_max_chars", 900) or 900
+                    ),
+                )
+            except Exception as exc:
+                self.context_assembler = None
+                try:
+                    self._logger.warning(
+                        f"[ConversationEvents] assembler init failed: {exc}"
+                    )
+                except Exception:
+                    pass
+
         # 配置
         self.store_roles = set(MEMORY_SETTINGS.get("store_roles", ["user"]))
         self.long_term_enabled = bool(MEMORY_SETTINGS.get("long_term_enabled", True))
@@ -1336,6 +1367,7 @@ Output ONLY "YES" or "NO".
         session_id: str = None,
         memory_session_id: str = None,
         person_id: str = "owner",
+        conversation_scope=None,
     ):
         print("🔍 [系统] 正在构建统一记忆上下文.")
 
@@ -1457,9 +1489,48 @@ Output ONLY "YES" or "NO".
         if mem_text:
             final_system += (
                 "\n\n【经筛选的长期记忆】\n"
-                "这些记录只用于回答当前问题，不要逐条复述，也不要补全记录中没有的事实。\n"
+                "这些记录只用于回答当前问题，不要逐条复述，也不要补全记录中没有的事实。"
+                "若记录里没有明确的周几、日期或次数，就直说没查到可靠依据，禁止猜测。"
+                "\n"
                 + mem_text
             )
+        elif memory_intent in {"episode", "profile"}:
+            final_system += (
+                "\n\n【经筛选的长期记忆】\n"
+                "当前没有找到与这个问题直接相关的可靠记录。"
+                "请明确说没查到可靠记事或依据，不要编造周几、日期、次数或“查了下记事”的假结论。\n"
+            )
+
+        # Near-history: only via ContextAssembler (T2 single read path).
+        assembled = None
+        recent_event_block = ""
+        context_assembler = getattr(self, "context_assembler", None)
+        if context_assembler is not None and not tool_mode:
+            try:
+                assembled = context_assembler.assemble(
+                    current_user_text=raw_user,
+                    scope=conversation_scope,
+                    short_term_messages=short_ctx,
+                    long_term_block=mem_text or "",
+                )
+                self._last_assembled_context = assembled
+                recent_event_block = str(
+                    getattr(assembled, "recent_event_block", "") or ""
+                )
+                if assembled.short_term_messages:
+                    short_ctx = [
+                        dict(item) for item in assembled.short_term_messages
+                    ]
+            except Exception as exc:
+                try:
+                    self._logger.warning(
+                        f"[ConversationEvents] assemble failed: {exc}"
+                    )
+                except Exception:
+                    pass
+
+        if recent_event_block:
+            final_system += "\n\n" + recent_event_block
 
         tool_ctx = self._format_tool_history(tool_intent)
         if tool_ctx:

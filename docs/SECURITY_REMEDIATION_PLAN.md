@@ -17,43 +17,37 @@
 - `mcp_tools` 默认限制远程 QQ 调用，可通过配置白名单放行。
 - `user_files` 只允许访问明确白名单根目录。
 - `workspace_ops` 写操作需要确认 token。
-- `code_executor` 使用受限执行环境，并对输出做敏感信息脱敏（**仍非真正隔离沙箱，见未闭环**）。
+- `code_executor` 委托本机 Codex CLI / Claude Code（无内置 Python 沙箱）；输出做敏感信息脱敏；默认关闭且需 ActionGate 确认。
 - GUI HTTP / WS 和 NapCat 接入有 token / 来源校验。
 - GUI 密钥脱敏可识别 setting `type=secret/password`（`modules.security_redaction.is_secret_setting`）。
 - QQ 文件、网页读取、搜索、邮件、远程控制等插件都应显式配置 access control。
 - search 插件 config 与实现类型已统一为 `delegate`。
 
-## 未闭环风险（优先处理）
+## 已落地（2026-08 P0 权限契约）
 
-来源：2026-07-30 代码审查；下列项在审查时仍未闭环，改动安全边界时优先处理。
+- **ActorKind**：`local` / `qq_owner` / `qq_other` + channel `local_ui` / `private` / `group`（`services/security/actor.py`）。
+- **HIGH 仅** local，或 **qq_owner 私聊**；**群聊 owner 也不允许 HIGH**。
+- **媒体策略**：`integrations/chat_gateway/media_policy.py`；远程（含 owner）禁止 `file://`/裸 path/私网 IP；身份信任 ≠ 内容信任。
+- **ActionGate** 已接入 `PluginManager._run_with_timeout`；`open_app` 信任列表 → `system.spawn_process_trusted` 免确认+审计；列表外 HIGH；`backup_manager` / `code_executor` / 邮件写操作可解析 action。
+- **code_executor**：默认关；需 Gate 确认；**改为调用本机 Codex/Claude CLI**（`modules/code_agent`），不再内嵌 AST 沙箱。
+- **确认交互**：ActionGate `requires_confirmation` → 本地 Qt 弹窗当场确认，或远程 `confirmation_required` + 聊天「确认/取消」；`AgentRuntime` / gate re-run 注入 `action_confirmed`。
+- **code_agent**：`system.code_agent` 高风险门控；与 `code_executor` 共用外部 CLI 栈。
+- **memory_items**：默认仅 `todo`；语义记忆走 `memory_records`。
 
-### P1 — 媒体加载 SSRF / 本地文件边界
+## 仍未闭环 / 后续
 
-- 位置：`integrations/chat_gateway/media_utils.py`
-- 现状：`http(s)://` 直接 `urlopen`；支持 `file://` 与任意本地 path；缺少内网/环回/元数据 IP 过滤、跳转限制、大小与 MIME 约束。
-- 影响：远程 QQ 图片元数据可控时，可能打到内网或本机路径，再进入视觉模型 / 外部接口。
-- 目标：统一 URL/路径安全策略；远程来源禁止 `file://` 与任意本地 path；限制体积、跳转与最终地址。
+### P1 — 外部 CLI 本身的权限面
 
-### P1 — `code_executor` 伪沙箱
+- `code_executor` / `code_agent` 依赖本机已安装的 Codex/Claude 及用户账号权限；需持续约束 cwd、确认与 owner 私聊边界。
 
-- 现状：正则/AST 黑名单 + 本机 `sys.executable` 子进程，不是隔离运行时。
-- 目标：隔离执行（低权限用户/容器/无网络/临时 FS）；黑名单仅作辅助。默认禁用并要求显式本地确认。
+### P1 — 远程高权限插件面仍偏大
 
-### P1 — 高风险写操作未统一进入 `ActionGate`
+- 样例：`user_files`、`qq_file_browser`、`code_agent`、`skill_runtime` 等 owner 可达；需持续收紧与确认策略对齐 ActionGate。
+- 空 `access_control`：启动 WARNING 列表；后续可 `access_control_strict`。
 
-- 现状：`services/action_gate.py` 存在，但未成为插件执行主入口。
-- 旁路样例：`backup_manager`（空 `access_control`、恢复可覆盖关键文件）、`open_app`（`Popen`、默认映射含高风险项、空 `access_control`）。
-- 目标：文件写、配置编辑、代码执行、进程启动、备份恢复、邮件发送统一经 ActionGate 或等价确认网关。
+### P1/P2 — `open_app` 列表外路径
 
-### P1 — 远程高权限插件面过大 / 空 access_control 不可观测
-
-- 样例：`user_files`、`qq_file_browser`、`qq_screenshot`、`code_agent`、邮件、`skill_runtime`、`app_control` 等经 QQ 主人可达；`search` 允许 others；部分插件 `access_control` 为空依赖隐式默认。
-- 目标：启动输出权限矩阵；空配置显式警告或失败；成本型/写操作默认收紧。
-
-### P1/P2 — `open_app` 能力语义与风险不闭环
-
-- 现状：子串匹配后直接启动进程；缺少明确的 command-only / NL 能力声明；失败回退映射可能含高风险命令。
-- 目标：明确仅命令触发或完整 NL 能力；移除高风险默认项；接入确认闸门。
+- 信任列表外当前不直接启动（需确认策略）；可产品化确认流。
 
 ### 仍需仓库拥有者手动处理
 

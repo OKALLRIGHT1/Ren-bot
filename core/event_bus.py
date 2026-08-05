@@ -131,6 +131,7 @@ class Events:
     UI_STATUS = "ui.status"
     UI_APPEND = "ui.append"
     UI_BUBBLE = "ui.bubble"
+    UI_ACTION_CONFIRM = "ui.action_confirm"
     LIVE2D_EMOTION = "live2d.emotion"
     LIVE2D_MOTION = "live2d.motion"
     LIVE2D_GO_IDLE = "live2d.go_idle"

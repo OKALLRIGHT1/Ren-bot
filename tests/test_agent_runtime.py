@@ -1,6 +1,15 @@
 import pytest
 
 from services.agent_runtime import AgentRuntime
+from services.security.pending_confirm import get_pending_confirm_store
+
+
+@pytest.fixture(autouse=True)
+def _clear_pending_confirm_store():
+    store = get_pending_confirm_store()
+    store.clear()
+    yield
+    store.clear()
 
 
 class FakePluginManager:
@@ -112,7 +121,10 @@ async def test_runtime_stores_and_confirms_pending_action():
     second = await runtime.handle_direct_text("确认", {"source": "text_input"})
     assert second.handled is True
     assert second.reply == "confirmed-ok"
-    assert plugin.confirmed == [({"token": "ctk_1"}, {"source": "text_input"})]
+    assert len(plugin.confirmed) == 1
+    assert plugin.confirmed[0][0] == {"token": "ctk_1"}
+    assert plugin.confirmed[0][1].get("source") == "text_input"
+    assert plugin.confirmed[0][1].get("action_confirmed") is True
 
 
 @pytest.mark.asyncio

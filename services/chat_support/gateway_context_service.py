@@ -50,6 +50,29 @@ class GatewayContextService:
         session_id, _user_id = self.reply_effect_identity(ctx)
         return str(session_id or "").strip()
 
+    def event_channel(self, ctx: Optional[Dict[str, Any]]) -> str:
+        """Normalize transport source into event channel (desktop vs qq)."""
+        if self.is_qq_source(ctx):
+            return "qq"
+        return "desktop"
+
+    def event_scope_parts(
+        self, ctx: Optional[Dict[str, Any]]
+    ) -> tuple[str, str]:
+        """Return (channel, conversation_id) for ConversationScope.
+
+        Reuses conversation_session_key(); never invents a second session key.
+        """
+        conversation_id = self.conversation_session_key(ctx)
+        if not conversation_id:
+            source = ""
+            if isinstance(ctx, dict):
+                source = str(ctx.get("source") or "").strip() or "local"
+            else:
+                source = "local"
+            conversation_id = f"local:{source}"
+        return self.event_channel(ctx), conversation_id
+
     def memory_session_id(self, ctx: Optional[Dict[str, Any]]) -> str:
         if not isinstance(ctx, dict):
             return ""

@@ -1,22 +1,44 @@
 import asyncio
+from datetime import datetime, timezone
+from pathlib import Path
 
 import pytest
 
 import services.chat_service as chat_service_module
+from modules.conversation_events.models import (
+    ConversationEvent,
+    ConversationEventType,
+    ConversationScope,
+)
+from modules.conversation_events.prompt import RECENT_BLOCK_TITLE
+from modules.conversation_events.store import ConversationEventStore
+from modules.memory_sqlite import MemorySQLite
 from modules.tool_router import ToolRouteResult
 from services.chat_service import ChatService
+from services.chat_support.context_assembler import ContextAssembler
 
 
 class _Brain:
-    def __init__(self):
+    def __init__(self, sqlite_store=None, context_assembler=None):
         self.short_term_memory = []
-        self.sqlite_store = None
+        self.sqlite_store = sqlite_store
+        self.context_assembler = context_assembler
         self.last_build_kwargs = {}
 
     def build_prompt(self, user_text, **kwargs):
         self.last_build_kwargs = dict(kwargs)
+        system = str(kwargs.get("system_persona", "") or "")
+        assembler = self.context_assembler
+        scope = kwargs.get("conversation_scope")
+        if assembler is not None and scope is not None:
+            assembled = assembler.assemble(
+                current_user_text=user_text,
+                scope=scope,
+            )
+            if assembled.recent_event_block:
+                system = system + "\n\n" + assembled.recent_event_block
         return [
-            {"role": "system", "content": kwargs.get("system_persona", "")},
+            {"role": "system", "content": system},
             {"role": "user", "content": user_text},
         ]
 
@@ -248,9 +270,30 @@ def chat_env(monkeypatch):
     monkeypatch.setattr(ChatService, "_record_search_topic", lambda self, *args, **kwargs: None, raising=False)
     monkeypatch.setattr(ChatService, "_remember_search_topic", lambda self, *args, **kwargs: None)
 
-    def make_service(*, plugin_manager=None, tool_router=None, presenter=None, event_bus=None, gateway=None):
+    def make_service(
+        *,
+        plugin_manager=None,
+        tool_router=None,
+        presenter=None,
+        event_bus=None,
+        gateway=None,
+        with_event_store=False,
+        tmp_path=None,
+    ):
+        sqlite_store = None
+        assembler = None
+        if with_event_store:
+            db_path = Path(tmp_path or ".") / "chat_events.sqlite"
+            if tmp_path is None:
+                import tempfile
+
+                tmp = tempfile.mkdtemp()
+                db_path = Path(tmp) / "chat_events.sqlite"
+            sqlite_store = MemorySQLite(str(db_path))
+            event_store = ConversationEventStore(sqlite_store)
+            assembler = ContextAssembler(store=event_store)
         service = ChatService(
-            brain=_Brain(),
+            brain=_Brain(sqlite_store=sqlite_store, context_assembler=assembler),
             plugin_manager=plugin_manager or _PluginManager(),
             tool_router=tool_router or _ToolRouter(),
             presenter=presenter or _Presenter(),
@@ -260,6 +303,27 @@ def chat_env(monkeypatch):
         )
         service.personality = _Personality()
         service.learning = None
+        if with_event_store and sqlite_store is not None:
+            # Recreate event service against real store (ChatService init saw empty brain store).
+            from services.chat_support.conversation_event_service import (
+                ConversationEventService,
+            )
+
+            service.conversation_event_service = ConversationEventService(
+                store=ConversationEventStore(sqlite_store),
+                gateway_context_service=service.gateway_context_service,
+                enabled=True,
+                logger=service.logger,
+            )
+            service.sensor_event_service.conversation_event_service = (
+                service.conversation_event_service
+            )
+            service.sensor_reply_service.conversation_event_service = (
+                service.conversation_event_service
+            )
+            service.active_alert_service.conversation_event_service = (
+                service.conversation_event_service
+            )
         return service
 
     return make_service
@@ -330,9 +394,27 @@ async def test_non_stream_reply_reaches_presenter_and_memory_once(chat_env, monk
     assert len([e for e in event_bus.events if e[0] == "ui.append"]) == 1
 
 
+def _seed_sensor_chain(service):
+    """Write observation + proactive utterance into conversation events."""
+    ctx = {"source": "desktop"}
+    obs = service.conversation_event_service.record_screen_observation(
+        ctx=ctx,
+        evidence_summary="DeepSeek 页面里出现了原神",
+        exact_text="DeepSeek 页面里出现了原神",
+    )
+    assert obs is not None
+    utt = service.conversation_event_service.record_proactive_utterance(
+        ctx=ctx,
+        text="原神又肝起来了？",
+        parent_event_id=obs.event_id,
+    )
+    assert utt is not None
+    return obs, utt
+
+
 @pytest.mark.asyncio
 async def test_sensor_source_followup_injects_recent_observation_context(
-    chat_env, monkeypatch
+    chat_env, monkeypatch, tmp_path
 ):
     captured = {}
 
@@ -341,15 +423,181 @@ async def test_sensor_source_followup_injects_recent_observation_context(
         return "是在刚才的 DeepSeek 页面视觉观察里看到的。"
 
     monkeypatch.setattr(chat_service_module, "chat_with_ai", fake_chat)
-    service = chat_env()
+    service = chat_env(with_event_store=True, tmp_path=tmp_path)
     service.screen_sensor_ref = _ScreenSensor()
+    _seed_sensor_chain(service)
 
     await service.process("你从哪看到有原神", ctx={"source": "desktop"})
 
     system_text = captured["messages"][0]["content"]
-    assert "最近屏幕/视觉观察证据" in system_text
+    assert RECENT_BLOCK_TITLE in system_text
+    assert "原神又肝起来了" in system_text
     assert "DeepSeek" in system_text
     assert "原神" in system_text
+    # T2: legacy dual inject titles must not appear alongside the new block.
+    assert "最近屏幕/视觉观察证据" not in system_text
+    assert "你刚才的屏幕吐槽" not in system_text
+
+
+@pytest.mark.asyncio
+async def test_sensor_what_did_you_see_followup_injects_roast_and_observation(
+    chat_env, monkeypatch, tmp_path
+):
+    """Short follow-up like「看到了什么」after a roast should reuse event context."""
+    captured = {}
+
+    def fake_chat(messages, *args, **kwargs):
+        captured["messages"] = messages
+        return "刚刚看你 DeepSeek 页面里写了原神。"
+
+    monkeypatch.setattr(chat_service_module, "chat_with_ai", fake_chat)
+    service = chat_env(with_event_store=True, tmp_path=tmp_path)
+    service.screen_sensor_ref = _ScreenSensor()
+    _seed_sensor_chain(service)
+
+    await service.process("看到了什么", ctx={"source": "desktop"})
+
+    system_text = captured["messages"][0]["content"]
+    assert RECENT_BLOCK_TITLE in system_text
+    assert "原神又肝起来了" in system_text
+    assert "DeepSeek" in system_text
+    assert "最近屏幕/视觉观察证据" not in system_text
+
+
+@pytest.mark.asyncio
+async def test_paraphrased_followup_uses_events_not_keywords(
+    chat_env, monkeypatch, tmp_path
+):
+    captured = {}
+
+    def fake_chat(messages, *args, **kwargs):
+        captured["messages"] = messages
+        return "依据是屏幕观察。"
+
+    monkeypatch.setattr(chat_service_module, "chat_with_ai", fake_chat)
+    service = chat_env(with_event_store=True, tmp_path=tmp_path)
+    _seed_sensor_chain(service)
+
+    await service.process("你这结论哪来的", ctx={"source": "desktop"})
+    system_text = captured["messages"][0]["content"]
+    assert RECENT_BLOCK_TITLE in system_text
+    assert "原神" in system_text
+
+
+@pytest.mark.asyncio
+async def test_irrelevant_chitchat_does_not_inject_screen_events(
+    chat_env, monkeypatch, tmp_path
+):
+    captured = {}
+
+    def fake_chat(messages, *args, **kwargs):
+        captured["messages"] = messages
+        return "晚饭吃面吧。"
+
+    monkeypatch.setattr(chat_service_module, "chat_with_ai", fake_chat)
+    service = chat_env(with_event_store=True, tmp_path=tmp_path)
+    _seed_sensor_chain(service)
+
+    await service.process("晚饭吃什么", ctx={"source": "desktop"})
+    system_text = captured["messages"][0]["content"]
+    assert "原神" not in system_text
+    assert "DeepSeek" not in system_text
+
+
+@pytest.mark.asyncio
+async def test_non_stream_reply_records_one_user_and_one_assistant_event(
+    chat_env, monkeypatch, tmp_path
+):
+    monkeypatch.setattr(
+        chat_service_module, "chat_with_ai", lambda *args, **kwargs: "非流式回复"
+    )
+    service = chat_env(with_event_store=True, tmp_path=tmp_path)
+    await service.process("正常聊天", ctx={"source": "desktop"})
+    events = service.conversation_event_service.list_recent_for_ctx(
+        {"source": "desktop"}, limit=10
+    )
+    assert [event.event_type.value for event in events] == [
+        "user_message",
+        "assistant_message",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_tool_reply_records_one_causal_event_chain(
+    chat_env, monkeypatch, tmp_path
+):
+    replies = iter(
+        [
+            "[CMD: sample | 查询天气]",
+            "工具已经查完了。",
+            "今天晴，适合出门。",
+        ]
+    )
+    monkeypatch.setattr(
+        chat_service_module,
+        "chat_with_ai",
+        lambda *args, **kwargs: next(replies),
+    )
+    plugin_manager = _PluginManager(
+        command_result=(True, "", ["天气结果：晴"], ["sample"])
+    )
+    service = chat_env(
+        plugin_manager=plugin_manager,
+        tool_router=_ToolRouter(need_tools=True, triggers=["sample"]),
+        with_event_store=True,
+        tmp_path=tmp_path,
+    )
+
+    await service.process("帮我查天气", ctx={"source": "desktop"})
+
+    events = service.conversation_event_service.list_recent_for_ctx(
+        {"source": "desktop"}, limit=10
+    )
+    assert [event.event_type for event in events] == [
+        ConversationEventType.USER_MESSAGE,
+        ConversationEventType.TOOL_CALL,
+        ConversationEventType.TOOL_RESULT,
+        ConversationEventType.ASSISTANT_MESSAGE,
+    ]
+    assert events[1].causal_parent_ids == (events[0].event_id,)
+    assert events[2].causal_parent_ids == (events[1].event_id,)
+    assert events[3].causal_parent_ids == (events[2].event_id,)
+    assert events[1].metadata["tool_name"] == "sample"
+    assert "天气结果：晴" in events[2].evidence_summary
+
+
+@pytest.mark.asyncio
+async def test_short_reaction_records_one_user_and_one_assistant_event(
+    chat_env, tmp_path, monkeypatch
+):
+    service = chat_env(with_event_store=True, tmp_path=tmp_path)
+    monkeypatch.setattr(
+        service.reply_style_service,
+        "build_short_reaction",
+        lambda text, **kwargs: ("嗯。", "neutral"),
+    )
+
+    await service.process("嗯", ctx={"source": "desktop"})
+
+    events = service.conversation_event_service.list_recent_for_ctx(
+        {"source": "desktop"}, limit=10
+    )
+    assert [event.event_type.value for event in events] == [
+        "user_message",
+        "assistant_message",
+    ]
+    assert events[0].exact_text == "嗯"
+    assert events[0].metadata.get("path") == "short_reaction"
+
+
+def test_sensor_followup_detector_covers_short_what_did_you_see(chat_env):
+    # Legacy detector kept for observability; main path no longer depends on it.
+    service = chat_env()
+    assert service._looks_like_sensor_source_followup("看到了什么")
+    assert service._looks_like_sensor_source_followup("你刚吐槽什么")
+    assert service._looks_like_sensor_source_followup("为什么这么说")
+    assert service._looks_like_sensor_source_followup("你从哪看到有原神")
+    assert not service._looks_like_sensor_source_followup("今天天气怎么样")
 
 
 @pytest.mark.asyncio

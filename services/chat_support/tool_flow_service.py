@@ -65,6 +65,14 @@ async def _call_chat_with_ai(
     )
 
 
+async def _call_optional(callback: Callable[..., Any] | None, **kwargs: Any) -> None:
+    if callback is None:
+        return
+    result = callback(**kwargs)
+    if inspect.isawaitable(result):
+        await result
+
+
 def _truncate_text(text: str, limit: int) -> str:
     if len(text) <= limit:
         return text
@@ -131,6 +139,7 @@ async def run_tool_command_loop(
     chat_with_ai: Callable[..., Any],
     allowed_types: set[str],
     contains_cmd: Callable[[str], bool],
+    record_tool_execution: Callable[..., Any] | None = None,
     max_iterations: int = DEFAULT_TOOL_LOOP_MAX_ITERATIONS,
 ) -> ToolCommandLoopResult:
     messages = list(context_messages)
@@ -168,6 +177,13 @@ async def run_tool_command_loop(
             ctx,
             allow_tools=True,
             allowed_types=set(allowed_types or set()),
+        )
+        await _call_optional(
+            record_tool_execution,
+            command_text=final_reply,
+            triggered=bool(command_triggered),
+            outputs=list(outputs or []),
+            used_triggers=list(used or []),
         )
         triggered = triggered or bool(command_triggered)
         if clean_text:
@@ -221,6 +237,7 @@ async def run_react_first_pass(
     chat_with_ai: Callable[..., Any],
     contains_cmd: Callable[[str], bool],
     strip_cmd_anywhere: Callable[[str], str],
+    record_tool_execution: Callable[..., Any] | None = None,
 ) -> ReactFirstPassResult:
     del strip_cmd_anywhere
     first_pass_task = task_reasoning if (need_tools or deferred_tool_flow) else task_default
@@ -238,6 +255,7 @@ async def run_react_first_pass(
         chat_with_ai=chat_with_ai,
         allowed_types={"react"},
         contains_cmd=contains_cmd,
+        record_tool_execution=record_tool_execution,
     )
     return ReactFirstPassResult(
         reply=str(loop_result.reply or ""),

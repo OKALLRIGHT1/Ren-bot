@@ -15,7 +15,7 @@ class SensorGenerationContext:
     recent_sensor_reply_block: str
     text_style_block: str
     vision_style_block: str
-    record_observation: Callable[[str, str], None]
+    record_observation: Callable[[str, str], str]
 
 
 @dataclass(frozen=True)
@@ -30,6 +30,7 @@ class SensorReplyGenerationResult:
     reply: str = ""
     reason: str = ""
     branch: str = ""
+    observation_event_id: str = ""
 
 
 class SensorEventService:
@@ -48,6 +49,7 @@ class SensorEventService:
         build_live2d_self_awareness_hint: Callable[..., str],
         compress_sensor_text: Callable[..., str],
         logger: Any = None,
+        conversation_event_service: Any = None,
     ) -> None:
         self.screen_sensor_ref_getter = screen_sensor_ref_getter
         self.format_sensor_observations = format_sensor_observations
@@ -59,6 +61,7 @@ class SensorEventService:
         self.build_live2d_self_awareness_hint = build_live2d_self_awareness_hint
         self.compress_sensor_text = compress_sensor_text
         self.logger = logger
+        self.conversation_event_service = conversation_event_service
 
     def build_generation_context(
         self,
@@ -134,31 +137,64 @@ class SensorEventService:
         category: str,
         display_app: str,
         reason: str,
-    ) -> None:
+        ctx: Optional[dict] = None,
+    ) -> str:
+        """Record screen observation; return conversation event id when available."""
         sensor_ref = self.screen_sensor_ref_getter()
-        if sensor_ref is None:
-            return
-        add_fn = getattr(sensor_ref, "add_observation", None) or getattr(
-            sensor_ref, "_append_observation", None
-        )
-        if not add_fn:
-            return
-        try:
-            add_fn(
-                content,
-                clean_title,
-                category,
-                app_name=display_app,
-                reason=reason,
-                source=source,
+        if sensor_ref is not None:
+            add_fn = getattr(sensor_ref, "add_observation", None) or getattr(
+                sensor_ref, "_append_observation", None
             )
-        except TypeError:
+            if add_fn:
+                try:
+                    add_fn(
+                        content,
+                        clean_title,
+                        category,
+                        app_name=display_app,
+                        reason=reason,
+                        source=source,
+                    )
+                except TypeError:
+                    try:
+                        add_fn(
+                            content, clean_title, category, display_app, reason, source
+                        )
+                    except Exception:
+                        pass
+                except Exception:
+                    pass
+
+        evidence = str(content or "").strip()
+        if not evidence:
+            return ""
+        event_id = ""
+        event_service = self.conversation_event_service
+        if event_service is not None and getattr(event_service, "is_ready", False):
+            event_ctx = dict(ctx or {"source": "desktop"})
+            if not event_ctx.get("source"):
+                event_ctx["source"] = "desktop"
             try:
-                add_fn(content, clean_title, category, display_app, reason, source)
-            except Exception:
-                return
-        except Exception:
-            return
+                event = event_service.record_screen_observation(
+                    ctx=event_ctx,
+                    evidence_summary=evidence,
+                    exact_text=evidence,
+                    metadata={
+                        "source": str(source or ""),
+                        "title": str(clean_title or ""),
+                        "category": str(category or ""),
+                        "app": str(display_app or ""),
+                        "reason": str(reason or ""),
+                    },
+                )
+                if event is not None:
+                    event_id = str(event.event_id or "")
+            except Exception as exc:
+                if self.logger:
+                    self.logger.warning(
+                        f"[Sensor] conversation observation event failed: {exc}"
+                    )
+        return event_id
 
     def build_self_prompt(
         self,
@@ -337,12 +373,14 @@ class SensorEventService:
             reply = await analyze_image(
                 image_base64, prompt, caller="sensor_vision_direct"
             )
-            if reply:
-                context.record_observation(clean_title, "vision")
+            observation_event_id = (
+                context.record_observation(clean_title, "vision") if reply else ""
+            )
             return SensorReplyGenerationResult(
                 reply=str(reply or "").strip(),
                 reason="generated" if str(reply or "").strip() else "empty",
                 branch="vision_direct",
+                observation_event_id=observation_event_id,
             )
         except Exception as exc:
             self._log_warning(f"Vision direct failed: {exc}")
@@ -407,7 +445,7 @@ class SensorEventService:
                 )
 
             description = self.compress_sensor_text(description, max_len=800)
-            context.record_observation(description, "vision")
+            observation_event_id = context.record_observation(description, "vision")
             talk_prompt = self.build_vision_talk_prompt(
                 context=context,
                 description=description,
@@ -435,6 +473,7 @@ class SensorEventService:
                 reply=str(reply or "").strip(),
                 reason="generated" if str(reply or "").strip() else "empty_reply",
                 branch="vision_separate",
+                observation_event_id=observation_event_id,
             )
         except Exception as exc:
             self._log_warning(f"Vision separate failed: {exc}")
@@ -594,7 +633,7 @@ class SensorEventService:
             count=count,
         )
         try:
-            context.record_observation(clean_title, "text")
+            observation_event_id = context.record_observation(clean_title, "text")
             reply = await asyncio.to_thread(
                 chat_with_ai,
                 [
@@ -608,6 +647,7 @@ class SensorEventService:
                 reply=str(reply or "").strip(),
                 reason="generated" if str(reply or "").strip() else "empty",
                 branch="text",
+                observation_event_id=observation_event_id,
             )
         except Exception as exc:
             self._log_error(f"Sensor Gen failed: {exc}")
@@ -621,10 +661,31 @@ class SensorEventService:
         category: str,
         count: int,
         reason: str,
+        use_vision: bool = False,
+        vision_mode: str = "separate",
         app_duration_sec: float | int | None,
         current_stay_sec: float | int | None,
         chat_with_ai: Callable[..., str],
+        analyze_image: Optional[Callable[..., Any]] = None,
+        active_title_getter: Optional[Callable[[], str]] = None,
+        take_screenshot_base64: Optional[Callable[..., str]] = None,
     ) -> SensorReplyGenerationResult:
+        # 非自身窗口：生成前先确认焦点还在事件窗口，避免串台。
+        if category != "self":
+            focus = revalidate_focus_for_sensor(
+                event_title=clean_title,
+                app_name=display_app,
+                active_title_getter=active_title_getter,
+            )
+            if not focus.ok:
+                self._log_info(
+                    f"🛑 [Sensor] 焦点已变，跳过吐槽: event={clean_title} active={focus.active_title}"
+                )
+                return SensorReplyGenerationResult(
+                    reason="focus_mismatch",
+                    branch="guard",
+                )
+
         context = self.build_generation_context(
             clean_title=clean_title,
             display_app=display_app,
@@ -643,18 +704,42 @@ class SensorEventService:
                 chat_with_ai=chat_with_ai,
             )
 
-        gatekeeper_result = await self.run_gatekeeper(
-            context=context,
-            clean_title=clean_title,
-            category=category,
-            count=count,
-            chat_with_ai=chat_with_ai,
-        )
-        if not gatekeeper_result.allowed:
-            return SensorReplyGenerationResult(
-                reason=gatekeeper_result.reason or "gatekeeper_blocked",
-                branch="gatekeeper",
+        # 文本路径先过 gatekeeper；视觉路径直接看图，失败再回退文本。
+        if not use_vision:
+            gatekeeper_result = await self.run_gatekeeper(
+                context=context,
+                clean_title=clean_title,
+                category=category,
+                count=count,
+                chat_with_ai=chat_with_ai,
             )
+            if not gatekeeper_result.allowed:
+                return SensorReplyGenerationResult(
+                    reason=gatekeeper_result.reason or "gatekeeper_blocked",
+                    branch="gatekeeper",
+                )
+
+        if use_vision:
+            if analyze_image is None:
+                self._log_warning("视觉路径缺少 analyze_image，回退文本生成")
+            else:
+                vision_generation = await self.run_vision_generation(
+                    context=context,
+                    clean_title=clean_title,
+                    vision_mode=vision_mode,
+                    analyze_image=analyze_image,
+                    chat_with_ai=chat_with_ai,
+                    display_app=display_app,
+                    take_screenshot_base64=take_screenshot_base64,
+                    active_title_getter=active_title_getter,
+                )
+                if vision_generation.reply:
+                    return vision_generation
+                if vision_generation.reason == "focus_mismatch":
+                    return vision_generation
+                self._log_info(
+                    f"ℹ️ [Sensor] 视觉生成未产出回复，回退文本: reason={vision_generation.reason}"
+                )
 
         return await self.run_text_generation(
             context=context,

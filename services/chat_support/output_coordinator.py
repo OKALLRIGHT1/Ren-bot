@@ -37,6 +37,7 @@ async def emit_short_reaction(
     emit_assistant_text: Callable[..., Awaitable[None]],
     add_memory_safe: Callable[..., Awaitable[Any]],
     emit_idle_status_when_safe: Callable[..., Awaitable[Any]],
+    record_message_pair: Optional[Callable[..., Awaitable[Any]]] = None,
 ) -> bool:
     if not text:
         return False
@@ -68,6 +69,13 @@ async def emit_short_reaction(
         short_meta["session_id"] = memory_session_id
     await add_memory_safe("user", user_text, meta=short_meta)
     await add_memory_safe("assistant", text, meta=short_meta)
+    if record_message_pair is not None:
+        await record_message_pair(
+            ctx=ctx,
+            user_text=user_text,
+            assistant_text=text,
+            metadata=short_meta,
+        )
     await emit_idle_status_when_safe(
         output_profile,
         reason="short_reaction",
@@ -191,6 +199,7 @@ async def emit_non_stream_reply(
     set_codex_task_state: Callable[..., None],
     add_memory_safe: Callable[..., Awaitable[Any]],
     emit_idle_status_when_safe: Callable[..., Awaitable[Any]],
+    record_message_pair: Optional[Callable[..., Awaitable[Any]]] = None,
 ) -> bool:
     if learning:
         learning.record_interaction(
@@ -268,8 +277,16 @@ async def emit_non_stream_reply(
         }
         if memory_session_id:
             chat_meta["session_id"] = memory_session_id
+        # T1 dual-write: transcript via add_memory_safe; events = near-history authority.
         await add_memory_safe("user", user_text, meta=chat_meta)
         await add_memory_safe("assistant", final_reply, meta=chat_meta)
+        if record_message_pair is not None:
+            await record_message_pair(
+                ctx=ctx,
+                user_text=user_text,
+                assistant_text=final_reply,
+                metadata=chat_meta,
+            )
 
     await emit_idle_status_when_safe(
         output_profile,
@@ -296,6 +313,7 @@ async def emit_stream_reply(
     record_task_followup: Callable[..., Awaitable[Any]],
     set_codex_task_state: Callable[..., None],
     add_memory_safe: Callable[..., Awaitable[Any]],
+    record_message_pair: Optional[Callable[..., Awaitable[Any]]] = None,
 ) -> bool:
     if not full_reply:
         return False
@@ -351,8 +369,16 @@ async def emit_stream_reply(
     }
     if stream_context.memory_session_id:
         stream_chat_meta["session_id"] = stream_context.memory_session_id
+    # T1 dual-write: transcript via add_memory_safe; events = near-history authority.
     await add_memory_safe("user", user_text, meta=stream_chat_meta)
     await add_memory_safe("assistant", full_reply, meta=stream_chat_meta)
+    if record_message_pair is not None:
+        await record_message_pair(
+            ctx=stream_context.ctx,
+            user_text=user_text,
+            assistant_text=full_reply,
+            metadata=stream_chat_meta,
+        )
     if stream_context.codex_mode:
         set_codex_task_state(stream_context.ctx, "finalize", summary=full_reply[:200])
 

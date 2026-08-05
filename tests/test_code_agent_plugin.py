@@ -151,7 +151,24 @@ async def test_code_agent_modify_requires_confirmation(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_code_agent_confirm_does_not_default_to_exec_permission(tmp_path):
+async def test_code_agent_gate_confirmed_skips_plugin_confirm(tmp_path):
+    Plugin = load_plugin_class()
+    runner = FakeRunner()
+    plugin = Plugin(runner=runner, discoverer=lambda provider: f"{provider} {{prompt_stdin}}")
+
+    result = await plugin.run(
+        f"modify ||| claude_code ||| {tmp_path} ||| 修改 README",
+        {"allow_exec": True, "action_confirmed": True},
+    )
+
+    assert isinstance(result, str)
+    assert "analysis ok" in result
+    assert runner.calls[0].allow_write is True
+
+
+@pytest.mark.asyncio
+async def test_code_agent_confirm_grants_exec_after_user_confirm(tmp_path):
+    """After explicit user confirm, external CLI may run even without prior allow_exec flag."""
     Plugin = load_plugin_class()
     runner = FakeRunner()
     plugin = Plugin(runner=runner, discoverer=lambda provider: f"{provider} {{prompt_stdin}}")
@@ -167,7 +184,7 @@ async def test_code_agent_confirm_does_not_default_to_exec_permission(tmp_path):
 
     await plugin.confirm_agent_action(payload, {})
 
-    assert runner.calls[0].allow_exec is False
+    assert runner.calls[0].allow_exec is True
 
 
 @pytest.mark.asyncio

@@ -638,11 +638,15 @@ class Plugin:
             join_endpoint_url = None
         if join_endpoint_url is not None:
             return join_endpoint_url(base_url, endpoint_path)
-        # fallback if catalog import fails
+        # fallback if catalog import fails: still avoid .../v4/v1/...
+        import re
+
         base = base_url.rstrip("/")
         path = endpoint_path if endpoint_path.startswith("/") else "/" + endpoint_path
-        if base.endswith("/v1") and path.startswith("/v1/"):
-            path = path[3:]
+        if re.search(r"/v\d+$", base, re.IGNORECASE):
+            path = re.sub(r"^/v\d+(?=/|$)", "", path, count=1, flags=re.IGNORECASE) or ""
+            if not path:
+                return base
         return base + path
 
     def _extract_image_bytes(self, payload: Any) -> Optional[bytes]:
@@ -1158,7 +1162,9 @@ class Plugin:
         for index, image_meta in enumerate(images[:max_images]):
             try:
                 value = str(
-                    await asyncio.to_thread(load_image_base64, image_meta)
+                    await asyncio.to_thread(
+                        load_image_base64, image_meta, source="remote"
+                    )
                 ).strip()
             except Exception as exc:
                 self._debug(f"load {source} image[{index}] failed: {exc}")

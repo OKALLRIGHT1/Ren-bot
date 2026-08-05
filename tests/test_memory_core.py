@@ -22,6 +22,7 @@ def test_memory_core_migrates_legacy_rows_once(tmp_path):
             "text": "用户喜欢简短直接的回答",
             "tags": ["role:user", "reply_style"],
             "confidence": 0.9,
+            "allow_legacy_write": True,
         }
     )
     store.upsert_episode(
@@ -56,6 +57,7 @@ def test_memory_core_repairs_legacy_character_profiles_without_owner_leak(tmp_pa
                 "text": "五十铃怜",
                 "tags": [f"role:{role_id}", "name"],
                 "confidence": 0.9,
+                "allow_legacy_write": True,
             }
         )
     for item_id, role_id in (("old_song", "default_char"), ("new_song", "suzu")):
@@ -66,6 +68,7 @@ def test_memory_core_repairs_legacy_character_profiles_without_owner_leak(tmp_pa
                 "text": "《迷星叫》",
                 "tags": [f"role:{role_id}", "likes", "music"],
                 "confidence": 0.9,
+                "allow_legacy_write": True,
             }
         )
     store.upsert_item(
@@ -74,6 +77,7 @@ def test_memory_core_repairs_legacy_character_profiles_without_owner_leak(tmp_pa
             "type": "agent_profile",
             "text": "温柔 / 冷静 (初始性格)",
             "tags": ["role:char_test", "traits"],
+            "allow_legacy_write": True,
         }
     )
 
@@ -471,6 +475,70 @@ def test_plain_chat_does_not_recall_long_term_memory(tmp_path):
     assert result.memory_text == ""
 
 
+def test_habit_weekday_query_uses_episode_and_requires_evidence(tmp_path):
+    store = _store(tmp_path)
+    core = MemoryCoreService(store)
+    core.initialize()
+
+    empty = core.build_reply_context(
+        "我平常都是周几开会",
+        session_id="local:owner",
+        person_id="owner",
+        recent_messages=[],
+        use_llm=False,
+    )
+    assert empty.intent == "episode"
+    assert empty.memory_text == ""
+
+    core.upsert_memory_record(
+        kind="fact",
+        key="habit.meeting_weekday",
+        content="用户固定周四开会",
+        subject_id="owner",
+        source_type="test",
+        source_id="habit-thursday",
+    )
+    hit = core.build_reply_context(
+        "我平常都是周几开会",
+        session_id="local:owner",
+        person_id="owner",
+        recent_messages=[],
+        use_llm=False,
+    )
+    assert hit.intent == "episode"
+    assert "周四" in hit.memory_text
+
+
+def test_format_active_tasks_skips_question_like_todos(tmp_path):
+    from datetime import datetime, timezone
+
+    from modules.memory_sqlite import format_active_tasks_for_prompt
+
+    store = _store(tmp_path)
+    now = datetime.now(timezone.utc).isoformat()
+    store.upsert_item(
+        {
+            "type": "todo",
+            "status": "active",
+            "text": "还记得我上次开会是什么时候吗",
+            "source": "task_agent",
+            "updated_at": now,
+        }
+    )
+    store.upsert_item(
+        {
+            "type": "todo",
+            "status": "active",
+            "text": "周四准备周会材料",
+            "source": "task_agent",
+            "updated_at": now,
+        }
+    )
+    prompt = format_active_tasks_for_prompt(store, limit=6)
+    assert "周四准备周会材料" in prompt
+    assert "还记得我上次开会" not in prompt
+
+
 def test_manual_profile_fact_is_not_overwritten(tmp_path):
     store = _store(tmp_path)
     core = MemoryCoreService(store)
@@ -600,6 +668,62 @@ def test_explicit_owner_profile_statement_is_learned(tmp_path):
     )
 
     assert "master" in core.get_person_profile("owner").text.lower()
+
+
+def test_meeting_weekday_correction_triggers_profile_learning(tmp_path):
+    store = _store(tmp_path)
+    calls = []
+
+    def fake_llm(messages, *, task_type="summary", caller=""):
+        calls.append(caller)
+        if caller == "profile_extract_v2":
+            prompt = messages[-1]["content"]
+            evidence_id = next(
+                line.split("id=", 1)[1].split()[0]
+                for line in prompt.splitlines()
+                if line.startswith("id=") and "其实是周四" in line
+            )
+            return (
+                '{"items":[{"kind":"fact","key":"habit.meeting_weekday",'
+                '"content":"用户固定周四开会","confidence":0.95,'
+                f'"valid_days":0,"evidence_ids":["{evidence_id}"]}}]}}'
+            )
+        return '{"items":[]}'
+
+    core = MemoryCoreService(store, llm_call=fake_llm)
+    core.initialize()
+    assert MemoryCoreService._has_explicit_profile_signal("其实是周四哦")
+    core.record_message(
+        "user",
+        "我平常都是周几开会",
+        session_id="owner_shared",
+        person_id="owner",
+        meta={"source": "text_input"},
+    )
+    core.record_message(
+        "assistant",
+        "查了下记事 好像周三和周五比较多",
+        session_id="owner_shared",
+        person_id="owner",
+        meta={"source": "text_input"},
+    )
+    core.record_message(
+        "user",
+        "其实是周四哦",
+        session_id="owner_shared",
+        person_id="owner",
+        meta={"source": "text_input"},
+    )
+
+    assert "profile_extract_v2" in calls
+    hit = core.build_reply_context(
+        "我平常都是周几开会",
+        session_id="owner_shared",
+        person_id="owner",
+        recent_messages=[],
+        use_llm=False,
+    )
+    assert "周四" in hit.memory_text
 
 
 def test_other_qq_users_are_not_automatic_learning_sources(tmp_path):

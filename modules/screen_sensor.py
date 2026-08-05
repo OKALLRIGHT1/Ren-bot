@@ -4,6 +4,7 @@ import asyncio
 import json
 import re
 import os
+import random
 
 from datetime import datetime
 from typing import Optional, Dict, Tuple, List, Any
@@ -1914,7 +1915,39 @@ class ScreenSensor:
                     self._last_rust_debug_at = now
                 return
 
-        self.logger.info(f"👀 [Screen] 触发 ChatService: {app_name} | Vision: False")
+        # ============================================================
+        # 视觉判定：默认文本观测；满足条件时升级为截图识别
+        # ============================================================
+        use_vision = False
+
+        # 场景 A: 沉浸时长触发 (reason="duration") -> 强制视觉查岗
+        if reason == "duration":
+            use_vision = True
+            self.logger.info("📸 [Sensor] 触发视觉查岗 (原因: 长时间停留)")
+        else:
+            # 场景 B: 切换触发 -> 对有内容的分类按概率升级
+            interesting_cats = {
+                "gaming",
+                "video",
+                "social",
+                "design",
+                "coding",
+                "work",
+                "other",
+            }
+            if category in interesting_cats:
+                base_prob = 0.15
+                prob_boost = count * 0.05
+                final_prob = min(base_prob + prob_boost, 0.85)
+                if random.random() < final_prob:
+                    use_vision = True
+                    self.logger.info(
+                        f"🎲 [Sensor] 升级为视觉查岗 (概率: {final_prob:.2f})"
+                    )
+
+        self.logger.info(
+            f"👀 [Screen] 触发 ChatService: {app_name} | Vision: {use_vision}"
+        )
 
         if self._loop and self._loop.is_running():
             if app_duration_sec is None:
@@ -1926,6 +1959,7 @@ class ScreenSensor:
                     full_title,
                     category,
                     count,
+                    use_vision=use_vision,
                     app_name=app_name,
                     reason=reason,
                     app_duration_sec=app_duration_sec,

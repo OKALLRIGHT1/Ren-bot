@@ -192,7 +192,9 @@ class ProviderEditDialog(QtWidgets.QDialog):
 
         self.inp_url = QtWidgets.QLineEdit(str(data.get("base_url", "")))
 
-        self.inp_url.setPlaceholderText("https://api.example.com/v1")
+        self.inp_url.setPlaceholderText(
+            "https://api.example.com/v1 或 .../api/paas/v4"
+        )
 
         form.addRow("Base URL:", self.inp_url)
 
@@ -324,7 +326,9 @@ class ModelEditDialog(QtWidgets.QDialog):
 
         self.inp_url = QtWidgets.QLineEdit(str(self._original.get("base_url", "")))
 
-        self.inp_url.setPlaceholderText("https://api.example.com/v1")
+        self.inp_url.setPlaceholderText(
+            "https://api.example.com/v1 或 https://open.bigmodel.cn/api/paas/v4"
+        )
 
         form.addRow("Base URL:", self.inp_url)
 
@@ -649,9 +653,12 @@ class ModelEditDialog(QtWidgets.QDialog):
                 if not path.startswith("/"):
                     path = "/" + path
                 base = base_url.rstrip("/")
-                if base.endswith("/v1") and path.startswith("/v1/"):
-                    path = path[3:]
-                endpoint = (base + path) if base else path
+                try:
+                    from modules.model_catalog import join_endpoint_url as _join
+
+                    endpoint = _join(base, path) if base else path
+                except Exception:
+                    endpoint = (base + path) if base else path
             transport = "images"
         else:
             endpoint = self._preview_endpoint(base_url, style)
@@ -679,15 +686,24 @@ class ModelEditDialog(QtWidgets.QDialog):
         base = str(base_url or "").strip().rstrip("/")
         if not base:
             return ""
-        if style in {"responses", "openai_responses"}:
-            if base.endswith("/v1"):
-                return base + "/responses"
-            return base + "/v1/responses"
         if style in {"gemini_native", "google"}:
             return base + "/v1beta/models/{model}:generateContent"
-        if base.endswith("/v1"):
-            return base + "/chat/completions"
-        return base + "/v1/chat/completions"
+        try:
+            from modules.model_catalog import join_openai_compat_url
+
+            if style in {"responses", "openai_responses"}:
+                return join_openai_compat_url(base, "responses")
+            return join_openai_compat_url(base, "chat/completions")
+        except Exception:
+            # Fallback mirrors join_openai_compat_url for any trailing /vN.
+            import re
+
+            versioned = bool(re.search(r"/v\d+$", base, re.IGNORECASE))
+            if style in {"responses", "openai_responses"}:
+                return base + ("/responses" if versioned else "/v1/responses")
+            return base + (
+                "/chat/completions" if versioned else "/v1/chat/completions"
+            )
 
     def _selected_purposes(self):
         selected = []

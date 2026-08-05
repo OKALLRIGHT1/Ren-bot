@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Set
 
 
@@ -22,12 +23,54 @@ MODEL_PURPOSE_OPTIONS: List[tuple[str, str]] = [
 MODEL_PURPOSE_LABELS: Dict[str, str] = {key: label for key, label in MODEL_PURPOSE_OPTIONS}
 MODEL_PURPOSE_IDS: Set[str] = set(MODEL_PURPOSE_LABELS)
 
+# Matches OpenAI-compatible roots such as /v1, /v4, /V2 (Zhipu paas/v4, etc.).
+_API_VERSION_SUFFIX_RE = re.compile(r"/v\d+$", re.IGNORECASE)
+_API_VERSION_PREFIX_RE = re.compile(r"^/v\d+(?=/|$)", re.IGNORECASE)
+
+
+def has_api_version_suffix(url: str) -> bool:
+    """Return True when URL already ends with an API version segment like /v1 or /v4."""
+    base = str(url or "").strip().rstrip("/")
+    return bool(_API_VERSION_SUFFIX_RE.search(base))
+
+
+def strip_leading_api_version(path: str) -> str:
+    """Strip a leading /vN from a path. /v1/chat/completions -> /chat/completions."""
+    text = str(path or "").strip()
+    if not text:
+        return ""
+    if not text.startswith("/"):
+        text = "/" + text
+    match = _API_VERSION_PREFIX_RE.match(text)
+    if not match:
+        return text
+    rest = text[match.end() :]
+    return rest if rest else ""
+
+
+def join_openai_compat_url(base_url: str, endpoint: str) -> str:
+    """Join base_url with an OpenAI-compatible endpoint.
+
+    If base_url already ends with /vN (e.g. .../paas/v4), do not insert another /v1.
+    Otherwise default to the common OpenAI root: base + /v1 + endpoint.
+    """
+    base = str(base_url or "").strip().rstrip("/")
+    if not base:
+        raise ValueError("openai compatible call missing base_url")
+    ep = str(endpoint or "").strip().lstrip("/")
+    if not ep:
+        raise ValueError("openai compatible call missing endpoint")
+    if has_api_version_suffix(base):
+        return f"{base}/{ep}"
+    return f"{base}/v1/{ep}"
+
 
 def join_endpoint_url(base_url: str, endpoint_path: str) -> str:
-    """Join base_url + endpoint_path without duplicating a trailing /v1 segment.
+    """Join base_url + endpoint_path without duplicating a trailing /vN segment.
 
     Examples:
       https://host/v1 + /v1/images/generations -> https://host/v1/images/generations
+      https://host/v4 + /v1/chat/completions   -> https://host/v4/chat/completions
       https://host     + /v1/images/generations -> https://host/v1/images/generations
       https://host/v1/ + images/generations     -> https://host/v1/images/generations
       https://host/v1/embedding + /embeddings   -> https://host/v1/embeddings
@@ -46,12 +89,13 @@ def join_endpoint_url(base_url: str, endpoint_path: str) -> str:
         return base[: -len("/embedding")] + "/embeddings" if base.endswith("/embedding") and not base.endswith("/embeddings") else (
             base if base.endswith("/embeddings") else base + path
         )
-    # base already ends with /v1 (common OpenAI-compatible root) and path also starts with /v1/
-    if base.endswith("/v1") and path.startswith("/v1/"):
-        path = path[3:]
-    # base is exactly .../v1 and path is exactly /v1
-    elif base.endswith("/v1") and path == "/v1":
-        return base
+    # base already ends with /vN (OpenAI /v1, Zhipu /v4, ...) and path also starts with /vN
+    if has_api_version_suffix(base):
+        stripped = strip_leading_api_version(path)
+        if stripped == "":
+            return base
+        if stripped != path:
+            path = stripped
     return base + path
 
 # Accept Chinese / alias labels so older configs and free-text import still work.

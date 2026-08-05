@@ -15,6 +15,7 @@ class Plugin:
     description = "把代码项目分析或修改任务委托给本机 Codex CLI / Claude Code。"
     aliases = ["code_agent", "codex", "Codex", "claude code", "Claude Code", "cc"]
     allow_natural_language_direct = True
+    gated_action = "system.code_agent"
     tool_examples = [
         "让 Codex 分析这个项目为什么启动失败",
         "用 Claude Code 修改 README",
@@ -30,6 +31,12 @@ class Plugin:
         self._runner = runner or run_code_agent
         self._discoverer = discoverer or discover_agent_command
         self.settings: Dict[str, Any] = {}
+
+    def resolve_gated_action(self, args: str, ctx: Optional[Dict[str, Any]] = None) -> str:
+        action, _provider, _cwd, _prompt = self._parse_request(args or "")
+        if action in {"", "help", "status"}:
+            return ""  # no gate for status/help
+        return "system.code_agent"
 
     def get_capabilities(self):
         return [
@@ -113,6 +120,10 @@ class Plugin:
         command_template = self._command_template(provider)
         if not command_template:
             return f"未找到 {self._provider_label(provider)} 命令，请先安装或在设置里配置命令模板。"
+
+        gate_confirmed = bool(
+            (ctx or {}).get("action_confirmed") or (ctx or {}).get("gate_confirmed")
+        )
         request = self._build_request(
             provider=provider,
             cwd=cwd,
@@ -120,9 +131,12 @@ class Plugin:
             command_template=command_template,
             action=action,
             ctx=ctx,
+            force_exec=gate_confirmed,
         )
 
-        if action == "modify":
+        # ActionGate already handles confirmation (local popup or chat “确认”).
+        # Keep a plugin-level fallback only when gate was bypassed and action is modify.
+        if action == "modify" and not gate_confirmed:
             if not request.allow_exec:
                 return self._exec_permission_message()
             return {
@@ -140,6 +154,8 @@ class Plugin:
                     "timeout_sec": request.timeout_sec,
                     "allow_write": True,
                     "task_id": request.task_id,
+                    "mode": "code_agent_run",
+                    "action": action,
                 },
                 "expires_in": 300,
             }
@@ -150,6 +166,13 @@ class Plugin:
         return self._format_result(result)
 
     async def confirm_agent_action(self, payload: Dict[str, Any], ctx: Dict[str, Any]) -> str:
+        runtime = dict(ctx or {})
+        runtime["action_confirmed"] = True
+        runtime["gate_confirmed"] = True
+        # Prefer gate_rerun args when present
+        if str(payload.get("mode") or "") == "gate_rerun" and payload.get("args") is not None:
+            result = await self.run(str(payload.get("args") or ""), runtime)
+            return str(result)
         provider = str(payload.get("provider") or "codex_cli").strip()
         request = CodeAgentRequest(
             provider=provider,
@@ -158,7 +181,8 @@ class Plugin:
             command_template=str(payload.get("command_template") or "").strip(),
             timeout_sec=int(payload.get("timeout_sec") or self._setting_int("timeout_sec", 300)),
             allow_write=bool(payload.get("allow_write", True)),
-            allow_exec=bool(ctx.get("allow_exec", False)),
+            # Confirmed path may run without separate code-assistant allow_exec flag
+            allow_exec=True,
             task_id=str(payload.get("task_id") or uuid.uuid4().hex[:8]),
         )
         result = await self._runner(request)
@@ -235,7 +259,9 @@ class Plugin:
         command_template: str,
         action: str,
         ctx: Dict[str, Any],
+        force_exec: bool = False,
     ) -> CodeAgentRequest:
+        allow_exec = bool(ctx.get("allow_exec", False)) or bool(force_exec)
         return CodeAgentRequest(
             provider=provider,
             prompt=str(prompt or "").strip(),
@@ -243,7 +269,7 @@ class Plugin:
             command_template=command_template,
             timeout_sec=self._setting_int("timeout_sec", 300),
             allow_write=action == "modify",
-            allow_exec=bool(ctx.get("allow_exec", False)),
+            allow_exec=allow_exec,
             task_id=str(ctx.get("codex_task_id") or uuid.uuid4().hex[:8]),
         )
 

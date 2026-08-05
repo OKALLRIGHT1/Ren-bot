@@ -37,6 +37,15 @@ DEFAULT_ACCESS_CONTROL = {
     "allow_group_without_at": False,
 }
 
+# Plugins that must declare access_control for long-term ops visibility
+_ACCESS_CONTROL_WARN_IF_DEFAULT = {
+    "打开",
+    "open_app",
+    "backup_manager",
+    "code",
+    "workspace_ops",
+}
+
 
 def _safe_print(message: Any = "") -> None:
     text = str(message)
@@ -73,6 +82,8 @@ class PluginManager:
 
         self.default_timeout_sec = 6.0
         self.debug_enabled = bool(CHAT_DEBUG_PRINTS)
+        # Optional local UI confirm: Callable[[title, summary], bool]
+        self.local_confirm_handler: Optional[Any] = None
         # 支持多种分隔符：| 、/ 和空格，非贪婪匹配直到右括号
         self._cmd_pattern = (
             r"\[CMD:\s*([A-Za-z0-9_\-]+)\s*(?:[\|／\/]\s*|\s+)([^\]]*?)\]"
@@ -186,6 +197,15 @@ class PluginManager:
             f"other_qq={len(other_qq)} {other_qq}; "
             f"group_without_at={len(group_no_at)} {group_no_at}"
         )
+        missing_ac = []
+        for trigger, config in (self.plugin_configs or {}).items():
+            raw = config.get("access_control") if isinstance(config, dict) else None
+            if not isinstance(raw, dict) or not raw:
+                missing_ac.append(str(trigger))
+        if missing_ac:
+            _safe_print(
+                f"[PluginSecurity] empty_access_control={len(missing_ac)} {sorted(missing_ac)}"
+            )
 
     def _apply_secret_overrides(self, trigger: str, config: dict) -> dict:
         if not isinstance(config, dict):
@@ -1044,11 +1064,169 @@ class PluginManager:
         return bool(self._iter_command_matches(text or ""))
 
     # -------------------- Execute --------------------
+    def _apply_action_gate(self, plugin, args: str, runtime_context: dict) -> Optional[Any]:
+        """Return deny text or confirmation_required dict if gated action cannot run; else None."""
+        try:
+            from services.action_gate import get_action_gate
+        except Exception:
+            return None
+        gate = get_action_gate()
+        action = gate.resolve_plugin_action(plugin, args, runtime_context)
+        if not action:
+            return None
+        runtime_context["gated_action"] = action
+        trigger = str(
+            getattr(plugin, "plugin_trigger", "")
+            or getattr(plugin, "llm_command", "")
+            or ""
+        )
+        runtime_context["plugin_trigger"] = trigger
+        decision = gate.evaluate(action, runtime_context)
+        runtime_context["action_gate_decision"] = {
+            "allowed": decision.allowed,
+            "requires_confirmation": decision.requires_confirmation,
+            "risk": decision.risk.value,
+            "reason": decision.reason,
+            "action": decision.action,
+        }
+        if decision.allowed:
+            return None
+        plugin_name = getattr(plugin, "name", getattr(plugin, "plugin_trigger", "工具"))
+        if decision.requires_confirmation:
+            preview = str(args or "").replace("\n", " ").strip()
+            if len(preview) > 160:
+                preview = preview[:160] + "..."
+            summary = (
+                f"⚠️ 插件“{plugin_name}”执行 {decision.action} 需要确认。"
+                f"{('（' + decision.reason + '）') if decision.reason else ''}"
+            )
+            if preview:
+                summary = f"{summary}\n预览: {preview}"
+
+            # Local UI: modal popup can approve in-place (no chat “确认” needed)
+            if self._try_local_popup_confirm(
+                title=f"确认：{plugin_name}",
+                summary=summary,
+                runtime_context=runtime_context,
+            ):
+                runtime_context["action_confirmed"] = True
+                runtime_context["gate_confirmed"] = True
+                # Re-evaluate with confirmation flag
+                decision2 = gate.evaluate(action, runtime_context)
+                runtime_context["action_gate_decision"] = {
+                    "allowed": decision2.allowed,
+                    "requires_confirmation": decision2.requires_confirmation,
+                    "risk": decision2.risk.value,
+                    "reason": decision2.reason,
+                    "action": decision2.action,
+                }
+                if decision2.allowed:
+                    return None
+                return (
+                    f"⚠️ 插件“{plugin_name}”无法执行 {decision2.action}："
+                    f"{decision2.reason or '权限不足'}"
+                )
+
+            # Local popup was offered and user cancelled
+            if self._local_confirm_was_cancelled(runtime_context):
+                return "已取消这次操作。"
+
+            payload = {
+                "mode": "gate_rerun",
+                "args": args,
+                "gated_action": action,
+            }
+            # Register immediately so react tool-loop path can also reply “确认”
+            try:
+                from services.security.pending_confirm import get_pending_confirm_store
+
+                get_pending_confirm_store().set(
+                    trigger=trigger,
+                    summary=summary,
+                    payload=payload,
+                    expires_in=300,
+                )
+            except Exception:
+                pass
+            return {
+                "__agent_result__": "confirmation_required",
+                "trigger": trigger,
+                "summary": summary,
+                "payload": payload,
+                "expires_in": 300,
+            }
+        return (
+            f"⚠️ 插件“{plugin_name}”无法执行 {decision.action}："
+            f"{decision.reason or '权限不足'}"
+        )
+
+    def _is_local_context(self, runtime_context: Optional[dict]) -> bool:
+        try:
+            from services.security.actor import ActorKind, resolve_actor_context
+
+            actor = resolve_actor_context(runtime_context)
+            return actor.kind == ActorKind.LOCAL
+        except Exception:
+            source = str((runtime_context or {}).get("source") or "").strip().lower()
+            return source in {"", "text_input", "tauri_gui", "local", "gui", "qt_gui"}
+
+    def _try_local_popup_confirm(
+        self,
+        *,
+        title: str,
+        summary: str,
+        runtime_context: dict,
+    ) -> bool:
+        """Return True if local UI confirmed the action."""
+        runtime_context.pop("_local_confirm_cancelled", None)
+        if not self._is_local_context(runtime_context):
+            return False
+        handler = self.local_confirm_handler
+        if not callable(handler):
+            return False
+        try:
+            result = handler(str(title or "确认操作"), str(summary or ""))
+        except Exception as exc:
+            self._dbg(f"[ActionGate] local confirm handler failed: {exc}")
+            return False
+        if result is True or str(result or "").strip().lower() in {
+            "confirm",
+            "yes",
+            "ok",
+            "true",
+            "1",
+            "确认",
+        }:
+            return True
+        # Explicit cancel from popup
+        if result is False or str(result or "").strip().lower() in {
+            "cancel",
+            "no",
+            "false",
+            "0",
+            "取消",
+        }:
+            runtime_context["_local_confirm_cancelled"] = True
+        return False
+
+    def _local_confirm_was_cancelled(self, runtime_context: dict) -> bool:
+        return bool((runtime_context or {}).get("_local_confirm_cancelled"))
+
     async def _run_with_timeout(self, plugin, args: str, context: dict):
         timeout = getattr(plugin, "timeout_sec", None) or self.default_timeout_sec
         runtime_context = self._build_runtime_context(context)
         if getattr(plugin, "type", "react") == "delegate":
             runtime_context = self._build_delegate_runtime_context(context)
+        # Local modal confirm blocks a worker thread; keep the asyncio loop free.
+        if callable(self.local_confirm_handler) and self._is_local_context(runtime_context):
+            gate_block = await asyncio.to_thread(
+                self._apply_action_gate, plugin, args, runtime_context
+            )
+        else:
+            gate_block = self._apply_action_gate(plugin, args, runtime_context)
+        if gate_block:
+            _safe_print(f"🔌 [ActionGate] blocked: {gate_block}")
+            return gate_block
         task = asyncio.create_task(plugin.run(args, runtime_context))
 
         try:
@@ -1064,6 +1242,12 @@ class PluginManager:
     def _build_runtime_context(self, context: dict) -> dict:
         runtime = dict(context or {})
         runtime.setdefault("model_gateway", self.model_gateway)
+        try:
+            from services.security.actor import ensure_actor_context
+
+            runtime = ensure_actor_context(runtime)
+        except Exception:
+            pass
         return runtime
 
     def _build_delegate_runtime_context(self, context: dict) -> dict:
@@ -1391,7 +1575,14 @@ class PluginManager:
                     )
                 result = await self._run_with_timeout(plugin, args, runtime_context)
                 self._dbg(f"🔌 [ReAct] 插件执行完成，结果: {result}")
-                if result:
+                if isinstance(result, dict) and str(
+                    result.get("__agent_result__") or ""
+                ) == "confirmation_required":
+                    summary = str(result.get("summary") or "需要确认这个操作。").strip()
+                    tool_outputs.append(
+                        summary + "\n确认请回复“确认”，取消请回复“取消”。"
+                    )
+                elif result is not None:
                     tool_outputs.append(result)
             except Exception as e:
                 self._dbg(f"🔌 [ReAct] 插件执行异常: {e}")

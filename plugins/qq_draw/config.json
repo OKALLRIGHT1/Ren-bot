@@ -16,7 +16,7 @@
         "allow_remote_qq": true,
         "allow_qq_owner": true,
         "allow_qq_others": false,
-        "allow_group_without_at": true
+        "allow_group_without_at": false
     },
     "settings": {
         "model_queue": {

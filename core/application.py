@@ -2582,6 +2582,15 @@ class Live2DApplication:
             except Exception as e:
                 print(f"停止插件后台任务出错: {e}")
 
+        # Drain long-term memory writeback worker before process exit.
+        try:
+            brain = getattr(self, "brain", None)
+            memory_core = getattr(brain, "memory_core", None) if brain is not None else None
+            if memory_core is not None and hasattr(memory_core, "stop_writeback"):
+                memory_core.stop_writeback(timeout=2.0)
+        except Exception as e:
+            print(f"关闭记忆写回服务出错: {e}")
+
         if self.gui_ws_server:
             try:
                 self.gui_ws_server.stop()
@@ -3321,6 +3330,13 @@ class Live2DApplication:
             )
             self.screen_sensor.set_sedentary_meme_selector(
                 self.select_sedentary_meme_image_path
+            )
+        # Local ActionGate confirm: Qt modal popup (remote still uses chat “确认”)
+        if self.plugin_manager is not None and hasattr(
+            self.qt_ui, "request_action_confirm"
+        ):
+            self.plugin_manager.local_confirm_handler = (
+                self.qt_ui.request_action_confirm
             )
         self.qt_ui.set_status("Idle")
         try:

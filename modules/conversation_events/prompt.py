@@ -1,0 +1,95 @@
+"""Format selected conversation events into a recent-context block."""
+
+from __future__ import annotations
+
+from typing import Iterable, Sequence
+
+from modules.conversation_events.models import ConversationEvent, ConversationEventType
+
+RECENT_BLOCK_TITLE = "【最近发生的事｜内部参考】"
+LEGACY_SENSOR_EVIDENCE_TITLE = "【最近屏幕/视觉观察证据】"
+LEGACY_SENSOR_ROAST_TITLE = "【你刚才的屏幕吐槽/主动发言】"
+
+_USAGE_RULES = (
+    "使用规则：\n"
+    "- 这些内容只是可用背景，不是当前必须讨论的话题。\n"
+    "- 仅在当前消息存在指代、因果或明确语义关联时使用。\n"
+    "- 不要复述“内部参考”“事件日志”等系统概念。"
+)
+
+
+def format_recent_event_block(events: Sequence[ConversationEvent]) -> str:
+    if not events:
+        return ""
+
+    lines: list[str] = [RECENT_BLOCK_TITLE]
+    by_id = {e.event_id: e for e in events}
+
+    # Prefer speak events with parent evidence.
+    speak_types = {
+        ConversationEventType.ASSISTANT_MESSAGE,
+        ConversationEventType.PROACTIVE_UTTERANCE,
+        ConversationEventType.CARE_REMINDER,
+    }
+    rendered_ids: set[str] = set()
+
+    for event in events:
+        if event.event_type not in speak_types:
+            continue
+        quote = str(event.exact_text or "").strip()
+        if not quote:
+            continue
+        lines.append(f'- 你刚才说：“{quote}”')
+        rendered_ids.add(event.event_id)
+        for parent_id in event.causal_parent_ids or ():
+            parent = by_id.get(parent_id)
+            if parent is None:
+                continue
+            evidence = str(parent.evidence_summary or parent.exact_text or "").strip()
+            if not evidence:
+                continue
+            if parent.event_type is ConversationEventType.SCREEN_OBSERVATION:
+                lines.append(f"  依据：屏幕观察到 {evidence}")
+            elif parent.event_type is ConversationEventType.TOOL_RESULT:
+                lines.append(f"  依据：工具结果 {evidence}")
+            else:
+                lines.append(f"  依据：{evidence}")
+            rendered_ids.add(parent.event_id)
+
+    for event in events:
+        if event.event_id in rendered_ids:
+            continue
+        if event.event_type is ConversationEventType.SCREEN_OBSERVATION:
+            evidence = str(event.evidence_summary or event.exact_text or "").strip()
+            if evidence:
+                lines.append(f"- 屏幕观察：{evidence}")
+                rendered_ids.add(event.event_id)
+        elif event.event_type is ConversationEventType.TOOL_RESULT:
+            evidence = str(event.evidence_summary or event.exact_text or "").strip()
+            if evidence:
+                lines.append(f"- 工具结果：{evidence}")
+                rendered_ids.add(event.event_id)
+        elif event.event_type is ConversationEventType.USER_MESSAGE:
+            text = str(event.exact_text or "").strip()
+            if text:
+                lines.append(f"- 用户刚说：{text}")
+                rendered_ids.add(event.event_id)
+        elif event.event_type in speak_types:
+            text = str(event.exact_text or "").strip()
+            if text:
+                lines.append(f'- 你刚才说：“{text}”')
+                rendered_ids.add(event.event_id)
+
+    if len(lines) <= 1:
+        return ""
+    lines.append("")
+    lines.append(_USAGE_RULES)
+    return "\n".join(lines).strip()
+
+
+def detect_dual_inject(system_text: str) -> bool:
+    """Return True if both legacy sensor titles and new recent block appear."""
+    text = str(system_text or "")
+    has_new = RECENT_BLOCK_TITLE in text
+    has_legacy = LEGACY_SENSOR_EVIDENCE_TITLE in text or LEGACY_SENSOR_ROAST_TITLE in text
+    return has_new and has_legacy

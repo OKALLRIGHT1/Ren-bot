@@ -55,6 +55,7 @@ from services.capability_manager import is_force_executable_capability
 from services.capability_gatekeeper import (
     build_forced_capability_command,
     refine_capability_args,
+    resolve_ambiguous_capability,
 )
 
 # 引入 Gatekeeper 配置
@@ -88,6 +89,7 @@ try:
         QQ_PRIVATE_LINK_ENRICHMENT_MAX_LINKS,
         QQ_PRIVATE_LINK_ENRICHMENT_TIMEOUT_SEC,
         SCREEN_GLOBAL_COOLDOWN,
+        MEMORY_SETTINGS,
     )
 except ImportError:
     # 默认值兜底，防止 config 未更新导致报错
@@ -109,6 +111,7 @@ except ImportError:
     QQ_PRIVATE_CONTINUOUS_ENABLE_TYPING = True
     QQ_PRIVATE_CONTINUOUS_MAX_ITEMS = 12
     QQ_PRIVATE_CONTINUOUS_MAX_TEXT_CHARS = 2400
+    MEMORY_SETTINGS = {}
     QQ_PRIVATE_CONTINUOUS_MAX_TYPING_WAIT_SEC = 12.0
     QQ_PRIVATE_CONTINUOUS_MESSAGE_ENABLED = True
     QQ_PRIVATE_CONTINUOUS_SHORT_DEBOUNCE_SEC = 2.2
@@ -397,6 +400,7 @@ class ChatService:
         self._recent_sensor_replies: List[str] = []
         self._sensor_event_lock = asyncio.Lock()
         self.gateway_context_service = self._create_gateway_context_service()
+        self.conversation_event_service = self._create_conversation_event_service()
         self.gateway_sender = self._create_gateway_sender()
         self.idle_status_service = self._create_idle_status_service()
         self.reply_style_service = self._create_reply_style_service()
@@ -431,6 +435,126 @@ class ChatService:
             owner_shared_session_id=OWNER_SHARED_SESSION_ID,
             owner_shared_local_sources=OWNER_SHARED_LOCAL_SOURCES,
         )
+
+    def _create_conversation_event_service(self):
+        from services.chat_support.conversation_event_service import (
+            ConversationEventService,
+        )
+        from modules.conversation_events.store import ConversationEventStore
+
+        settings = dict(MEMORY_SETTINGS or {})
+        enabled = bool(settings.get("conversation_events_enabled", True))
+        store = None
+        sqlite_store = getattr(self.brain, "sqlite_store", None)
+        if enabled and sqlite_store is not None:
+            try:
+                store = ConversationEventStore(sqlite_store)
+            except Exception as exc:
+                if self.logger:
+                    self.logger.warning(
+                        f"[ConversationEvents] store init failed: {exc}"
+                    )
+                store = None
+        return ConversationEventService(
+            store=store,
+            gateway_context_service=self.gateway_context_service,
+            enabled=enabled and store is not None,
+            default_persona_id="suzu",
+            screen_event_ttl_sec=int(settings.get("screen_event_ttl_sec", 1800) or 1800),
+            logger=self.logger,
+        )
+
+    async def _record_message_pair_events(
+        self,
+        *,
+        ctx: Optional[Dict[str, Any]],
+        user_text: str,
+        assistant_text: str,
+        metadata: Optional[Dict[str, Any]] = None,
+        existing_user_event_id: str = "",
+        assistant_parent_event_id: str = "",
+    ) -> tuple[str, str]:
+        """T1 dual-write: events = near-history authority; transcript via add_memory_safe."""
+        service = getattr(self, "conversation_event_service", None)
+        if service is None or not getattr(service, "is_ready", False):
+            return "", ""
+        try:
+            return await service.record_message_pair(
+                ctx=ctx,
+                user_text=user_text,
+                assistant_text=assistant_text,
+                metadata=metadata,
+                existing_user_event_id=existing_user_event_id,
+                assistant_parent_event_id=assistant_parent_event_id,
+            )
+        except Exception as exc:
+            if self.logger:
+                self.logger.warning(
+                    f"[ConversationEvents] record_message_pair failed: {exc}"
+                )
+            return "", ""
+
+    async def _record_tool_execution_events(
+        self,
+        *,
+        ctx: Dict[str, Any],
+        user_text: str,
+        event_state: Dict[str, str],
+        command_text: str,
+        triggered: bool,
+        outputs: list[Any],
+        used_triggers: list[str],
+    ) -> None:
+        service = getattr(self, "conversation_event_service", None)
+        if service is None or not getattr(service, "is_ready", False):
+            return
+        triggers = [
+            str(item or "").strip()
+            for item in used_triggers
+            if str(item or "").strip()
+        ]
+        if not triggers:
+            return
+
+        user_event_id = str(event_state.get("user_event_id") or "")
+        if not user_event_id:
+            user_event = service.record_user_message(
+                ctx=ctx,
+                text=user_text,
+                metadata={"path": "tool_use", "role": "user"},
+            )
+            user_event_id = user_event.event_id if user_event else ""
+            if user_event_id:
+                event_state["user_event_id"] = user_event_id
+
+        parent_event_id = str(
+            event_state.get("assistant_parent_event_id") or user_event_id
+        )
+        result_rows = [str(item or "") for item in outputs]
+        for index, tool_name in enumerate(triggers):
+            call_event = service.record_tool_call(
+                ctx=ctx,
+                tool_name=tool_name,
+                arguments_summary=str(command_text or "")[:1000],
+                parent_event_id=parent_event_id,
+                metadata={"path": "tool_loop"},
+            )
+            if call_event is None:
+                continue
+            parent_event_id = call_event.event_id
+            result_summary = result_rows[index] if index < len(result_rows) else ""
+            result_event = service.record_tool_result(
+                ctx=ctx,
+                tool_name=tool_name,
+                success=bool(triggered),
+                result_summary=result_summary[:1500],
+                parent_event_id=call_event.event_id,
+                metadata={"path": "tool_loop"},
+            )
+            if result_event is not None:
+                parent_event_id = result_event.event_id
+        if parent_event_id:
+            event_state["assistant_parent_event_id"] = parent_event_id
 
     def _create_idle_status_service(
         self,
@@ -502,6 +626,9 @@ class ChatService:
             polish_natural_reply=self._polish_natural_reply,
             apply_character_catchphrase=self._apply_character_catchphrase,
             logger=self.logger,
+            conversation_event_service=getattr(
+                self, "conversation_event_service", None
+            ),
         )
 
     def _create_sensor_event_service(
@@ -518,6 +645,9 @@ class ChatService:
             build_live2d_self_awareness_hint=self._build_live2d_self_awareness_hint,
             compress_sensor_text=text_utils.compress_sensor_text,
             logger=self.logger,
+            conversation_event_service=getattr(
+                self, "conversation_event_service", None
+            ),
         )
 
     def _create_sensor_reply_service(
@@ -543,6 +673,9 @@ class ChatService:
             reset_sensor_motion_after=self._reset_sensor_motion_after,
             add_memory_safe=self._add_memory_safe,
             last_reply_time_getter=lambda: self._last_reply_time,
+            conversation_event_service=getattr(
+                self, "conversation_event_service", None
+            ),
         )
 
     def _create_diary_service(self) -> diary_service.DiaryService:
@@ -1709,10 +1842,65 @@ class ChatService:
         )
 
     def _looks_like_sensor_source_followup(self, user_text: str) -> bool:
-        text = str(user_text or "").strip().lower()
+        """Detect follow-ups about a recent screen roast / vision observation.
+
+        Covers both "where did you see that" and "what did you just see/say".
+        """
+        text = str(user_text or "").strip()
         if not text:
             return False
-        source_markers = ("哪看到", "从哪", "哪里看到", "怎么看到", "怎么知道", "你看到")
+        lower = text.lower()
+
+        # Strong single-phrase intents (short follow-ups after a roast).
+        strong_phrases = (
+            "看到了什么",
+            "看见了什么",
+            "看了什么",
+            "看到啥",
+            "看见啥",
+            "看啥了",
+            "你看到",
+            "你看见",
+            "你看了",
+            "吐槽什么",
+            "吐槽啥",
+            "刚吐槽",
+            "刚才吐槽",
+            "刚刚吐槽",
+            "你刚说",
+            "你刚才说",
+            "你刚刚说",
+            "为什么这么说",
+            "为啥这么说",
+            "怎么知道",
+            "怎么看到",
+            "从哪看到",
+            "从哪里看到",
+            "哪看到",
+            "哪里看到",
+            "你从哪",
+            "屏幕上有",
+            "刚才那句",
+            "刚刚那句",
+        )
+        if any(phrase in text for phrase in strong_phrases):
+            return True
+        if any(phrase in lower for phrase in ("what did you see", "what you saw")):
+            return True
+
+        source_markers = (
+            "哪看到",
+            "从哪",
+            "哪里看到",
+            "怎么看到",
+            "怎么知道",
+            "你看到",
+            "你看见",
+            "看到了",
+            "看见了",
+            "看了什么",
+            "吐槽",
+        )
         context_markers = (
             "刚才",
             "刚刚",
@@ -1720,9 +1908,12 @@ class ChatService:
             "说过",
             "提到",
             "看到",
+            "看见",
             "屏幕",
             "视觉",
             "画面",
+            "窗口",
+            "页面",
         )
         return any(marker in text for marker in source_markers) and any(
             marker in text for marker in context_markers
@@ -1733,23 +1924,48 @@ class ChatService:
     ) -> str:
         if not self._looks_like_sensor_source_followup(user_text):
             return ""
+
+        sections: List[str] = []
+
+        # 1) What she just said (the roast itself) — critical for "why did you say that".
+        recent_replies = getattr(self, "_recent_sensor_replies", []) or []
+        reply_lines: List[str] = []
+        for item in list(recent_replies)[-max_items:]:
+            clean = self._clean_text_for_tts(str(item or "")).strip()
+            if not clean:
+                continue
+            clean = re.sub(r"\s+", " ", clean)
+            if len(clean) > 80:
+                clean = clean[:77].rstrip() + "..."
+            reply_lines.append(f"- {clean}")
+        if reply_lines:
+            sections.append(
+                "【你刚才的屏幕吐槽/主动发言】\n" + "\n".join(reply_lines)
+            )
+
+        # 2) What the sensor actually observed (window + vision description).
         sensor_ref = getattr(self, "screen_sensor_ref", None)
-        if sensor_ref is None or not hasattr(sensor_ref, "get_recent_observations"):
+        formatted = ""
+        if sensor_ref is not None and hasattr(sensor_ref, "get_recent_observations"):
+            try:
+                entries = sensor_ref.get_recent_observations(max_items)
+            except Exception:
+                entries = []
+            formatted = sensor_utils.format_sensor_observations(
+                entries or [], max_items=max_items
+            )
+            if formatted:
+                sections.append("【最近屏幕/视觉观察证据】\n" + formatted)
+
+        if not sections:
             return ""
-        try:
-            entries = sensor_ref.get_recent_observations(max_items)
-        except Exception:
-            return ""
-        formatted = sensor_utils.format_sensor_observations(
-            entries or [], max_items=max_items
-        )
-        if not formatted:
-            return ""
+
         return (
-            "【最近屏幕/视觉观察证据】\n"
-            f"{formatted}\n"
-            "说明：如果用户追问你刚才从哪看到、怎么知道某个内容，优先根据这里回答来源；"
-            "可以说来自刚才的屏幕/视觉观察、具体窗口或页面。不要因为普通聊天记录里没有那句话就否认。"
+            "\n".join(sections)
+            + "\n说明：用户正在追问你刚才为什么这么说、看到了什么、或从哪知道的。"
+            "请结合上面的「吐槽原文」和「观察证据」连贯回答，不要装作没发生过；"
+            "可以说你刚才看了他的屏幕/窗口，并点出你吐槽对应的具体内容。"
+            "不要因为普通聊天记录里没有那句话就否认；也不要机械复述整段观察报告，用角色口吻自然说明即可。"
         )
 
     def _remember_sensor_reply(self, text: str, max_items: int = 8) -> None:
@@ -2048,7 +2264,9 @@ class ChatService:
         image_summaries = []
         for index, image_meta in enumerate(images[:3], 1):
             try:
-                image_base64 = await asyncio.to_thread(load_image_base64, image_meta)
+                image_base64 = await asyncio.to_thread(
+                    load_image_base64, image_meta, source="remote"
+                )
                 if not image_base64:
                     image_summaries.append(f"[图片{index}] 无法读取图片数据。")
                     continue
@@ -2405,6 +2623,33 @@ class ChatService:
             return True
         return False
 
+    @staticmethod
+    def _looks_like_question_or_recall(text: str) -> bool:
+        """True for memory-recall questions / interrogatives that must not become todos."""
+        raw = str(text or "").strip()
+        if not raw:
+            return False
+        lower = raw.lower()
+        if "?" in raw or "？" in raw:
+            return True
+        if raw.rstrip().endswith(("吗", "么", "呢", "嘛")):
+            return True
+        # "还记得…吗" / "你记得…" are recall, not "记得帮我…" task imperatives.
+        if any(
+            cue in lower
+            for cue in (
+                "还记得",
+                "记得吗",
+                "记得不",
+                "你记得",
+                "记得我",
+                "记得上次",
+                "记得之前",
+            )
+        ):
+            return True
+        return False
+
     def _extract_task_candidates(self, text: str) -> list[str]:
         candidates = []
         seen = set()
@@ -2416,14 +2661,23 @@ class ChatService:
             ]
             for part in parts or [raw]:
                 lower = part.lower()
-                if len(part) < 4 or "?" in part or "？" in part:
+                if len(part) < 4 or self._looks_like_question_or_recall(part):
                     continue
                 if any(k in lower for k in self.TASK_DONE_KEYWORDS):
                     continue
                 if not any(k in lower for k in self.TASK_CREATE_KEYWORDS):
                     continue
+                # Bare "记得" without imperative task shape is usually chat, not a todo.
+                create_hits = [k for k in self.TASK_CREATE_KEYWORDS if k in lower]
+                if create_hits == ["记得"] and not any(
+                    cue in lower
+                    for cue in ("记得要", "记得帮", "记得把", "记得去", "记得给", "记得买")
+                ):
+                    continue
                 cleaned = self._normalize_task_text(part)
                 if len(cleaned) < 2:
+                    continue
+                if self._looks_like_question_or_recall(cleaned):
                     continue
                 if cleaned in seen:
                     continue
@@ -3603,6 +3857,17 @@ class ChatService:
         self._observe_reply_effect(user_text, ctx)
         conversation_session_id = self.gateway_context_service.conversation_session_key(ctx)
         ctx["conversation_session_id"] = conversation_session_id
+        try:
+            ctx["conversation_scope"] = self.conversation_event_service.resolve_scope(
+                ctx,
+                person_id=self._get_memory_person_id(ctx) or "owner",
+            )
+        except Exception as exc:
+            if self.logger:
+                self.logger.warning(
+                    f"[ConversationEvents] resolve_scope failed: {exc}"
+                )
+            ctx["conversation_scope"] = None
         transcript_channel_meta = dict(input_ctx.transcript_channel_meta)
         if conversation_session_id:
             transcript_channel_meta["context_session_id"] = conversation_session_id
@@ -3673,9 +3938,10 @@ class ChatService:
             self._add_codex_session_event("user_task", text=user_text, ctx=ctx)
 
         # =========================================================================
-        # 2. Direct 模式：处理“控制类”硬指令
+        # 2. Direct 模式：处理“控制类”硬指令 / 待确认操作（确认/取消）
         # =========================================================================
         self._dbg("检查是否为direct命令")
+        # Pending ActionGate/agent confirm is handled inside AgentRuntime before plugins
         direct_outcome = await self.agent_runtime.handle_direct_text(user_text, ctx)
         is_direct = direct_outcome.handled
         direct_result = direct_outcome.reply
@@ -3994,6 +4260,7 @@ class ChatService:
                 emit_assistant_text=self._emit_assistant_text,
                 add_memory_safe=self._add_memory_safe,
                 emit_idle_status_when_safe=self._emit_idle_status_when_safe,
+                record_message_pair=self._record_message_pair_events,
             )
             return
         self._remember_search_topic(user_text, ctx)
@@ -4130,6 +4397,46 @@ class ChatService:
             route = self.tool_router.route(
                 user_text, last_tool_triggers=last_tool_triggers
             )
+        # Fuzzy capability matches: ask the shared gatekeeper model chain.
+        if (
+            not route.need_tools
+            and bool(getattr(route, "capability_ambiguous", False))
+            and list(getattr(route, "capability_candidates", None) or [])
+        ):
+            try:
+                gate_pick = await resolve_ambiguous_capability(
+                    user_text=user_text,
+                    candidates=list(route.capability_candidates or []),
+                    chat_with_ai=chat_with_ai,
+                )
+            except Exception as exc:
+                self.logger.warning("capability gatekeeper resolve failed: %s", exc)
+                gate_pick = None
+            if gate_pick is not None and gate_pick.approved and gate_pick.plugin:
+                from modules.tool_router import ToolRouteResult
+
+                route = ToolRouteResult(
+                    True,
+                    [gate_pick.plugin],
+                    f"capability:{gate_pick.capability_id}",
+                    capability_id=gate_pick.capability_id,
+                    capability_args=dict(gate_pick.args or {}),
+                    capability_score=float(gate_pick.confidence or 0.0),
+                    capability_match_reason=str(
+                        gate_pick.reason or "gatekeeper_selected"
+                    ),
+                )
+                self.logger.info(
+                    "[Gatekeeper] 模糊能力裁决: %s -> %s (%.2f)",
+                    gate_pick.capability_id,
+                    gate_pick.plugin,
+                    float(gate_pick.confidence or 0.0),
+                )
+            else:
+                self.logger.info(
+                    "[Gatekeeper] 模糊能力未放行: %s",
+                    getattr(gate_pick, "reason", None) or "no_decision",
+                )
         self._dbg(
             f"路由结果: need_tools={route.need_tools}, triggers={route.tool_triggers}"
         )
@@ -4234,6 +4541,7 @@ class ChatService:
             emit_assistant_text=self._emit_assistant_text,
             add_memory_safe=self._add_memory_safe,
             emit_idle_status_when_safe=self._emit_idle_status_when_safe,
+            record_message_pair=self._record_message_pair_events,
         ):
             return
 
@@ -4258,9 +4566,15 @@ class ChatService:
         external_sender_context = self._build_external_sender_context(ctx)
         if external_sender_context:
             special_context += f"\n\n{external_sender_context}"
-        sensor_source_context = self._build_sensor_source_followup_context(user_text)
-        if sensor_source_context:
-            special_context += f"\n\n{sensor_source_context}"
+        # T2: near-history sensor follow-up comes only from ContextAssembler.
+        # Legacy keyword path remains for observability only — do not inject.
+        legacy_sensor_followup = self._build_sensor_source_followup_context(user_text)
+        if legacy_sensor_followup:
+            self._trace_process(
+                "legacy_sensor_followup_suppressed",
+                chars=len(legacy_sensor_followup),
+                dual_inject_blocked=True,
+            )
 
         try:
             from config import PERSONA_PROMPT
@@ -4328,6 +4642,7 @@ class ChatService:
         if mcp_prompt:
             system_text += "\n" + mcp_prompt
 
+        conversation_scope = ctx.get("conversation_scope")
         context_messages = await asyncio.to_thread(
             self.brain.build_prompt,
             user_text,
@@ -4336,6 +4651,7 @@ class ChatService:
             session_id=conversation_session_id,
             memory_session_id=memory_session_id,
             person_id=self._get_memory_person_id(ctx) or "owner",
+            conversation_scope=conversation_scope,
         )
         cleaned_context_messages = []
         for message in context_messages:
@@ -4381,6 +4697,7 @@ class ChatService:
         if use_non_stream_flow:
             self._dbg("进入非流式回复/工具流程")
             await self.event_bus.emit("ui.status", text="Thinking (Tools)...")
+            tool_event_state: Dict[str, str] = {}
 
             if search_delegate_requested:
                 react_first_pass = tool_flow_service.ReactFirstPassResult(
@@ -4398,6 +4715,12 @@ class ChatService:
                     chat_with_ai=chat_with_ai,
                     contains_cmd=self._contains_cmd,
                     strip_cmd_anywhere=self._strip_cmd_anywhere,
+                    record_tool_execution=lambda **event: self._record_tool_execution_events(
+                        ctx=ctx,
+                        user_text=user_text,
+                        event_state=tool_event_state,
+                        **event,
+                    ),
                 )
             reply1 = react_first_pass.reply
             triggered = react_first_pass.triggered
@@ -4723,6 +5046,15 @@ class ChatService:
                 set_codex_task_state=self._set_codex_task_state,
                 add_memory_safe=self._add_memory_safe,
                 emit_idle_status_when_safe=self._emit_idle_status_when_safe,
+                record_message_pair=lambda **message: self._record_message_pair_events(
+                    existing_user_event_id=str(
+                        tool_event_state.get("user_event_id") or ""
+                    ),
+                    assistant_parent_event_id=str(
+                        tool_event_state.get("assistant_parent_event_id") or ""
+                    ),
+                    **message,
+                ),
             )
 
         # =========================================================================
@@ -4916,6 +5248,7 @@ class ChatService:
                 record_task_followup=self._record_task_followup,
                 set_codex_task_state=self._set_codex_task_state,
                 add_memory_safe=self._add_memory_safe,
+                record_message_pair=self._record_message_pair_events,
             )
 
     # 🟢 [新增] 主动关怀提醒
@@ -4923,13 +5256,14 @@ class ChatService:
         """处理久坐提醒"""
         await self.active_alert_service.send_active_alert(app_name, minutes)
 
-    # ==================== Rust 屏幕事件文本处理 ====================
+    # ==================== 屏幕感知事件处理 (文本 + 视觉) ====================
 
     async def handle_sensor_event(
         self,
         window_title: str,
         category: str,
         count: int = 1,
+        use_vision: bool = False,
         app_name: str = "",
         reason: str = "",
         app_duration_sec: float | int | None = None,
@@ -4943,6 +5277,7 @@ class ChatService:
                 window_title,
                 category,
                 count=count,
+                use_vision=use_vision,
                 app_name=app_name,
                 reason=reason,
                 app_duration_sec=app_duration_sec,
@@ -4954,12 +5289,13 @@ class ChatService:
         window_title: str,
         category: str,
         count: int = 1,
+        use_vision: bool = False,
         app_name: str = "",
         reason: str = "",
         app_duration_sec: float | int | None = None,
         current_stay_sec: float | int | None = None,
     ) -> bool:
-        from modules.llm import chat_with_ai
+        from modules.llm import analyze_image, chat_with_ai
 
         guard = sensor_event_guard.check_sensor_event_guard(
             window_title=window_title,
@@ -4977,7 +5313,7 @@ class ChatService:
             return False
 
         print(
-            f"🤖 [Sensor] 观察: {clean_title} ({category}) | App: {display_app} | Count: {count}"
+            f"🤖 [Sensor] 观察: {clean_title} ({category}) | App: {display_app} | Count: {count} | Vision: {bool(use_vision)}"
         )
         generation = await self.sensor_event_service.run_event_generation(
             clean_title=clean_title,
@@ -4985,9 +5321,12 @@ class ChatService:
             category=category,
             count=count,
             reason=reason,
+            use_vision=bool(use_vision),
+            vision_mode=VISION_MODE,
             app_duration_sec=app_duration_sec,
             current_stay_sec=current_stay_sec,
             chat_with_ai=chat_with_ai,
+            analyze_image=analyze_image,
         )
         if not generation.reply:
             return False
@@ -4995,7 +5334,13 @@ class ChatService:
         reply_title = clean_title if generation.branch == "self" else window_title
         is_vision = generation.branch.startswith("vision")
         return await self.sensor_reply_service.send_sensor_reply(
-            generation.reply, reply_category, count, reply_title, is_vision
+            generation.reply,
+            reply_category,
+            count,
+            reply_title,
+            is_vision,
+            observation_event_id=str(generation.observation_event_id or ""),
+            ctx={"source": "desktop"},
         )
 
     # Helper: reset sensor motion after sensor replies.

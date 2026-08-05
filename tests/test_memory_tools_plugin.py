@@ -19,6 +19,8 @@ def test_memory_capabilities_use_shared_intent_rules():
     assert capabilities["activity.query"].match("我昨天学习了多久", {}) is not None
     assert capabilities["memory.query"].match("今天天气怎么样", {}) is None
     assert MemoryCoreService.detect_intent("我一般什么时候开会") == "episode"
+    assert MemoryCoreService.detect_intent("我平常都是周几开会") == "episode"
+    assert MemoryCoreService.detect_intent("我通常哪天开会") == "episode"
     assert MemoryCoreService.detect_intent("上次开会多久") == "episode"
     assert MemoryCoreService.detect_intent("今天我学习了吗") == "activity"
     assert MemoryCoreService.detect_intent("我昨天学习了多久") == "activity"

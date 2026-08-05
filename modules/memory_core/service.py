@@ -48,6 +48,27 @@ class MemoryCoreService:
         "last time",
         "previously",
     )
+    # Habit / frequency questions must go through episode recall, not free chat.
+    HABIT_RECALL_CUES = (
+        "周几",
+        "哪几天",
+        "哪天",
+        "平常都",
+        "平常是",
+        "平常几",
+        "一般是",
+        "一般周",
+        "一般几",
+        "通常是",
+        "通常都",
+        "通常几",
+        "每周几",
+        "每周都",
+        "固定周",
+        "固定哪",
+        "经常是",
+        "经常周",
+    )
     PROFILE_CUES = (
         "我喜欢什么",
         "我讨厌什么",
@@ -138,6 +159,7 @@ class MemoryCoreService:
         self._pending_replies: dict[str, _PendingReply] = {}
         self._learning_buffers: dict[str, list[dict[str, Any]]] = {}
         self._selected_expression_ids: dict[str, tuple[str, ...]] = {}
+        self._writeback_service: Any = None
 
     def _setting_bool(self, key: str, default: bool) -> bool:
         value = self.settings.get(key, default)
@@ -164,7 +186,52 @@ class MemoryCoreService:
             character_catalog=self._get_character_catalog(),
         )
         self._initialized = True
+        self._ensure_writeback_service()
         return result
+
+    def _ensure_writeback_service(self) -> Any:
+        if self._writeback_service is not None:
+            return self._writeback_service
+        if not self._setting_bool("memory_writeback_enabled", True):
+            return None
+        try:
+            from services.memory_writeback import MemoryWritebackService
+        except Exception as exc:
+            logger.warning("memory writeback import failed: %s", exc)
+            return None
+        self._writeback_service = MemoryWritebackService(
+            self,
+            llm_call=self.llm_call,
+            settings=self.settings,
+        )
+        try:
+            self._writeback_service.start()
+        except Exception as exc:
+            logger.warning("memory writeback start failed: %s", exc)
+        return self._writeback_service
+
+    def get_writeback_service(self) -> Any:
+        self._ensure_initialized()
+        return self._ensure_writeback_service()
+
+    def writeback_stats(self) -> dict[str, int]:
+        service = self.get_writeback_service()
+        if service is None:
+            return {}
+        try:
+            return dict(service.stats() or {})
+        except Exception:
+            return {}
+
+    def stop_writeback(self, *, timeout: float = 2.0) -> None:
+        """Stop async writeback worker (app shutdown / tests)."""
+        service = self._writeback_service
+        if service is None:
+            return
+        try:
+            service.stop(timeout=timeout)
+        except Exception as exc:
+            logger.warning("memory writeback stop failed: %s", exc)
 
     def _get_character_catalog(self) -> dict[str, dict[str, Any]]:
         if self._character_catalog_getter is not None:
@@ -298,10 +365,16 @@ class MemoryCoreService:
             return transcript_id
         if not self._is_real_learning_message(role, content, safe_meta):
             return transcript_id
-        if not self.enabled or not (
+
+        writeback_enabled = self._setting_bool("memory_writeback_enabled", True)
+        learning_enabled = bool(self.enabled) and (
             self.profile_learning_enabled or self.expression_learning_enabled
-        ):
+        )
+        # Writeback is independent of profile/expression learning toggles: chat
+        # corrections must still become long-term memory_records.
+        if not learning_enabled and not (bool(self.enabled) and writeback_enabled):
             return transcript_id
+
         session_key = str(session_id or "global").strip() or "global"
         buffer = self._learning_buffers.setdefault(session_key, [])
         buffer.append(
@@ -315,30 +388,81 @@ class MemoryCoreService:
                 "meta": safe_meta,
             }
         )
-        buffer_limit = max(24, self.learning_batch_messages * 2)
+        # Keep enough recent turns for writeback evidence even when learning batch
+        # is small or learning is disabled.
+        buffer_limit = max(
+            24,
+            self.learning_batch_messages * 2,
+            self._setting_int(
+                "memory_writeback_context_messages", 12, minimum=2, maximum=40
+            )
+            * 2,
+        )
         if len(buffer) > buffer_limit:
             del buffer[:-buffer_limit]
         trusted = self._is_trusted_learning_source(safe_meta)
-        if (
-            self.profile_learning_enabled
-            and role == "user"
-            and trusted
-            and self._has_explicit_profile_signal(content)
-        ):
-            self._learn_profile_from_messages(buffer[-6:], person_id=person_id)
-        if trusted and len(buffer) >= self.learning_batch_messages:
-            batch = list(buffer[-self.learning_batch_messages :])
-            if self.profile_learning_enabled:
-                self._learn_profile_from_messages(batch, person_id=person_id)
-            if self.expression_learning_enabled:
-                self._learn_expressions_from_messages(
-                    batch,
-                    session_id=session_key,
-                    person_id=person_id,
-                    character_id=character_id,
-                    character_name=character_name,
+
+        if learning_enabled and trusted:
+            if (
+                self.profile_learning_enabled
+                and role == "user"
+                and self._has_explicit_profile_signal(content)
+            ):
+                self._learn_profile_from_messages(buffer[-6:], person_id=person_id)
+            if len(buffer) >= self.learning_batch_messages:
+                batch = list(buffer[-self.learning_batch_messages :])
+                if self.profile_learning_enabled:
+                    self._learn_profile_from_messages(batch, person_id=person_id)
+                if self.expression_learning_enabled:
+                    self._learn_expressions_from_messages(
+                        batch,
+                        session_id=session_key,
+                        person_id=person_id,
+                        character_id=character_id,
+                        character_name=character_name,
+                    )
+                # Do not clear the whole buffer: writeback still needs recent turns.
+                # Keep a trailing window after batch learning.
+                keep = max(
+                    self.learning_batch_messages,
+                    self._setting_int(
+                        "memory_writeback_context_messages",
+                        12,
+                        minimum=2,
+                        maximum=40,
+                    ),
                 )
-            buffer.clear()
+                if len(buffer) > keep:
+                    del buffer[:-keep]
+
+        # MaiBot-style long-term writeback: extract stable user-supported facts
+        # asynchronously. Transcript is already stored above; empty extract = no write.
+        if bool(self.enabled) and writeback_enabled and trusted and role in {
+            "user",
+            "assistant",
+        }:
+            writeback = self._ensure_writeback_service()
+            if writeback is not None:
+                try:
+                    context_n = self._setting_int(
+                        "memory_writeback_context_messages",
+                        12,
+                        minimum=2,
+                        maximum=40,
+                    )
+                    writeback.observe_message(
+                        role,
+                        content,
+                        session_id=session_key,
+                        person_id=person_id,
+                        character_id=character_id,
+                        character_name=character_name,
+                        transcript_id=transcript_id,
+                        meta=safe_meta,
+                        recent_messages=list(buffer[-context_n:]),
+                    )
+                except Exception as exc:
+                    logger.warning("memory writeback observe failed: %s", exc)
         return transcript_id
 
     @staticmethod
@@ -385,6 +509,19 @@ class MemoryCoreService:
             "我正在",
             "我最近",
             "我更喜欢",
+            # Habit / schedule corrections that should enter profile learning promptly.
+            "我平常",
+            "我一般",
+            "我通常",
+            "其实是",
+            "其实我",
+            "不是周",
+            "是周",
+            "每周",
+            "固定周",
+            "记住",
+            "记下来",
+            "帮我记",
         )
         return any(signal in clean for signal in signals)
 
@@ -399,9 +536,10 @@ class MemoryCoreService:
         if not lines:
             return 0
         prompt = (
-            "从真实聊天中提取关于用户的稳定事实、偏好、雷区、互动要求或临时状态。\n"
-            "不要推测；只有消息有明确证据时才提取。称呼、固定偏好和明确纠正应优先。\n"
-            "临时状态设置 valid_days，稳定事实填 0。\n"
+            "从真实聊天中提取关于用户的稳定事实、偏好、习惯、雷区、互动要求或临时状态。\n"
+            "不要推测；只有消息有明确证据时才提取。称呼、固定偏好、习惯（如周几开会）和明确纠正应优先。\n"
+            "用户纠正助手错误时，以用户最新纠正为准，写入纠正后的事实。\n"
+            "临时状态设置 valid_days，稳定事实/习惯填 0。\n"
             "严格只输出 JSON："
             '{"items":[{"kind":"preference|fact|rule|profile","key":"稳定字段名",'
             '"content":"简短事实","confidence":0.0,"valid_days":0,"evidence_ids":["1"]}]}\n\n'
@@ -697,7 +835,10 @@ class MemoryCoreService:
         clean = str(text or "").strip().lower()
         if not clean or clean.startswith("/"):
             return "none"
+        # Single-episode time cues and habit/weekday questions both need grounded recall.
         if any(cue in clean for cue in ("上次", "最近一次", "什么时候")):
+            return "episode"
+        if any(cue in clean for cue in cls.HABIT_RECALL_CUES):
             return "episode"
         activity_action = any(
             cue in clean
@@ -866,6 +1007,7 @@ class MemoryCoreService:
         kinds = ("profile", "fact", "preference", "rule") if intent == "profile" else (
             "episode",
             "fact",
+            "preference",
             "summary",
             "other",
         )
@@ -908,6 +1050,26 @@ class MemoryCoreService:
             recency = self._recency_score(item.get("updated_at"), now)
             metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
             query_context_bonus = 0.7 if metadata.get("query_context_match") else 0.0
+            habit_bonus = 0.0
+            key_text = str(item.get("key") or "").strip().lower()
+            habit_query = any(
+                cue in search_text
+                for cue in ("周几", "哪天", "平常", "一般", "通常", "习惯", "每周")
+            )
+            if habit_query:
+                if key_text.startswith("habit") or key_text.startswith("habits"):
+                    habit_bonus += 0.55
+                if any(
+                    day in content
+                    for day in ("周一", "周二", "周三", "周四", "周五", "周六", "周日")
+                ) and any(term in content for term in ("开会", "会议", "习惯")):
+                    habit_bonus += 0.35
+                # Long diary noise should not drown short habit facts.
+                if len(content) > 420 and str(item.get("kind") or "") in {
+                    "episode",
+                    "summary",
+                }:
+                    habit_bonus -= 0.35
             score = (
                 overlap * 0.55
                 + substring_bonus
@@ -915,6 +1077,7 @@ class MemoryCoreService:
                 + float(item.get("importance") or 0) * 0.1
                 + recency * 0.15
                 + query_context_bonus
+                + habit_bonus
             )
             if (
                 overlap <= 0
@@ -953,7 +1116,20 @@ class MemoryCoreService:
             return True
         expects_fact_answer = any(
             cue in query
-            for cue in ("多久", "多长时间", "什么时候", "几小时", "几分钟", "哪天", "日期")
+            for cue in (
+                "多久",
+                "多长时间",
+                "什么时候",
+                "几小时",
+                "几分钟",
+                "哪天",
+                "日期",
+                "周几",
+                "哪几天",
+                "平常",
+                "一般",
+                "通常",
+            )
         )
         role = str(metadata.get("role") or "").strip().lower()
         is_question = content.rstrip().endswith(("?", "？", "吗", "么"))
@@ -963,7 +1139,7 @@ class MemoryCoreService:
     def _candidate_kinds(intent: str) -> tuple[str, ...]:
         if intent == "profile":
             return ("profile", "fact", "preference", "rule")
-        return ("episode", "fact", "summary", "other")
+        return ("episode", "fact", "preference", "summary", "other")
 
     @staticmethod
     def _record_matches_scope(

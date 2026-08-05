@@ -4,7 +4,7 @@ SQLite memory store (source of truth)
 
 - ./memory/memory.sqlite is the primary store for:
   - transcript (all chat messages)
-  - memory_items (manual long-term notes: rules/preferences/facts/assistant_said)
+  - memory_items (task store only: type=todo by default; not Memory Core semantic memory)
   - episodes (episodic summaries)
   - profile (stable user profile)
   - expression_patterns (reply-style learning library)
@@ -332,6 +332,36 @@ class MemorySQLite:
                 pass
 
             # 每日屏幕活动统计表
+            # Near-history conversation events (single source of truth for "just now").
+            # Not the same as transcript: observations, tools, causal parents live here.
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS conversation_events (
+                  event_id TEXT PRIMARY KEY,
+                  persona_id TEXT NOT NULL,
+                  person_id TEXT NOT NULL,
+                  channel TEXT NOT NULL,
+                  conversation_id TEXT NOT NULL,
+                  event_type TEXT NOT NULL,
+                  occurred_at TEXT NOT NULL,
+                  exact_text TEXT NOT NULL DEFAULT '',
+                  evidence_summary TEXT NOT NULL DEFAULT '',
+                  causal_parent_ids_json TEXT NOT NULL DEFAULT '[]',
+                  expires_at TEXT,
+                  status TEXT NOT NULL DEFAULT 'active',
+                  metadata_json TEXT NOT NULL DEFAULT '{}'
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_conversation_events_scope_time
+                ON conversation_events(
+                  persona_id, person_id, channel, conversation_id, occurred_at DESC
+                )
+                """
+            )
+
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS daily_screen_stats (
@@ -541,6 +571,38 @@ class MemorySQLite:
                 )
                 conn.commit()
                 return int(cursor.lastrowid)
+
+    def ensure_conversation_events_schema(self) -> None:
+        """Idempotent schema ensure for conversation_events (safe for older DBs)."""
+        with self._connect() as conn:
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS conversation_events (
+                  event_id TEXT PRIMARY KEY,
+                  persona_id TEXT NOT NULL,
+                  person_id TEXT NOT NULL,
+                  channel TEXT NOT NULL,
+                  conversation_id TEXT NOT NULL,
+                  event_type TEXT NOT NULL,
+                  occurred_at TEXT NOT NULL,
+                  exact_text TEXT NOT NULL DEFAULT '',
+                  evidence_summary TEXT NOT NULL DEFAULT '',
+                  causal_parent_ids_json TEXT NOT NULL DEFAULT '[]',
+                  expires_at TEXT,
+                  status TEXT NOT NULL DEFAULT 'active',
+                  metadata_json TEXT NOT NULL DEFAULT '{}'
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_conversation_events_scope_time
+                ON conversation_events(
+                  persona_id, person_id, channel, conversation_id, occurred_at DESC
+                )
+                """
+            )
+            conn.commit()
 
     def repair_known_transcript_mojibake(self) -> int:
         """Repair the known costume-change message that was stored from a bad literal."""
@@ -1123,11 +1185,21 @@ class MemorySQLite:
                 print(f"[MemorySQLite] 删除 qq_user_profiles 失败: {e}")
                 return False
 
+    # Allowed product types for memory_items (task store). Semantic memory → memory_records.
+    ALLOWED_MEMORY_ITEM_TYPES = frozenset({"todo"})
+
     # ---------- memory items ----------
     def upsert_item(self, item: Dict[str, Any]) -> str:
         # Normalize
         _id = str(item.get("id") or "").strip() or f"n_{uuid.uuid4().hex[:10]}"
-        tp = str(item.get("type") or "other").strip()
+        tp = str(item.get("type") or "todo").strip() or "todo"
+        allow_legacy = bool(item.get("allow_legacy_write"))
+        if tp not in self.ALLOWED_MEMORY_ITEM_TYPES and not allow_legacy:
+            raise ValueError(
+                f"memory_items type '{tp}' is not allowed; "
+                f"only {sorted(self.ALLOWED_MEMORY_ITEM_TYPES)} "
+                "(semantic memory must use Memory Core / memory_records)"
+            )
         st = str(item.get("status") or "active").strip().lower()
         pin = 1 if bool(item.get("pin")) else 0
         conf = item.get("confidence", 1.0)
@@ -2016,15 +2088,40 @@ def format_notes_for_prompt(store: MemorySQLite, max_items: int = 24) -> str:
     return "\n".join(lines).strip()
 
 
+def _is_question_like_todo_text(text: str) -> bool:
+    """Filter mis-captured recall questions out of the task prompt block."""
+    raw = str(text or "").strip()
+    if not raw:
+        return True
+    if "?" in raw or "？" in raw:
+        return True
+    if raw.rstrip().endswith(("吗", "么", "呢", "嘛")):
+        return True
+    if any(
+        cue in raw
+        for cue in (
+            "还记得",
+            "记得吗",
+            "记得不",
+            "你记得",
+            "记得我",
+            "记得上次",
+            "记得之前",
+        )
+    ):
+        return True
+    return False
+
+
 def format_active_tasks_for_prompt(store: MemorySQLite, limit: int = 6) -> str:
     items = store.list_items(
-        status="active", type_="todo", limit=max(1, int(limit)), offset=0
+        status="active", type_="todo", limit=max(1, int(limit) * 3), offset=0
     )
     lines = []
     cutoff = datetime.now() - timedelta(days=3)
     for it in items:
         text = str(it.get("text") or "").strip()
-        if not text:
+        if not text or _is_question_like_todo_text(text):
             continue
         updated_at = str(it.get("updated_at") or "").strip()
         try:
@@ -2041,6 +2138,8 @@ def format_active_tasks_for_prompt(store: MemorySQLite, limit: int = 6) -> str:
             lines.append(f"- {text}（更新:{short_time}）")
         else:
             lines.append(f"- {text}")
+        if len(lines) >= max(1, int(limit)):
+            break
     return "\n".join(lines).strip()
 
 

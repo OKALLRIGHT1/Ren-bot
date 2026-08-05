@@ -4,6 +4,13 @@
   "llm_command": "backup_manager",
   "aliases": ["备份", "恢复", "快照", "回滚快照"],
   "type": "react",
-  "description": "管理关键文件快照。参数格式：action ||| arg；action可用 create/list/restore。",
-  "example_arg": "create ||| before_codex_change"
+  "description": "管理关键文件快照。参数格式：action ||| arg；action可用 create/list/restore。restore 需确认；仅本地或管理员私聊。",
+  "example_arg": "create ||| before_codex_change",
+  "access_control": {
+    "allow_local": true,
+    "allow_remote_qq": true,
+    "allow_qq_owner": true,
+    "allow_qq_others": false,
+    "allow_group_without_at": false
+  }
 }

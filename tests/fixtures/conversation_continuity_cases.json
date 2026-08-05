@@ -1,0 +1,765 @@
+{
+  "cases": [
+    {
+      "id": "sensor-paraphrase-001",
+      "category": "recent_causal_followup",
+      "scope": {"channel": "desktop", "conversation_id": "local:desktop"},
+      "events": [
+        {"type": "screen_observation", "text": "DeepSeek 页面里出现了原神"},
+        {"type": "proactive_utterance", "text": "原神又肝起来了？", "parent": 0}
+      ],
+      "user_text": "你这结论哪来的",
+      "must_include_evidence": ["DeepSeek", "原神"],
+      "must_not_include_evidence": []
+    },
+    {
+      "id": "sensor-paraphrase-002",
+      "category": "recent_causal_followup",
+      "scope": {"channel": "desktop", "conversation_id": "local:desktop"},
+      "events": [
+        {"type": "screen_observation", "text": "用户在看代码编辑器"},
+        {"type": "proactive_utterance", "text": "又在修 bug 啊", "parent": 0}
+      ],
+      "user_text": "怎么突然这么讲",
+      "must_include_evidence": ["代码", "bug"],
+      "must_not_include_evidence": []
+    },
+    {
+      "id": "sensor-paraphrase-003",
+      "category": "recent_causal_followup",
+      "scope": {"channel": "desktop", "conversation_id": "local:desktop"},
+      "events": [
+        {"type": "screen_observation", "text": "浏览器打开了原神 wiki"},
+        {"type": "proactive_utterance", "text": "查攻略呢？", "parent": 0}
+      ],
+      "user_text": "嗯？依据呢",
+      "must_include_evidence": ["原神", "wiki"],
+      "must_not_include_evidence": []
+    },
+    {
+      "id": "sensor-paraphrase-004",
+      "category": "recent_causal_followup",
+      "scope": {"channel": "desktop", "conversation_id": "local:desktop"},
+      "events": [
+        {"type": "screen_observation", "text": "DeepSeek 页面里出现了原神"},
+        {"type": "proactive_utterance", "text": "原神又肝起来了？", "parent": 0}
+      ],
+      "user_text": "你刚吐槽什么",
+      "must_include_evidence": ["原神"],
+      "must_not_include_evidence": []
+    },
+    {
+      "id": "sensor-paraphrase-005",
+      "category": "recent_causal_followup",
+      "scope": {"channel": "desktop", "conversation_id": "local:desktop"},
+      "events": [
+        {"type": "screen_observation", "text": "VS Code 打开了 config.py"},
+        {"type": "proactive_utterance", "text": "又在改配置？", "parent": 0}
+      ],
+      "user_text": "为什么这么说",
+      "must_include_evidence": ["配置", "config"],
+      "must_not_include_evidence": []
+    },
+    {
+      "id": "sensor-paraphrase-006",
+      "category": "recent_causal_followup",
+      "scope": {"channel": "desktop", "conversation_id": "local:desktop"},
+      "events": [
+        {"type": "screen_observation", "text": "屏幕上是原神启动器"},
+        {"type": "proactive_utterance", "text": "开打了？", "parent": 0}
+      ],
+      "user_text": "看到了什么",
+      "must_include_evidence": ["原神"],
+      "must_not_include_evidence": []
+    },
+    {
+      "id": "sensor-paraphrase-007",
+      "category": "recent_causal_followup",
+      "scope": {"channel": "desktop", "conversation_id": "local:desktop"},
+      "events": [
+        {"type": "screen_observation", "text": "DeepSeek 对话里写了原神"},
+        {"type": "proactive_utterance", "text": "原神相关又出现了", "parent": 0}
+      ],
+      "user_text": "你从哪看到有原神",
+      "must_include_evidence": ["DeepSeek", "原神"],
+      "must_not_include_evidence": []
+    },
+    {
+      "id": "sensor-paraphrase-008",
+      "category": "recent_causal_followup",
+      "scope": {"channel": "desktop", "conversation_id": "local:desktop"},
+      "events": [
+        {"type": "screen_observation", "text": "用户在看 bilibili 直播"},
+        {"type": "proactive_utterance", "text": "又在看直播摸鱼？", "parent": 0}
+      ],
+      "user_text": "你刚才说啥",
+      "must_include_evidence": ["直播"],
+      "must_not_include_evidence": []
+    },
+    {
+      "id": "para-followup-001",
+      "category": "paraphrased_followup",
+      "scope": {"channel": "desktop", "conversation_id": "local:desktop"},
+      "events": [
+        {"type": "screen_observation", "text": "DeepSeek 页面里出现了原神"},
+        {"type": "proactive_utterance", "text": "原神又肝起来了？", "parent": 0}
+      ],
+      "user_text": "你这判断凭啥",
+      "must_include_evidence": ["原神"],
+      "must_not_include_evidence": []
+    },
+    {
+      "id": "para-followup-002",
+      "category": "paraphrased_followup",
+      "scope": {"channel": "desktop", "conversation_id": "local:desktop"},
+      "events": [
+        {"type": "assistant_message", "text": "我等下提醒你喝水"},
+        {"type": "user_message", "text": "好"}
+      ],
+      "user_text": "你刚才答应我什么来着",
+      "must_include_evidence": ["喝水"],
+      "must_not_include_evidence": []
+    },
+    {
+      "id": "para-followup-003",
+      "category": "paraphrased_followup",
+      "scope": {"channel": "desktop", "conversation_id": "local:desktop"},
+      "events": [
+        {"type": "screen_observation", "text": "浏览器在看天气"},
+        {"type": "proactive_utterance", "text": "要出门记得看天气", "parent": 0}
+      ],
+      "user_text": "刚刚那句是啥意思",
+      "must_include_evidence": ["天气"],
+      "must_not_include_evidence": []
+    },
+    {
+      "id": "para-followup-004",
+      "category": "paraphrased_followup",
+      "scope": {"channel": "desktop", "conversation_id": "local:desktop"},
+      "events": [
+        {"type": "proactive_utterance", "text": "原神又肝起来了？"}
+      ],
+      "user_text": "你怎么知道的",
+      "must_include_evidence": ["原神"],
+      "must_not_include_evidence": []
+    },
+    {
+      "id": "para-followup-005",
+      "category": "paraphrased_followup",
+      "scope": {"channel": "desktop", "conversation_id": "local:desktop"},
+      "events": [
+        {"type": "screen_observation", "text": "代码仓库打开了 PR"},
+        {"type": "proactive_utterance", "text": "在审 PR？", "parent": 0}
+      ],
+      "user_text": "你指什么",
+      "must_include_evidence": ["PR"],
+      "must_not_include_evidence": []
+    },
+    {
+      "id": "para-followup-006",
+      "category": "paraphrased_followup",
+      "scope": {"channel": "desktop", "conversation_id": "local:desktop"},
+      "events": [
+        {"type": "screen_observation", "text": "DeepSeek 页面里出现了原神"},
+        {"type": "proactive_utterance", "text": "原神又肝起来了？", "parent": 0}
+      ],
+      "user_text": "哪来的信息",
+      "must_include_evidence": ["原神"],
+      "must_not_include_evidence": []
+    },
+    {
+      "id": "para-followup-007",
+      "category": "paraphrased_followup",
+      "scope": {"channel": "desktop", "conversation_id": "local:desktop"},
+      "events": [
+        {"type": "care_reminder", "text": "坐太久了，起来走走吧"}
+      ],
+      "user_text": "你刚提醒啥了",
+      "must_include_evidence": ["坐", "走"],
+      "must_not_include_evidence": []
+    },
+    {
+      "id": "para-followup-008",
+      "category": "paraphrased_followup",
+      "scope": {"channel": "desktop", "conversation_id": "local:desktop"},
+      "events": [
+        {"type": "screen_observation", "text": "Steam 页面显示原神"},
+        {"type": "proactive_utterance", "text": "又要下载游戏？", "parent": 0}
+      ],
+      "user_text": "你看我屏幕了？",
+      "must_include_evidence": ["原神", "Steam"],
+      "must_not_include_evidence": []
+    },
+    {
+      "id": "sensor-topic-switch-001",
+      "category": "irrelevant_recent_event",
+      "scope": {"channel": "desktop", "conversation_id": "local:desktop"},
+      "events": [
+        {"type": "screen_observation", "text": "用户正在看代码"}
+      ],
+      "user_text": "晚饭吃什么",
+      "must_include_evidence": [],
+      "must_not_include_evidence": ["代码"]
+    },
+    {
+      "id": "sensor-topic-switch-002",
+      "category": "irrelevant_recent_event",
+      "scope": {"channel": "desktop", "conversation_id": "local:desktop"},
+      "events": [
+        {"type": "proactive_utterance", "text": "原神又肝起来了？"}
+      ],
+      "user_text": "明天天气怎么样",
+      "must_include_evidence": [],
+      "must_not_include_evidence": ["原神"]
+    },
+    {
+      "id": "sensor-topic-switch-003",
+      "category": "irrelevant_recent_event",
+      "scope": {"channel": "desktop", "conversation_id": "local:desktop"},
+      "events": [
+        {"type": "screen_observation", "text": "DeepSeek 页面里出现了原神"},
+        {"type": "proactive_utterance", "text": "原神又肝起来了？", "parent": 0}
+      ],
+      "user_text": "午饭吃啥好",
+      "must_include_evidence": [],
+      "must_not_include_evidence": ["原神", "DeepSeek"]
+    },
+    {
+      "id": "sensor-topic-switch-004",
+      "category": "irrelevant_recent_event",
+      "scope": {"channel": "desktop", "conversation_id": "local:desktop"},
+      "events": [
+        {"type": "care_reminder", "text": "坐太久了起来活动一下"}
+      ],
+      "user_text": "周末有什么安排",
+      "must_include_evidence": [],
+      "must_not_include_evidence": ["坐太久"]
+    },
+    {
+      "id": "sensor-topic-switch-005",
+      "category": "irrelevant_recent_event",
+      "scope": {"channel": "desktop", "conversation_id": "local:desktop"},
+      "events": [
+        {"type": "screen_observation", "text": "用户在写 Python 单元测试"}
+      ],
+      "user_text": "几点了",
+      "must_include_evidence": [],
+      "must_not_include_evidence": ["Python", "测试"]
+    },
+    {
+      "id": "sensor-topic-switch-006",
+      "category": "irrelevant_recent_event",
+      "scope": {"channel": "desktop", "conversation_id": "local:desktop"},
+      "events": [
+        {"type": "proactive_utterance", "text": "又在改配置？"}
+      ],
+      "user_text": "早饭吃了吗我忘了",
+      "must_include_evidence": [],
+      "must_not_include_evidence": ["配置"]
+    },
+    {
+      "id": "sensor-topic-switch-007",
+      "category": "irrelevant_recent_event",
+      "scope": {"channel": "desktop", "conversation_id": "local:desktop"},
+      "events": [
+        {"type": "screen_observation", "text": "屏幕上是原神启动器"}
+      ],
+      "user_text": "帮我算一下 12+34",
+      "must_include_evidence": [],
+      "must_not_include_evidence": ["原神"]
+    },
+    {
+      "id": "sensor-topic-switch-008",
+      "category": "irrelevant_recent_event",
+      "scope": {"channel": "desktop", "conversation_id": "local:desktop"},
+      "events": [
+        {"type": "tool_result", "text": "search 返回了天气结果"}
+      ],
+      "user_text": "晚饭吃什么",
+      "must_include_evidence": [],
+      "must_not_include_evidence": ["天气", "search"]
+    },
+    {
+      "id": "tool-followup-001",
+      "category": "tool_followup",
+      "scope": {"channel": "desktop", "conversation_id": "local:desktop"},
+      "events": [
+        {"type": "user_message", "text": "帮我查一下猫是什么"},
+        {"type": "tool_call", "text": "search"},
+        {"type": "tool_result", "text": "猫是动物", "parent": 1},
+        {"type": "assistant_message", "text": "猫是一种动物", "parent": 0}
+      ],
+      "user_text": "刚才查到什么",
+      "must_include_evidence": ["猫"],
+      "must_not_include_evidence": []
+    },
+    {
+      "id": "tool-followup-002",
+      "category": "tool_followup",
+      "scope": {"channel": "desktop", "conversation_id": "local:desktop"},
+      "events": [
+        {"type": "tool_call", "text": "monitor"},
+        {"type": "tool_result", "text": "CPU 45%", "parent": 0}
+      ],
+      "user_text": "工具返回啥了",
+      "must_include_evidence": ["CPU"],
+      "must_not_include_evidence": []
+    },
+    {
+      "id": "tool-followup-003",
+      "category": "tool_followup",
+      "scope": {"channel": "desktop", "conversation_id": "local:desktop"},
+      "events": [
+        {"type": "user_message", "text": "搜索一下 Python asyncio"},
+        {"type": "tool_result", "text": "asyncio 是异步 IO 库"}
+      ],
+      "user_text": "你搜到了啥",
+      "must_include_evidence": ["asyncio"],
+      "must_not_include_evidence": []
+    },
+    {
+      "id": "tool-followup-004",
+      "category": "tool_followup",
+      "scope": {"channel": "desktop", "conversation_id": "local:desktop"},
+      "events": [
+        {"type": "tool_result", "text": "打开记事本成功"}
+      ],
+      "user_text": "刚才那个工具成功了吗",
+      "must_include_evidence": ["记事本", "成功"],
+      "must_not_include_evidence": []
+    },
+    {
+      "id": "tool-followup-005",
+      "category": "tool_followup",
+      "scope": {"channel": "desktop", "conversation_id": "local:desktop"},
+      "events": [
+        {"type": "tool_call", "text": "search"},
+        {"type": "tool_result", "text": "查询失败: timeout", "parent": 0}
+      ],
+      "user_text": "失败原因是什么",
+      "must_include_evidence": ["timeout", "失败"],
+      "must_not_include_evidence": []
+    },
+    {
+      "id": "tool-followup-006",
+      "category": "tool_followup",
+      "scope": {"channel": "desktop", "conversation_id": "local:desktop"},
+      "events": [
+        {"type": "assistant_message", "text": "我用 search 查了天气，明天有雨"}
+      ],
+      "user_text": "你用什么工具查的",
+      "must_include_evidence": ["search", "天气"],
+      "must_not_include_evidence": []
+    },
+    {
+      "id": "tool-followup-007",
+      "category": "tool_followup",
+      "scope": {"channel": "desktop", "conversation_id": "local:desktop"},
+      "events": [
+        {"type": "tool_result", "text": "邮件已发送给 Alice"}
+      ],
+      "user_text": "发给谁了",
+      "must_include_evidence": ["Alice"],
+      "must_not_include_evidence": []
+    },
+    {
+      "id": "tool-followup-008",
+      "category": "tool_followup",
+      "scope": {"channel": "desktop", "conversation_id": "local:desktop"},
+      "events": [
+        {"type": "user_message", "text": "运行一下状态检查"},
+        {"type": "tool_result", "text": "内存使用 62%"}
+      ],
+      "user_text": "结果怎么样",
+      "must_include_evidence": ["内存", "62"],
+      "must_not_include_evidence": []
+    },
+    {
+      "id": "care-followup-001",
+      "category": "care_followup",
+      "scope": {"channel": "desktop", "conversation_id": "local:desktop"},
+      "events": [
+        {"type": "care_reminder", "text": "已经坐了 60 分钟，起来走走吧"}
+      ],
+      "user_text": "你刚提醒我啥",
+      "must_include_evidence": ["坐", "走"],
+      "must_not_include_evidence": []
+    },
+    {
+      "id": "care-followup-002",
+      "category": "care_followup",
+      "scope": {"channel": "desktop", "conversation_id": "local:desktop"},
+      "events": [
+        {"type": "care_reminder", "text": "喝口水休息一下"}
+      ],
+      "user_text": "为什么突然提醒我",
+      "must_include_evidence": ["喝口水", "休息"],
+      "must_not_include_evidence": []
+    },
+    {
+      "id": "care-followup-003",
+      "category": "care_followup",
+      "scope": {"channel": "desktop", "conversation_id": "local:desktop"},
+      "events": [
+        {"type": "care_reminder", "text": "久坐太久了该活动了"}
+      ],
+      "user_text": "刚才那句温馨提醒",
+      "must_include_evidence": ["久坐", "活动"],
+      "must_not_include_evidence": []
+    },
+    {
+      "id": "care-followup-004",
+      "category": "care_followup",
+      "scope": {"channel": "desktop", "conversation_id": "local:desktop"},
+      "events": [
+        {"type": "care_reminder", "text": "眼睛也要休息哦"}
+      ],
+      "user_text": "你说啥了",
+      "must_include_evidence": ["眼睛", "休息"],
+      "must_not_include_evidence": []
+    },
+    {
+      "id": "care-followup-005",
+      "category": "care_followup",
+      "scope": {"channel": "desktop", "conversation_id": "local:desktop"},
+      "events": [
+        {"type": "care_reminder", "text": "连续写代码 90 分钟了"}
+      ],
+      "user_text": "你怎么知道我坐很久",
+      "must_include_evidence": ["90", "代码"],
+      "must_not_include_evidence": []
+    },
+    {
+      "id": "care-followup-006",
+      "category": "care_followup",
+      "scope": {"channel": "desktop", "conversation_id": "local:desktop"},
+      "events": [
+        {"type": "care_reminder", "text": "起来伸个懒腰吧"}
+      ],
+      "user_text": "提醒内容是啥",
+      "must_include_evidence": ["懒腰"],
+      "must_not_include_evidence": []
+    },
+    {
+      "id": "care-followup-007",
+      "category": "care_followup",
+      "scope": {"channel": "desktop", "conversation_id": "local:desktop"},
+      "events": [
+        {"type": "care_reminder", "text": "该喝水了"}
+      ],
+      "user_text": "你刚才关心我什么",
+      "must_include_evidence": ["喝水"],
+      "must_not_include_evidence": []
+    },
+    {
+      "id": "care-followup-008",
+      "category": "care_followup",
+      "scope": {"channel": "desktop", "conversation_id": "local:desktop"},
+      "events": [
+        {"type": "care_reminder", "text": "别一直盯屏幕"}
+      ],
+      "user_text": "刚那条提醒再说一遍",
+      "must_include_evidence": ["屏幕"],
+      "must_not_include_evidence": []
+    },
+    {
+      "id": "long-conv-001",
+      "category": "long_conversation",
+      "scope": {"channel": "desktop", "conversation_id": "local:desktop"},
+      "events": [
+        {"type": "user_message", "text": "我在做一个记忆系统重构"},
+        {"type": "assistant_message", "text": "需要我帮你列任务吗"},
+        {"type": "user_message", "text": "先把事件表做了"},
+        {"type": "assistant_message", "text": "好，事件表用 conversation_events"}
+      ],
+      "user_text": "我们刚才决定表名是什么",
+      "must_include_evidence": ["conversation_events"],
+      "must_not_include_evidence": []
+    },
+    {
+      "id": "long-conv-002",
+      "category": "long_conversation",
+      "scope": {"channel": "desktop", "conversation_id": "local:desktop"},
+      "events": [
+        {"type": "user_message", "text": "项目叫 live2d-llm"},
+        {"type": "assistant_message", "text": "记下了"},
+        {"type": "user_message", "text": "下一步做 selector"},
+        {"type": "assistant_message", "text": "selector 用确定性评分"}
+      ],
+      "user_text": "下一步是啥",
+      "must_include_evidence": ["selector"],
+      "must_not_include_evidence": []
+    },
+    {
+      "id": "long-conv-003",
+      "category": "long_conversation",
+      "scope": {"channel": "desktop", "conversation_id": "local:desktop"},
+      "events": [
+        {"type": "assistant_message", "text": "我稍后提醒你提交 PR"},
+        {"type": "user_message", "text": "好"},
+        {"type": "user_message", "text": "中间聊了天气"},
+        {"type": "assistant_message", "text": "明天有雨"}
+      ],
+      "user_text": "你答应提醒我什么",
+      "must_include_evidence": ["PR", "提交"],
+      "must_not_include_evidence": []
+    },
+    {
+      "id": "long-conv-004",
+      "category": "long_conversation",
+      "scope": {"channel": "desktop", "conversation_id": "local:desktop"},
+      "events": [
+        {"type": "user_message", "text": "角色是 suzu"},
+        {"type": "assistant_message", "text": "嗯"},
+        {"type": "user_message", "text": "通道隔离要做"},
+        {"type": "assistant_message", "text": "desktop 和 qq 不共享近因"}
+      ],
+      "user_text": "隔离规则是什么",
+      "must_include_evidence": ["desktop", "qq"],
+      "must_not_include_evidence": []
+    },
+    {
+      "id": "long-conv-005",
+      "category": "long_conversation",
+      "scope": {"channel": "desktop", "conversation_id": "local:desktop"},
+      "events": [
+        {"type": "user_message", "text": "预算最多 3 条事件"},
+        {"type": "assistant_message", "text": "好的，max_events=3"}
+      ],
+      "user_text": "近因预算多少",
+      "must_include_evidence": ["3"],
+      "must_not_include_evidence": []
+    },
+    {
+      "id": "long-conv-006",
+      "category": "long_conversation",
+      "scope": {"channel": "desktop", "conversation_id": "local:desktop"},
+      "events": [
+        {"type": "user_message", "text": "中期摘要要带来源 id"},
+        {"type": "assistant_message", "text": "source_event_ids 必须非空"}
+      ],
+      "user_text": "摘要必须带什么",
+      "must_include_evidence": ["source_event_ids"],
+      "must_not_include_evidence": []
+    },
+    {
+      "id": "long-conv-007",
+      "category": "long_conversation",
+      "scope": {"channel": "desktop", "conversation_id": "local:desktop"},
+      "events": [
+        {"type": "user_message", "text": "先做 T2 读路径单源"},
+        {"type": "assistant_message", "text": "ContextAssembler 是唯一读出口"}
+      ],
+      "user_text": "读出口是谁",
+      "must_include_evidence": ["ContextAssembler"],
+      "must_not_include_evidence": []
+    },
+    {
+      "id": "long-conv-008",
+      "category": "long_conversation",
+      "scope": {"channel": "desktop", "conversation_id": "local:desktop"},
+      "events": [
+        {"type": "user_message", "text": "双写阶段 transcript 还保留"},
+        {"type": "assistant_message", "text": "events 是权威源"}
+      ],
+      "user_text": "权威源是什么",
+      "must_include_evidence": ["events"],
+      "must_not_include_evidence": []
+    },
+    {
+      "id": "cross-channel-001",
+      "category": "cross_channel_isolation",
+      "scope": {"channel": "desktop", "conversation_id": "local:desktop"},
+      "events": [
+        {"type": "screen_observation", "text": "桌面秘密：原神"},
+        {"type": "proactive_utterance", "text": "桌面吐槽原神", "parent": 0}
+      ],
+      "user_text": "你看到了什么",
+      "query_scope": {"channel": "qq", "conversation_id": "private:42"},
+      "must_include_evidence": [],
+      "must_not_include_evidence": ["原神", "桌面"]
+    },
+    {
+      "id": "cross-channel-002",
+      "category": "cross_channel_isolation",
+      "scope": {"channel": "qq", "conversation_id": "private:42"},
+      "events": [
+        {"type": "user_message", "text": "QQ 私聊秘密：密码 123"},
+        {"type": "assistant_message", "text": "收到"}
+      ],
+      "user_text": "密码是多少",
+      "query_scope": {"channel": "desktop", "conversation_id": "local:desktop"},
+      "must_include_evidence": [],
+      "must_not_include_evidence": ["密码", "123"]
+    },
+    {
+      "id": "cross-channel-003",
+      "category": "cross_channel_isolation",
+      "scope": {"channel": "qq", "conversation_id": "group:7"},
+      "events": [
+        {"type": "user_message", "text": "群里说的秘密项目 X"},
+        {"type": "assistant_message", "text": "记下了"}
+      ],
+      "user_text": "项目是什么",
+      "query_scope": {"channel": "qq", "conversation_id": "private:42"},
+      "must_include_evidence": [],
+      "must_not_include_evidence": ["项目 X", "秘密项目"]
+    },
+    {
+      "id": "cross-channel-004",
+      "category": "cross_channel_isolation",
+      "scope": {"channel": "desktop", "conversation_id": "local:desktop"},
+      "events": [
+        {"type": "care_reminder", "text": "桌面久坐提醒"}
+      ],
+      "user_text": "提醒了什么",
+      "query_scope": {"channel": "qq", "conversation_id": "group:7"},
+      "must_include_evidence": [],
+      "must_not_include_evidence": ["久坐"]
+    },
+    {
+      "id": "cross-channel-005",
+      "category": "cross_channel_isolation",
+      "scope": {"channel": "qq", "conversation_id": "private:1"},
+      "events": [
+        {"type": "assistant_message", "text": "私聊说了原神攻略"}
+      ],
+      "user_text": "原神",
+      "query_scope": {"channel": "qq", "conversation_id": "private:2"},
+      "must_include_evidence": [],
+      "must_not_include_evidence": ["攻略"]
+    },
+    {
+      "id": "cross-channel-006",
+      "category": "cross_channel_isolation",
+      "scope": {"channel": "desktop", "conversation_id": "local:text_input"},
+      "events": [
+        {"type": "user_message", "text": "text_input 会话密钥 alpha"}
+      ],
+      "user_text": "密钥",
+      "query_scope": {"channel": "desktop", "conversation_id": "local:desktop"},
+      "must_include_evidence": [],
+      "must_not_include_evidence": ["alpha"]
+    },
+    {
+      "id": "cross-channel-007",
+      "category": "cross_channel_isolation",
+      "scope": {"channel": "qq", "conversation_id": "group:100"},
+      "events": [
+        {"type": "tool_result", "text": "群工具结果 secret-g"}
+      ],
+      "user_text": "工具结果",
+      "query_scope": {"channel": "qq", "conversation_id": "group:200"},
+      "must_include_evidence": [],
+      "must_not_include_evidence": ["secret-g"]
+    },
+    {
+      "id": "cross-channel-008",
+      "category": "cross_channel_isolation",
+      "scope": {"channel": "desktop", "conversation_id": "local:desktop"},
+      "events": [
+        {"type": "screen_observation", "text": "桌面观察：银行余额"}
+      ],
+      "user_text": "余额",
+      "query_scope": {"channel": "qq", "conversation_id": "private:42"},
+      "must_include_evidence": [],
+      "must_not_include_evidence": ["银行", "余额"]
+    },
+    {
+      "id": "cross-user-001",
+      "category": "cross_user_isolation",
+      "scope": {"channel": "qq", "conversation_id": "private:42", "person_id": "owner"},
+      "events": [
+        {"type": "user_message", "text": "主人秘密：喜欢抹茶"}
+      ],
+      "user_text": "喜欢什么",
+      "query_scope": {"channel": "qq", "conversation_id": "private:99", "person_id": "guest"},
+      "must_include_evidence": [],
+      "must_not_include_evidence": ["抹茶"]
+    },
+    {
+      "id": "cross-user-002",
+      "category": "cross_user_isolation",
+      "scope": {"channel": "qq", "conversation_id": "private:10", "person_id": "u10"},
+      "events": [
+        {"type": "assistant_message", "text": "只对 u10 说的话"}
+      ],
+      "user_text": "你说啥",
+      "query_scope": {"channel": "qq", "conversation_id": "private:11", "person_id": "u11"},
+      "must_include_evidence": [],
+      "must_not_include_evidence": ["u10"]
+    },
+    {
+      "id": "cross-user-003",
+      "category": "cross_user_isolation",
+      "scope": {"channel": "desktop", "conversation_id": "local:desktop", "person_id": "owner"},
+      "events": [
+        {"type": "user_message", "text": "owner 的待办：交税"}
+      ],
+      "user_text": "待办",
+      "query_scope": {"channel": "desktop", "conversation_id": "local:desktop", "person_id": "other"},
+      "must_include_evidence": [],
+      "must_not_include_evidence": ["交税"]
+    },
+    {
+      "id": "cross-user-004",
+      "category": "cross_user_isolation",
+      "scope": {"channel": "qq", "conversation_id": "group:1", "person_id": "alice"},
+      "events": [
+        {"type": "user_message", "text": "Alice 的电话 138"}
+      ],
+      "user_text": "电话",
+      "query_scope": {"channel": "qq", "conversation_id": "group:1", "person_id": "bob"},
+      "must_include_evidence": [],
+      "must_not_include_evidence": ["138"]
+    },
+    {
+      "id": "cross-user-005",
+      "category": "cross_user_isolation",
+      "scope": {"channel": "qq", "conversation_id": "private:5", "person_id": "p5"},
+      "events": [
+        {"type": "care_reminder", "text": "只给 p5 的提醒"}
+      ],
+      "user_text": "提醒",
+      "query_scope": {"channel": "qq", "conversation_id": "private:6", "person_id": "p6"},
+      "must_include_evidence": [],
+      "must_not_include_evidence": ["p5"]
+    },
+    {
+      "id": "cross-user-006",
+      "category": "cross_user_isolation",
+      "scope": {"channel": "desktop", "conversation_id": "local:desktop", "person_id": "owner"},
+      "events": [
+        {"type": "tool_result", "text": "owner 工具结果 Z"}
+      ],
+      "user_text": "工具",
+      "query_scope": {"channel": "desktop", "conversation_id": "local:desktop", "person_id": "guest"},
+      "must_include_evidence": [],
+      "must_not_include_evidence": ["结果 Z"]
+    },
+    {
+      "id": "cross-user-007",
+      "category": "cross_user_isolation",
+      "scope": {"channel": "qq", "conversation_id": "private:20", "person_id": "a"},
+      "events": [
+        {"type": "screen_observation", "text": "不该出现：用户 a 的屏幕"}
+      ],
+      "user_text": "屏幕",
+      "query_scope": {"channel": "qq", "conversation_id": "private:21", "person_id": "b"},
+      "must_include_evidence": [],
+      "must_not_include_evidence": ["用户 a"]
+    },
+    {
+      "id": "cross-user-008",
+      "category": "cross_user_isolation",
+      "scope": {"channel": "qq", "conversation_id": "group:9", "person_id": "owner"},
+      "events": [
+        {"type": "assistant_message", "text": "owner 在群里的私密备注"}
+      ],
+      "user_text": "备注",
+      "query_scope": {"channel": "qq", "conversation_id": "group:9", "person_id": "member"},
+      "must_include_evidence": [],
+      "must_not_include_evidence": ["私密备注"]
+    }
+  ]
+}

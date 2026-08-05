@@ -13,7 +13,7 @@ class DummyChatService:
         return None
 
 
-def test_screen_reaction_always_uses_text_path(monkeypatch):
+def test_screen_reaction_duration_enables_vision(monkeypatch):
     calls = []
 
     class ChatService:
@@ -63,10 +63,71 @@ def test_screen_reaction_always_uses_text_path(monkeypatch):
 
     assert calls == [
         {
+            "use_vision": True,
             "app_name": "Code.exe",
             "reason": "duration",
             "app_duration_sec": 7200.0,
             "current_stay_sec": 1800.0,
+        }
+    ]
+
+
+def test_screen_reaction_switch_can_stay_text_only(monkeypatch):
+    calls = []
+
+    class ChatService:
+        async def handle_sensor_event(self, *args, **kwargs):
+            calls.append(kwargs)
+            return True
+
+    class RunningLoop:
+        def is_running(self):
+            return True
+
+    loop = RunningLoop()
+    sensor = ScreenSensor.__new__(ScreenSensor)
+    sensor.chat_service = ChatService()
+    sensor._loop = loop
+    sensor.logger = logging.getLogger("screen-switch-text-test")
+    sensor.last_reaction_time = 0.0
+    sensor.category_reaction_times = {}
+    sensor._last_rust_debug_key = ""
+    sensor._last_rust_debug_at = 0.0
+    sensor.debug_verbose = False
+    sensor.daily_durations = {"Code.exe": 120.0}
+    sensor.current_window_start_time = 0.0
+
+    monkeypatch.setattr("modules.screen_sensor.time.time", lambda: 10_000.0)
+    monkeypatch.setattr("modules.screen_sensor.random.random", lambda: 0.99)
+
+    def run_immediately(coroutine, target_loop):
+        assert target_loop is loop
+        completed = Future()
+        completed.set_result(asyncio.run(coroutine))
+        return completed
+
+    monkeypatch.setattr(
+        "modules.screen_sensor.asyncio.run_coroutine_threadsafe",
+        run_immediately,
+    )
+
+    sensor._try_trigger_reaction(
+        "main.py - Code",
+        "coding",
+        3,
+        "Code.exe",
+        reason="switch",
+        app_duration_sec=120.0,
+        current_stay_sec=5.0,
+    )
+
+    assert calls == [
+        {
+            "use_vision": False,
+            "app_name": "Code.exe",
+            "reason": "switch",
+            "app_duration_sec": 120.0,
+            "current_stay_sec": 5.0,
         }
     ]
 

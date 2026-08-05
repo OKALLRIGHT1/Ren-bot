@@ -14,10 +14,13 @@ class ToolRouteResult:
     capability_args: Optional[Dict[str, Any]] = None
     capability_score: float = 0.0
     capability_match_reason: str = ""
+    # Low-confidence capability matches for optional gatekeeper resolution.
+    capability_ambiguous: bool = False
+    capability_candidates: Optional[List[Dict[str, Any]]] = None
 
 
 class ToolRouter:
-    """轻量级工具路由器（不依赖 LLM）。"""
+    """轻量级工具路由器：规则优先；模糊 capability 交给上层 gatekeeper 裁决。"""
 
     _WORKSPACE_READ_HINTS = [
         "读",
@@ -382,6 +385,33 @@ class ToolRouter:
 
         return keywords
 
+    @staticmethod
+    def _serialize_capability_candidates(candidates: List[Any]) -> List[Dict[str, Any]]:
+        rows: List[Dict[str, Any]] = []
+        for item in candidates or []:
+            if not bool(getattr(item, "available", True)):
+                continue
+            capability_id = str(getattr(item, "capability_id", "") or "").strip()
+            plugin = str(getattr(item, "plugin", "") or "").strip()
+            if not capability_id or not plugin:
+                continue
+            try:
+                score = float(getattr(item, "score", 0.0) or 0.0)
+            except Exception:
+                score = 0.0
+            args = getattr(item, "args", None)
+            rows.append(
+                {
+                    "capability_id": capability_id,
+                    "plugin": plugin,
+                    "score": score,
+                    "args": dict(args or {}) if isinstance(args, dict) else {},
+                    "reason": str(getattr(item, "reason", "") or ""),
+                }
+            )
+        rows.sort(key=lambda row: float(row.get("score") or 0.0), reverse=True)
+        return rows
+
     def route(
         self, user_text: str, last_tool_triggers: Optional[List[str]] = None
     ) -> ToolRouteResult:
@@ -393,6 +423,7 @@ class ToolRouter:
         combined_map: Dict[str, object] = {}
         combined_map.update(self.react_map)
         combined_map.update(self.delegate_map)
+        ambiguous_candidates: List[Dict[str, Any]] = []
 
         if self.enable_capability_routes and self.capability_manager is not None:
             capability_result = self.capability_manager.match(user_text, {})
@@ -424,6 +455,10 @@ class ToolRouter:
                     capability_match_reason=str(
                         candidate.unavailable_reason or candidate.reason or ""
                     ),
+                )
+            if capability_result.ambiguous and capability_result.candidates:
+                ambiguous_candidates = self._serialize_capability_candidates(
+                    list(capability_result.candidates)
                 )
 
         if not self._plugin_has_capabilities("mcp_tools") and self._should_route_to_mcp_domain(text):
@@ -463,5 +498,15 @@ class ToolRouter:
 
         if matched:
             return ToolRouteResult(True, sorted(matched), "intent_keyword_matched")
+
+        if ambiguous_candidates:
+            return ToolRouteResult(
+                False,
+                [],
+                "capability_ambiguous",
+                capability_ambiguous=True,
+                capability_candidates=ambiguous_candidates,
+                capability_match_reason="low_confidence_or_multi_candidate",
+            )
 
         return ToolRouteResult(False, [], "no_tool_intent")

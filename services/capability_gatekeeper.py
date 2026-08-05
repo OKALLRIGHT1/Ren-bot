@@ -4,15 +4,18 @@ import inspect
 import json
 import re
 from dataclasses import dataclass, field
-from typing import Any, Awaitable, Callable, Dict, Optional
+from typing import Any, Callable, Dict, Iterable, List, Optional
 
 
 GATEKEEPER_CAPABILITIES = {"info.weather_now", "info.weather_7d"}
+# Use the same cheap gatekeeper chain as chat/sensor (cloud flash first, local last).
+GATEKEEPER_TASK_TYPE = "gatekeeper"
 
 
 @dataclass(frozen=True)
 class CapabilityGateDecision:
     capability_id: str = ""
+    plugin: str = ""
     args: Dict[str, Any] = field(default_factory=dict)
     confidence: float = 0.0
     approved: bool = False
@@ -21,6 +24,53 @@ class CapabilityGateDecision:
 
 def should_use_gatekeeper(capability_id: str) -> bool:
     return str(capability_id or "").strip() in GATEKEEPER_CAPABILITIES
+
+
+def _candidate_rows(candidates: Iterable[Any]) -> List[Dict[str, Any]]:
+    rows: List[Dict[str, Any]] = []
+    for item in candidates or []:
+        if isinstance(item, dict):
+            capability_id = str(item.get("capability_id") or "").strip()
+            plugin = str(item.get("plugin") or "").strip()
+            if not capability_id or not plugin:
+                continue
+            try:
+                score = float(item.get("score") or 0.0)
+            except Exception:
+                score = 0.0
+            rows.append(
+                {
+                    "capability_id": capability_id,
+                    "plugin": plugin,
+                    "score": score,
+                    "args": dict(item.get("args") or {})
+                    if isinstance(item.get("args"), dict)
+                    else {},
+                    "reason": str(item.get("reason") or ""),
+                    "description": str(item.get("description") or ""),
+                }
+            )
+            continue
+        capability_id = str(getattr(item, "capability_id", "") or "").strip()
+        plugin = str(getattr(item, "plugin", "") or "").strip()
+        if not capability_id or not plugin:
+            continue
+        try:
+            score = float(getattr(item, "score", 0.0) or 0.0)
+        except Exception:
+            score = 0.0
+        args = getattr(item, "args", None)
+        rows.append(
+            {
+                "capability_id": capability_id,
+                "plugin": plugin,
+                "score": score,
+                "args": dict(args or {}) if isinstance(args, dict) else {},
+                "reason": str(getattr(item, "reason", "") or ""),
+                "description": str(getattr(item, "description", "") or ""),
+            }
+        )
+    return rows
 
 
 async def refine_capability_args(
@@ -59,7 +109,7 @@ async def refine_capability_args(
         raw = await _call_chat_with_ai(
             chat_with_ai,
             messages,
-            task_type="tool_gatekeeper",
+            task_type=GATEKEEPER_TASK_TYPE,
             caller="capability_gatekeeper",
         )
         data = _parse_json_object(raw)
@@ -82,6 +132,95 @@ async def refine_capability_args(
         confidence=confidence,
         approved=approved,
         reason=str(data.get("reason") or ""),
+    )
+
+
+async def resolve_ambiguous_capability(
+    *,
+    user_text: str,
+    candidates: Iterable[Any],
+    chat_with_ai: Callable[..., Any],
+) -> Optional[CapabilityGateDecision]:
+    """Pick one capability from low-confidence / multi-candidate matches via gatekeeper."""
+    rows = _candidate_rows(candidates)
+    if not rows:
+        return None
+    # Cap prompt size; prefer higher rule scores first.
+    rows = sorted(rows, key=lambda item: float(item.get("score") or 0.0), reverse=True)[:8]
+    allowed_ids = {str(item["capability_id"]) for item in rows}
+    plugin_by_id = {str(item["capability_id"]): str(item["plugin"]) for item in rows}
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "你是工具调用看门人。根据用户话从候选能力里选一个，或判定不需要工具。"
+                "只输出 JSON，不要解释。"
+                "格式：{\"need_tools\":true,\"capability_id\":\"...\",\"args\":{},\"confidence\":0.0,\"reason\":\"...\"}。"
+                "need_tools=false 时 capability_id 可为空。"
+                "只能选择候选列表中的 capability_id，禁止发明新能力。"
+                "闲聊、无明确工具意图、证据不足时 need_tools=false。"
+            ),
+        },
+        {
+            "role": "user",
+            "content": json.dumps(
+                {
+                    "user_text": str(user_text or ""),
+                    "candidates": rows,
+                },
+                ensure_ascii=False,
+            ),
+        },
+    ]
+    try:
+        raw = await _call_chat_with_ai(
+            chat_with_ai,
+            messages,
+            task_type=GATEKEEPER_TASK_TYPE,
+            caller="capability_route_gatekeeper",
+        )
+        data = _parse_json_object(raw)
+    except Exception:
+        return None
+    if not isinstance(data, dict):
+        return None
+    try:
+        confidence = float(data.get("confidence") or 0.0)
+    except Exception:
+        confidence = 0.0
+    need_tools = bool(data.get("need_tools", False))
+    capability_id = str(data.get("capability_id") or "").strip()
+    if not need_tools or confidence < 0.6:
+        return CapabilityGateDecision(
+            capability_id=capability_id,
+            plugin=plugin_by_id.get(capability_id, ""),
+            args={},
+            confidence=confidence,
+            approved=False,
+            reason=str(data.get("reason") or "gatekeeper_no_tool"),
+        )
+    if capability_id not in allowed_ids:
+        return CapabilityGateDecision(
+            confidence=confidence,
+            approved=False,
+            reason="gatekeeper_unknown_capability",
+        )
+    args = data.get("args") if isinstance(data.get("args"), dict) else {}
+    # Prefer candidate args when model omitted them.
+    seed_args = {}
+    for row in rows:
+        if row["capability_id"] == capability_id:
+            seed_args = dict(row.get("args") or {})
+            break
+    merged_args = dict(seed_args)
+    merged_args.update(dict(args or {}))
+    return CapabilityGateDecision(
+        capability_id=capability_id,
+        plugin=plugin_by_id.get(capability_id, ""),
+        args=merged_args,
+        confidence=confidence,
+        approved=True,
+        reason=str(data.get("reason") or "gatekeeper_selected"),
     )
 
 

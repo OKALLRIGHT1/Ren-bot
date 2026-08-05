@@ -15,6 +15,7 @@ class ActiveAlertService:
         polish_natural_reply: Callable[..., Awaitable[str]],
         apply_character_catchphrase: Callable[[str], str],
         logger: Any = None,
+        conversation_event_service: Any = None,
     ) -> None:
         self.default_persona = default_persona
         self.event_bus = event_bus
@@ -23,6 +24,7 @@ class ActiveAlertService:
         self.polish_natural_reply = polish_natural_reply
         self.apply_character_catchphrase = apply_character_catchphrase
         self.logger = logger
+        self.conversation_event_service = conversation_event_service
 
     def _active_character_prompt(self) -> str:
         try:
@@ -76,6 +78,24 @@ class ActiveAlertService:
             await self.presenter.present(
                 clean_reply, emotion=extracted_emo or "concern", interrupt=True
             )
+            event_service = self.conversation_event_service
+            if event_service is not None and getattr(event_service, "is_ready", False):
+                try:
+                    event_service.record_care_reminder(
+                        ctx={"source": "desktop"},
+                        text=clean_reply,
+                        reason=f"sedentary:{app_name}:{minutes}m",
+                        metadata={
+                            "path": "active_alert",
+                            "app_name": str(app_name or ""),
+                            "minutes": int(minutes or 0),
+                        },
+                    )
+                except Exception as event_exc:
+                    if self.logger:
+                        self.logger.warning(
+                            f"[ActiveAlert] care event failed: {event_exc}"
+                        )
         except Exception as exc:
             if self.logger:
                 self.logger.error(f"Active alert failed: {exc}")

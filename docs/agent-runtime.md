@@ -7,8 +7,12 @@
 - `ChatService` 仍负责对话主流程、UI、TTS、QQ 回发和记忆。
 - `PluginManager` 仍负责加载插件、权限、超时和旧工具执行。
 - `AgentRuntime` 负责 direct 工具入口、确认状态和统一工具目录。
-- `ActionGate` 负责安装、写配置、发邮件、删除等高风险操作的确认策略。
+- `ActionGate` 负责安装、写配置、发邮件、删除、代码执行等高风险操作的确认策略。
+- `PendingConfirmStore`（`services/security/pending_confirm.py`）保存待确认动作；用户回复「确认」后复跑并注入 `action_confirmed=true`。
+- **本地**高风险确认优先走 Qt 弹窗（`PluginManager.local_confirm_handler` → `QtChatTrayApp.request_action_confirm`）；弹窗确认后当场放行，无需再打字「确认」。
+- **远程 QQ** 仍用聊天「确认/取消」，不弹本机窗。
 - `CapabilityManager` 负责自检和能力安装计划；第一版不直接安装。
+- `code_executor` / `code_agent` 均委托本机 Codex CLI / Claude Code，并经 ActionGate（`system.exec_code` / `system.code_agent`）。
 
 ## 工具来源
 

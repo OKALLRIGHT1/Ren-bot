@@ -1215,18 +1215,38 @@ class GuiHttpServer:
     def _list_memory_items(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         store = self._get_memory_store()
         if store is None or not hasattr(store, "list_items"):
-            return {"items": [], "error": "memory_store_unavailable"}
+            return {
+                "items": [],
+                "error": "memory_store_unavailable",
+                "deprecated": True,
+                "use": "/memory/core/*",
+                "allowed_types": ["todo"],
+            }
         try:
+            type_filter = str(payload.get("type") or "todo").strip()
+            include_legacy = str(payload.get("include_legacy") or "").strip() in {
+                "1",
+                "true",
+                "yes",
+            }
+            if not type_filter and not include_legacy:
+                type_filter = "todo"
             items = store.list_items(
                 status=str(payload.get("status") or "active"),
-                type_=str(payload.get("type") or ""),
+                type_=type_filter if not include_legacy else str(payload.get("type") or ""),
                 query=str(payload.get("query") or ""),
                 limit=int(payload.get("limit") or 200),
                 offset=int(payload.get("offset") or 0),
             )
-            return {"items": items}
+            return {
+                "items": items,
+                "deprecated": True,
+                "use": "/memory/core/*",
+                "allowed_types": ["todo"],
+                "note": "memory_items is a task store (todo); semantic memory is memory_records",
+            }
         except Exception as exc:
-            return {"items": [], "error": str(exc)}
+            return {"items": [], "error": str(exc), "deprecated": True}
 
     def _list_memory_episodes(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         store = self._get_memory_store()
@@ -1372,13 +1392,27 @@ class GuiHttpServer:
     def _upsert_memory_item(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         store = self._get_memory_store()
         if store is None or not hasattr(store, "upsert_item"):
-            return {"error": "memory_store_unavailable"}
+            return {"error": "memory_store_unavailable", "deprecated": True}
         try:
-            item = payload.get("item") or payload
+            item = dict(payload.get("item") or payload or {})
+            tp = str(item.get("type") or "todo").strip() or "todo"
+            if tp not in {"todo"}:
+                return {
+                    "error": "type_not_allowed",
+                    "message": "memory_items only accepts type=todo; use Memory Core for semantic memory",
+                    "allowed_types": ["todo"],
+                    "deprecated": True,
+                    "use": "/memory/core/*",
+                }
+            item["type"] = "todo"
             item_id = store.upsert_item(item)
-            return {"item": store.get_item(item_id)}
+            return {
+                "item": store.get_item(item_id),
+                "deprecated": True,
+                "allowed_types": ["todo"],
+            }
         except Exception as exc:
-            return {"error": str(exc)}
+            return {"error": str(exc), "deprecated": True}
 
     def _delete_episode(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         store = self._get_memory_store()

@@ -2,7 +2,9 @@ from modules.model_catalog import (
     embedding_fields_from_model,
     format_purposes_label,
     get_model_purposes,
+    has_api_version_suffix,
     join_endpoint_url,
+    join_openai_compat_url,
     list_model_options,
     list_models_by_purpose,
     model_has_purpose,
@@ -48,6 +50,39 @@ def test_join_endpoint_url_dedupes_trailing_v1():
         == "http://20.214.141.16:3000/v1/images/generations"
     )
     assert join_endpoint_url("https://host/v1", "/v1") == "https://host/v1"
+
+
+def test_join_endpoint_url_respects_non_v1_version_roots():
+    """Zhipu/BigModel uses /api/paas/v4 — must not become .../v4/v1/..."""
+    assert has_api_version_suffix("https://open.bigmodel.cn/api/paas/v4")
+    assert has_api_version_suffix("https://open.bigmodel.cn/api/paas/v4/")
+    assert not has_api_version_suffix("https://api.example.com")
+    assert (
+        join_endpoint_url(
+            "https://open.bigmodel.cn/api/paas/v4", "/v1/chat/completions"
+        )
+        == "https://open.bigmodel.cn/api/paas/v4/chat/completions"
+    )
+    assert (
+        join_endpoint_url(
+            "https://open.bigmodel.cn/api/paas/v4", "chat/completions"
+        )
+        == "https://open.bigmodel.cn/api/paas/v4/chat/completions"
+    )
+    assert (
+        join_openai_compat_url(
+            "https://open.bigmodel.cn/api/paas/v4", "chat/completions"
+        )
+        == "https://open.bigmodel.cn/api/paas/v4/chat/completions"
+    )
+    assert (
+        join_openai_compat_url("https://api.deepseek.com", "chat/completions")
+        == "https://api.deepseek.com/v1/chat/completions"
+    )
+    assert (
+        join_openai_compat_url("https://api.deepseek.com/v1", "chat/completions")
+        == "https://api.deepseek.com/v1/chat/completions"
+    )
 
 
 def test_normalize_purposes_accepts_chinese_aliases():

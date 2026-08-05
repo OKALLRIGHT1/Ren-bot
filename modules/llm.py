@@ -308,15 +308,24 @@ def _messages_to_text_block(messages_context) -> str:
 
 
 def _build_openai_compat_url(base_url: str, endpoint: str) -> str:
-    base = str(base_url or "").strip().rstrip("/")
-    if not base:
-        raise ValueError("openai compatible call missing base_url")
-    ep = str(endpoint or "").strip().lstrip("/")
-    if not ep:
-        raise ValueError("openai compatible call missing endpoint")
-    if base.endswith("/v1"):
-        return f"{base}/{ep}"
-    return f"{base}/v1/{ep}"
+    try:
+        from modules.model_catalog import join_openai_compat_url
+
+        return join_openai_compat_url(base_url, endpoint)
+    except Exception:
+        # Keep a local fallback so transport still works if catalog import fails.
+        base = str(base_url or "").strip().rstrip("/")
+        if not base:
+            raise ValueError("openai compatible call missing base_url")
+        ep = str(endpoint or "").strip().lstrip("/")
+        if not ep:
+            raise ValueError("openai compatible call missing endpoint")
+        # Treat any trailing /vN (v1/v4/...) as already versioned.
+        import re
+
+        if re.search(r"/v\d+$", base, re.IGNORECASE):
+            return f"{base}/{ep}"
+        return f"{base}/v1/{ep}"
 
 
 def _extract_responses_text(data: dict) -> str:
@@ -403,8 +412,10 @@ def _build_gemini_native_url(
     base_url: str, model_name: str, api_key: str
 ) -> tuple[str, dict]:
     base = str(base_url or "").strip().rstrip("/")
-    if base.endswith("/v1"):
-        base = base[:-3]
+    # Drop trailing OpenAI-style /vN before switching to Gemini /v1beta.
+    import re
+
+    base = re.sub(r"/v\d+$", "", base, flags=re.IGNORECASE)
     if not base:
         base = "https://generativelanguage.googleapis.com"
     url = f"{base}/v1beta/models/{model_name}:generateContent"

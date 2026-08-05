@@ -1,3 +1,6 @@
+import pytest
+
+from services.chat_support.conversation_event_service import ConversationEventService
 from services.chat_support.gateway_context_service import GatewayContextService
 
 
@@ -49,3 +52,44 @@ def test_owner_private_memory_still_shares_with_local_owner_session():
     )
 
     assert session_id == "owner_shared"
+
+
+@pytest.mark.parametrize(
+    ("ctx", "expected"),
+    [
+        ({"source": "desktop"}, ("desktop", "local:desktop")),
+        ({"source": "text_input"}, ("desktop", "local:text_input")),
+        (
+            {
+                "source": "qq_gateway",
+                "channel_meta": {"session_id": "private:42", "user_id": "42"},
+            },
+            ("qq", "private:42"),
+        ),
+        (
+            {
+                "source": "qq_gateway",
+                "channel_meta": {"session_id": "group:7", "user_id": "42"},
+            },
+            ("qq", "group:7"),
+        ),
+    ],
+)
+def test_event_scope_matrix(ctx, expected):
+    service = ConversationEventService(
+        store=None,
+        gateway_context_service=_service(),
+        enabled=False,
+    )
+    scope = service.resolve_scope(ctx, persona_id="suzu", person_id="owner")
+    assert (scope.channel, scope.conversation_id) == expected
+
+
+def test_gateway_event_scope_parts_reuse_session_key():
+    service = _service()
+    ctx = {
+        "source": "qq_gateway",
+        "channel_meta": {"session_id": "group:100", "user_id": "1"},
+    }
+    assert service.event_scope_parts(ctx) == ("qq", "group:100")
+    assert service.conversation_session_key(ctx) == "group:100"

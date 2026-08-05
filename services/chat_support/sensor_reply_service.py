@@ -29,6 +29,7 @@ class SensorReplyService:
         reset_sensor_motion_after: Callable[..., Awaitable[None]],
         add_memory_safe: Callable[..., Awaitable[None]],
         last_reply_time_getter: Callable[[], float],
+        conversation_event_service: Any = None,
     ) -> None:
         self.event_bus = event_bus
         self.presenter = presenter
@@ -47,9 +48,18 @@ class SensorReplyService:
         self.reset_sensor_motion_after = reset_sensor_motion_after
         self.add_memory_safe = add_memory_safe
         self.last_reply_time_getter = last_reply_time_getter
+        self.conversation_event_service = conversation_event_service
 
     async def send_sensor_reply(
-        self, reply: str, category: str, count: int, title: str, is_vision: bool
+        self,
+        reply: str,
+        category: str,
+        count: int,
+        title: str,
+        is_vision: bool,
+        *,
+        observation_event_id: str = "",
+        ctx: Optional[dict] = None,
     ) -> bool:
         extracted_emo, clean_text = self.extract_emo_tag(reply)
         clean_text = self.strip_wrapping_quotes(clean_text)
@@ -149,9 +159,36 @@ class SensorReplyService:
         )
 
         tag = "[视觉观察]" if is_vision else "[屏幕观察]"
+        # T1 dual-write: transcript for UI/search; events = near-history authority.
         await self.add_memory_safe(
             "assistant",
             f"{tag} {clean_text}",
             meta={"path": "sensor", "emotion": final_emo},
         )
+        event_service = self.conversation_event_service
+        if event_service is not None and getattr(event_service, "is_ready", False):
+            event_ctx = dict(ctx or {"source": "desktop"})
+            if not event_ctx.get("source"):
+                event_ctx["source"] = "desktop"
+            # Causality must come from this generation's observation id only.
+            # Do not fall back to any shared/last observation field.
+            parent_id = str(observation_event_id or "").strip()
+            try:
+                event_service.record_proactive_utterance(
+                    ctx=event_ctx,
+                    text=clean_text,
+                    parent_event_id=parent_id,
+                    metadata={
+                        "path": "sensor",
+                        "emotion": final_emo,
+                        "is_vision": bool(is_vision),
+                        "category": str(category or ""),
+                        "title": str(title or ""),
+                    },
+                )
+            except Exception as exc:
+                if self.logger:
+                    self.logger.warning(
+                        f"[Sensor] proactive utterance event failed: {exc}"
+                    )
         return True

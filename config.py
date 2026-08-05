@@ -211,17 +211,18 @@ RHUBARB_TIMEOUT_SEC = get_env_float(
     "RHUBARB_TIMEOUT_SEC", 25.0, 0.1
 )  # Rhubarb 口型分析超时
 
-# ==================== 代码执行器配置 ====================
-CODE_EXECUTOR_ENABLED = get_env_bool("CODE_EXECUTOR_ENABLED", "0")  # 是否启用代码执行器
+# ==================== 代码执行器配置（外部 Codex/Claude CLI） ====================
+CODE_EXECUTOR_ENABLED = get_env_bool("CODE_EXECUTOR_ENABLED", "0")  # 是否启用（默认关）
 CODE_EXECUTOR_MAX_TIME = get_env_int(
-    "CODE_EXECUTOR_MAX_TIME", 30, 1
-)  # 最大执行时间（秒）
+    "CODE_EXECUTOR_MAX_TIME", 300, 1
+)  # 外部 CLI 最大执行时间（秒）
+# 兼容旧 env；外部 CLI 路径下不再做进程内 AST 沙箱截断
 CODE_EXECUTOR_MAX_LENGTH = get_env_int(
     "CODE_EXECUTOR_MAX_LENGTH", 5000, 1
-)  # 最大代码长度（字符）
+)
 CODE_EXECUTOR_MAX_OUTPUT = get_env_int(
     "CODE_EXECUTOR_MAX_OUTPUT", 100, 1
-)  # 最大输出行数
+)
 
 # ==================== 硬件监控配置 ====================
 SYSTEM_MONITOR_ENABLED = get_env_bool(
@@ -432,11 +433,11 @@ MODELS = {
         "base_url": "https://openrouter.ai/api/v1",
         "model": "nex-agi/deepseek-v3.1-nex-n1:free",
     },
-    # 本地模型，用于断网情况
+    # 本地 Ollama 兜底（看门/轻量任务链路末位；主聊天不要优先它）
     "local": {
         "api_key": "sk-no-key-needed",
         "base_url": "http://localhost:11434/v1",
-        "model": "llama3",
+        "model": "gemma4:e4b",
     },
     "glm-4-flash": {
         "api_key": os.getenv("BIGM_API_KEY"),
@@ -477,8 +478,12 @@ LLM_ROUTER = {
     "summary": ["glm-4-flash"],
     # 联网搜索：只应选择 purposes 包含 web_search 的模型
     "web_search": [],
-    # ===>看门人路由，用于判断是否需要回复 <===
-    "gatekeeper": ["glm-4-flash", "gemini-3-flash"],
+    # 看门人：是否回复 / 工具与能力确认；云端 flash 优先，本地 gemma 垫底
+    "gatekeeper": ["glm-4-flash", "gemini-3-flash", "local"],
+    # 兼容旧 task_type 名，与 gatekeeper 同一条链
+    "tool_gatekeeper": ["glm-4-flash", "gemini-3-flash", "local"],
+    # 长期记忆写回抽取：默认与看门链一致（云端优先，local 垫底）
+    "memory_writeback": ["glm-4-flash", "gemini-3-flash", "local"],
     "translation": ["glm-4-flash", "gemini-3-flash"],
     "screen_classify": ["glm-4-flash", "gemini-3-flash"],
     "sensor_vision_talk": ["glm-4-flash", "gemini-3-flash"],
@@ -533,6 +538,40 @@ MEMORY_SETTINGS = {
     "memory_core_learning_batch_messages": int(
         os.getenv("MEMORY_CORE_LEARNING_BATCH_MESSAGES", "10")
     ),
+    # Long-term writeback (MaiBot-style person facts + chat summary).
+    # Transcript is always kept; memory_records only when extract succeeds.
+    "memory_writeback_enabled": get_env_bool("MEMORY_WRITEBACK_ENABLED", "1"),
+    "memory_writeback_person_fact_enabled": get_env_bool(
+        "MEMORY_WRITEBACK_PERSON_FACT_ENABLED", "1"
+    ),
+    "memory_writeback_chat_summary_enabled": get_env_bool(
+        "MEMORY_WRITEBACK_CHAT_SUMMARY_ENABLED", "1"
+    ),
+    "memory_writeback_queue_maxsize": int(
+        os.getenv("MEMORY_WRITEBACK_QUEUE_MAXSIZE", "256")
+    ),
+    "memory_writeback_context_messages": int(
+        os.getenv("MEMORY_WRITEBACK_CONTEXT_MESSAGES", "12")
+    ),
+    "memory_writeback_summary_message_threshold": int(
+        os.getenv("MEMORY_WRITEBACK_SUMMARY_MESSAGE_THRESHOLD", "24")
+    ),
+    "memory_writeback_min_confidence": float(
+        os.getenv("MEMORY_WRITEBACK_MIN_CONFIDENCE", "0.7")
+    ),
+    "memory_writeback_max_facts": int(os.getenv("MEMORY_WRITEBACK_MAX_FACTS", "5")),
+    "memory_writeback_session_cooldown_sec": float(
+        os.getenv("MEMORY_WRITEBACK_SESSION_COOLDOWN_SEC", "2")
+    ),
+    "memory_writeback_explicit_user_immediate": get_env_bool(
+        "MEMORY_WRITEBACK_EXPLICIT_USER_IMMEDIATE", "1"
+    ),
+    # Prefer gatekeeper chain; memory_writeback task can override in custom router.
+    "memory_writeback_task_type": os.getenv(
+        "MEMORY_WRITEBACK_TASK_TYPE", "memory_writeback"
+    ),
+    # Process on caller thread (tests/debug only; production stays async queue).
+    "memory_writeback_inline": get_env_bool("MEMORY_WRITEBACK_INLINE", "0"),
     # 短期记忆配置
     "max_short_term": 12,  # 短期记忆窗口大小（对话轮数）
     # 长期记忆配置
@@ -570,6 +609,14 @@ MEMORY_SETTINGS = {
     # 调试配置
     "debug_prompt_injection": get_env_bool("DEBUG_PROMPT_INJECTION", "0"),  # 调试模式
     "recall_min_chars": int(os.getenv("RECALL_MIN_CHARS", "12")),  # 召回最小字符数
+    # Near-history conversation events (single source of truth for "just now").
+    # T1 dual-write: events + transcript; T2 read path only via ContextAssembler.
+    "conversation_events_enabled": get_env_bool("CONVERSATION_EVENTS_ENABLED", "1"),
+    "recent_event_max_items": int(os.getenv("RECENT_EVENT_MAX_ITEMS", "3")),
+    "recent_event_max_chars": int(os.getenv("RECENT_EVENT_MAX_CHARS", "900")),
+    "screen_event_ttl_sec": int(os.getenv("SCREEN_EVENT_TTL_SEC", "1800")),
+    "short_term_from_events": get_env_bool("SHORT_TERM_FROM_EVENTS", "0"),
+    "mid_term_enabled": get_env_bool("MID_TERM_ENABLED", "0"),
 }
 
 # ==================== 角色设定 ====================
