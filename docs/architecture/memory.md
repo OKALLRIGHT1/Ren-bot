@@ -75,6 +75,9 @@
 - 更老 segment 只通过 embedding 相关度按需召回，默认最多 1 条；embedding 不可用或失败时跳过历史中期召回，不使用字符串包含 fallback，也不影响 Active Session 和近因主链。
 - desktop、QQ 私聊、QQ群按 `persona_id + person_id + channel + conversation_id` 硬隔离。长期语义记忆的共享桶 `owner_shared` 不得代替中期会话的 `conversation_id`。
 - LLM 摘要只允许引用其声明的来源事件；数字、日期、路径、URL、实体、助手承诺和工具未决状态必须经来源校验。非法输出降级为只复制来源原文的低置信 `stub`。
+- `ContextAssembler` 是最终预算边界：recent 900 字符 / 3 项、Active Session 500 字符、历史中期 1800 字符 / 默认 1 段、长期 1200 字符。先跨层去重，再按完整行或完整 segment 裁切；Active Session 优先保留最新段后原始事件。
+- 每轮 trace 只记录 conversation ID、候选 / 入选 event ID、选择理由、segment ID、各层字符数和去重位置；不得复制 QQ 正文。显式传入的 candidates 仍必须在 Assembler 内重新按完整 scope 过滤。
+- 旧 `_looks_like_sensor_source_followup()` / `_build_sensor_source_followup_context()` 关键词与观察拼接路径已删除；`_recent_sensor_replies` 只用于屏幕生成防复读，不参与聊天 prompt 近史读取。
 - 中期召回与生成目前由 `mid_term_enabled=0` 默认关闭，待本地长稳和 canary 后开启；`short_term_from_events=0` 仍保留旧热窗回退路径。
 
 `mid_term_segments` 与长期写回的 `memory_records(kind=summary)` 不是同一层：前者只承托当前 conversation 的连续性，后者保存可跨会话使用的长期语义摘要。两者不得互相回写或重复入库。

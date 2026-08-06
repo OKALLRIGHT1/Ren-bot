@@ -622,6 +622,7 @@ MEMORY_SETTINGS = {
     "mid_term_segment_source_items": int(
         os.getenv("MID_TERM_SEGMENT_SOURCE_ITEMS", "10")
     ),
+    "active_session_max_chars": int(os.getenv("ACTIVE_SESSION_MAX_CHARS", "500")),
     "mid_term_max_chars": int(os.getenv("MID_TERM_MAX_CHARS", "1800")),
     "mid_term_recall_max_items": int(os.getenv("MID_TERM_RECALL_MAX_ITEMS", "1")),
 }

@@ -598,14 +598,10 @@ async def test_short_reaction_records_one_user_and_one_assistant_event(
     assert events[0].metadata.get("path") == "short_reaction"
 
 
-def test_sensor_followup_detector_covers_short_what_did_you_see(chat_env):
-    # Legacy detector kept for observability; main path no longer depends on it.
+def test_legacy_sensor_followup_keyword_path_is_removed(chat_env):
     service = chat_env()
-    assert service._looks_like_sensor_source_followup("看到了什么")
-    assert service._looks_like_sensor_source_followup("你刚吐槽什么")
-    assert service._looks_like_sensor_source_followup("为什么这么说")
-    assert service._looks_like_sensor_source_followup("你从哪看到有原神")
-    assert not service._looks_like_sensor_source_followup("今天天气怎么样")
+    assert not hasattr(service, "_looks_like_sensor_source_followup")
+    assert not hasattr(service, "_build_sensor_source_followup_context")
 
 
 @pytest.mark.asyncio

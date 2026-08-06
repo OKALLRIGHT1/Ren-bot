@@ -69,10 +69,15 @@ class ContinuityMetrics:
 class ContextTrace:
     """Per-turn assembly / selection trace for dual-inject and budget checks."""
 
+    source: str = "events"
+    conversation_id: str = ""
     candidate_event_ids: Sequence[str] = ()
     selected_event_ids: Sequence[str] = ()
-    selected_reasons: Mapping[str, str] = field(default_factory=dict)
-    recent_block_chars: int = 0
+    selection_reasons: Mapping[str, str] = field(default_factory=dict)
+    selected_segment_ids: Sequence[str] = ()
+    layer_chars: Mapping[str, int] = field(default_factory=dict)
+    deduplicated_items: Sequence[str] = ()
+    planner_triggered: bool = False
     dual_inject_detected: bool = False
     used_legacy_sensor_followup: bool = False
     notes: Mapping[str, object] = field(default_factory=dict)

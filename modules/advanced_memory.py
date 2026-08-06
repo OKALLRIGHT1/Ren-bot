@@ -206,6 +206,9 @@ class AdvancedMemorySystem:
                         recall_max_items=int(
                             MEMORY_SETTINGS.get("mid_term_recall_max_items", 1) or 1
                         ),
+                        active_max_chars=int(
+                            MEMORY_SETTINGS.get("active_session_max_chars", 500) or 500
+                        ),
                         mid_term_max_chars=int(
                             MEMORY_SETTINGS.get("mid_term_max_chars", 1800) or 1800
                         ),
@@ -218,6 +221,16 @@ class AdvancedMemorySystem:
                     ),
                     max_chars=int(
                         MEMORY_SETTINGS.get("recent_event_max_chars", 900) or 900
+                    ),
+                    active_max_chars=int(
+                        MEMORY_SETTINGS.get("active_session_max_chars", 500) or 500
+                    ),
+                    mid_term_max_chars=int(
+                        MEMORY_SETTINGS.get("mid_term_max_chars", 1800) or 1800
+                    ),
+                    long_term_max_chars=int(
+                        MEMORY_SETTINGS.get("memory_core_context_max_chars", 1200)
+                        or 1200
                     ),
                     mid_term_enabled=self.mid_term_enabled,
                     mid_term_recall_service=mid_term_recall_service,
@@ -1699,6 +1712,7 @@ Output ONLY "YES" or "NO".
         recent_event_block = ""
         active_session_block = ""
         mid_term_block = ""
+        resolved_memory_block = mem_text or ""
         context_assembler = getattr(self, "context_assembler", None)
         if context_assembler is not None and not tool_mode:
             try:
@@ -1717,6 +1731,9 @@ Output ONLY "YES" or "NO".
                 )
                 mid_term_block = str(
                     getattr(assembled, "mid_term_block", "") or ""
+                )
+                resolved_memory_block = str(
+                    getattr(assembled, "long_term_block", "") or ""
                 )
                 if assembled.short_term_messages:
                     short_ctx = [
@@ -1737,15 +1754,15 @@ Output ONLY "YES" or "NO".
         if mid_term_block:
             final_system += "\n\n" + mid_term_block
 
-        if mem_text:
+        if resolved_memory_block:
             final_system += (
                 "\n\n【经筛选的长期记忆】\n"
                 "这些记录只用于回答当前问题，不要逐条复述，也不要补全记录中没有的事实。"
                 "若记录里没有明确的周几、日期或次数，就直说没查到可靠依据，禁止猜测。"
                 "\n"
-                + mem_text
+                + resolved_memory_block
             )
-        elif memory_intent in {"episode", "profile"}:
+        elif not mem_text and memory_intent in {"episode", "profile"}:
             final_system += (
                 "\n\n【经筛选的长期记忆】\n"
                 "当前没有找到与这个问题直接相关的可靠记录。"

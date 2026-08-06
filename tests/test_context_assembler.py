@@ -26,10 +26,10 @@ def _scope(cid="local:desktop"):
     return ConversationScope("suzu", "owner", "desktop", cid)
 
 
-def _ev(store, etype, text, parents=(), eid=None):
+def _ev(store, etype, text, parents=(), eid=None, scope=None):
     event = ConversationEvent(
         event_id=eid or "",
-        scope=_scope(),
+        scope=scope or _scope(),
         event_type=etype,
         occurred_at=datetime.now(timezone.utc),
         exact_text=text,
@@ -243,4 +243,215 @@ def test_mid_term_failure_does_not_drop_recent_context(assembler):
     assert "原神" in result.recent_event_block
     assert result.active_session_block == ""
     assert result.mid_term_block == ""
-    assert "mid-term database unavailable" in result.trace["mid_term_error"]
+    assert result.trace["mid_term_error"] == "recall_exception:RuntimeError"
+    assert "mid-term database unavailable" not in str(result.trace)
+
+
+def test_assembler_enforces_final_layer_budgets_without_partial_units(assembler):
+    _, store = assembler
+    obs = _ev(
+        store,
+        ConversationEventType.SCREEN_OBSERVATION,
+        "登录页按钮是蓝色",
+    )
+    _ev(
+        store,
+        ConversationEventType.PROACTIVE_UTTERANCE,
+        "蓝色按钮挺显眼的",
+        parents=(obs.event_id,),
+    )
+
+    class OversizedRecall:
+        def recall(self, **kwargs):
+            return MidTermRecallResult(
+                active_session_block=(
+                    "【当前会话状态｜内部参考】\n"
+                    "原始事件优先。\n"
+                    + "- ACTIVE_OLDER_" + "甲" * 180 + "\n"
+                    + "- ACTIVE_NEWEST 完整最新事件"
+                ),
+                mid_term_block=(
+                    "【中期会话摘要】\n"
+                    "（压缩承托）\n"
+                    "- 段 first\nMID_FIRST 完整片段\n"
+                    "- 段 second\n" + "MID_SECOND_" + "乙" * 180
+                ),
+                active_segment_id="active-segment",
+                recalled_segment_ids=("first", "second"),
+            )
+
+    asm = ContextAssembler(
+        store=store,
+        max_events=3,
+        max_chars=260,
+        active_max_chars=120,
+        mid_term_max_chars=100,
+        long_term_max_chars=45,
+        mid_term_enabled=True,
+        mid_term_recall_service=OversizedRecall(),
+    )
+    result = asm.assemble(
+        current_user_text="你刚才为什么这么说",
+        scope=_scope(),
+        long_term_block="LONG_FIRST 完整记忆\nLONG_SECOND_" + "丙" * 80,
+    )
+
+    assert len(result.recent_event_block) <= 260
+    assert len(result.active_session_block) <= 120
+    assert len(result.mid_term_block) <= 100
+    assert len(result.long_term_block) <= 45
+    assert "ACTIVE_NEWEST 完整最新事件" in result.active_session_block
+    assert "ACTIVE_OLDER_" not in result.active_session_block
+    assert "MID_FIRST 完整片段" in result.mid_term_block
+    assert "MID_SECOND_" not in result.mid_term_block
+    assert "LONG_FIRST 完整记忆" in result.long_term_block
+    assert "LONG_SECOND_" not in result.long_term_block
+
+
+def test_active_budget_prioritizes_newest_raw_event_over_summary(assembler):
+    _, store = assembler
+
+    class SummaryHeavyRecall:
+        def recall(self, **kwargs):
+            return MidTermRecallResult(
+                active_session_block=(
+                    "【当前会话状态｜内部参考】\n"
+                    "以下是压缩状态及段后原始事件。\n"
+                    + "很长的旧摘要" * 45
+                    + "\n- [assistant_message] 最新承诺：十分钟后提醒喝水"
+                ),
+                active_segment_id="active-segment",
+            )
+
+    result = ContextAssembler(
+        store=store,
+        active_max_chars=140,
+        mid_term_enabled=True,
+        mid_term_recall_service=SummaryHeavyRecall(),
+    ).assemble(current_user_text="继续", scope=_scope())
+
+    assert len(result.active_session_block) <= 140
+    assert "最新承诺：十分钟后提醒喝水" in result.active_session_block
+    assert "很长的旧摘要" not in result.active_session_block
+
+
+def test_assembler_deduplicates_lower_layers_before_budgeting(assembler):
+    _, store = assembler
+
+    class DuplicateRecall:
+        def recall(self, **kwargs):
+            return MidTermRecallResult(
+                active_session_block=(
+                    "【当前会话状态｜内部参考】\n共享事实：按钮是蓝色\n当前未决：检查对比度"
+                ),
+                mid_term_block=(
+                    "【中期会话摘要】\n共享事实：按钮是蓝色\n历史决定：保留圆角"
+                ),
+                active_segment_id="active-segment",
+                recalled_segment_ids=("history-segment",),
+            )
+
+    asm = ContextAssembler(
+        store=store,
+        mid_term_enabled=True,
+        mid_term_recall_service=DuplicateRecall(),
+    )
+    result = asm.assemble(
+        current_user_text="继续",
+        scope=_scope(),
+        long_term_block="共享事实：按钮是蓝色\n长期偏好：喜欢简洁界面",
+    )
+    combined = "\n".join(
+        (
+            result.active_session_block,
+            result.mid_term_block,
+            result.long_term_block,
+        )
+    )
+
+    assert combined.count("共享事实：按钮是蓝色") == 1
+    assert result.trace["deduplicated_items"] == [
+        "mid_term:line:2",
+        "long_term:line:1",
+    ]
+
+
+def test_assembler_trace_has_bounded_privacy_safe_contract(assembler):
+    asm, store = assembler
+    private_text = "这是不能复制进 trace 的 QQ 私聊正文"
+    qq_scope = _scope("qq:private:1001")
+    event = _ev(
+        store,
+        ConversationEventType.ASSISTANT_MESSAGE,
+        private_text,
+        scope=qq_scope,
+    )
+
+    result = asm.assemble(
+        current_user_text="你刚才说什么",
+        scope=qq_scope,
+        candidates=[event],
+    )
+    trace = result.trace
+
+    assert trace["source"] == "events"
+    assert trace["conversation_id"] == "qq:private:1001"
+    assert trace["candidate_event_ids"] == [event.event_id]
+    assert trace["selected_event_ids"] == [event.event_id]
+    assert trace["selection_reasons"][event.event_id]
+    assert trace["selected_segment_ids"] == []
+    assert trace["layer_chars"] == {
+        "recent": len(result.recent_event_block),
+        "active": len(result.active_session_block),
+        "mid_term": len(result.mid_term_block),
+        "long_term": len(result.long_term_block),
+    }
+    assert trace["planner_triggered"] is False
+    assert private_text not in str(trace)
+
+
+def test_assembler_filters_explicit_candidates_by_scope(assembler):
+    asm, store = assembler
+    desktop_scope = _scope("local:desktop")
+    qq_scope = _scope("qq:private:1001")
+    desktop_event = _ev(
+        store,
+        ConversationEventType.ASSISTANT_MESSAGE,
+        "桌面端刚才说的话",
+        scope=desktop_scope,
+    )
+    qq_event = _ev(
+        store,
+        ConversationEventType.ASSISTANT_MESSAGE,
+        "QQ 私聊里不能泄漏的话",
+        scope=qq_scope,
+    )
+
+    result = asm.assemble(
+        current_user_text="你刚才说什么",
+        scope=desktop_scope,
+        candidates=[desktop_event, qq_event],
+    )
+
+    assert desktop_event.event_id in result.selected_event_ids
+    assert qq_event.event_id not in result.trace["candidate_event_ids"]
+    assert "QQ 私聊里不能泄漏的话" not in result.recent_event_block
+
+
+def test_assembler_rejects_explicit_candidates_without_scope(assembler):
+    asm, store = assembler
+    event = _ev(
+        store,
+        ConversationEventType.ASSISTANT_MESSAGE,
+        "不能在缺少 scope 时进入上下文",
+    )
+
+    result = asm.assemble(
+        current_user_text="你刚才说什么",
+        candidates=[event],
+    )
+
+    assert result.selected_event_ids == ()
+    assert result.recent_event_block == ""
+    assert result.trace["reason"] == "missing_scope"
+    assert result.trace["candidate_event_ids"] == []
