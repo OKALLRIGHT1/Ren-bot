@@ -616,9 +616,9 @@ MEMORY_SETTINGS = {
     "recent_event_max_chars": int(os.getenv("RECENT_EVENT_MAX_CHARS", "900")),
     "screen_event_ttl_sec": int(os.getenv("SCREEN_EVENT_TTL_SEC", "1800")),
     # T3: project short-term dialog window from conversation events when enabled.
-    "short_term_from_events": get_env_bool("SHORT_TERM_FROM_EVENTS", "0"),
-    # Mid-term segment generation (default off until canary; tests enable explicitly).
-    "mid_term_enabled": get_env_bool("MID_TERM_ENABLED", "0"),
+    "short_term_from_events": get_env_bool("SHORT_TERM_FROM_EVENTS", "1"),
+    # Mid-term generation and recall are on by default; set env to 0 for rollback.
+    "mid_term_enabled": get_env_bool("MID_TERM_ENABLED", "1"),
     "mid_term_segment_source_items": int(
         os.getenv("MID_TERM_SEGMENT_SOURCE_ITEMS", "10")
     ),

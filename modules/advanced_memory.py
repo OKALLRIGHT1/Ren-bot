@@ -177,7 +177,10 @@ class AdvancedMemorySystem:
         self.conversation_events_enabled = bool(
             MEMORY_SETTINGS.get("conversation_events_enabled", True)
         )
-        self.mid_term_enabled = bool(MEMORY_SETTINGS.get("mid_term_enabled", False))
+        self.short_term_from_events = bool(
+            MEMORY_SETTINGS.get("short_term_from_events", True)
+        )
+        self.mid_term_enabled = bool(MEMORY_SETTINGS.get("mid_term_enabled", True))
         self.mid_term_segment_source_items = max(
             4,
             int(MEMORY_SETTINGS.get("mid_term_segment_source_items", 10) or 10),
@@ -538,6 +541,38 @@ class AdvancedMemorySystem:
         self._session_short_term_loaded = (
             self.short_term_manager._session_short_term_loaded
         )
+
+    def _get_short_term_context(
+        self,
+        *,
+        session_id: str = None,
+        conversation_scope=None,
+    ) -> list[dict]:
+        if getattr(self, "short_term_from_events", False) and conversation_scope is not None:
+            assembler = getattr(self, "context_assembler", None)
+            event_store = getattr(assembler, "store", None)
+            if event_store is not None:
+                try:
+                    return list(
+                        event_store.list_dialog_window(
+                            conversation_scope,
+                            limit=max(1, int(self.max_short_term)),
+                        )
+                    )
+                except Exception as exc:
+                    try:
+                        self._logger.warning(
+                            f"[ConversationEvents] short-term projection failed: {exc}"
+                        )
+                    except Exception:
+                        pass
+                    return []
+
+        session_key = str(session_id or "").strip()
+        if session_key:
+            self._restore_session_short_term_from_db(session_key)
+            return list(self.session_short_term_memory.get(session_key, []))
+        return list(self.short_term_memory)
 
     def _append_short_term_memory(
         self,
@@ -1629,11 +1664,10 @@ Output ONLY "YES" or "NO".
         tool_mode = bool(tool_intent)
         session_key = str(session_id or "").strip()
         memory_session_key = str(memory_session_id or session_key).strip()
-        if session_key:
-            self._restore_session_short_term_from_db(session_key)
-            short_ctx = list(self.session_short_term_memory.get(session_key, []))
-        else:
-            short_ctx = list(self.short_term_memory)
+        short_ctx = self._get_short_term_context(
+            session_id=session_key,
+            conversation_scope=conversation_scope,
+        )
         recent_messages = [
             item
             for item in short_ctx[-8:]

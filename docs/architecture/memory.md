@@ -78,7 +78,7 @@
 - `ContextAssembler` 是最终预算边界：recent 900 字符 / 3 项、Active Session 500 字符、历史中期 1800 字符 / 默认 1 段、长期 1200 字符。先跨层去重，再按完整行或完整 segment 裁切；Active Session 优先保留最新段后原始事件。
 - 每轮 trace 只记录 conversation ID、候选 / 入选 event ID、选择理由、segment ID、各层字符数和去重位置；不得复制 QQ 正文。显式传入的 candidates 仍必须在 Assembler 内重新按完整 scope 过滤。
 - 旧 `_looks_like_sensor_source_followup()` / `_build_sensor_source_followup_context()` 关键词与观察拼接路径已删除；`_recent_sensor_replies` 只用于屏幕生成防复读，不参与聊天 prompt 近史读取。
-- 中期召回与生成目前由 `mid_term_enabled=0` 默认关闭，待本地长稳和 canary 后开启；`short_term_from_events=0` 仍保留旧热窗回退路径。
+- `short_term_from_events=1` 与 `mid_term_enabled=1` 现已默认开启：对话热窗从 events 投影，窗口滑出后生成中期 segment，并在后续轮次注入 Active Session / 按需召回历史段。出现运行问题时可分别设置对应环境变量为 `0` 并重启回滚；旧 transcript 热窗仅作为关闭投影或缺少有效 scope 时的兼容路径。
 
 `mid_term_segments` 与长期写回的 `memory_records(kind=summary)` 不是同一层：前者只承托当前 conversation 的连续性，后者保存可跨会话使用的长期语义摘要。两者不得互相回写或重复入库。
 

@@ -269,6 +269,76 @@ def test_short_term_context_restores_group_from_shared_long_term_session(tmp_pat
     assert [item["content"] for item in restored] == ["第二个群重启前的内容"]
 
 
+def test_short_term_from_events_projects_authoritative_dialog_window():
+    import modules.advanced_memory as advanced_memory
+
+    scope = SimpleNamespace(conversation_id="local:desktop")
+
+    class EventStore:
+        def __init__(self):
+            self.calls = []
+
+        def list_dialog_window(self, actual_scope, *, limit):
+            self.calls.append((actual_scope, limit))
+            return [
+                {
+                    "role": "user",
+                    "content": "events 权威热窗",
+                    "event_id": "event-1",
+                }
+            ]
+
+    store = EventStore()
+    brain = advanced_memory.AdvancedMemorySystem.__new__(
+        advanced_memory.AdvancedMemorySystem
+    )
+    brain.short_term_from_events = True
+    brain.context_assembler = SimpleNamespace(store=store)
+    brain.max_short_term = 12
+    brain.short_term_memory = [{"role": "user", "content": "旧缓存"}]
+    brain.session_short_term_memory = {
+        "local:desktop": [{"role": "user", "content": "旧会话缓存"}]
+    }
+    brain._restore_session_short_term_from_db = lambda *_args: None
+
+    result = brain._get_short_term_context(
+        session_id="local:desktop", conversation_scope=scope
+    )
+
+    assert result == [
+        {
+            "role": "user",
+            "content": "events 权威热窗",
+            "event_id": "event-1",
+        }
+    ]
+    assert store.calls == [(scope, 12)]
+
+
+def test_short_term_events_empty_does_not_fall_back_to_legacy_cache():
+    import modules.advanced_memory as advanced_memory
+
+    class EventStore:
+        def list_dialog_window(self, _scope, *, limit):
+            assert limit == 12
+            return []
+
+    brain = advanced_memory.AdvancedMemorySystem.__new__(
+        advanced_memory.AdvancedMemorySystem
+    )
+    brain.short_term_from_events = True
+    brain.context_assembler = SimpleNamespace(store=EventStore())
+    brain.max_short_term = 12
+    brain.short_term_memory = [{"role": "user", "content": "旧缓存"}]
+    brain.session_short_term_memory = {}
+
+    result = brain._get_short_term_context(
+        conversation_scope=SimpleNamespace(conversation_id="local:desktop")
+    )
+
+    assert result == []
+
+
 def test_advanced_memory_runtime_wires_shared_vector_index(tmp_path, monkeypatch):
     import modules.advanced_memory as advanced_memory
     from modules.memory_sqlite import MemorySQLite
