@@ -339,6 +339,47 @@ def test_short_term_events_empty_does_not_fall_back_to_legacy_cache():
     assert result == []
 
 
+def test_short_term_projection_failure_falls_back_to_legacy_cache():
+    """Projection exceptions must not wipe the dialog window; use RAM/transcript cache."""
+    import modules.advanced_memory as advanced_memory
+
+    class BrokenEventStore:
+        def list_dialog_window(self, _scope, *, limit):
+            raise RuntimeError("sqlite locked")
+
+    class _Logger:
+        def __init__(self):
+            self.warnings = []
+
+        def warning(self, msg, *args, **kwargs):
+            self.warnings.append(str(msg))
+
+    brain = advanced_memory.AdvancedMemorySystem.__new__(
+        advanced_memory.AdvancedMemorySystem
+    )
+    brain.short_term_from_events = True
+    brain.context_assembler = SimpleNamespace(store=BrokenEventStore())
+    brain.max_short_term = 12
+    brain._logger = _Logger()
+    brain.short_term_memory = [{"role": "user", "content": "全局旧缓存"}]
+    brain.session_short_term_memory = {
+        "local:desktop": [
+            {"role": "user", "content": "会话旧缓存", "event_id": "legacy-1"}
+        ]
+    }
+    brain._restore_session_short_term_from_db = lambda *_args: None
+
+    result = brain._get_short_term_context(
+        session_id="local:desktop",
+        conversation_scope=SimpleNamespace(conversation_id="local:desktop"),
+    )
+
+    assert result == [
+        {"role": "user", "content": "会话旧缓存", "event_id": "legacy-1"}
+    ]
+    assert any("falling back" in w for w in brain._logger.warnings)
+
+
 def test_advanced_memory_runtime_wires_shared_vector_index(tmp_path, monkeypatch):
     import modules.advanced_memory as advanced_memory
     from modules.memory_sqlite import MemorySQLite

@@ -542,6 +542,14 @@ class AdvancedMemorySystem:
             self.short_term_manager._session_short_term_loaded
         )
 
+    def _legacy_short_term_context(self, session_id: str = None) -> list[dict]:
+        """RAM / transcript short-term window (fallback when events projection fails)."""
+        session_key = str(session_id or "").strip()
+        if session_key:
+            self._restore_session_short_term_from_db(session_key)
+            return list(self.session_short_term_memory.get(session_key, []))
+        return list(self.short_term_memory)
+
     def _get_short_term_context(
         self,
         *,
@@ -553,6 +561,7 @@ class AdvancedMemorySystem:
             event_store = getattr(assembler, "store", None)
             if event_store is not None:
                 try:
+                    # Successful projection wins — including empty (no dialog events yet).
                     return list(
                         event_store.list_dialog_window(
                             conversation_scope,
@@ -562,17 +571,14 @@ class AdvancedMemorySystem:
                 except Exception as exc:
                     try:
                         self._logger.warning(
-                            f"[ConversationEvents] short-term projection failed: {exc}"
+                            "[ConversationEvents] short-term projection failed; "
+                            f"falling back to legacy short_term: {exc}"
                         )
                     except Exception:
                         pass
-                    return []
+                    return self._legacy_short_term_context(session_id)
 
-        session_key = str(session_id or "").strip()
-        if session_key:
-            self._restore_session_short_term_from_db(session_key)
-            return list(self.session_short_term_memory.get(session_key, []))
-        return list(self.short_term_memory)
+        return self._legacy_short_term_context(session_id)
 
     def _append_short_term_memory(
         self,
