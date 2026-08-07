@@ -1,0 +1,23 @@
+{
+  "name": "主人跨通道近史",
+  "trigger": "owner_channel_bridge",
+  "llm_command": "owner_channel_bridge",
+  "type": "delegate",
+  "aliases": ["/桥接", "/跨通道", "/channel_bridge"],
+  "direct_command_aliases": ["/桥接", "/跨通道", "/channel_bridge"],
+  "description": "主人按需查询桌面或 QQ 另一侧的近史摘要。默认会话仍隔离，不会自动混进 prompt。参数：desktop|qq|other ||| 可选关键词",
+  "example_arg": "desktop ||| 刚才在干嘛",
+  "timeout_sec": 20,
+  "version": "1.0.0",
+  "access_control": {
+    "allow_local": true,
+    "allow_remote_qq": true,
+    "allow_qq_owner": true,
+    "allow_qq_others": false,
+    "allow_group_without_at": false
+  },
+  "settings": {
+    "max_items": 8,
+    "max_chars": 1200
+  }
+}

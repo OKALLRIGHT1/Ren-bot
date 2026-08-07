@@ -242,6 +242,74 @@ class ConversationEventStore:
         events.reverse()
         return events
 
+    def list_recent_for_person(
+        self,
+        *,
+        persona_id: str,
+        person_id: str,
+        now: datetime,
+        channels: Optional[Sequence[str]] = None,
+        exclude_conversation_id: str = "",
+        limit: int = 12,
+        include_expired: bool = False,
+        statuses: Optional[Sequence[str]] = None,
+    ) -> list[ConversationEvent]:
+        """List recent events for one person across conversations (owner bridge).
+
+        Default near-history isolation remains conversation-scoped. This API is
+        for explicit on-demand tools, not automatic prompt injection.
+        """
+        persona = str(persona_id or "").strip()
+        person = str(person_id or "").strip()
+        if not persona or not person:
+            raise ValueError("persona_id and person_id are required")
+        limit = max(1, min(40, int(limit or 12)))
+        status_filter = [
+            str(item).strip()
+            for item in (statuses or ("active",))
+            if str(item).strip()
+        ]
+        if not status_filter:
+            status_filter = ["active"]
+        placeholders = ",".join("?" for _ in status_filter)
+        now_iso = _to_iso(now) or ""
+        params: list[Any] = [persona, person, *status_filter]
+        channel_clause = ""
+        channel_list = [
+            str(item).strip()
+            for item in (channels or ())
+            if str(item or "").strip()
+        ]
+        if channel_list:
+            channel_placeholders = ",".join("?" for _ in channel_list)
+            channel_clause = f" AND channel IN ({channel_placeholders})"
+            params.extend(channel_list)
+        exclude = str(exclude_conversation_id or "").strip()
+        exclude_clause = ""
+        if exclude:
+            exclude_clause = " AND conversation_id != ?"
+            params.append(exclude)
+        expired_clause = ""
+        if not include_expired:
+            expired_clause = " AND (expires_at IS NULL OR expires_at > ?)"
+            params.append(now_iso)
+        params.append(limit)
+        sql = f"""
+            SELECT * FROM conversation_events
+            WHERE persona_id=? AND person_id=?
+              AND status IN ({placeholders})
+              {channel_clause}
+              {exclude_clause}
+              {expired_clause}
+            ORDER BY occurred_at DESC, rowid DESC
+            LIMIT ?
+        """
+        with self.sqlite_store._connect() as conn:  # noqa: SLF001
+            rows = conn.execute(sql, tuple(params)).fetchall()
+        events = [self._row_to_event(row) for row in rows]
+        events.reverse()
+        return events
+
     def mark_status(self, event_id: str, status: str) -> None:
         event_id = str(event_id or "").strip()
         status = str(status or "").strip()

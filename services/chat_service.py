@@ -3691,6 +3691,9 @@ class ChatService:
         ctx["chat_service"] = self
         ctx["brain"] = self.brain
         ctx["mcp_bridge"] = self.mcp_bridge
+        # Explicit for on-demand tools (e.g. owner_channel_bridge); keeps hard isolation elsewhere.
+        if getattr(self, "conversation_event_service", None) is not None:
+            ctx["conversation_event_service"] = self.conversation_event_service
         ctx.setdefault("send_bubble", None)
         ctx.setdefault("trigger_motion", trigger_motion)
         ctx.setdefault("user_text", user_text)
