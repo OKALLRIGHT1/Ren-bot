@@ -97,6 +97,8 @@ class AssembledContext:
     selected_event_ids: tuple[str, ...]
     selected_segment_ids: tuple[str, ...]
     trace: Mapping[str, Any]
+    # Soft owner-only snippet from the other channel (time-nearby); not mixed short_term.
+    cross_channel_recent_block: str = ""
 
 
 @dataclass(frozen=True, slots=True)

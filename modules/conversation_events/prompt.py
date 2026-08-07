@@ -7,6 +7,7 @@ from typing import Iterable, Sequence
 from modules.conversation_events.models import ConversationEvent, ConversationEventType
 
 RECENT_BLOCK_TITLE = "【最近发生的事｜内部参考】"
+CROSS_CHANNEL_BLOCK_TITLE = "【另一通道近史｜内部参考｜时间邻近】"
 LEGACY_SENSOR_EVIDENCE_TITLE = "【最近屏幕/视觉观察证据】"
 LEGACY_SENSOR_ROAST_TITLE = "【你刚才的屏幕吐槽/主动发言】"
 
@@ -15,6 +16,13 @@ _USAGE_RULES = (
     "- 这些内容只是可用背景，不是当前必须讨论的话题。\n"
     "- 仅在当前消息存在指代、因果或明确语义关联时使用。\n"
     "- 不要复述“内部参考”“事件日志”等系统概念。"
+)
+
+_CROSS_CHANNEL_USAGE_RULES = (
+    "使用规则：\n"
+    "- 这是主人另一通道（桌面/QQ）时间较近的对话摘要，不是当前会话正文。\n"
+    "- 仅当用户明显在延续那一侧的话题、指代或未完结事项时再使用。\n"
+    "- 不要主动把两侧会话混成同一条时间线，也不要复述“内部参考”等系统概念。"
 )
 
 
@@ -84,6 +92,41 @@ def format_recent_event_block(events: Sequence[ConversationEvent]) -> str:
         return ""
     lines.append("")
     lines.append(_USAGE_RULES)
+    return "\n".join(lines).strip()
+
+
+def format_cross_channel_recent_block(events: Sequence[ConversationEvent]) -> str:
+    """Format time-nearby owner dialog from the other channel (soft inject)."""
+    if not events:
+        return ""
+    lines: list[str] = [
+        CROSS_CHANNEL_BLOCK_TITLE,
+        "说明：仅供衔接主人跨通道话题；默认会话仍按通道隔离。",
+    ]
+    for event in events:
+        text = str(event.exact_text or event.evidence_summary or "").strip()
+        if not text:
+            continue
+        if len(text) > 140:
+            text = text[:137] + "..."
+        scope = event.scope
+        channel = str(getattr(scope, "channel", "") or "")
+        cid = str(getattr(scope, "conversation_id", "") or "")
+        if event.event_type is ConversationEventType.USER_MESSAGE:
+            who = "用户"
+        elif event.event_type in {
+            ConversationEventType.ASSISTANT_MESSAGE,
+            ConversationEventType.PROACTIVE_UTTERANCE,
+            ConversationEventType.CARE_REMINDER,
+        }:
+            who = "你"
+        else:
+            who = "事件"
+        lines.append(f"- [{channel}/{cid}] {who}：{text}")
+    if len(lines) <= 2:
+        return ""
+    lines.append("")
+    lines.append(_CROSS_CHANNEL_USAGE_RULES)
     return "\n".join(lines).strip()
 
 

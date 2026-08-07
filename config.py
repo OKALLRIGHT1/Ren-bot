@@ -625,6 +625,20 @@ MEMORY_SETTINGS = {
     "active_session_max_chars": int(os.getenv("ACTIVE_SESSION_MAX_CHARS", "500")),
     "mid_term_max_chars": int(os.getenv("MID_TERM_MAX_CHARS", "1800")),
     "mid_term_recall_max_items": int(os.getenv("MID_TERM_RECALL_MAX_ITEMS", "1")),
+    # Soft owner bridge: auto-inject time-nearby dialog from the other channel
+    # (desktop ↔ QQ owner private). Not mixed into short_term; group/non-owner off.
+    "owner_cross_channel_recent_enabled": get_env_bool(
+        "OWNER_CROSS_CHANNEL_RECENT_ENABLED", "1"
+    ),
+    "owner_cross_channel_max_items": int(
+        os.getenv("OWNER_CROSS_CHANNEL_MAX_ITEMS", "4")
+    ),
+    "owner_cross_channel_max_chars": int(
+        os.getenv("OWNER_CROSS_CHANNEL_MAX_CHARS", "700")
+    ),
+    "owner_cross_channel_max_age_sec": int(
+        os.getenv("OWNER_CROSS_CHANNEL_MAX_AGE_SEC", str(6 * 3600))
+    ),
 }
 
 # ==================== 角色设定 ====================

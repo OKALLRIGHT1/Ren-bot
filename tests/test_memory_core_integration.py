@@ -147,6 +147,7 @@ def test_advanced_memory_injects_context_layers_in_priority_order(monkeypatch):
                 selected_event_ids=("event-1",),
                 selected_segment_ids=("segment-1",),
                 trace={},
+                cross_channel_recent_block="【另一通道近史｜内部参考｜时间邻近】\n跨通道摘要",
             )
 
     brain = advanced_memory.AdvancedMemorySystem.__new__(
@@ -178,10 +179,11 @@ def test_advanced_memory_injects_context_layers_in_priority_order(monkeypatch):
     system = messages[0]["content"]
 
     recent_at = system.index("【最近发生的事｜内部参考】")
+    cross_at = system.index("【另一通道近史｜内部参考｜时间邻近】")
     active_at = system.index("【当前会话状态｜内部参考】")
     mid_at = system.index("【中期会话摘要】")
     long_at = system.index("【经筛选的长期记忆】")
-    assert recent_at < active_at < mid_at < long_at
+    assert recent_at < cross_at < active_at < mid_at < long_at
     assert "经 Assembler 裁切后的长期事实" in system
     assert "\n长期事实" not in system
 

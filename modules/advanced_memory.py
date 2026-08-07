@@ -237,6 +237,24 @@ class AdvancedMemorySystem:
                     ),
                     mid_term_enabled=self.mid_term_enabled,
                     mid_term_recall_service=mid_term_recall_service,
+                    owner_cross_channel_recent_enabled=bool(
+                        MEMORY_SETTINGS.get(
+                            "owner_cross_channel_recent_enabled", True
+                        )
+                    ),
+                    owner_cross_channel_max_items=int(
+                        MEMORY_SETTINGS.get("owner_cross_channel_max_items", 4) or 4
+                    ),
+                    owner_cross_channel_max_chars=int(
+                        MEMORY_SETTINGS.get("owner_cross_channel_max_chars", 700)
+                        or 700
+                    ),
+                    owner_cross_channel_max_age_sec=int(
+                        MEMORY_SETTINGS.get(
+                            "owner_cross_channel_max_age_sec", 6 * 3600
+                        )
+                        or (6 * 3600)
+                    ),
                 )
             except Exception as exc:
                 self.context_assembler = None
@@ -1752,6 +1770,7 @@ Output ONLY "YES" or "NO".
         recent_event_block = ""
         active_session_block = ""
         mid_term_block = ""
+        cross_channel_recent_block = ""
         resolved_memory_block = mem_text or ""
         context_assembler = getattr(self, "context_assembler", None)
         if context_assembler is not None and not tool_mode:
@@ -1772,6 +1791,9 @@ Output ONLY "YES" or "NO".
                 mid_term_block = str(
                     getattr(assembled, "mid_term_block", "") or ""
                 )
+                cross_channel_recent_block = str(
+                    getattr(assembled, "cross_channel_recent_block", "") or ""
+                )
                 resolved_memory_block = str(
                     getattr(assembled, "long_term_block", "") or ""
                 )
@@ -1789,6 +1811,8 @@ Output ONLY "YES" or "NO".
 
         if recent_event_block:
             final_system += "\n\n" + recent_event_block
+        if cross_channel_recent_block:
+            final_system += "\n\n" + cross_channel_recent_block
         if active_session_block:
             final_system += "\n\n" + active_session_block
         if mid_term_block:

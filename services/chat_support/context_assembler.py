@@ -3,18 +3,35 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Mapping, Optional, Sequence
 
 from modules.conversation_events.models import (
     AssembledContext,
     ConversationEvent,
+    ConversationEventType,
     ConversationScope,
     EventBudget,
 )
-from modules.conversation_events.prompt import format_recent_event_block
+from modules.conversation_events.prompt import (
+    format_cross_channel_recent_block,
+    format_recent_event_block,
+)
 from modules.conversation_events.selector import RecentEventSelector
 from modules.conversation_events.store import ConversationEventStore
+
+_OWNER_PERSON_IDS = frozenset({"owner", "master"})
+_DIALOG_EVENT_TYPES = frozenset(
+    {
+        ConversationEventType.USER_MESSAGE,
+        ConversationEventType.ASSISTANT_MESSAGE,
+        ConversationEventType.PROACTIVE_UTTERANCE,
+    }
+)
+_DESKTOP_CHANNELS = frozenset({"desktop", "local", "gui", "text_input", "voice"})
+_QQ_CHANNELS = frozenset(
+    {"qq", "qq_gateway", "napcat_qq", "qq_private", "qq_group", "remote_qq"}
+)
 
 
 def _is_structural_line(line: str) -> bool:
@@ -142,10 +159,113 @@ class ContextAssembler:
     list_limit: int = 24
     mid_term_enabled: bool = False
     mid_term_recall_service: Any = None
+    # Soft owner bridge: inject time-nearby dialog from the other channel.
+    owner_cross_channel_recent_enabled: bool = True
+    owner_cross_channel_max_items: int = 4
+    owner_cross_channel_max_chars: int = 700
+    owner_cross_channel_max_age_sec: int = 6 * 3600
 
     def __post_init__(self) -> None:
         if self.selector is None:
             self.selector = RecentEventSelector()
+
+    @staticmethod
+    def _is_owner_person(person_id: str) -> bool:
+        return str(person_id or "").strip().lower() in _OWNER_PERSON_IDS
+
+    @staticmethod
+    def _is_group_conversation(scope: ConversationScope) -> bool:
+        cid = str(scope.conversation_id or "").strip().lower()
+        channel = str(scope.channel or "").strip().lower()
+        return (
+            cid.startswith("group:")
+            or ":group:" in cid
+            or channel in {"qq_group", "group"}
+        )
+
+    @staticmethod
+    def _opposite_channels(scope: ConversationScope) -> Optional[tuple[str, ...]]:
+        channel = str(scope.channel or "").strip().lower()
+        if channel in _DESKTOP_CHANNELS or channel == "desktop":
+            return ("qq",)
+        if channel in _QQ_CHANNELS or channel == "qq":
+            return ("desktop",)
+        return None
+
+    def _owner_cross_channel_events(
+        self,
+        *,
+        scope: ConversationScope,
+        now: datetime,
+        exclude_event_ids: set[str],
+    ) -> list[ConversationEvent]:
+        if not self.owner_cross_channel_recent_enabled or self.store is None:
+            return []
+        if not self._is_owner_person(scope.person_id):
+            return []
+        if self._is_group_conversation(scope):
+            return []
+        channels = self._opposite_channels(scope)
+        if not channels:
+            return []
+        max_items = max(1, min(12, int(self.owner_cross_channel_max_items or 4)))
+        max_age = max(60, int(self.owner_cross_channel_max_age_sec or 0))
+        try:
+            candidates = self.store.list_recent_for_person(
+                persona_id=scope.persona_id,
+                person_id=scope.person_id,
+                now=now,
+                channels=channels,
+                exclude_conversation_id=str(scope.conversation_id or ""),
+                limit=max(max_items * 3, 12),
+            )
+        except Exception:
+            return []
+        cutoff = now - timedelta(seconds=max_age)
+        kept: list[ConversationEvent] = []
+        for event in candidates:
+            if str(event.event_id or "") in exclude_event_ids:
+                continue
+            if event.event_type not in _DIALOG_EVENT_TYPES:
+                continue
+            occurred = event.occurred_at
+            if occurred.tzinfo is None:
+                occurred = occurred.replace(tzinfo=timezone.utc)
+            if occurred < cutoff:
+                continue
+            text = str(event.exact_text or event.evidence_summary or "").strip()
+            if not text:
+                continue
+            kept.append(event)
+        # list_recent_for_person returns oldest→newest; keep the newest window.
+        if len(kept) > max_items:
+            kept = kept[-max_items:]
+        return kept
+
+    def _build_cross_channel_block(
+        self,
+        *,
+        scope: Optional[ConversationScope],
+        now: datetime,
+        exclude_event_ids: set[str],
+    ) -> tuple[str, tuple[str, ...]]:
+        if scope is None:
+            return "", ()
+        events = self._owner_cross_channel_events(
+            scope=scope,
+            now=now,
+            exclude_event_ids=exclude_event_ids,
+        )
+        if not events:
+            return "", ()
+        block = format_cross_channel_recent_block(events)
+        max_chars = max(0, int(self.owner_cross_channel_max_chars or 0))
+        while block and max_chars and len(block) > max_chars and len(events) > 1:
+            events = events[1:]
+            block = format_cross_channel_recent_block(events)
+        if block and max_chars and len(block) > max_chars:
+            return "", ()
+        return block, tuple(event.event_id for event in events)
 
     def _trace(
         self,
@@ -172,7 +292,13 @@ class ContextAssembler:
             "selected_segment_ids": [str(item) for item in selected_segment_ids],
             "layer_chars": dict(
                 layer_chars
-                or {"recent": 0, "active": 0, "mid_term": 0, "long_term": 0}
+                or {
+                    "recent": 0,
+                    "active": 0,
+                    "mid_term": 0,
+                    "long_term": 0,
+                    "cross_channel": 0,
+                }
             ),
             "deduplicated_items": [str(item) for item in deduplicated_items],
             "planner_triggered": False,
@@ -235,6 +361,7 @@ class ContextAssembler:
                 short_term_messages=short_msgs,
                 selected_event_ids=(),
                 selected_segment_ids=(),
+                cross_channel_recent_block="",
                 trace=self._trace(
                     scope=scope,
                     layer_chars={
@@ -242,6 +369,7 @@ class ContextAssembler:
                         "active": len(resolved_active),
                         "mid_term": len(resolved_mid),
                         "long_term": len(resolved_long),
+                        "cross_channel": 0,
                     },
                     deduplicated_items=(*active_dedup, *mid_dedup, *long_dedup),
                     enabled=bool(self.enabled),
@@ -262,6 +390,7 @@ class ContextAssembler:
                 short_term_messages=short_msgs,
                 selected_event_ids=(),
                 selected_segment_ids=(),
+                cross_channel_recent_block="",
                 trace=self._trace(
                     scope=None,
                     layer_chars={
@@ -269,6 +398,7 @@ class ContextAssembler:
                         "active": 0,
                         "mid_term": 0,
                         "long_term": len(bounded_long_term),
+                        "cross_channel": 0,
                     },
                     enabled=True,
                     reason="missing_scope",
@@ -409,11 +539,22 @@ class ContextAssembler:
             recalled_ids = selected_segment_ids[1 : 1 + mid_term_segment_count]
             injected_segment_ids = (*active_ids, *recalled_ids)
         deduplicated_items = [*active_dedup, *mid_dedup, *long_dedup]
+        exclude_for_cross = set(injected_event_ids)
+        for item in short_msgs:
+            eid = str(item.get("event_id") or "").strip()
+            if eid:
+                exclude_for_cross.add(eid)
+        cross_block, cross_event_ids = self._build_cross_channel_block(
+            scope=scope,
+            now=now,
+            exclude_event_ids=exclude_for_cross,
+        )
         layer_chars = {
             "recent": len(recent_block),
             "active": len(resolved_active_session_block),
             "mid_term": len(resolved_mid_term_block),
             "long_term": len(resolved_long_term_block),
+            "cross_channel": len(cross_block),
         }
 
         return AssembledContext(
@@ -424,6 +565,7 @@ class ContextAssembler:
             short_term_messages=tuple(deduped_short),
             selected_event_ids=injected_event_ids,
             selected_segment_ids=injected_segment_ids,
+            cross_channel_recent_block=cross_block,
             trace=self._trace(
                 scope=scope,
                 candidates=event_list,
@@ -438,5 +580,7 @@ class ContextAssembler:
                 recent_block_chars=len(recent_block),
                 total_chars=selection.total_chars,
                 mid_term_error=mid_term_error,
+                cross_channel_event_ids=list(cross_event_ids),
+                cross_channel_injected=bool(cross_block),
             ),
         )

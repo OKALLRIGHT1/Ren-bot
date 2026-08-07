@@ -22,16 +22,16 @@ from modules.memory_sqlite import MemorySQLite
 from services.chat_support.context_assembler import ContextAssembler
 
 
-def _scope(cid="local:desktop"):
-    return ConversationScope("suzu", "owner", "desktop", cid)
+def _scope(cid="local:desktop", channel="desktop", person_id="owner"):
+    return ConversationScope("suzu", person_id, channel, cid)
 
 
-def _ev(store, etype, text, parents=(), eid=None, scope=None):
+def _ev(store, etype, text, parents=(), eid=None, scope=None, at=None):
     event = ConversationEvent(
         event_id=eid or "",
         scope=scope or _scope(),
         event_type=etype,
-        occurred_at=datetime.now(timezone.utc),
+        occurred_at=at or datetime.now(timezone.utc),
         exact_text=text,
         evidence_summary=text,
         causal_parent_ids=parents,
@@ -379,7 +379,7 @@ def test_assembler_deduplicates_lower_layers_before_budgeting(assembler):
 def test_assembler_trace_has_bounded_privacy_safe_contract(assembler):
     asm, store = assembler
     private_text = "这是不能复制进 trace 的 QQ 私聊正文"
-    qq_scope = _scope("qq:private:1001")
+    qq_scope = _scope("qq:private:1001", channel="qq")
     event = _ev(
         store,
         ConversationEventType.ASSISTANT_MESSAGE,
@@ -405,6 +405,7 @@ def test_assembler_trace_has_bounded_privacy_safe_contract(assembler):
         "active": len(result.active_session_block),
         "mid_term": len(result.mid_term_block),
         "long_term": len(result.long_term_block),
+        "cross_channel": len(result.cross_channel_recent_block),
     }
     assert trace["planner_triggered"] is False
     assert private_text not in str(trace)
@@ -413,7 +414,7 @@ def test_assembler_trace_has_bounded_privacy_safe_contract(assembler):
 def test_assembler_filters_explicit_candidates_by_scope(assembler):
     asm, store = assembler
     desktop_scope = _scope("local:desktop")
-    qq_scope = _scope("qq:private:1001")
+    qq_scope = _scope("qq:private:1001", channel="qq")
     desktop_event = _ev(
         store,
         ConversationEventType.ASSISTANT_MESSAGE,
@@ -435,7 +436,85 @@ def test_assembler_filters_explicit_candidates_by_scope(assembler):
 
     assert desktop_event.event_id in result.selected_event_ids
     assert qq_event.event_id not in result.trace["candidate_event_ids"]
+    # Current-session recent stays hard-isolated.
     assert "QQ 私聊里不能泄漏的话" not in result.recent_event_block
+    # Owner soft bridge may still surface the opposite channel separately.
+    assert "QQ 私聊里不能泄漏的话" in result.cross_channel_recent_block
+
+
+def test_owner_cross_channel_recent_auto_injects_opposite_side(assembler):
+    """Desktop owner prompt can soft-see recent QQ private dialog by time."""
+    from modules.conversation_events.prompt import CROSS_CHANNEL_BLOCK_TITLE
+
+    asm, store = assembler
+    desktop = _scope("local:desktop", channel="desktop")
+    qq = _scope("qq:private:owner", channel="qq")
+    _ev(
+        store,
+        ConversationEventType.USER_MESSAGE,
+        "QQ上说晚饭吃面",
+        scope=qq,
+    )
+    _ev(
+        store,
+        ConversationEventType.ASSISTANT_MESSAGE,
+        "桌面这边在改登录",
+        scope=desktop,
+    )
+
+    result = asm.assemble(
+        current_user_text="那晚饭呢",
+        scope=desktop,
+    )
+    assert CROSS_CHANNEL_BLOCK_TITLE in result.cross_channel_recent_block
+    assert "晚饭吃面" in result.cross_channel_recent_block
+    assert "改登录" not in result.cross_channel_recent_block
+    assert result.trace.get("cross_channel_injected") is True
+
+
+def test_owner_cross_channel_skips_group_and_non_owner(assembler):
+    asm, store = assembler
+    desktop = _scope("local:desktop", channel="desktop")
+    _ev(
+        store,
+        ConversationEventType.USER_MESSAGE,
+        "本地秘密话题",
+        scope=desktop,
+    )
+
+    group_scope = _scope("group:9", channel="qq", person_id="owner")
+    group_result = asm.assemble(
+        current_user_text="本地刚才聊了啥",
+        scope=group_scope,
+    )
+    assert group_result.cross_channel_recent_block == ""
+    assert not group_result.trace.get("cross_channel_injected")
+
+    other = _scope("qq:private:2", channel="qq", person_id="qq:2")
+    other_result = asm.assemble(
+        current_user_text="本地刚才聊了啥",
+        scope=other,
+    )
+    assert other_result.cross_channel_recent_block == ""
+
+
+def test_owner_cross_channel_respects_max_age(assembler):
+    from datetime import timedelta
+
+    asm, store = assembler
+    asm.owner_cross_channel_max_age_sec = 600
+    desktop = _scope("local:desktop", channel="desktop")
+    qq = _scope("qq:private:owner", channel="qq")
+    old = datetime.now(timezone.utc) - timedelta(hours=3)
+    _ev(
+        store,
+        ConversationEventType.USER_MESSAGE,
+        "很久以前的QQ话题",
+        scope=qq,
+        at=old,
+    )
+    result = asm.assemble(current_user_text="继续说", scope=desktop)
+    assert result.cross_channel_recent_block == ""
 
 
 def test_assembler_rejects_explicit_candidates_without_scope(assembler):
