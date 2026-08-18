@@ -50,7 +50,20 @@ from services.chat_support import (
 )
 from services.chat_support.qq_link_enrichment import QqLinkEnrichmentService
 from services.chat_support.qq_private_buffer import QqPrivateMessageBuffer
+from services.chat_support.character_thought import (
+    format_thought_for_prompt,
+    generate_character_thought,
+)
+from services.chat_support.natural_chat_pipeline import (
+    NaturalChatConfig,
+    build_scene_prompt,
+    decide_thought_gate,
+    evaluate_forbidden_reply,
+    format_expression_block,
+    scope_matches,
+)
 from services.agent_runtime import AgentRuntime
+from services.plugin_ports import BrainKnowledgePort
 from services.capability_manager import is_force_executable_capability
 from services.capability_gatekeeper import (
     build_forced_capability_command,
@@ -72,6 +85,7 @@ try:
         VISION_MODE,
         WAKE_KEYWORDS,
         CHARACTER_SHARING_ENABLED,
+        CHARACTER_NATURAL_CHAT,
         CHAT_DEBUG_PRINTS,
         NAPCAT_OWNER_USER_IDS,
         QQ_PRIVATE_CONTINUOUS_COMMAND_PREFIXES,
@@ -101,6 +115,18 @@ except ImportError:
     GATEKEEPER_ACTIVE_SESSION_WINDOW = 20
     WAKE_KEYWORDS = []
     CHARACTER_SHARING_ENABLED = False
+    CHARACTER_NATURAL_CHAT = {
+        "character_thought_enabled": True,
+        "character_thought_scope": "desktop_and_qq_private",
+        "group_chat_natural_enabled": False,
+        "character_thought_timeout_ms": 2500,
+        "character_thought_max_tokens": 220,
+        "expression_inject_in_main_reply": True,
+        "expression_inject_max_items": 1,
+        "character_thought_on_error": "skip_thought",
+        "forbidden_phrase_max_retries": 1,
+        "detail_intent_bypass_short_shell": True,
+    }
     CHAT_DEBUG_PRINTS = False
     NAPCAT_OWNER_USER_IDS = []
     QQ_PRIVATE_CONTINUOUS_COMMAND_PREFIXES = ["/", "!", "！", "#"]
@@ -623,7 +649,6 @@ class ChatService:
             event_bus=self.event_bus,
             presenter=self.presenter,
             extract_emo_tag=self._extract_emo_tag,
-            polish_natural_reply=self._polish_natural_reply,
             apply_character_catchphrase=self._apply_character_catchphrase,
             logger=self.logger,
             conversation_event_service=getattr(
@@ -991,55 +1016,274 @@ class ChatService:
                 session_id, is_typing=bool(metadata.get("is_typing"))
             )
 
-    def _build_qq_reply_angle_context(
-        self, user_text: str, ctx: Optional[Dict[str, Any]]
-    ) -> str:
-        if not isinstance(ctx, dict):
-            return ""
-        source = str(ctx.get("source") or "").strip().lower()
-        if source not in QQ_REMOTE_SOURCES:
-            return ""
-        channel_meta = ctx.get("channel_meta") or {}
-        message_type = str(channel_meta.get("message_type") or "private").strip().lower()
-        if message_type != "private":
-            return ""
+    def _get_natural_chat_config(self) -> NaturalChatConfig:
+        try:
+            raw = CHARACTER_NATURAL_CHAT
+        except Exception:
+            raw = {}
+        if not isinstance(raw, dict):
+            raw = {}
+        return NaturalChatConfig.from_mapping(raw)
 
+    def _natural_chat_message_type(self, ctx: Optional[Dict[str, Any]]) -> str:
+        if not isinstance(ctx, dict):
+            return "private"
+        meta = ctx.get("channel_meta") or {}
+        if not isinstance(meta, dict):
+            return "private"
+        return str(meta.get("message_type") or "private").strip().lower() or "private"
+
+    def _looks_like_chat_command(self, user_text: str) -> bool:
         raw = str(user_text or "").strip()
         if not raw:
-            return ""
-        lines = [line.strip() for line in raw.splitlines() if line.strip()]
-        latest = lines[-1] if lines else raw
-        compact = re.sub(r"\s+", " ", raw)
+            return False
+        if raw.startswith(("/", "!", "！", "#")):
+            return True
+        return False
 
-        angle = "日常接话"
-        instruction = "像私聊里顺手回，不要把每句话都当成题目作答"
-        if any(k in latest for k in ("狡猾", "坏", "嘴硬", "笨", "可爱", "怜酱")):
-            angle = "接调侃"
-            instruction = "顺着调侃轻轻嘴硬或反问一下，不要认真辩解"
-        elif any(k in latest for k in ("喜欢", "想你", "陪我", "抱", "亲", "老婆")):
-            angle = "接亲近感"
-            instruction = "保留一点克制和不好意思，别突然讲大道理"
-        elif any(k in latest for k in ("是不是", "你是不是", "对吧", "吗", "?","？")):
-            angle = "直接回应"
-            instruction = "先接住问题本身，能一句回答就别展开成说明文"
-        elif any(k in latest for k in ("为什么", "怎么", "咋", "如何")):
-            angle = "轻解释"
-            instruction = "给一个短原因就停，不要写教程或总结"
-        elif any(k in latest for k in ("难受", "烦", "累", "崩", "不想", "害怕")):
-            angle = "陪伴"
-            instruction = "先站在他这边，用短句接情绪，不要立刻提供方案"
-        elif len(lines) >= 2:
-            angle = "合并连续消息"
-            instruction = "把连续几句当成一个整体，优先接最后一句的情绪和梗，不要逐条回答"
+    def _consume_character_switch_flag(self) -> bool:
+        """True once after active character id changes (first natural-chat turn)."""
+        try:
+            _name, char_id, _prompt = self._get_active_character_context()
+        except Exception:
+            char_id = ""
+        prev = getattr(self, "_natural_chat_last_character_id", None)
+        self._natural_chat_last_character_id = char_id
+        if prev is None:
+            return False
+        return bool(char_id) and str(prev) != str(char_id)
 
-        return (
-            "【本轮 QQ 私聊接话规划】\n"
-            f"- 用户连续消息数：{len(lines) or 1}\n"
-            f"- 接话角度：{angle}\n"
-            f"- 执行方式：{instruction}\n"
-            f"- 用户原话压缩：{compact[:180]}\n"
-            "- 回复要求：像真人私聊，不要编号，不要总结，不要句号收尾。"
+    async def _maybe_build_character_thought_block(
+        self,
+        *,
+        user_text: str,
+        ctx: Optional[Dict[str, Any]],
+        need_tools: bool = False,
+        codex_mode: bool = False,
+        recent: Optional[List[Dict[str, Any]]] = None,
+    ) -> tuple[str, Dict[str, Any]]:
+        """Run Character Thought when gate allows; returns (prompt_block, trace)."""
+        config = self._get_natural_chat_config()
+        source = str((ctx or {}).get("source") or "").strip().lower()
+        message_type = self._natural_chat_message_type(ctx)
+        detail = self._wants_detailed_answer(user_text)
+        gate = decide_thought_gate(
+            user_text=user_text,
+            source=source,
+            message_type=message_type,
+            config=config,
+            need_tools=need_tools,
+            codex_mode=codex_mode,
+            wants_detailed_answer=detail,
+            is_command=self._looks_like_chat_command(user_text),
         )
+        just_switched = self._consume_character_switch_flag()
+        trace: Dict[str, Any] = {
+            "character_thought_used": False,
+            "scope_matched": gate.scope_matched,
+            "thought_skipped_reason": gate.reason if not gate.should_run else "",
+            "thought_latency_ms": 0.0,
+            "emotion_level": "",
+            "want": "",
+            "angle": "",
+            "just_switched_character": just_switched,
+            "short_shell": gate.short_shell,
+            "detail_intent": gate.detail_intent,
+            "source": source,
+            "message_type": message_type,
+        }
+        if not gate.should_run:
+            return "", trace
+
+        char_name, _char_id, base_prompt = self._get_active_character_context()
+        recent_window = list(recent if recent is not None else self._get_short_term_messages(ctx))[-6:]
+        try:
+            thought, skip_reason, latency_ms = await asyncio.to_thread(
+                generate_character_thought,
+                chat_fn=chat_with_ai,
+                character_name=char_name,
+                character_prompt_excerpt=str(base_prompt or ""),
+                recent=recent_window,
+                user_text=user_text,
+                just_switched_character=just_switched,
+                timeout_ms=config.character_thought_timeout_ms,
+                max_tokens=config.character_thought_max_tokens,
+                on_error=config.character_thought_on_error,
+            )
+        except TimeoutError:
+            trace["thought_skipped_reason"] = "timeout"
+            return "", trace
+        except Exception as exc:
+            try:
+                self.logger.warning("character thought failed: %s", exc)
+            except Exception:
+                pass
+            trace["thought_skipped_reason"] = "error"
+            return "", trace
+
+        trace["thought_latency_ms"] = round(float(latency_ms or 0.0), 1)
+        if thought is None:
+            trace["thought_skipped_reason"] = skip_reason or "error"
+            return "", trace
+
+        if gate.detail_intent and thought.want == "light_ack":
+            thought.want = "direct_answer"
+            thought.angle = "direct"
+
+        block = format_thought_for_prompt(
+            thought,
+            short_shell=gate.short_shell,
+            just_switched_character=just_switched,
+        )
+        trace.update(
+            {
+                "character_thought_used": True,
+                "thought_skipped_reason": "",
+                "emotion_level": thought.emotion_level,
+                "want": thought.want,
+                "angle": thought.angle,
+                "avoid": list(thought.avoid or []),
+            }
+        )
+        return block, trace
+
+    def _build_expression_inject_block(
+        self,
+        user_text: str,
+        ctx: Optional[Dict[str, Any]] = None,
+        *,
+        config: Optional[NaturalChatConfig] = None,
+        recent: Optional[List[Dict[str, Any]]] = None,
+    ) -> tuple[str, List[str]]:
+        cfg = config or self._get_natural_chat_config()
+        if not cfg.expression_inject_in_main_reply:
+            return "", []
+        limit = max(1, int(cfg.expression_inject_max_items or 1))
+        hints = self._load_expression_library_hints(
+            user_text, "chat", ctx, recent=recent, limit=limit
+        )
+        hints = [h for h in hints if str(h).strip()][:limit]
+        return format_expression_block(hints, max_items=limit), hints
+
+    async def _retry_reply_without_forbidden(
+        self,
+        *,
+        user_text: str,
+        draft_text: str,
+        constraint: str,
+        ctx: Optional[Dict[str, Any]] = None,
+    ) -> str:
+        """One-shot constrained rewrite only when forbidden phrases hit (not polish mode)."""
+        char_name, _cid, _prompt = self._get_active_character_context()
+        system = (
+            f"你正在修正角色「{char_name}」的一句回复草稿。"
+            "只去掉点评腔/抽象标签，保持原意与短句，不新增事实。"
+            "只输出修正后的回复正文。"
+        )
+        messages = [
+            {"role": "system", "content": system},
+            {
+                "role": "user",
+                "content": (
+                    f"{constraint}\n\n"
+                    f"【用户原话】\n{str(user_text or '').strip()}\n\n"
+                    f"【回复草稿】\n{str(draft_text or '').strip()}"
+                ),
+            },
+        ]
+        try:
+            reply = await asyncio.to_thread(
+                chat_with_ai,
+                messages,
+                task_type="gatekeeper",
+                caller="forbidden_phrase_retry",
+            )
+            polished = self._clean_text_for_tts(
+                self._strip_wrapping_quotes(
+                    self._strip_internal_tags(
+                        self._strip_cmd_anywhere(
+                            self._strip_emo_tags_anywhere(reply or "")
+                        )
+                    )
+                )
+            )
+            polished = self._strip_model_catchphrase(polished).strip()
+            source = str((ctx or {}).get("source") or "").strip().lower()
+            if polished and source in QQ_REMOTE_SOURCES:
+                polished = self._normalize_qq_reply_style(polished)
+            return polished or ""
+        except Exception:
+            return ""
+
+    async def _apply_forbidden_phrase_guard(
+        self,
+        *,
+        text: str,
+        user_text: str,
+        ctx: Optional[Dict[str, Any]],
+        regenerate: Optional[Callable[..., Awaitable[str]]] = None,
+    ) -> tuple[str, Dict[str, Any]]:
+        config = self._get_natural_chat_config()
+        max_retries = int(config.forbidden_phrase_max_retries or 0)
+        current = str(text or "")
+        retries_done = 0
+        last_hits: List[str] = []
+        source = str((ctx or {}).get("source") or "").strip().lower()
+        message_type = self._natural_chat_message_type(ctx)
+        # 仅在自然聊作用域内做护栏，避免改工具长文
+        if not scope_matches(source, message_type, config):
+            return current, {
+                "forbidden_phrase_hit": False,
+                "forbidden_phrases": [],
+                "forbidden_retries": 0,
+                "forbidden_skipped": "scope_miss",
+            }
+
+        async def _default_regen(constraint: str) -> str:
+            return await self._retry_reply_without_forbidden(
+                user_text=user_text,
+                draft_text=current,
+                constraint=constraint,
+                ctx=ctx,
+            )
+
+        regen = regenerate or _default_regen
+
+        while True:
+            result = evaluate_forbidden_reply(
+                current,
+                retries_done=retries_done,
+                max_retries=max_retries,
+            )
+            hits = list(result.get("hits") or [])
+            last_hits = hits
+            if not hits:
+                return current, {
+                    "forbidden_phrase_hit": False,
+                    "forbidden_phrases": [],
+                    "forbidden_retries": retries_done,
+                }
+            if result.get("should_retry"):
+                constraint = str(result.get("retry_constraint") or "")
+                try:
+                    retried = await regen(constraint=constraint)
+                    if retried:
+                        current = str(retried)
+                        retries_done += 1
+                        continue
+                except Exception as exc:
+                    try:
+                        self.logger.warning("forbidden phrase retry failed: %s", exc)
+                    except Exception:
+                        pass
+            stripped = str(result.get("stripped") or current)
+            if not stripped.strip():
+                stripped = "嗯……这样啊"
+            return stripped, {
+                "forbidden_phrase_hit": True,
+                "forbidden_phrases": last_hits,
+                "forbidden_retries": retries_done,
+            }
 
     async def _send_gateway_reply(
         self,
@@ -1665,42 +1909,24 @@ class ChatService:
     def _build_reply_style_context(
         self, user_text: str, ctx: Optional[Dict[str, Any]] = None
     ) -> str:
+        """Scene prompt: shared core for desktop + QQ; shell differs only lightly."""
         source = str((ctx or {}).get("source") or "").strip().lower()
+        message_type = self._natural_chat_message_type(ctx)
         detail_requested = self._wants_detailed_answer(user_text)
-        parts = ["【本轮回复风格】"]
-        if detail_requested:
-            parts.extend(
-                [
-                    "- 用户这轮允许你讲细一点，但仍然先给结论，再补必要说明。",
-                    "- 即使展开，也尽量像聊天，不要写成报告或教程腔。",
-                ]
-            )
-        else:
-            parts.extend(
-                [
-                    "- 这轮默认按即时聊天来回，优先 1 到 2 句短句。",
-                    "- 不要自发写成长解释、分点说明、总结陈词或安慰小作文。",
-                    "- 能一句说完就一句说完；不要为了显得体贴而铺很多层。",
-                    "- 不要每句都写成下结论；合适时可以像平常聊天那样用疑问句或轻反问。",
-                    "- 记忆只影响你的态度和语气，不要主动复述用户以前说过的原句。",
-                ]
-            )
-        if source in QQ_REMOTE_SOURCES:
-            parts.extend(
-                [
-                    "- 当前渠道是 QQ，回复要像真人发消息，不像客服。",
-                    "- 尽量控制在 8 到 35 字一小句；没有必要不要连续发大段。",
-                    "- 短句不要用句号收尾；问号、感叹号可以保留。",
-                    "- 可以偶尔用问句接话，不要每条都像正式答复。",
-                    "- 不要把模型、接口、系统错误原文发给对方；卡住就自然地说你这边卡了一下。",
-                ]
-            )
-        elif source in {"text_input", "desktop", "voice"}:
-            parts.append("- 当前是日常对话场景，优先自然、短促、有人味；可以适当用疑问句。")
+        config = self._get_natural_chat_config()
+        parts_text = build_scene_prompt(
+            source,
+            message_type,
+            detail_intent=detail_requested,
+            bypass_short_shell=bool(
+                detail_requested and config.detail_intent_bypass_short_shell
+            ),
+        )
         effect_hint = self._build_reply_effect_style_hint(ctx)
         if effect_hint:
-            parts.append(effect_hint)
-        return "\n".join(parts)
+            # 反馈提示本身已是一行，直接挂上；不重复系统规则里的记忆说明
+            parts_text = parts_text + "\n" + effect_hint
+        return parts_text
 
     def _build_reply_effect_style_hint(self, ctx: Optional[Dict[str, Any]]) -> str:
         memory_core = getattr(self.brain, "memory_core", None)
@@ -1891,6 +2117,8 @@ class ChatService:
         user_text: str,
         scene: str = "chat",
         ctx: Optional[Dict[str, Any]] = None,
+        recent: Optional[List[Dict[str, Any]]] = None,
+        limit: Optional[int] = None,
     ) -> List[str]:
         runtime = self._load_expression_library_runtime()
         if not runtime.get("expression_library_enabled", True):
@@ -1906,15 +2134,23 @@ class ChatService:
         character_name = str(profile.get("name") or "").strip()
         _active_name, character_id, _base_prompt = self._get_active_character_context()
         try:
+            recent_messages = list(
+                recent if recent is not None else self._get_short_term_messages(ctx)
+            )[-6:]
+            runtime_limit = min(3, runtime.get("expression_library_max_prompt_items", 4))
+            select_limit = runtime_limit
+            if limit is not None:
+                select_limit = max(1, min(runtime_limit, int(limit)))
             return memory_core.select_expressions(
                 user_text=user_text,
                 character_id=character_id,
                 character_name=character_name,
                 scene=scene,
-                recent_messages=self._get_short_term_messages(ctx)[-6:],
-                limit=min(3, runtime.get("expression_library_max_prompt_items", 4)),
+                recent_messages=recent_messages,
+                limit=select_limit,
                 session_id=self._get_memory_session_id(ctx),
                 person_id=self._get_memory_person_id(ctx) or "owner",
+                use_llm=scene != "chat",
             )
         except Exception:
             return []
@@ -1978,15 +2214,9 @@ class ChatService:
             return False
         if self._looks_structured_reply(clean):
             return False
-        if scene == "sensor":
-            return True
-        source = str((ctx or {}).get("source") or "").strip().lower()
-        if source not in {"text_input", "voice", "desktop", "qq_gateway", "napcat_qq"}:
+        # 闲聊不再二次 polish；传感器只在草稿已经像观察报告时才改写。
+        if scene != "sensor":
             return False
-        if self._wants_detailed_answer(user_text):
-            return False
-        if source in QQ_REMOTE_SOURCES and ("。" in clean or "．" in clean or len(clean) > 18):
-            return True
         return self._needs_natural_polish(clean, scene=scene)
 
     async def _polish_natural_reply(
@@ -2027,19 +2257,15 @@ class ChatService:
         source = str((ctx or {}).get("source") or "").strip().lower()
         if scene == "sensor":
             scene_prompt = (
-                "这是一次屏幕感知后的临场回应。像五十铃怜在旁边安静瞥了一眼后低声接一句，"
-                "可以是关心、提醒、陪伴、疑问，也可以是一点点吐槽；不要把画面再解释一遍。默认 1 句，最多 36 个字。"
+                f"屏幕感知临场句。像「{char_name}」低声接一句，不要再解释画面；最多 36 字。"
             )
         elif source in QQ_REMOTE_SOURCES:
             scene_prompt = (
-                "这是一次 QQ 聊天。改得像真人随手回消息，默认 1 到 2 条短句，"
-                "不要用句号收尾，不要解释太满；合适时可以用问句接话。"
+                f"QQ 消息。像「{char_name}」随手回，1～2 短句，少用句号。"
+                "不要拔高成价值判断，不要复述原句。"
             )
         else:
-            scene_prompt = (
-                "这是一次普通日常聊天。把它改得更像真人即时回复，"
-                "默认 1 到 2 句短句，尽量不要超过 40 个字；不要全写成陈述句。"
-            )
+            scene_prompt = "日常闲聊改写：1～2 短句，不要扩写。"
 
         system_prompt = (
             f"你现在只负责改写一句已经生成好的回复，让它更像角色「{char_name}」在即时聊天里顺口说出来的话。"
@@ -2051,18 +2277,11 @@ class ChatService:
             "4) 不要出现“用户/根据/当前情况/首先/其次/另外/总之/如果你需要我可以”；\n"
             "5) 可以把生硬短评改成自然疑问或轻反问，但不要为了问而问；\n"
             "6) 不要加引号，不要加固定口癖，不要写情绪标签。\n"
+            "7) 只跟随当前角色气质，不要套用其他固定角色的说话方式。\n"
             f"{scene_prompt}"
         )
         if scene == "sensor":
-            system_prompt += (
-                "\n屏幕回应的额外要求：\n"
-                "- 保留五十铃怜的冷静、克制和一点点距离感；可以轻轻戳他，但不要热情服务。\n"
-                "- 少评价网页或软件本身，多对“他正在看/正在做这件事”作一句很轻的反应。\n"
-                "- 不要连续输出同一种陈述句；可以用低声问句，但不要复用最近出现过的固定模板。\n"
-                "- 禁止写成“挺实用、步骤详尽、请仔细阅读、需要协助、收获颇丰、至关重要、注意基础”这种助手口吻。\n"
-                "- 不要使用 🌸 或其他装饰 emoji。\n"
-                "- 如果最近几次已经有相似开头、相似句式或相似落点，这次必须换一种说法；不要每次都硬吐槽。"
-            )
+            system_prompt += "\n不要写成观察报告或助手口吻。"
 
         user_parts = []
         if habits_block:
@@ -2363,13 +2582,11 @@ class ChatService:
         extra_context: str = "",
     ) -> str:
         base_prompt = DEFAULT_PERSONA
-        active_char_name = ""
         try:
             from modules.character_manager import character_manager
 
             active_char = character_manager.get_active_character()
             if active_char:
-                active_char_name = str(active_char.get("name") or "").strip()
                 base_prompt = active_char.get("prompt", DEFAULT_PERSONA)
         except Exception:
             pass
@@ -2381,17 +2598,7 @@ class ChatService:
             self._build_current_emotion_context(ctx),
         ]
         parts.append(
-            "\n".join(
-                [
-                    "【屏幕感知时的口吻】",
-                    "- 你不是在总结屏幕，也不是在评价软件；你是在旁边陪着用户，轻轻接一句。",
-                    "- 优先说他这个人正在做什么、给你的感觉，而不是评价页面内容“很实用/很详细”。",
-                    "- 用你自己的语气和方式接话，不要像客服，不要热情服务。",
-                    "- 每次根据窗口内容换一个落点：疑问、半句吐槽、轻声提醒、短感受都可以；不要照抄固定口癖。",
-                    "- 禁用句式：挺实用、步骤详尽、请仔细阅读、需要协助、收获颇丰、至关重要、注意基础。",
-                    "- 不要使用 🌸 或其他装饰 emoji。",
-                ]
-            )
+            "【屏幕感知】旁边轻轻接一句，不要总结屏幕或评价软件好不好。"
         )
         self_awareness_hint = self._build_live2d_self_awareness_hint(ctx)
         if self_awareness_hint:
@@ -2994,6 +3201,18 @@ class ChatService:
             dict.fromkeys(delegate_triggers)
         )
 
+    def _has_search_delegate(self) -> bool:
+        delegate_map = getattr(self.plugin_manager, "delegate_map", None) or {}
+        for key, plugin in dict(delegate_map).items():
+            names = {
+                str(key or "").strip().lower(),
+                str(getattr(plugin, "plugin_trigger", "") or "").strip().lower(),
+                str(getattr(plugin, "llm_command", "") or "").strip().lower(),
+            }
+            if names & {"search", "search_web"}:
+                return True
+        return False
+
     def _is_search_delegate_route(self, triggers, raw_text: str) -> bool:
         normalized = [
             str(trigger or "").strip()
@@ -3072,14 +3291,16 @@ class ChatService:
                 content=final_text,
                 meta=assistant_log_meta,
             )
-        if output_profile.get("ui_append", True):
-            await self.event_bus.emit("ui.append", role="assistant", text=final_text)
+        pace_ui = output_coordinator.should_pace_assistant_ui(output_profile)
+        if output_profile.get("ui_append", True) and not pace_ui:
+            await output_coordinator.emit_assistant_ui_parts(self.event_bus, final_text)
         await self.presenter.present(
             final_text,
             emotion,
             interrupt=interrupt,
             speak=output_profile.get("speak", True),
             show_bubble=output_profile.get("show_bubble", True),
+            append_ui=pace_ui,
         )
         await self._send_gateway_reply(final_text, ctx, emotion=emotion)
 
@@ -3690,6 +3911,7 @@ class ChatService:
             ctx = {}
         ctx["chat_service"] = self
         ctx["brain"] = self.brain
+        ctx["knowledge"] = BrainKnowledgePort(self.brain)
         ctx["mcp_bridge"] = self.mcp_bridge
         # Explicit for on-demand tools (e.g. owner_channel_bridge); keeps hard isolation elsewhere.
         if getattr(self, "conversation_event_service", None) is not None:
@@ -3971,15 +4193,17 @@ class ChatService:
                 direct_memory_reply = direct_reply_text
 
             if direct_reply_text:
-                if output_profile.get("ui_append", True):
-                    await self.event_bus.emit(
-                        "ui.append", role="assistant", text=direct_reply_text
+                pace_ui = output_coordinator.should_pace_assistant_ui(output_profile)
+                if output_profile.get("ui_append", True) and not pace_ui:
+                    await output_coordinator.emit_assistant_ui_parts(
+                        self.event_bus, direct_reply_text
                     )
                 await self.presenter.present(
                     direct_reply_text,
                     emotion="neutral",
                     speak=output_profile.get("speak", True),
                     show_bubble=output_profile.get("show_bubble", True),
+                    append_ui=pace_ui,
                 )
                 if (
                     not handled_gateway_voice
@@ -4317,6 +4541,18 @@ class ChatService:
             f"路由结果: need_tools={route.need_tools}, triggers={route.tool_triggers}"
         )
         effective_triggers = list(route.tool_triggers or [])
+        if (
+            not route.need_tools
+            and not effective_triggers
+            and not codex_mode
+            and text_utils.is_direct_fact_search_question(user_text)
+            and self._has_search_delegate()
+        ):
+            effective_triggers.append("search_web")
+            self.logger.info(
+                "[SearchRoute] 事实问句直接搜索: %s",
+                str(user_text or "")[:120],
+            )
         if codex_mode and "workspace_ops" not in effective_triggers:
             effective_triggers.append("workspace_ops")
         normal_triggers, delegate_triggers = self._split_delegate_triggers(
@@ -4326,22 +4562,6 @@ class ChatService:
             delegate_triggers,
             user_text,
         )
-        if search_delegate_requested:
-            search_acknowledgement = search_flow_service.build_search_acknowledgement(
-                user_text
-            )
-            await self._emit_assistant_text(
-                search_acknowledgement,
-                ctx=ctx,
-                emotion="think",
-                transcript_meta=transcript_channel_meta,
-                chat_log_source=chat_log_source,
-                output_profile=output_profile,
-                tool=True,
-                interrupt=False,
-                apply_catchphrase=False,
-                record_chat_log=False,
-            )
         if delegate_triggers:
             self._set_delegate_task_state(
                 ctx,
@@ -4358,7 +4578,7 @@ class ChatService:
                 text=user_text,
                 meta={"route_reason": str(route.reason or "")},
             )
-        need_tools = bool(route.need_tools or (codex_mode and effective_triggers))
+        need_tools = bool(route.need_tools or effective_triggers)
         self._trace_process(
             "route",
             source=source_key,
@@ -4450,13 +4670,40 @@ class ChatService:
         self_awareness_hint = self._build_live2d_self_awareness_hint(ctx)
         current_emotion_context = self._build_current_emotion_context(ctx)
         reply_style_context = self._build_reply_style_context(user_text, ctx)
-        reply_angle_context = self._build_qq_reply_angle_context(user_text, ctx)
+        natural_cfg = self._get_natural_chat_config()
+        short_term_messages = self._get_short_term_messages(ctx)
+        thought_block, thought_trace = await self._maybe_build_character_thought_block(
+            user_text=user_text,
+            ctx=ctx,
+            need_tools=need_tools,
+            codex_mode=codex_mode,
+            recent=short_term_messages,
+        )
+        expression_block, expression_hints = self._build_expression_inject_block(
+            user_text,
+            ctx,
+            config=natural_cfg,
+            recent=short_term_messages,
+        )
         system_text = (
             f"【当前时间】{current_time}\n{PERSONA_PROMPT}\n"
             f"{current_emotion_context}\n{reply_style_context}\n{special_context}"
         )
-        if reply_angle_context:
-            system_text += f"\n{reply_angle_context}"
+        if thought_block:
+            system_text += f"\n{thought_block}"
+        if expression_block:
+            system_text += f"\n{expression_block}"
+        try:
+            self._trace_process(
+                "character_natural_chat",
+                **{
+                    **thought_trace,
+                    "expression_count": len(expression_hints or []),
+                    "expression_ids_or_hints": (expression_hints or [])[:3],
+                },
+            )
+        except Exception:
+            pass
         if self_awareness_hint:
             system_text += f"\n{self_awareness_hint}"
         skill_prompt = ""
@@ -4538,11 +4785,23 @@ class ChatService:
                 cleaned_context_messages.append(message)
         context_messages = cleaned_context_messages
 
+        guard_requires_non_stream = bool(
+            (
+                output_profile.get("speak", True)
+                or output_profile.get("show_bubble", True)
+            )
+            and scope_matches(
+                source_key,
+                self._natural_chat_message_type(ctx),
+                natural_cfg,
+            )
+        )
         use_non_stream_flow = reply_flow_service.should_use_non_stream_flow(
             need_tools=need_tools,
             deferred_tool_flow=deferred_tool_flow,
             stream_available=chat_with_ai_stream is not None,
             natural_reply_candidate=natural_reply_candidate,
+            guard_requires_non_stream=guard_requires_non_stream,
         )
         self._trace_process(
             "branch",
@@ -4858,8 +5117,6 @@ class ChatService:
                 final_reply=final_reply,
                 final_emo=final_emo,
                 model_emo_seen=model_emo_seen,
-                natural_reply_candidate=natural_reply_candidate,
-                triggered=triggered,
                 user_text=user_text,
                 ctx=ctx,
                 preface_text=preface_text,
@@ -4869,7 +5126,6 @@ class ChatService:
                 strip_emo_tags_anywhere=self._strip_emo_tags_anywhere,
                 should_suppress_followup_preface=self._should_suppress_followup_preface,
                 merge_preface_texts=self._merge_preface_texts,
-                polish_natural_reply=self._polish_natural_reply,
                 apply_character_catchphrase=self._apply_character_catchphrase,
                 prepare_reply_for_output=self._prepare_reply_for_output,
                 infer_reply_emotion_with_llm=self._infer_reply_emotion_with_llm,
@@ -4877,6 +5133,19 @@ class ChatService:
             final_reply = prepared_reply.text
             final_emo = prepared_reply.emotion
             model_emo_seen = prepared_reply.model_emo_seen
+            if not triggered:
+                final_reply, guard_trace = await self._apply_forbidden_phrase_guard(
+                    text=final_reply,
+                    user_text=user_text,
+                    ctx=ctx,
+                )
+                try:
+                    if guard_trace.get("forbidden_phrase_hit") or guard_trace.get(
+                        "forbidden_retries"
+                    ):
+                        self._trace_process("forbidden_phrase_guard", **guard_trace)
+                except Exception:
+                    pass
             self._observe_final_reply_emotion(final_emo)
 
             await output_coordinator.emit_non_stream_reply(
@@ -4940,6 +5209,7 @@ class ChatService:
                 interrupt=True,
                 speak=output_profile.get("speak", True),
                 show_bubble=output_profile.get("show_bubble", True),
+                append_ui=output_coordinator.should_pace_assistant_ui(output_profile),
             )
 
             buffer = ""
@@ -5047,6 +5317,11 @@ class ChatService:
             except Exception as e:
                 self.logger.error(f"Stream error: {e}")
 
+            full_reply, stream_guard = await self._apply_forbidden_phrase_guard(
+                text=full_reply,
+                user_text=user_text,
+                ctx=ctx,
+            )
             stream_finalized = reply_flow_service.finalize_stream_reply(
                 full_reply=full_reply,
                 ctx=ctx,
@@ -5056,6 +5331,13 @@ class ChatService:
                 prepare_reply_for_output=self._prepare_reply_for_output,
             )
             full_reply = stream_finalized.text
+            try:
+                if stream_guard.get("forbidden_phrase_hit") or stream_guard.get(
+                    "forbidden_retries"
+                ):
+                    self._trace_process("forbidden_phrase_guard_stream", **stream_guard)
+            except Exception:
+                pass
             for feed_chunk in stream_finalized.feed_chunks:
                 await self.event_bus.emit(
                     "assistant.stream.feed",
@@ -5115,6 +5397,7 @@ class ChatService:
                 set_codex_task_state=self._set_codex_task_state,
                 add_memory_safe=self._add_memory_safe,
                 record_message_pair=self._record_message_pair_events,
+                presenter=self.presenter,
             )
 
     # 🟢 [新增] 主动关怀提醒
@@ -5181,6 +5464,20 @@ class ChatService:
         print(
             f"🤖 [Sensor] 观察: {clean_title} ({category}) | App: {display_app} | Count: {count} | Vision: {bool(use_vision)}"
         )
+
+        def _sensor_active_title() -> str:
+            sensor_ref = getattr(self, "screen_sensor_ref", None)
+            rust_title = str(getattr(sensor_ref, "last_window_title", "") or "").strip()
+            try:
+                from modules.vision.capture import get_active_window_title
+
+                captured = str(get_active_window_title() or "").strip()
+            except Exception:
+                captured = ""
+            if captured:
+                return captured
+            return rust_title
+
         generation = await self.sensor_event_service.run_event_generation(
             clean_title=clean_title,
             display_app=display_app,
@@ -5193,6 +5490,7 @@ class ChatService:
             current_stay_sec=current_stay_sec,
             chat_with_ai=chat_with_ai,
             analyze_image=analyze_image,
+            active_title_getter=_sensor_active_title,
         )
         if not generation.reply:
             return False
@@ -5234,7 +5532,7 @@ class ChatService:
             prompt = (
                 "把下面这句屏幕感知回应改成一句自然的临场短话。\n"
                 "要求：直接对 Master 说；不要像观察报告；不要出现“用户正在、屏幕上、画面中、我看到、根据、当前窗口、"
-                "挺实用、步骤详尽、需要协助、这也要看、盯着、你又、还真”。\n"
+                "挺实用、步骤详尽、需要协助、这也要看”。\n"
                 "允许关心、疑问、陪一句或很轻的吐槽；最多 28 个字；只输出最终一句。\n"
                 f"窗口：{title} / {category}\n"
                 f"原句：{clean}"
@@ -5312,7 +5610,7 @@ class ChatService:
                 chat_with_ai,
                 messages,
                 task_type="default",
-                caller="send_active_alert",
+                caller="music_event",
             )
             reply = (reply or "").strip()
 
@@ -5334,8 +5632,9 @@ class ChatService:
                 # 可以添加更多规则...
             self._observe_final_reply_emotion(final_emo)
 
-            await self.event_bus.emit("ui.append", role="assistant", text=clean_text)
-            await self.presenter.present(clean_text, emotion=final_emo, interrupt=False)
+            await self.presenter.present(
+                clean_text, emotion=final_emo, interrupt=False, append_ui=True
+            )
 
             self._update_active_time()
             asyncio.create_task(

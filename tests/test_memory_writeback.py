@@ -51,7 +51,6 @@ def test_writeback_extracts_thursday_correction_from_user_evidence(tmp_path):
                         "key": "habit.meeting_weekday",
                         "content": "用户固定周四开会",
                         "confidence": 0.95,
-                        "valid_days": 0,
                         "evidence_ids": [evidence_id],
                         "is_correction": True,
                         "category_override": "habits",

@@ -53,6 +53,8 @@ _MODEL_COOLDOWN_LOCK = threading.RLock()
 _MODEL_COOLDOWNS = {}
 _DEFAULT_MODEL_COOLDOWN_SECONDS = 60.0
 _MAX_MODEL_COOLDOWN_SECONDS = 900.0
+_BLOCKED_MODEL_COOLDOWN_SECONDS = 600.0
+_TIMEOUT_MODEL_COOLDOWN_SECONDS = 90.0
 _RUNTIME_HEALTH = None
 
 
@@ -127,15 +129,66 @@ def _set_model_cooldown(model_key: str, *, until: float, reason: str) -> None:
         pass
 
 
-def _start_model_cooldown(model_key: str, exc: BaseException, *, now=None):
+def _exception_text(exc: BaseException) -> str:
+    parts = [str(exc or "")]
+    body = getattr(exc, "body", None)
+    if body is not None:
+        parts.append(str(body))
+    return " ".join(parts).lower()
+
+
+def _is_blocked_error(exc: BaseException) -> bool:
+    text = _exception_text(exc)
+    markers = (
+        "request was blocked",
+        "your request was blocked",
+        "content_policy",
+        "content policy",
+        "blocked by",
+    )
+    if any(marker in text for marker in markers):
+        return True
+    if "blocked" in text and "rate" not in text:
+        return True
+    return False
+
+
+def _is_timeout_error(exc: BaseException) -> bool:
+    if isinstance(exc, TimeoutError):
+        return True
+    text = _exception_text(exc)
+    markers = (
+        "timed out",
+        "timeout",
+        "read timeout",
+        "connect timeout",
+        "deadline exceeded",
+    )
+    return any(marker in text for marker in markers)
+
+
+def _start_model_cooldown(
+    model_key: str,
+    exc: BaseException,
+    *,
+    now=None,
+    all_transports_failed: bool = True,
+):
+    current = time.time() if now is None else float(now)
     delay = _rate_limit_delay(exc)
+    reason = "rate_limit"
+    if delay is None and _is_blocked_error(exc):
+        delay = _BLOCKED_MODEL_COOLDOWN_SECONDS
+        reason = "blocked"
+    elif delay is None and all_transports_failed and _is_timeout_error(exc):
+        delay = _TIMEOUT_MODEL_COOLDOWN_SECONDS
+        reason = "timeout"
     if delay is None:
         return None
-    current = time.time() if now is None else float(now)
     _set_model_cooldown(
         model_key,
         until=current + delay,
-        reason="rate_limit",
+        reason=reason,
     )
     return delay
 
@@ -368,8 +421,18 @@ def _extract_responses_text(data: dict) -> str:
     return "\n".join(texts).strip()
 
 
+def _optional_positive_int(value) -> int | None:
+    if value is None or value == "":
+        return None
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
+
+
 def _chat_with_openai_responses(
-    messages_context, config: dict, timeout: int = 30
+    messages_context, config: dict, timeout: int = 30, max_tokens=None
 ) -> str:
     model_name = str((config or {}).get("model", "")).strip()
     api_key = str((config or {}).get("api_key", "")).strip()
@@ -387,12 +450,17 @@ def _chat_with_openai_responses(
         "model": model_name,
         "input": _messages_to_responses_input(messages_context),
     }
+    token_budget = _optional_positive_int(max_tokens)
+    if token_budget:
+        payload["max_output_tokens"] = token_budget
     resp = requests.post(url, headers=headers, json=payload, timeout=timeout)
     if resp.status_code >= 400:
         fallback_payload = {
             "model": model_name,
             "input": _messages_to_text_block(messages_context),
         }
+        if token_budget:
+            fallback_payload["max_output_tokens"] = token_budget
         fallback_resp = requests.post(
             url, headers=headers, json=fallback_payload, timeout=timeout
         )
@@ -483,16 +551,22 @@ def _extract_gemini_text(data: dict) -> str:
         return ""
 
 
-def _chat_with_gemini_native(messages_context, config: dict, timeout: int = 30) -> str:
+def _chat_with_gemini_native(
+    messages_context, config: dict, timeout: int = 30, max_tokens=None
+) -> str:
     model_name = str((config or {}).get("model", "")).strip()
     api_key = str((config or {}).get("api_key", "")).strip()
     base_url = str((config or {}).get("base_url", "")).strip()
     if not model_name:
         raise ValueError("gemini native call missing model")
     url, headers = _build_gemini_native_url(base_url, model_name, api_key)
+    generation_config = {"temperature": 0.7}
+    token_budget = _optional_positive_int(max_tokens)
+    if token_budget:
+        generation_config["maxOutputTokens"] = token_budget
     payload = {
         "contents": _messages_to_gemini_contents(messages_context),
-        "generationConfig": {"temperature": 0.7},
+        "generationConfig": generation_config,
     }
     resp = requests.post(url, headers=headers, json=payload, timeout=timeout)
     if resp.status_code >= 400:
@@ -647,7 +721,7 @@ async def chat_with_ai_stream(
             f"[LLM Stream] 传输顺序 model={key}: {attempts} preferred={preferred or '-'}"
         )
 
-        for method in attempts:
+        for method_idx, method in enumerate(attempts):
             try:
                 if method == "openai":
                     client = AsyncOpenAI(
@@ -714,7 +788,11 @@ async def chat_with_ai_stream(
                         "error": safe_error[:300],
                     }
                 )
-                cooldown_delay = _start_model_cooldown(key, e)
+                cooldown_delay = _start_model_cooldown(
+                    key,
+                    e,
+                    all_transports_failed=method_idx >= len(attempts) - 1,
+                )
                 if yielded_any:
                     return
                 if cooldown_delay is not None:
@@ -732,6 +810,7 @@ def chat_with_ai(
     timeout_sec: float = 30,
     model_keys_override=None,
     call_metadata=None,
+    max_tokens=None,
 ):
     request_id = request_id or uuid.uuid4().hex[:8]
     caller = caller or "unknown"
@@ -793,26 +872,36 @@ def chat_with_ai(
             f"[LLM Sync] transport_order={attempts} preferred={preferred or '-'} ({trace})"
         )
 
-        for method in attempts:
+        for method_idx, method in enumerate(attempts):
             try:
                 if method == "openai":
                     client = OpenAI(
                         api_key=config["api_key"], base_url=config["base_url"]
                     )
-                    response = client.chat.completions.create(
-                        model=config["model"],
-                        messages=messages_context,
-                        timeout=float(timeout_sec),
-                    )
+                    create_kwargs = {
+                        "model": config["model"],
+                        "messages": messages_context,
+                        "timeout": float(timeout_sec),
+                    }
+                    token_budget = _optional_positive_int(max_tokens)
+                    if token_budget:
+                        create_kwargs["max_tokens"] = token_budget
+                    response = client.chat.completions.create(**create_kwargs)
                     raw_content = getattr(response.choices[0].message, "content", "")
                     content = _extract_text_content(raw_content)
                 elif method == "openai_responses":
                     content = _chat_with_openai_responses(
-                        messages_context, config, timeout=float(timeout_sec)
+                        messages_context,
+                        config,
+                        timeout=float(timeout_sec),
+                        max_tokens=max_tokens,
                     )
                 elif method == "gemini_native":
                     content = _chat_with_gemini_native(
-                        messages_context, config, timeout=float(timeout_sec)
+                        messages_context,
+                        config,
+                        timeout=float(timeout_sec),
+                        max_tokens=max_tokens,
                     )
                 else:
                     raise RuntimeError(f"unsupported transport: {method}")
@@ -864,7 +953,11 @@ def chat_with_ai(
                     }
                 )
                 _trace_log(f"[LLM Sync] ❌ 失败: {safe_error} (transport={method}) ({trace})")
-                cooldown_delay = _start_model_cooldown(key, e)
+                cooldown_delay = _start_model_cooldown(
+                    key,
+                    e,
+                    all_transports_failed=method_idx >= len(attempts) - 1,
+                )
                 if cooldown_delay is not None:
                     break
                 continue

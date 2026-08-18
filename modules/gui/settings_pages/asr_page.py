@@ -82,7 +82,7 @@ class AsrSettingsPage(QtWidgets.QWidget):
         self.global_wake_words.setPlaceholderText(
             "全局兜底唤醒词，每行一个，例如：\n五十铃\n怜\nSuzu\n助手"
         )
-        self.global_wake_words.setMinimumHeight(90)
+        self.global_wake_words.setMinimumHeight(60)
         self.global_wake_words.setToolTip(
             "默认来自 config.WAKE_KEYWORDS，可在此增删改；保存后写入 runtime_settings。"
         )
@@ -92,7 +92,7 @@ class AsrSettingsPage(QtWidgets.QWidget):
         self.extra_wake_words.setPlaceholderText(
             "自定义唤醒词，每行一个，例如：\n小铃\nSuzu\n助手"
         )
-        self.extra_wake_words.setMinimumHeight(100)
+        self.extra_wake_words.setMinimumHeight(60)
         wake_form.addRow("自定义补充:", self.extra_wake_words)
 
         preview_group = QtWidgets.QGroupBox("当前生效唤醒词预览")

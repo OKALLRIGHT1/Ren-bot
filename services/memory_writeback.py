@@ -19,7 +19,7 @@ import re
 import threading
 import time
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional, Sequence
 
 
@@ -68,7 +68,8 @@ class ExtractedFact:
     key: str
     content: str
     confidence: float
-    valid_days: int = 0
+    valid_from: str = ""
+    valid_until: str = ""
     evidence_ids: tuple[str, ...] = ()
     is_correction: bool = False
     supersede_keys: tuple[str, ...] = ()
@@ -486,6 +487,7 @@ class MemoryWritebackService:
                     "id": str(item.get("id") or "").strip(),
                     "role": role,
                     "content": content,
+                    "observed_at": str(item.get("ts_iso") or item.get("observed_at") or "").strip(),
                 }
             )
 
@@ -514,6 +516,7 @@ class MemoryWritebackService:
                             "id": str(row.get("id") or "").strip(),
                             "role": role,
                             "content": content[:500],
+                            "observed_at": str(row.get("ts_iso") or "").strip(),
                         }
                     )
                 if store_msgs:
@@ -646,10 +649,12 @@ class MemoryWritebackService:
             "没有用户确认的推测、把问句本身当事实。\n"
             "evidence_ids 必须引用「目标用户原始发言证据」里的 id，至少一条用户消息 id。\n"
             "没有可写事实时输出 {\"items\":[]}。\n"
+            "只有用户原话明确给出起点或终点时才填 valid_from / valid_until；"
+            "稳定事实和习惯不要填，也不要输出 valid_days。\n"
             "严格只输出 JSON：\n"
             '{"items":[{"kind":"preference|fact|rule|profile","key":"稳定英文或点分键",'
-            '"content":"简短中文事实陈述","confidence":0.0,"valid_days":0,'
-            '"evidence_ids":["用户消息id"],"is_correction":false,'
+            '"content":"简短中文事实陈述","confidence":0.0,"valid_from":"",'
+            '"valid_until":"","evidence_ids":["用户消息id"],"is_correction":false,'
             '"supersede_keys":[],"category_override":"","reason":""}]}\n'
             "key 示例：preferred_address, habit.meeting_weekday, likes.food, "
             "dislikes.xxx, status.recent, interaction.rule\n"
@@ -717,10 +722,8 @@ class MemoryWritebackService:
                 evidence_ids = user_hits + [
                     eid for eid in evidence_ids if eid not in user_hits
                 ]
-            try:
-                valid_days = max(0, min(3650, int(item.get("valid_days") or 0)))
-            except Exception:
-                valid_days = 0
+            valid_from = self._explicit_bound(item.get("valid_from"))
+            valid_until = self._explicit_bound(item.get("valid_until"))
             supersede_keys = tuple(
                 self._normalize_key(str(value))
                 for value in (item.get("supersede_keys") or [])
@@ -747,7 +750,8 @@ class MemoryWritebackService:
                     key=key,
                     content=content,
                     confidence=confidence,
-                    valid_days=valid_days,
+                    valid_from=valid_from,
+                    valid_until=valid_until,
                     evidence_ids=tuple(evidence_ids[:4]),
                     is_correction=is_correction,
                     supersede_keys=supersede_keys,
@@ -763,20 +767,10 @@ class MemoryWritebackService:
         fact: ExtractedFact,
         source_map: dict[str, dict[str, Any]],
     ) -> str:
-        # Explicit supersede of alternate keys before writing.
-        for old_key in fact.supersede_keys:
-            if old_key and old_key != fact.key:
-                self._supersede_key(job.person_id, fact.kind, old_key)
-
         fingerprint = hashlib.sha256(
-            f"{job.person_id}|{fact.kind}|{fact.key}|{fact.content}".encode("utf-8")
+            f"{job.person_id}|{fact.kind}|{fact.key}|{fact.content}|{','.join(fact.evidence_ids)}".encode("utf-8")
         ).hexdigest()[:20]
         source_id = f"person_fact:{job.person_id}:{fingerprint}"
-        valid_until = None
-        if fact.valid_days:
-            valid_until = (
-                datetime.now(timezone.utc) + timedelta(days=fact.valid_days)
-            ).isoformat()
 
         metadata: dict[str, Any] = {
             "writeback_source": "memory_writeback",
@@ -789,11 +783,21 @@ class MemoryWritebackService:
             metadata["category_override"] = fact.category_override
 
         evidence = []
+        observed_at = ""
         for eid in fact.evidence_ids:
-            quote = ""
             src = source_map.get(eid) or {}
             quote = str(src.get("content") or job.trigger_text or "")[:500]
-            evidence.append({"type": "transcript", "id": eid, "quote": quote})
+            item_observed = str(src.get("observed_at") or src.get("ts_iso") or "").strip()
+            if item_observed and not observed_at:
+                observed_at = item_observed
+            evidence.append(
+                {
+                    "type": "transcript",
+                    "id": eid,
+                    "quote": quote,
+                    "observed_at": item_observed,
+                }
+            )
 
         importance = 0.6
         if fact.key in {"preferred_address", "reply_style"}:
@@ -807,52 +811,29 @@ class MemoryWritebackService:
                 key=fact.key,
                 content=fact.content,
                 subject_id=job.person_id,
-                session_id=job.session_id if job.session_id != "global" else "",
+                session_id="",
                 source_type="person_fact_writeback",
                 source_id=source_id,
                 confidence=fact.confidence,
                 importance=importance,
-                valid_until=valid_until,
+                valid_from=fact.valid_from or None,
+                valid_until=fact.valid_until or None,
                 metadata=metadata,
                 evidence=evidence,
+                supersede_keys=fact.supersede_keys,
+                observed_at=observed_at or None,
             )
             return str(record_id or "")
         except Exception as exc:
             logger.warning("writeback upsert failed: %s", exc)
             return ""
 
-    def _supersede_key(self, person_id: str, kind: str, key: str) -> None:
-        kinds = tuple(
-            dict.fromkeys(
-                [
-                    kind,
-                    "fact",
-                    "preference",
-                    "profile",
-                    "rule",
-                ]
-            )
-        )
-        try:
-            rows = self.memory_core.list_memory_records(
-                subject_id=person_id,
-                kinds=kinds,
-                limit=80,
-            )
-        except Exception:
-            return
-        for row in rows or []:
-            if str(row.get("key") or "").strip() != key:
-                continue
-            if str(row.get("status") or "") != "active":
-                continue
-            try:
-                self.memory_core.update_memory_record(
-                    str(row.get("id")),
-                    status="superseded",
-                )
-            except Exception:
-                continue
+    @staticmethod
+    def _explicit_bound(value: Any) -> str:
+        text = str(value or "").strip()
+        if not text or text.lower() in {"0", "null", "none", "undefined"}:
+            return ""
+        return text
 
     # ------------------------------------------------------------------ chat summary
     def _process_chat_summary(self, job: WritebackJob) -> WritebackResult:

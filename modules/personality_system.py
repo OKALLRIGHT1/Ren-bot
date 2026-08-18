@@ -151,13 +151,15 @@ class ThinkingSimulator:
         "让我考虑一下"
     ]
     
-    # 思考延迟时间（秒）
+    # 思考延迟时间（秒）——已关闭故意等待，仅保留配置兼容。
     DELAY_RANGES = {
-        "simple": (0.3, 0.8),      # 简单问题
-        "medium": (0.8, 1.8),     # 中等问题
-        "complex": (1.5, 3.0),    # 复杂问题
-        "very_complex": (2.5, 5.0) # 非常复杂
+        "simple": (0.0, 0.0),
+        "medium": (0.0, 0.0),
+        "complex": (0.0, 0.0),
+        "very_complex": (0.0, 0.0),
     }
+    # 总开关：当前主链路本身已够慢，不再额外 sleep 装思考。
+    ENABLED = False
     
     def __init__(self):
         self._last_think_time = 0.0
@@ -186,15 +188,17 @@ class ThinkingSimulator:
         return "medium"
     
     async def think_before_respond(self, user_text: str, callback=None) -> Optional[str]:
-        """在回复前模拟思考"""
-        complexity = self.estimate_complexity(user_text)
-        delay_range = self.DELAY_RANGES[complexity]
-        delay = random.uniform(*delay_range)
-        
-        # 简单问题5%概率不思考，快速回复
-        if complexity == "simple" and random.random() < 0.05:
+        """在回复前模拟思考（当前已关闭故意延迟）。"""
+        if not self.ENABLED:
+            _get_logger().debug("思考延迟已关闭，跳过 sleep")
             return None
-        
+
+        complexity = self.estimate_complexity(user_text)
+        delay_range = self.DELAY_RANGES.get(complexity, (0.0, 0.0))
+        delay = random.uniform(*delay_range)
+        if delay <= 0:
+            return None
+
         # 有自言自语的概率
         show_self_talk = complexity in ["complex", "very_complex"] and random.random() < 0.08
         
@@ -203,7 +207,6 @@ class ThinkingSimulator:
             _get_logger().debug(f"自言自语: {self_talk}")
             if callback:
                 await callback(self_talk, "think")
-            # 自言自语后等待更短时间
             delay *= 0.6
         
         _get_logger().debug(f"思考延迟: {delay:.2f}秒 (复杂度: {complexity})")

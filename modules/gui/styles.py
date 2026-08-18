@@ -873,9 +873,10 @@ def get_settings_styles() -> str:
             background: {p["bg_card"]};
         }}
         QPushButton#tableActionBtn {{
-            min-width: 64px;
-            padding: 6px 12px;
-            font-size: 13px;
+            min-width: 52px;
+            max-width: 72px;
+            padding: 4px 10px;
+            font-size: 12px;
             font-weight: 600;
         }}
         QTextBrowser#consoleView, QPlainTextEdit#consoleView {{
@@ -890,9 +891,10 @@ def get_settings_styles() -> str:
             selection-color: {p["console_codex"]["selection_fg"]};
         }}
         QPushButton#tableDangerBtn {{
-            min-width: 64px;
-            padding: 6px 12px;
-            font-size: 13px;
+            min-width: 52px;
+            max-width: 72px;
+            padding: 4px 10px;
+            font-size: 12px;
             font-weight: 700;
             color: {p["danger"]};
             background: transparent;

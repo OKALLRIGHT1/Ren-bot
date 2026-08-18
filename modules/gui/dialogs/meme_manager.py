@@ -7,6 +7,7 @@ from typing import Any, Optional
 from PySide6 import QtCore, QtGui, QtWidgets
 
 from modules.gui.styles import get_tool_dialog_styles
+from modules.gui.utils import FlowLayout
 
 
 class MemeManagerDialog(QtWidgets.QDialog):
@@ -17,7 +18,8 @@ class MemeManagerDialog(QtWidgets.QDialog):
         self._current_asset_id: Optional[int] = None
         self.setWindowTitle("表情包库")
         self.resize(1040, 680)
-        self.setMinimumSize(900, 560)
+        # 独立窗口保留可用下限；嵌入设置页时由 apply_embedded_mode 清零。
+        self.setMinimumSize(720, 480)
         self._setup_ui()
         self._refresh_table()
 
@@ -74,30 +76,31 @@ class MemeManagerDialog(QtWidgets.QDialog):
         header_layout.addWidget(desc)
         container_layout.addWidget(header_card)
 
-        # 工具栏
-        toolbar = QtWidgets.QHBoxLayout()
-        toolbar.setSpacing(8)
-        
+        # 工具栏：窄宽时自动换行，避免按钮挤出卡片
+        toolbar_wrap = QtWidgets.QWidget()
+        toolbar = FlowLayout(toolbar_wrap, margin=0, h_spacing=8, v_spacing=8)
+
         self.search_input = QtWidgets.QLineEdit()
         self.search_input.setPlaceholderText("🔍 搜索文件名 / 描述 / 标签 / 情绪")
-        
+        self.search_input.setMinimumWidth(180)
+
         self.chk_include_disabled = QtWidgets.QCheckBox("显示禁用")
         self.chk_include_disabled.setChecked(True)
-        
+
         self.btn_refresh = QtWidgets.QPushButton("⟳ 刷新")
         self.btn_refresh.setObjectName("main_btn")
-        
+
         self.btn_import_files = QtWidgets.QPushButton("📥 导入图片")
         self.btn_import_dir = QtWidgets.QPushButton("📂 导入目录")
         self.btn_stats = QtWidgets.QPushButton("📊 统计信息")
 
-        toolbar.addWidget(self.search_input, 1)
+        toolbar.addWidget(self.search_input)
         toolbar.addWidget(self.chk_include_disabled)
         toolbar.addWidget(self.btn_refresh)
         toolbar.addWidget(self.btn_import_files)
         toolbar.addWidget(self.btn_import_dir)
         toolbar.addWidget(self.btn_stats)
-        container_layout.addLayout(toolbar)
+        container_layout.addWidget(toolbar_wrap)
 
         split = QtWidgets.QSplitter()
         split.setOrientation(QtCore.Qt.Orientation.Horizontal)
@@ -136,14 +139,14 @@ class MemeManagerDialog(QtWidgets.QDialog):
         header.setSectionResizeMode(7, QtWidgets.QHeaderView.ResizeMode.Stretch)
         left_layout.addWidget(self.table, 1)
 
-        table_actions = QtWidgets.QHBoxLayout()
-        table_actions.setSpacing(8)
+        table_actions_wrap = QtWidgets.QWidget()
+        table_actions = FlowLayout(table_actions_wrap, margin=0, h_spacing=8, v_spacing=8)
         self.btn_enable = QtWidgets.QPushButton("🟢 批量启用")
         self.btn_disable = QtWidgets.QPushButton("🔴 批量禁用")
-        
+
         self.btn_delete = QtWidgets.QPushButton("🗑️ 删除记录")
         self.btn_delete_files = QtWidgets.QPushButton("⚠️ 删除记录与文件")
-        
+
         danger_qss = """
             QPushButton {
                 color: #EF4444;
@@ -161,10 +164,9 @@ class MemeManagerDialog(QtWidgets.QDialog):
 
         table_actions.addWidget(self.btn_enable)
         table_actions.addWidget(self.btn_disable)
-        table_actions.addStretch()
         table_actions.addWidget(self.btn_delete)
         table_actions.addWidget(self.btn_delete_files)
-        left_layout.addLayout(table_actions)
+        left_layout.addWidget(table_actions_wrap)
         split.addWidget(left)
 
         right = QtWidgets.QFrame()
@@ -179,11 +181,16 @@ class MemeManagerDialog(QtWidgets.QDialog):
 
         self.preview = QtWidgets.QLabel("未选择")
         self.preview.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
-        self.preview.setMinimumSize(240, 220)
+        # 嵌入窄窗时允许压缩；独立大窗仍靠 sizeHint 保持可读预览区。
+        self.preview.setMinimumSize(120, 120)
+        self.preview.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Expanding,
+            QtWidgets.QSizePolicy.Policy.Expanding,
+        )
         self.preview.setStyleSheet(
             "QLabel { background:#FFFFFF; border:1px solid #E5E7EB; border-radius:8px; color:#9CA3AF; }"
         )
-        right_layout.addWidget(self.preview)
+        right_layout.addWidget(self.preview, 1)
 
         form = QtWidgets.QFormLayout()
         form.setVerticalSpacing(8)
@@ -195,7 +202,8 @@ class MemeManagerDialog(QtWidgets.QDialog):
         self.edit_tags.setPlaceholderText("逗号分隔，例如：狡猾,偷笑")
         self.edit_desc = QtWidgets.QPlainTextEdit()
         self.edit_desc.setPlaceholderText("描述这个表情适合的语气/情境...")
-        self.edit_desc.setFixedHeight(75)
+        self.edit_desc.setMinimumHeight(60)
+        self.edit_desc.setMaximumHeight(120)
         self.path_label = QtWidgets.QLabel("-")
         self.path_label.setWordWrap(True)
         self.path_label.setTextInteractionFlags(

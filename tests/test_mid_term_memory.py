@@ -157,6 +157,30 @@ def test_list_dialog_window_projects_user_assistant_with_event_ids(event_env):
     assert turns[1]["event_id"] == a.event_id
 
 
+def test_list_dialog_window_drops_turns_older_than_max_age(event_env):
+    _, store = event_env
+    scope = _scope()
+    now = datetime.now(timezone.utc)
+    _append_event(
+        store,
+        ConversationEventType.USER_MESSAGE,
+        "在我眼里你就是最完美的哦",
+        scope=scope,
+        occurred_at=now - timedelta(days=11),
+    )
+    _append_event(
+        store,
+        ConversationEventType.USER_MESSAGE,
+        "上海最近会有什么台风吗",
+        scope=scope,
+        occurred_at=now,
+    )
+
+    turns = store.list_dialog_window(scope, now=now, limit=12, max_age_sec=86400)
+
+    assert [item["content"] for item in turns] == ["上海最近会有什么台风吗"]
+
+
 def test_pending_mid_term_bucket_collects_event_ids_on_evict():
     from modules.advanced_memory import AdvancedMemorySystem
     import threading

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
@@ -26,6 +27,95 @@ def _normalize_dirs(raw: Any) -> List[Dict[str, Any]]:
         seen.add(path)
         rows.append({"path": path, "enabled": enabled})
     return rows
+
+
+def ingest_knowledge_paths(
+    paths: Any,
+    *,
+    import_file: Callable[..., Any],
+    get_stats: Optional[Callable[[], Dict[str, Any]]] = None,
+    on_progress: Optional[Callable[[Dict[str, Any]], None]] = None,
+    slow: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Shared file ingest used by GUI, plugin learn, and one-click learn."""
+    files = [str(item or "").strip() for item in (paths or []) if str(item or "").strip()]
+    results: List[str] = []
+    added = 0
+    skipped = 0
+    failed = 0
+    adaptive_hits = 0
+    slow_cfg = slow if isinstance(slow, dict) else {}
+    slow_enabled = bool(slow_cfg.get("enabled", False))
+    slow_batch = max(1, int(slow_cfg.get("batch") or 20))
+    slow_sleep_ms = max(0, int(slow_cfg.get("sleep_ms") or 0))
+    adaptive = bool(slow_cfg.get("adaptive", False))
+    dynamic_sleep_ms = slow_sleep_ms
+    stats_before = dict(get_stats() or {}) if callable(get_stats) else {}
+    last_rate_limit_hits = int(stats_before.get("rate_limit_hits", 0) or 0)
+    total = len(files)
+
+    for index, path in enumerate(files, 1):
+        def _progress(info: Any, *, current=path, current_index=index) -> None:
+            payload = dict(info or {})
+            payload.setdefault("file_index", current_index)
+            payload.setdefault("file_count", total)
+            payload.setdefault("file_path", current)
+            if on_progress is not None:
+                on_progress(payload)
+
+        try:
+            result = import_file(path, progress_callback=_progress)
+            if isinstance(result, dict):
+                item_added = int(result.get("added", 0) or 0)
+                item_skipped = int(result.get("skipped", 0) or 0)
+                if result.get("ok") is False:
+                    failed += 1
+                    results.append(
+                        f"{Path(path).name}: 导入失败 - "
+                        f"{result.get('status') or result.get('error') or 'unknown'}"
+                    )
+                    continue
+            else:
+                item_added = int(result or 0)
+                item_skipped = 0
+            added += item_added
+            skipped += item_skipped
+            results.append(
+                f"{Path(path).name}: 新增 {item_added} 条，跳过 {item_skipped} 条。"
+            )
+        except Exception as exc:
+            failed += 1
+            results.append(f"{Path(path).name}: 导入失败 - {exc}")
+
+        if adaptive and callable(get_stats):
+            current_stats = dict(get_stats() or {})
+            current_rate_limit_hits = int(current_stats.get("rate_limit_hits", 0) or 0)
+            if current_rate_limit_hits > last_rate_limit_hits:
+                adaptive_hits += current_rate_limit_hits - last_rate_limit_hits
+                dynamic_sleep_ms = min(max(dynamic_sleep_ms * 2, slow_sleep_ms), 10000)
+                last_rate_limit_hits = current_rate_limit_hits
+            elif dynamic_sleep_ms > slow_sleep_ms:
+                dynamic_sleep_ms = max(slow_sleep_ms, dynamic_sleep_ms - 300)
+        if slow_enabled and dynamic_sleep_ms > 0 and index % slow_batch == 0:
+            time.sleep(dynamic_sleep_ms / 1000.0)
+
+    stats_after = dict(get_stats() or {}) if callable(get_stats) else {}
+    rate_limit_hits = int(stats_after.get("rate_limit_hits", 0) or 0) - int(
+        stats_before.get("rate_limit_hits", 0) or 0
+    )
+    fallback_uses = int(stats_after.get("fallback_uses", 0) or 0) - int(
+        stats_before.get("fallback_uses", 0) or 0
+    )
+    return {
+        "file_count": total,
+        "added": added,
+        "skipped": skipped,
+        "failed": failed,
+        "results": results,
+        "rate_limit_hits": max(0, rate_limit_hits),
+        "fallback_uses": max(0, fallback_uses),
+        "adaptive_hits": adaptive_hits,
+    }
 
 
 def _safe_filename(title: str) -> str:
@@ -114,13 +204,39 @@ class KnowledgeGuiService:
         if brain is None or not hasattr(brain, "search_knowledge"):
             return {"ok": False, "error": "brain_unavailable"}
         try:
+            from modules.memory.retrieval import (
+                KnowledgeHit,
+                format_knowledge_hits_for_display,
+            )
+
             rows = brain.search_knowledge(query, int(limit or 5)) or []
-            results = [str(item) for item in rows]
-            return {"ok": True, "data": {"results": results, "count": len(results)}}
+            results = format_knowledge_hits_for_display(rows)
+            structured = []
+            for item in rows:
+                if isinstance(item, KnowledgeHit):
+                    structured.append(
+                        {
+                            "id": item.id,
+                            "content": item.content,
+                            "source": item.source,
+                            "source_path": item.source_path,
+                            "score": item.score,
+                        }
+                    )
+            return {
+                "ok": True,
+                "data": {
+                    "results": results,
+                    "count": len(results),
+                    "hits": structured,
+                },
+            }
         except Exception as exc:
             return {"ok": False, "error": str(exc)}
 
-    def import_file(self, path: str) -> Dict[str, Any]:
+    def import_file(
+        self, path: str, progress_callback: Optional[Callable[..., Any]] = None
+    ) -> Dict[str, Any]:
         path = str(path or "").strip()
         if not path:
             return {"ok": False, "error": "invalid_path"}
@@ -128,10 +244,43 @@ class KnowledgeGuiService:
         if brain is None or not hasattr(brain, "import_knowledge_from_file"):
             return {"ok": False, "error": "brain_unavailable"}
         try:
-            result = brain.import_knowledge_from_file(path)
-            return {"ok": True, "data": {"result": result, "path": path}}
+            result = brain.import_knowledge_from_file(
+                path, progress_callback=progress_callback
+            )
+            ok = True
+            if isinstance(result, dict) and result.get("ok") is False:
+                ok = False
+            return {"ok": ok, "data": {"result": result, "path": path}}
         except Exception as exc:
             return {"ok": False, "error": str(exc)}
+
+    def ingest_files(
+        self,
+        paths: Any,
+        *,
+        progress: Optional[Callable[[Dict[str, Any]], None]] = None,
+        slow: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        if self.brain is None or not hasattr(self.brain, "import_knowledge_from_file"):
+            return {"ok": False, "error": "brain_unavailable"}
+
+        def _import(path: str, progress_callback=None):
+            wrapped = self.import_file(path, progress_callback=progress_callback)
+            raw = (wrapped.get("data") or {}).get("result")
+            if not wrapped.get("ok"):
+                if isinstance(raw, dict):
+                    return raw
+                return {"ok": False, "error": wrapped.get("error") or "import_failed"}
+            return raw
+
+        data = ingest_knowledge_paths(
+            paths,
+            import_file=_import,
+            get_stats=lambda: (self.stats().get("data") or {}),
+            on_progress=progress,
+            slow=slow,
+        )
+        return {"ok": True, "data": data}
 
     def rebuild(self) -> Dict[str, Any]:
         brain = self.brain
@@ -192,15 +341,46 @@ class KnowledgeGuiService:
         if manager is not None:
             plugins = getattr(manager, "plugins", {}) or {}
             plugin = plugins.get(self.plugin_trigger)
-        brain = self.brain
-        if plugin is None or brain is None:
-            return {"ok": False, "error": "plugin_or_brain_unavailable"}
-        ingest = getattr(plugin, "gui_ingest_configured_dirs", None)
-        if not callable(ingest):
-            return {"ok": False, "error": "ingest_unavailable"}
+        if self.brain is None:
+            return {"ok": False, "error": "brain_unavailable"}
+        list_files = getattr(plugin, "list_configured_learn_files", None) if plugin else None
+        if not callable(list_files):
+            ingest = getattr(plugin, "gui_ingest_configured_dirs", None) if plugin else None
+            if not callable(ingest):
+                return {"ok": False, "error": "ingest_unavailable"}
+            try:
+                result = self._run_maybe_async(ingest, {"brain": self.brain})
+                return {"ok": True, "data": {"result": str(result)}}
+            except Exception as exc:
+                return {"ok": False, "error": str(exc)}
         try:
-            result = self._run_maybe_async(ingest, {"brain": brain})
-            return {"ok": True, "data": {"result": str(result)}}
+            paths = list(list_files() or [])
+            slow = None
+            slow_cfg = getattr(plugin, "_slow_ingest_config", None)
+            if callable(slow_cfg):
+                enabled, batch, sleep_ms, adaptive = slow_cfg()
+                slow = {
+                    "enabled": bool(enabled),
+                    "batch": batch,
+                    "sleep_ms": sleep_ms,
+                    "adaptive": bool(adaptive),
+                }
+            ingested = self.ingest_files(paths, slow=slow)
+            if not ingested.get("ok"):
+                return ingested
+            data = ingested.get("data") or {}
+            failed = int(data.get("failed") or 0)
+            prefix = "⚠️ GUI 学习完成，但有文件失败" if failed else "✅ GUI 学习完成"
+            summary = (
+                f"{prefix}！共扫描 {int(data.get('file_count') or 0)} 个文件，"
+                f"新增 {int(data.get('added') or 0)} 条知识片段，"
+                f"跳过 {int(data.get('skipped') or 0)} 条已存在片段，"
+                f"失败 {failed} 个文件。"
+                f"限频 {int(data.get('rate_limit_hits') or 0)} 次，"
+                f"fallback {int(data.get('fallback_uses') or 0)} 次，"
+                f"自适应触发 {int(data.get('adaptive_hits') or 0)} 次。"
+            )
+            return {"ok": True, "data": {"result": summary, **data}}
         except Exception as exc:
             return {"ok": False, "error": str(exc)}
 

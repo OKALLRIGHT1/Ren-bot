@@ -96,10 +96,33 @@ class SensorReplyService:
         )
         if not clean_text:
             return False
+
+        # 规则护栏：禁止把会话次数念成「打开了 N 次」（不另开 polish/rescue LLM）
+        sanitized, open_count_hits = sensor_utils.sanitize_sensor_open_count_reply(
+            clean_text
+        )
+        if open_count_hits:
+            if not sanitized:
+                preview = re.sub(r"\s+", " ", clean_text)[:80]
+                self.logger.warning(
+                    "⚠️ [Sensor] 吐槽含「打开了N次」类夸张且改写后为空，已跳过: "
+                    f"hits={open_count_hits} text={preview}"
+                )
+                return False
+            self.logger.info(
+                f"🧹 [Sensor] 已去掉打开次数夸张表述: hits={open_count_hits}"
+            )
+            clean_text = sanitized
+
         if self.looks_like_sensor_template_reply(clean_text):
             fallback_text = self.prepare_reply_for_output(
                 original_clean_text, {"source": "desktop"}, scene="sensor"
             )
+            if fallback_text:
+                fb_sanitized, _ = sensor_utils.sanitize_sensor_open_count_reply(
+                    fallback_text
+                )
+                fallback_text = fb_sanitized or fallback_text
             if (
                 fallback_text
                 and fallback_text != clean_text
@@ -111,7 +134,10 @@ class SensorReplyService:
                     clean_text, title=title, category=category
                 )
                 if rescued:
-                    clean_text = rescued
+                    rescued_clean, _ = sensor_utils.sanitize_sensor_open_count_reply(
+                        rescued
+                    )
+                    clean_text = rescued_clean or rescued
                 else:
                     preview = re.sub(r"\s+", " ", clean_text)[:80]
                     self.logger.warning(
@@ -122,8 +148,6 @@ class SensorReplyService:
         self.logger.info(f"🤖 [Sensor] 发言: {clean_text[:50]}...")
         self.remember_sensor_reply(clean_text)
         self.update_active_time()
-
-        await self.event_bus.emit("ui.append", role="assistant", text=clean_text)
 
         if not extracted_emo:
             extracted_emo = await self.infer_reply_emotion_with_llm(
@@ -146,7 +170,9 @@ class SensorReplyService:
             reason="sensor_reply",
         )
 
-        await self.presenter.present(clean_text, emotion=final_emo, interrupt=False)
+        await self.presenter.present(
+            clean_text, emotion=final_emo, interrupt=False, append_ui=True
+        )
 
         delay = max(
             3.2, min(8.5, estimate_bubble_display_ms(clean_text) / 1000.0 + 0.35)

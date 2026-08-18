@@ -29,50 +29,79 @@ class PluginManagerDialog(QtWidgets.QDialog):
         # 1. 现代化的样式表 (QSS)
         self.setStyleSheet(get_tool_dialog_styles())
 
-        # 2. 布局结构
+        # 2. 布局结构：嵌入设置页时压缩外壳，把空间留给表格。
         layout = QtWidgets.QVBoxLayout(self)
-        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setContentsMargins(0 if self.embedded else 16, 0 if self.embedded else 16, 0 if self.embedded else 16, 0 if self.embedded else 16)
 
         self.container = QtWidgets.QFrame()
         self.container.setObjectName("dialogShell")
-        self.container.setObjectName("container")
+        if self.embedded:
+            # 嵌入时去掉大卡片壳，避免和设置页 header 叠两层。
+            self.container.setStyleSheet(
+                "QFrame#dialogShell { background: transparent; border: none; }"
+            )
         container_layout = QtWidgets.QVBoxLayout(self.container)
-        container_layout.setContentsMargins(20, 20, 20, 20)
-        container_layout.setSpacing(15)
+        container_layout.setContentsMargins(
+            0 if self.embedded else 20,
+            0 if self.embedded else 20,
+            0 if self.embedded else 20,
+            0 if self.embedded else 20,
+        )
+        container_layout.setSpacing(10 if self.embedded else 15)
 
-        header_card = QtWidgets.QFrame()
-        header_card.setObjectName("dialogHeader")
-        header_layout = QtWidgets.QHBoxLayout(header_card)
-        header_layout.setContentsMargins(14, 12, 14, 12)
+        # 工具栏：嵌入时单行紧凑；独立窗口保留标题说明。
+        toolbar = QtWidgets.QHBoxLayout()
+        toolbar.setContentsMargins(0, 0, 0, 0)
+        toolbar.setSpacing(8)
+        if not self.embedded:
+            icon_label = QtWidgets.QLabel("🔌")
+            icon_label.setStyleSheet("font-size: 18px;")
+            toolbar.addWidget(icon_label)
+            title = QtWidgets.QLabel("插件列表")
+            title.setObjectName("dialogTitle")
+            toolbar.addWidget(title)
+            toolbar.addStretch(1)
+        else:
+            toolbar.addStretch(1)
 
-        icon_label = QtWidgets.QLabel("🔌")
-        icon_label.setStyleSheet("font-size: 20px;")
-        header_layout.addWidget(icon_label)
-
-        title = QtWidgets.QLabel("插件列表")
-        title.setObjectName("dialogTitle")
-        header_layout.addWidget(title)
-        header_layout.addStretch()
-        import_btn = QtWidgets.QPushButton("📂 导入本地插件")
-        import_btn.setObjectName("main_btn")
-        import_btn.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
+        import_btn = QtWidgets.QPushButton("导入本地插件")
+        refresh_btn = QtWidgets.QPushButton("刷新列表")
+        for btn in (import_btn, refresh_btn):
+            btn.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
+            btn.setFixedHeight(30)
+            if self.embedded:
+                # 嵌入设置页时用轻量按钮，避免 main_btn 卡片感太重。
+                btn.setStyleSheet(
+                    """
+                    QPushButton {
+                        background: #FFFFFF;
+                        color: #374151;
+                        border: 1px solid #E5E7EB;
+                        border-radius: 8px;
+                        padding: 4px 12px;
+                        font-size: 12px;
+                        font-weight: 600;
+                    }
+                    QPushButton:hover {
+                        border-color: #93C5FD;
+                        color: #1D4ED8;
+                        background: #EFF6FF;
+                    }
+                    """
+                )
+            else:
+                btn.setObjectName("main_btn")
         import_btn.clicked.connect(self._import_local_plugin)
-        header_layout.addWidget(import_btn)
-        # 刷新按钮移到右上角，更符合操作习惯
-        refresh_btn = QtWidgets.QPushButton("⟳ 刷新列表")
-        refresh_btn.setObjectName("main_btn")
-        refresh_btn.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
         refresh_btn.clicked.connect(self._refresh_plugins)
-        header_layout.addWidget(refresh_btn)
+        toolbar.addWidget(import_btn)
+        toolbar.addWidget(refresh_btn)
+        container_layout.addLayout(toolbar)
 
-        desc_label = QtWidgets.QLabel("这里集中查看插件启停、兼容入口和配置状态。")
-        desc_label.setObjectName("dialogDesc")
-        desc_label.setWordWrap(True)
-        header_block = QtWidgets.QVBoxLayout()
-        header_block.addLayout(header_layout)
-        header_block.addWidget(desc_label)
-        header_card.setLayout(header_block)
-        container_layout.addWidget(header_card)
+        if not self.embedded:
+            desc_label = QtWidgets.QLabel("这里集中查看插件启停、兼容入口和配置状态。")
+            desc_label.setObjectName("dialogDesc")
+            desc_label.setWordWrap(True)
+            container_layout.addWidget(desc_label)
 
         # --- 搜索区域 ---
         self.search_input = QtWidgets.QLineEdit()
@@ -95,23 +124,23 @@ class PluginManagerDialog(QtWidgets.QDialog):
         self.table.setShowGrid(False)  # 去除网格线
         self.table.setFocusPolicy(QtCore.Qt.FocusPolicy.NoFocus)  # 去除选中虚线框
 
-        # 调整列宽模式
+        # 操作列固定，其余列弹性分配，避免状态/操作被挤到看不见。
         header = self.table.horizontalHeader()
-        header.setSectionResizeMode(
-            0, QtWidgets.QHeaderView.ResizeMode.Stretch
-        )  # 名称自适应
-        header.setSectionResizeMode(1, QtWidgets.QHeaderView.ResizeMode.Fixed)
-        header.setSectionResizeMode(2, QtWidgets.QHeaderView.ResizeMode.Fixed)
+        header.setSectionResizeMode(0, QtWidgets.QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(1, QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(2, QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
         header.setSectionResizeMode(3, QtWidgets.QHeaderView.ResizeMode.Fixed)
-
-        self.table.setColumnWidth(1, 80)  # 类型
-        self.table.setColumnWidth(2, 100)  # 状态
-        self.table.setColumnWidth(3, 160)  # 操作
+        header.setMinimumSectionSize(48)
+        self.table.setColumnWidth(3, 168)
+        self.table.setTextElideMode(QtCore.Qt.TextElideMode.ElideRight)
+        self.table.setHorizontalScrollBarPolicy(
+            QtCore.Qt.ScrollBarPolicy.ScrollBarAsNeeded
+        )
 
         # 增加行高，不再拥挤
-        self.table.verticalHeader().setDefaultSectionSize(65)
+        self.table.verticalHeader().setDefaultSectionSize(52 if self.embedded else 60)
 
-        container_layout.addWidget(self.table)
+        container_layout.addWidget(self.table, 1)
 
         if not self.embedded:
             footer_layout = QtWidgets.QHBoxLayout()
@@ -199,30 +228,31 @@ class PluginManagerDialog(QtWidgets.QDialog):
             # 4. 操作按钮组
             btn_widget = QtWidgets.QWidget()
             btn_layout = QtWidgets.QHBoxLayout(btn_widget)
-            btn_layout.setContentsMargins(5, 5, 5, 5)
-            btn_layout.setSpacing(8)
+            btn_layout.setContentsMargins(2, 2, 2, 2)
+            btn_layout.setSpacing(4)
             btn_layout.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
 
             # 切换按钮
             toggle_btn = QtWidgets.QPushButton()
             toggle_btn.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
+            toggle_btn.setFixedHeight(26)
             if info["enabled"]:
                 toggle_btn.setText("禁用")
-                # 红色边框样式
                 toggle_btn.setStyleSheet("""
                     QPushButton {
                         background-color: white; color: #DC2626; border: 1px solid #FECACA;
-                        border-radius: 6px; padding: 5px 10px; font-size: 12px; font-weight: 600;
+                        border-radius: 6px; padding: 2px 8px; font-size: 12px; font-weight: 600;
+                        min-width: 48px;
                     }
                     QPushButton:hover { background-color: #FEF2F2; border-color: #DC2626; }
                 """)
             else:
                 toggle_btn.setText("启用")
-                # 绿色填充样式
                 toggle_btn.setStyleSheet("""
                     QPushButton {
                         background-color: #059669; color: white; border: none;
-                        border-radius: 6px; padding: 5px 10px; font-size: 12px; font-weight: 600;
+                        border-radius: 6px; padding: 2px 8px; font-size: 12px; font-weight: 600;
+                        min-width: 48px;
                     }
                     QPushButton:hover { background-color: #047857; }
                 """)
@@ -233,10 +263,12 @@ class PluginManagerDialog(QtWidgets.QDialog):
             # 编辑按钮
             edit_btn = QtWidgets.QPushButton("编辑")
             edit_btn.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
+            edit_btn.setFixedHeight(26)
             edit_btn.setStyleSheet("""
                 QPushButton {
                     background-color: white; color: #2563EB; border: 1px solid #BFDBFE;
-                    border-radius: 6px; padding: 5px 10px; font-size: 12px; font-weight: 600;
+                    border-radius: 6px; padding: 2px 8px; font-size: 12px; font-weight: 600;
+                    min-width: 48px;
                 }
                 QPushButton:hover { background-color: #EFF6FF; border-color: #2563EB; }
             """)
@@ -1855,11 +1887,74 @@ class PluginEditorDialog(QtWidgets.QDialog):
                 self, "失败", "未找到 brain 实例，无法执行 GUI 学习。"
             )
             return
-        try:
-            result = asyncio.run(plugin.gui_ingest_configured_dirs({"brain": brain}))
-            QtWidgets.QMessageBox.information(self, "学习结果", str(result))
-        except Exception as e:
-            QtWidgets.QMessageBox.critical(self, "错误", f"GUI 学习失败: {e}")
+        if not hasattr(brain, "import_knowledge_from_file"):
+            QtWidgets.QMessageBox.warning(self, "失败", "brain 未就绪，暂时不能学习。")
+            return
+        list_files = getattr(plugin, "list_configured_learn_files", None)
+        paths = list(list_files()) if callable(list_files) else []
+        if not paths:
+            QtWidgets.QMessageBox.information(
+                self,
+                "一键学习",
+                "配置目录里没有可学习的 .md/.txt/.py/.json 文件。",
+            )
+            return
+        from pathlib import Path
+
+        from modules.gui.dialogs.knowledge_manager import KnowledgeImportWorker
+
+        progress = QtWidgets.QProgressDialog("准备学习知识目录…", "", 0, 100, self)
+        progress.setWindowTitle("一键学习")
+        progress.setCancelButton(None)
+        progress.setMinimumDuration(0)
+        progress.setWindowModality(QtCore.Qt.WindowModality.WindowModal)
+        progress.setValue(0)
+        progress.show()
+        self._knowledge_learn_progress = progress
+
+        def _on_progress(info: dict):
+            stage = str(info.get("stage") or "").strip()
+            batch = int(info.get("batch") or 0)
+            batches = max(1, int(info.get("batches") or 1))
+            file_index = int(info.get("file_index") or 1)
+            file_count = max(1, int(info.get("file_count") or 1))
+            file_name = Path(str(info.get("file_path") or "")).name
+            file_base = max(0, file_index - 1) / max(1, file_count)
+            file_part = (batch / batches) / max(1, file_count)
+            percent = int(max(0, min(100, (file_base + file_part) * 100)))
+            stage_text = {
+                "prepared": "已解析文件",
+                "embedding": "正在生成向量并写入",
+                "batch_done": "已完成一批",
+            }.get(stage, "正在学习")
+            progress.setValue(percent)
+            progress.setLabelText(
+                f"{stage_text}: {file_name}\n文件 {file_index}/{file_count}，批次 {batch}/{batches}"
+            )
+
+        def _on_finished(result: dict):
+            progress.close()
+            file_count = int(result.get("file_count", 0) or 0)
+            added = int(result.get("added", 0) or 0)
+            skipped = int(result.get("skipped", 0) or 0)
+            failed = int(result.get("failed", 0) or 0)
+            details = "\n".join(list(result.get("results") or [])[:80])
+            QtWidgets.QMessageBox.information(
+                self,
+                "学习结果",
+                f"已处理 {file_count} 个文件：新增 {added} 条，跳过 {skipped} 条，失败 {failed} 个文件。\n\n{details}",
+            )
+
+        self._knowledge_learn_thread = QtCore.QThread(self)
+        self._knowledge_learn_worker = KnowledgeImportWorker(brain, paths)
+        self._knowledge_learn_worker.moveToThread(self._knowledge_learn_thread)
+        self._knowledge_learn_thread.started.connect(self._knowledge_learn_worker.run)
+        self._knowledge_learn_worker.progress.connect(_on_progress)
+        self._knowledge_learn_worker.finished.connect(_on_finished)
+        self._knowledge_learn_worker.finished.connect(self._knowledge_learn_thread.quit)
+        self._knowledge_learn_worker.finished.connect(self._knowledge_learn_worker.deleteLater)
+        self._knowledge_learn_thread.finished.connect(self._knowledge_learn_thread.deleteLater)
+        self._knowledge_learn_thread.start()
 
     def _run_search_endpoint_check(self):
         plugin = self.plugin_manager.plugins.get(self.trigger)

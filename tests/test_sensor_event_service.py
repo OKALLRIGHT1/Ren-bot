@@ -440,3 +440,126 @@ async def test_run_vision_generation_proceeds_when_focus_matches(monkeypatch):
     assert capture_calls == ["active_monitor"]
     assert result.reason == "generated"
     assert "抠" in result.reply
+
+
+@pytest.mark.asyncio
+async def test_gatekeeper_skips_only_first_non_work_session():
+    service = _service()
+    first = await service.run_gatekeeper(
+        context=_context(),
+        clean_title="Docs - Chrome",
+        category="browser",
+        count=1,
+        chat_with_ai=lambda *args, **kwargs: "YES",
+    )
+    second = await service.run_gatekeeper(
+        context=_context(),
+        clean_title="Docs - Chrome",
+        category="browser",
+        count=2,
+        chat_with_ai=lambda *args, **kwargs: "YES",
+    )
+    coding = await service.run_gatekeeper(
+        context=_context(),
+        clean_title="main.py - Code",
+        category="coding",
+        count=1,
+        chat_with_ai=lambda *args, **kwargs: "YES",
+    )
+    assert first.allowed is False
+    assert first.reason == "low_intensity"
+    assert second.allowed is True
+    assert coding.allowed is True
+
+
+def test_text_prompt_distinguishes_duration_from_switch():
+    service = _service()
+    switch_prompt = service.build_text_prompt(
+        context=_context(),
+        clean_title="Docs",
+        category="browser",
+        count=3,
+        reason="switch",
+    )
+    duration_prompt = service.build_text_prompt(
+        context=_context(),
+        clean_title="Docs",
+        category="browser",
+        count=3,
+        reason="duration",
+    )
+    assert "刚切换到窗口" in switch_prompt
+    assert "停留了一段时间" in duration_prompt
+    assert "刚切换到窗口" not in duration_prompt
+    assert "像五十铃怜" not in service.build_vision_direct_prompt(
+        context=_context(),
+        clean_title="Docs",
+    )
+    assert switch_prompt.count("【说话】") == 1
+    assert duration_prompt.count("【说话】") == 1
+
+
+@pytest.mark.asyncio
+async def test_text_generation_forwards_duration_reason():
+    captured = {}
+
+    def fake_chat_with_ai(messages, *args, **kwargs):
+        captured["messages"] = messages
+        return "还挂着啊。"
+
+    result = await _service().run_text_generation(
+        context=_context(),
+        clean_title="Docs",
+        category="work",
+        count=3,
+        chat_with_ai=fake_chat_with_ai,
+        reason="duration",
+    )
+    assert result.reason == "generated"
+    system = captured["messages"][0]["content"]
+    assert "停留了一段时间" in system
+
+
+def test_vision_direct_prompt_uses_current_character_not_hardcoded_name():
+    prompt = _service().build_vision_direct_prompt(
+        context=_context(),
+        clean_title="Live2D Agent",
+    )
+    assert "五十铃怜" not in prompt
+    assert "【说话】" in prompt
+
+
+@pytest.mark.asyncio
+async def test_focus_revalidate_accepts_rust_alternate_title():
+    class _Sensor:
+        last_window_title = "main.py - Visual Studio Code"
+        last_app_name = "Code.exe"
+
+    service = SensorEventService(
+        screen_sensor_ref_getter=lambda: _Sensor(),
+        format_sensor_observations=lambda *args, **kwargs: "",
+        build_sensor_usage_context=lambda *args, **kwargs: "",
+        build_sensor_interaction_context=lambda: "",
+        build_sensor_persona_prompt=lambda *args, **kwargs: "persona",
+        format_recent_sensor_reply_block=lambda: "",
+        build_sensor_spontaneous_style_block=lambda *args, **kwargs: "",
+        build_live2d_self_awareness_hint=lambda *args, **kwargs: "",
+        compress_sensor_text=lambda text, max_len=None: str(text)[: max_len or 80],
+    )
+    result = await service.run_event_generation(
+        clean_title="main.py - Visual Studio Code",
+        display_app="Code.exe",
+        category="coding",
+        count=3,
+        reason="switch",
+        use_vision=False,
+        vision_mode="separate",
+        app_duration_sec=10,
+        current_stay_sec=4,
+        chat_with_ai=lambda *args, **kwargs: (
+            "YES" if kwargs.get("caller") == "sensor_gatekeeper" else "还在抠这里？"
+        ),
+        active_title_getter=lambda: "Unrelated Popup",
+    )
+    assert result.branch == "text"
+    assert result.reply == "还在抠这里？"

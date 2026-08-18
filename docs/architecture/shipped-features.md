@@ -22,3 +22,30 @@
 - 模型目录统一管理嵌入模型；运行时只选 `embedding_model_id`。
 - 同模型同维度可复用索引；换模型/维度需重建，不自动清空知识数据。
 - 详见 `docs/architecture/memory.md`。
+
+## 知识库可用化 + 人设 current（2026-08-13）
+
+已落地计划 `docs/superpowers/plans/2026-08-13-knowledge-and-persona-timeline.md` 的 **B0 + A0–A4**。未做 A5/A6 与 B1–B4。
+
+- 闲聊默认不查知识库；明确说「设定 / 资料 / 知识库 / 文档里 / 词条」才自动注入，并带来源和资料约束。
+- 普通文档按段落分块；未改文件且 `chunker_version` 一致才 skip；升级后的旧按行清单会自动重导。改过会替换旧块。
+- 人设只取当前有效；纠正原子 supersede；人设不带会话号；没有通用 `valid_days` TTL。
+- 关系 / 经历时间线 / 「以前怎么样」历史召回还没做。
+- 契约见 `docs/architecture/memory.md`。
+
+## 角色自然聊 + 接线收敛（2026-08-18）
+
+已按 `docs/architecture/README.md` 落地 P0–P4a。
+
+- 桌面 / QQ 私聊：Character Thought → 词法表情（默认 1 条）→ 主回复 → 禁词守卫。Thought 超时走 `chat_with_ai(..., timeout_sec=)`，`max_tokens` 已接线。
+- 作用域内且要出声或出气泡时走非流式，守卫发生在 catchphrase / share 之前。
+- 闲聊不再二次 polish；`qq_polish_mode` 与未接线的 `modules/memory/prompt_builder.py` 已删。传感器观察报告改写、工具直出软化仍在。
+- `VISION_MODE` 默认 `separate`；一次视觉+说话用环境变量 `VISION_MODE=direct`。
+- 设置 → 记忆 / 知识走 `MemoryGuiService` / `KnowledgeGuiService`，与聊天共用进程内 Memory Core；导入走 `ingest_knowledge_paths`。
+- `ctx["knowledge"]` = `BrainKnowledgePort`。`ctx["brain"]`、`ctx["chat_service"]` 仍在。未做 P4b / P5。
+
+## 运行健康 + Rust 纯文本屏幕
+
+- 进程内 `RuntimeHealthCenter` 只观测；Qt 顶栏与详情窗读同一 `snapshot()`，不经 HTTP 回环。
+- 屏幕吐槽走 Tauri 文本事件，不在 Python 里截图/视觉升级。
+- 同页挂机不得说「打开了 N 次」：会话去抖（默认离开 ≥ 90s 再回才 +1），见 `docs/TROUBLESHOOTING.md` 4.x 对应节。

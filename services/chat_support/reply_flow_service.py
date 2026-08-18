@@ -83,12 +83,14 @@ def should_use_non_stream_flow(
     deferred_tool_flow: bool,
     stream_available: bool,
     natural_reply_candidate: bool,
+    guard_requires_non_stream: bool = False,
 ) -> bool:
     return (
         bool(need_tools)
         or bool(deferred_tool_flow)
         or not stream_available
         or bool(natural_reply_candidate)
+        or bool(guard_requires_non_stream)
     )
 
 
@@ -225,8 +227,6 @@ async def prepare_final_reply(
     final_reply: str,
     final_emo: str,
     model_emo_seen: bool,
-    natural_reply_candidate: bool,
-    triggered: bool,
     user_text: str,
     ctx: Dict[str, Any],
     preface_text: str,
@@ -236,7 +236,6 @@ async def prepare_final_reply(
     strip_emo_tags_anywhere: Callable[[str], str],
     should_suppress_followup_preface: Callable[[str], bool],
     merge_preface_texts: Callable[..., str],
-    polish_natural_reply: Callable[..., Awaitable[str]],
     apply_character_catchphrase: Callable[[str], str],
     prepare_reply_for_output: Callable[..., str],
     infer_reply_emotion_with_llm: Callable[..., Awaitable[Optional[str]]],
@@ -248,14 +247,6 @@ async def prepare_final_reply(
         text = text or preface_text
     else:
         text = merge_preface_texts(preface_text, text)
-
-    if natural_reply_candidate and not triggered:
-        text = await polish_natural_reply(
-            user_text=user_text,
-            draft_text=text,
-            ctx=ctx,
-            scene="chat",
-        )
 
     text = apply_character_catchphrase(text)
     text = prepare_reply_for_output(text, ctx, scene="chat")

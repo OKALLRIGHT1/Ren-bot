@@ -4,7 +4,6 @@ import asyncio
 import json
 import re
 import os
-import random
 
 from datetime import datetime
 from typing import Optional, Dict, Tuple, List, Any
@@ -24,9 +23,15 @@ from config import (
     SEDENTARY_REMINDER_COOLDOWN_MINUTES,
     SCREEN_OBSERVATION_MAX_ITEMS,
     SCREEN_ACTIVITY_MAX_ITEMS,
+    SCREEN_APP_SESSION_REOPEN_GAP_SEC,
 )
 from core.logger import get_logger
 from services.runtime_health import get_runtime_health
+
+
+def rust_activity_stale_threshold_sec(interval: float | None = None) -> float:
+    value = float(SCREEN_SENSOR_INTERVAL if interval is None else interval)
+    return max(120.0, value * 20.0)
 
 try:
     from modules.memory_sqlite import get_memory_store
@@ -41,6 +46,9 @@ LIVE2D_ACTIVITY_SOURCE = "live2d-tauri"
 LIVE2D_SEDENTARY_SOURCE = "live2d-sedentary"
 SEDENTARY_SESSION_APP_NAME = "电脑"
 SEDENTARY_SESSION_CATEGORY = "computer_active"
+# 短暂失焦（通知/Alt-Tab 闪一下）再回来不算「又打开一次」
+# 优先读 config.SCREEN_APP_SESSION_REOPEN_GAP_SEC；模块常量仅作 fallback
+APP_SESSION_REOPEN_GAP_SEC = float(SCREEN_APP_SESSION_REOPEN_GAP_SEC or 90.0)
 
 
 
@@ -72,10 +80,12 @@ class ScreenSensor:
         # 数据文件
         self.stats_file = "./data/sensor_stats.json"
 
-        # 鏍稿績鏁版嵁
+        # 核心数据：daily_counts = 有意义的「回到该应用会话」次数，不是原始前台事件数
         self.daily_counts: Dict[str, int] = {}
-        # 鐢ㄦ潵瀛樻椂闀?(鍗曚綅: 绉?
+        # 单位: 秒
         self.daily_durations: Dict[str, float] = {}
+        # app -> 上次离开该应用前台的时间戳（用于会话去抖）
+        self._app_last_left_ts: Dict[str, float] = {}
         self.app_cache: Dict[str, List[str]] = {}
         self.current_day = self._today_key()
 
@@ -309,10 +319,11 @@ class ScreenSensor:
                 lines.append(f"- {cat}: {self._format_duration(seconds)}")
 
         lines.append("[按应用]")
+        # daily_counts = 独立前台会话段数，不是用户主动「打开次数」
         for app, duration_sec in sorted_apps:
             count = self.daily_counts.get(app, 0)
             time_str = self._format_duration(duration_sec)
-            lines.append(f"- {app}: {time_str} ({count} 次)")
+            lines.append(f"- {app}: {time_str} ({count} 段会话)")
 
         obs_lines = self._format_compact_observations(
             self.observation_entries, limit=10
@@ -699,25 +710,31 @@ class ScreenSensor:
                 previous_app_name = str(getattr(self, "last_app_name", "") or "").strip()
                 app_switched = not previous_app_name or previous_app_name != app_name
                 if app_switched:
-                    self.daily_counts[app_name] = self.daily_counts.get(app_name, 0) + 1
-                self.last_window_title = full_title
-                self.last_app_name = app_name
-                self.last_category = cat
-                if app_switched:
+                    if previous_app_name:
+                        self._app_last_left_ts[previous_app_name] = float(event_ts)
+                    # 会话去抖：短时间离开再回来只算同一次使用，不把挂机闪屏算成「打开了 N 次」
+                    counted = self._maybe_increment_app_session_count(
+                        app_name, event_ts=float(event_ts)
+                    )
                     self.current_window_start_time = event_ts
                     self.next_duration_trigger_time = event_ts + (20 * 60)
                     self._last_alert_app = None
-                    # A newer switch invalidates any pending duration comment.
+                    # 切到别的应用后，之前窗口的停留吐槽不再成立。
                     latest_duration_reaction = None
-                    latest_switch_reaction = {
-                        "full_title": full_title,
-                        "category": cat,
-                        "count": self.daily_counts.get(app_name, 1),
-                        "app_name": app_name,
-                        "reason": "switch",
-                        "app_duration_sec": self.daily_durations.get(app_name, 0.0),
-                        "current_stay_sec": 0.0,
-                    }
+                    # 仅有意义的会话切换才触发切屏吐槽；短暂回弹只更新焦点
+                    if counted or not previous_app_name:
+                        latest_switch_reaction = {
+                            "full_title": full_title,
+                            "category": cat,
+                            "count": self.daily_counts.get(app_name, 1),
+                            "app_name": app_name,
+                            "reason": "switch",
+                            "app_duration_sec": self.daily_durations.get(app_name, 0.0),
+                            "current_stay_sec": 0.0,
+                        }
+                self.last_window_title = full_title
+                self.last_app_name = app_name
+                self.last_category = cat
                 self._last_rust_sample_ts = event_ts
             elif kind == "activity_sample":
                 if not str(getattr(self, "last_app_name", "") or "").strip():
@@ -766,7 +783,8 @@ class ScreenSensor:
 
             self._mark_rust_event_processed(event_id, event_ts)
 
-        reaction = latest_switch_reaction or latest_duration_reaction
+        # 同一批里如果切窗后又在当前窗口坐满阈值，优先说停留，不要被切窗盖掉。
+        reaction = latest_duration_reaction or latest_switch_reaction
         if not reaction:
             return
         reason = str(reaction.get("reason") or "switch")
@@ -1549,6 +1567,97 @@ class ScreenSensor:
             return
         self._save_stats()
 
+    def _session_reopen_gap_sec(self) -> float:
+        """可配置会话间隔；运行时读 config，失败则用模块 fallback。"""
+        try:
+            value = float(
+                getattr(config, "SCREEN_APP_SESSION_REOPEN_GAP_SEC", None)
+                or APP_SESSION_REOPEN_GAP_SEC
+                or 90.0
+            )
+        except Exception:
+            value = float(APP_SESSION_REOPEN_GAP_SEC or 90.0)
+        return max(15.0, min(600.0, value))
+
+    def _maybe_increment_app_session_count(
+        self, app_name: str, *, event_ts: float
+    ) -> bool:
+        """
+        有意义的「回到该应用」才 +1。
+        同一应用在会话 gap 内再次前台 → 视为同一次使用会话，不计次。
+        返回是否发生了计数增加。
+        """
+        name = str(app_name or "").strip()
+        if not name or self._is_polluted_stats_key(name):
+            return False
+        left_ts = float((self._app_last_left_ts or {}).get(name) or 0.0)
+        gap = float(event_ts) - left_ts if left_ts > 0 else 1e18
+        # 首次见到，或离开足够久再回来 → 新会话
+        if left_ts <= 0 or gap >= self._session_reopen_gap_sec():
+            self.daily_counts[name] = int(self.daily_counts.get(name, 0) or 0) + 1
+            # 进入会话后清掉 left，避免同会话内重复逻辑误用
+            if name in self._app_last_left_ts:
+                self._app_last_left_ts.pop(name, None)
+            return True
+        return False
+
+    def _count_sessions_from_foreground_events(
+        self, events: List[Dict[str, Any]]
+    ) -> Dict[str, int]:
+        """
+        从原始 foreground_changed 事件重建「会话次数」：
+        连续同一 app 只算 1；离开后再回来且间隔 >= 阈值才 +1。
+        事件列表按时间从新到旧或从旧到新均可（内部会排序）。
+        """
+        rows: List[Tuple[float, str]] = []
+        previous_suppress = bool(getattr(self, "_suppress_stats_save", False))
+        self._suppress_stats_save = True
+        try:
+            for item in events or []:
+                kind = str(item.get("kind") or "").strip().lower()
+                if kind != "foreground_changed":
+                    continue
+                app = str(((item.get("app") or {}).get("name") or "")).strip()
+                title = str(item.get("window_title") or "").strip()
+                domain = str((((item.get("browser") or {}).get("domain")) or "")).strip()
+                full_title = title or domain or app
+                if self._is_ignored_rust_screen_event(
+                    app_name=app,
+                    title=full_title,
+                    kind=kind,
+                ):
+                    continue
+                _category, app_name = self._analyze_window_context(
+                    app=app, title=title, domain=domain
+                )
+                if self._is_polluted_stats_key(app_name):
+                    continue
+                event_ts = self._parse_rust_event_ts(item)
+                if event_ts <= 0:
+                    continue
+                rows.append((event_ts, app_name))
+        finally:
+            self._suppress_stats_save = previous_suppress
+
+        if not rows:
+            return {}
+        rows.sort(key=lambda item: item[0])
+
+        session_counts: Dict[str, int] = {}
+        last_app = ""
+        last_left: Dict[str, float] = {}
+        for event_ts, app_name in rows:
+            if app_name == last_app:
+                continue
+            if last_app:
+                last_left[last_app] = float(event_ts)
+            left_ts = float(last_left.get(app_name) or 0.0)
+            gap = float(event_ts) - left_ts if left_ts > 0 else 1e18
+            if left_ts <= 0 or gap >= self._session_reopen_gap_sec():
+                session_counts[app_name] = int(session_counts.get(app_name, 0) or 0) + 1
+            last_app = app_name
+        return session_counts
+
     def _reconcile_daily_counts_with_rust_events(self) -> None:
         if not self.daily_counts or not get_memory_store:
             return
@@ -1570,40 +1679,15 @@ class ScreenSensor:
         if not events:
             return
 
-        raw_counts: Dict[str, int] = {}
-        previous_suppress = bool(getattr(self, "_suppress_stats_save", False))
-        self._suppress_stats_save = True
-        try:
-            for item in events:
-                kind = str(item.get("kind") or "").strip().lower()
-                if kind != "foreground_changed":
-                    continue
-                app = str(((item.get("app") or {}).get("name") or "")).strip()
-                title = str(item.get("window_title") or "").strip()
-                domain = str((((item.get("browser") or {}).get("domain")) or "")).strip()
-                full_title = title or domain or app
-                if self._is_ignored_rust_screen_event(
-                    app_name=app,
-                    title=full_title,
-                    kind=kind,
-                ):
-                    continue
-                _category, app_name = self._analyze_window_context(
-                    app=app, title=title, domain=domain
-                )
-                if self._is_polluted_stats_key(app_name):
-                    continue
-                raw_counts[app_name] = raw_counts.get(app_name, 0) + 1
-        finally:
-            self._suppress_stats_save = previous_suppress
-
-        if not raw_counts:
+        # 用会话口径封顶，避免 raw foreground 事件把「打开次数」吹到十几次
+        session_caps = self._count_sessions_from_foreground_events(list(events))
+        if not session_caps:
             return
 
         reconciled: Dict[str, int] = {}
         for app, count in dict(self.daily_counts or {}).items():
             app_name = str(app)
-            cap = raw_counts.get(app_name)
+            cap = session_caps.get(app_name)
             if cap is None:
                 continue
             try:
@@ -1809,7 +1893,7 @@ class ScreenSensor:
         # Consume Live2D/Tauri activity events; no local window polling fallback.
         rust_started_at = time.time()
         self._last_rust_event_seen_at = self._last_rust_event_seen_at or rust_started_at
-        stale_threshold_sec = max(90.0, float(SCREEN_SENSOR_INTERVAL) * 12.0)
+        stale_threshold_sec = rust_activity_stale_threshold_sec()
         self.logger.info(
             "[Screen] Live2D activity source enabled; Python window polling disabled"
         )
@@ -1920,30 +2004,10 @@ class ScreenSensor:
         # ============================================================
         use_vision = False
 
-        # 场景 A: 沉浸时长触发 (reason="duration") -> 强制视觉查岗
+        # 停留才看图；切窗只走窗口标题，避免多一轮视觉。
         if reason == "duration":
             use_vision = True
             self.logger.info("📸 [Sensor] 触发视觉查岗 (原因: 长时间停留)")
-        else:
-            # 场景 B: 切换触发 -> 对有内容的分类按概率升级
-            interesting_cats = {
-                "gaming",
-                "video",
-                "social",
-                "design",
-                "coding",
-                "work",
-                "other",
-            }
-            if category in interesting_cats:
-                base_prob = 0.15
-                prob_boost = count * 0.05
-                final_prob = min(base_prob + prob_boost, 0.85)
-                if random.random() < final_prob:
-                    use_vision = True
-                    self.logger.info(
-                        f"🎲 [Sensor] 升级为视觉查岗 (概率: {final_prob:.2f})"
-                    )
 
         self.logger.info(
             f"👀 [Screen] 触发 ChatService: {app_name} | Vision: {use_vision}"

@@ -163,6 +163,7 @@ class ConversationEventStore:
         *,
         now: Optional[datetime] = None,
         limit: int = 12,
+        max_age_sec: int = 0,
     ) -> list[dict[str, str]]:
         """Project user/assistant message events into short-term style turns."""
         now = now or datetime.now(timezone.utc)
@@ -171,10 +172,19 @@ class ConversationEventStore:
             ConversationEventType.USER_MESSAGE,
             ConversationEventType.ASSISTANT_MESSAGE,
         }
+        age_limit = max(0, int(max_age_sec or 0))
         turns: list[dict[str, str]] = []
         for event in events:
             if event.event_type not in dialog_types:
                 continue
+            if age_limit and event.occurred_at is not None:
+                occurred = event.occurred_at
+                if occurred.tzinfo is None and now.tzinfo is not None:
+                    occurred = occurred.replace(tzinfo=timezone.utc)
+                elif occurred.tzinfo is not None and now.tzinfo is None:
+                    occurred = occurred.replace(tzinfo=None)
+                if (now - occurred).total_seconds() > age_limit:
+                    continue
             role = (
                 "user"
                 if event.event_type is ConversationEventType.USER_MESSAGE

@@ -10,7 +10,7 @@ from typing import Any, Callable, Iterable, Optional
 
 from .categories import OVERRIDABLE_CATEGORY_IDS
 from .models import MemoryProfile, ReplyMemoryContext
-from .repository import MemoryCoreRepository
+from .repository import MemoryCoreRepository, is_current, parse_memory_time
 
 
 logger = logging.getLogger(__name__)
@@ -258,6 +258,10 @@ class MemoryCoreService:
     def list_memory_records(self, **kwargs: Any) -> list[dict[str, Any]]:
         self._ensure_initialized()
         return self.repository.list_records(**kwargs)
+
+    def list_current_memory_records(self, **kwargs: Any) -> list[dict[str, Any]]:
+        self._ensure_initialized()
+        return self.repository.list_current_records(**kwargs)
 
     def list_persons(self) -> list[dict[str, Any]]:
         self._ensure_initialized()
@@ -539,10 +543,12 @@ class MemoryCoreService:
             "从真实聊天中提取关于用户的稳定事实、偏好、习惯、雷区、互动要求或临时状态。\n"
             "不要推测；只有消息有明确证据时才提取。称呼、固定偏好、习惯（如周几开会）和明确纠正应优先。\n"
             "用户纠正助手错误时，以用户最新纠正为准，写入纠正后的事实。\n"
-            "临时状态设置 valid_days，稳定事实/习惯填 0。\n"
+            "只有用户原话明确给出起点或终点时才填 valid_from / valid_until；稳定事实和习惯不要填。\n"
+            "不要输出 valid_days。\n"
             "严格只输出 JSON："
             '{"items":[{"kind":"preference|fact|rule|profile","key":"稳定字段名",'
-            '"content":"简短事实","confidence":0.0,"valid_days":0,"evidence_ids":["1"]}]}\n\n'
+            '"content":"简短事实","confidence":0.0,"valid_from":"","valid_until":"",'
+            '"evidence_ids":["1"]}]}\n\n'
             + "\n".join(lines)
         )
         try:
@@ -560,7 +566,6 @@ class MemoryCoreService:
             return 0
         source_map = {str(item["id"]): item for item in messages}
         inserted = 0
-        from datetime import datetime, timedelta, timezone
 
         for item in raw_items[:8]:
             if not isinstance(item, dict):
@@ -585,22 +590,19 @@ class MemoryCoreService:
             ][:4]
             if not evidence_ids:
                 continue
-            try:
-                valid_days = max(0, min(3650, int(item.get("valid_days") or 0)))
-            except Exception:
-                valid_days = 0
-            valid_until = None
-            if valid_days:
-                valid_until = (datetime.now(timezone.utc) + timedelta(days=valid_days)).isoformat()
+            valid_from = self._explicit_bound(item.get("valid_from"))
+            valid_until = self._explicit_bound(item.get("valid_until"))
             _record_id, created = self.repository.upsert_record(
                 kind=kind,
                 key=key,
                 content=fact,
                 subject_id=person_id,
+                session_id="",
                 source_type="learned_profile",
                 source_id=f"{person_id}:{key}:{evidence_ids[-1]}",
                 confidence=confidence,
                 importance=0.75 if key in {"preferred_address", "reply_style"} else 0.6,
+                valid_from=valid_from,
                 valid_until=valid_until,
                 evidence=[
                     {
@@ -710,7 +712,7 @@ class MemoryCoreService:
     def get_person_profile(self, person_id: str, *, max_items: int = 8) -> MemoryProfile:
         self._ensure_initialized()
         person_id = str(person_id or "owner").strip() or "owner"
-        rows = self.repository.list_records(
+        rows = self.repository.list_current_records(
             subject_id=person_id,
             kinds=("profile", "fact", "preference", "rule"),
             limit=500,
@@ -737,15 +739,7 @@ class MemoryCoreService:
         )
         active: list[dict[str, Any]] = []
         seen_keys: set[str] = set()
-        now = time.time()
         for row in rows:
-            valid_until = str(row.get("valid_until") or "").strip()
-            if valid_until:
-                try:
-                    if self._parse_time(valid_until) < now:
-                        continue
-                except Exception:
-                    pass
             key = str(row.get("key") or "").strip()
             if key and key in seen_keys:
                 continue
@@ -775,7 +769,7 @@ class MemoryCoreService:
         person_id = self.repository.character_subject_id(character_id)
         if not person_id:
             return MemoryProfile(person_id="")
-        rows = self.repository.list_records(
+        rows = self.repository.list_current_records(
             subject_id=person_id,
             kinds=("profile", "fact", "preference", "rule"),
             limit=max(20, int(max_items) * 3),
@@ -825,10 +819,18 @@ class MemoryCoreService:
         return content
 
     @staticmethod
-    def _parse_time(value: str) -> float:
-        from datetime import datetime
+    def _explicit_bound(value: Any) -> Optional[str]:
+        text = str(value or "").strip()
+        if not text or text.lower() in {"0", "null", "none", "undefined"}:
+            return None
+        return text
 
-        return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
+    @staticmethod
+    def _parse_time(value: str) -> float:
+        parsed = parse_memory_time(value)
+        if parsed is None:
+            raise ValueError(f"invalid memory time: {value}")
+        return parsed
 
     @classmethod
     def detect_intent(cls, text: str) -> str:
@@ -1017,7 +1019,7 @@ class MemoryCoreService:
             else search_text
         )
         query_tokens = self._tokens(token_text)
-        records = self.repository.list_records(
+        records = self.repository.list_current_records(
             subject_id=person_id,
             session_id=session_id,
             kinds=kinds,
@@ -1185,7 +1187,7 @@ class MemoryCoreService:
             record = self.repository.get_record(record_id)
             if (
                 record is None
-                or record.get("status") != "active"
+                or not is_current(record)
                 or str(record.get("kind") or "") not in allowed_kinds
                 or not self._record_matches_scope(
                     record,
@@ -1380,6 +1382,7 @@ class MemoryCoreService:
         limit: int = 3,
         session_id: str = "",
         person_id: str = "owner",
+        use_llm: bool = True,
     ) -> list[str]:
         self._ensure_initialized()
         rows = self.store.list_expression_patterns(
@@ -1402,7 +1405,8 @@ class MemoryCoreService:
             ]
             query = " ".join([item for item in [*recent, query] if item])
         selected_rows: list[dict[str, Any]] = []
-        if self.llm_call:
+        llm_failed = False
+        if use_llm and self.llm_call:
             lines = [
                 f"id={row['id']} situation={row.get('situation','')} style={row.get('style','')} "
                 f"examples={' / '.join((row.get('content_list') or [])[:2])}"
@@ -1424,10 +1428,12 @@ class MemoryCoreService:
             except Exception as exc:
                 logger.warning("expression selector failed: %s", exc)
                 selected_ids = None
-            if selected_ids is not None:
+            if selected_ids is None:
+                llm_failed = True
+            else:
                 mapping = {str(row["id"]): row for row in rows}
                 selected_rows = [mapping[item_id] for item_id in selected_ids if item_id in mapping]
-        if not selected_rows and not self.llm_call:
+        if not selected_rows and (not use_llm or not self.llm_call or llm_failed):
             query_tokens = self._tokens(query)
             scored = []
             for row in rows:

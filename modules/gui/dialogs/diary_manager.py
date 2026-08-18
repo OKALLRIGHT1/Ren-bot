@@ -77,7 +77,12 @@ class DiaryManagerDialog(QtWidgets.QDialog):
         )
         form.addRow("标签", self.tags_label)
         self.summary_edit = QtWidgets.QPlainTextEdit()
-        self.summary_edit.setMinimumHeight(420)
+        # 嵌入设置页时允许压缩；独立窗口仍靠 stretch 吃满剩余高度。
+        self.summary_edit.setMinimumHeight(140)
+        self.summary_edit.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Expanding,
+            QtWidgets.QSizePolicy.Policy.Expanding,
+        )
         form.addRow("正文", self.summary_edit)
 
         buttons = QtWidgets.QHBoxLayout()
@@ -89,7 +94,10 @@ class DiaryManagerDialog(QtWidgets.QDialog):
         buttons.addWidget(delete_button)
         form.addRow(buttons)
         splitter.addWidget(editor)
-        splitter.setSizes([320, 660])
+        splitter.setChildrenCollapsible(False)
+        splitter.setStretchFactor(0, 1)
+        splitter.setStretchFactor(1, 3)
+        splitter.setSizes([260, 620])
         root.addWidget(splitter, 1)
 
     @staticmethod

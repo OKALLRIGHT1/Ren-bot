@@ -165,12 +165,11 @@ class ReplyStyleService:
         )
         if scene == "sensor":
             formal_markers = formal_markers + (
-                "屏幕",
-                "画面",
-                "窗口",
-                "正在",
+                "屏幕上",
+                "画面中",
+                "当前窗口",
+                "用户正在",
                 "我看到",
-                "看起来",
             )
             if len(raw) > 18:
                 return True

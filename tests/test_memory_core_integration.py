@@ -280,8 +280,8 @@ def test_short_term_from_events_projects_authoritative_dialog_window():
         def __init__(self):
             self.calls = []
 
-        def list_dialog_window(self, actual_scope, *, limit):
-            self.calls.append((actual_scope, limit))
+        def list_dialog_window(self, actual_scope, *, limit, max_age_sec=0):
+            self.calls.append((actual_scope, limit, max_age_sec))
             return [
                 {
                     "role": "user",
@@ -314,14 +314,14 @@ def test_short_term_from_events_projects_authoritative_dialog_window():
             "event_id": "event-1",
         }
     ]
-    assert store.calls == [(scope, 12)]
+    assert store.calls == [(scope, 12, 86400)]
 
 
 def test_short_term_events_empty_does_not_fall_back_to_legacy_cache():
     import modules.advanced_memory as advanced_memory
 
     class EventStore:
-        def list_dialog_window(self, _scope, *, limit):
+        def list_dialog_window(self, _scope, *, limit, max_age_sec=0):
             assert limit == 12
             return []
 
@@ -346,7 +346,7 @@ def test_short_term_projection_failure_falls_back_to_legacy_cache():
     import modules.advanced_memory as advanced_memory
 
     class BrokenEventStore:
-        def list_dialog_window(self, _scope, *, limit):
+        def list_dialog_window(self, _scope, *, limit, max_age_sec=0):
             raise RuntimeError("sqlite locked")
 
     class _Logger:
@@ -603,6 +603,32 @@ def test_rebuild_knowledge_collection_reports_delete_failure():
     brain.knowledge_collection_metadata = {}
 
     assert brain.rebuild_knowledge_collection() is False
+
+
+def test_memory_editor_reuses_injected_live_core(tmp_path, monkeypatch):
+    from modules.gui.dialogs import memory_editor
+    from modules.memory_core import MemoryCoreService
+    from modules.memory_sqlite import MemorySQLite
+
+    _app()
+    store = MemorySQLite(str(tmp_path / "memory.sqlite"))
+    core = MemoryCoreService(store)
+    core.initialize()
+    created = {"count": 0}
+    original_init = core.initialize
+
+    def _count_init():
+        created["count"] += 1
+        return original_init()
+
+    core.initialize = _count_init
+    monkeypatch.setattr(memory_editor, "get_memory_store", lambda: store)
+    dialog = memory_editor.MemoryEditorDialog(
+        embedded=True, memory_core=core
+    )
+    assert dialog.memory_core is core
+    assert created["count"] == 0
+    dialog.close()
 
 
 def test_memory_editor_constructs_without_loading_chromadb(tmp_path, monkeypatch):

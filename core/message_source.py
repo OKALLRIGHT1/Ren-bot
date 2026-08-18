@@ -16,6 +16,7 @@ except Exception:
 
 LOCAL_LIVE2D_SOURCES = {
     "text_input",
+    "desktop",
     "voice",
     "codex_input",
     "screen_sensor",

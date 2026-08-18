@@ -1,0 +1,135 @@
+[
+  {
+    "id": "daily_switch",
+    "category": "daily_contrast",
+    "user_text": "昨天台风居家办公今天一来就开会了",
+    "forbidden_substrings": ["切换得好硬", "落差好大", "状态不对", "节奏很怪"],
+    "expected_emotion_max": "light",
+    "expect_distress": false,
+    "channels": ["desktop", "qq_private"]
+  },
+  {
+    "id": "daily_switch_2",
+    "category": "daily_contrast",
+    "user_text": "上周一直居家，这周突然天天上班",
+    "forbidden_substrings": ["切换得好硬", "落差好大", "状态不对"],
+    "expected_emotion_max": "light",
+    "expect_distress": false,
+    "channels": ["desktop", "qq_private"]
+  },
+  {
+    "id": "tired",
+    "category": "real_distress",
+    "user_text": "好累不想动",
+    "forbidden_substrings": ["建议你", "你可以试试", "首先"],
+    "expected_emotion_min": "medium",
+    "expect_distress": true,
+    "channels": ["desktop", "qq_private"]
+  },
+  {
+    "id": "collapse_with_schedule",
+    "category": "real_distress",
+    "user_text": "今天开会但我快崩了",
+    "forbidden_substrings": ["切换得好硬", "落差好大"],
+    "expected_emotion_min": "medium",
+    "expect_distress": true,
+    "channels": ["desktop", "qq_private"]
+  },
+  {
+    "id": "tease",
+    "category": "tease",
+    "user_text": "你是不是又嘴硬",
+    "forbidden_substrings": ["切换得好硬"],
+    "expected_emotion_max": "light",
+    "expect_distress": false,
+    "channels": ["desktop", "qq_private"]
+  },
+  {
+    "id": "tease_2",
+    "category": "tease",
+    "user_text": "坏，又在装乖",
+    "forbidden_substrings": ["状态不对"],
+    "expected_emotion_max": "light",
+    "expect_distress": false,
+    "channels": ["desktop", "qq_private"]
+  },
+  {
+    "id": "fact_q",
+    "category": "fact_q",
+    "user_text": "今天星期几",
+    "forbidden_substrings": ["首先", "其次", "总之"],
+    "expected_emotion_max": "light",
+    "expect_distress": false,
+    "channels": ["desktop", "qq_private"]
+  },
+  {
+    "id": "fact_q_2",
+    "category": "fact_q",
+    "user_text": "现在几点了",
+    "forbidden_substrings": ["首先"],
+    "expected_emotion_max": "light",
+    "expect_distress": false,
+    "channels": ["desktop", "qq_private"]
+  },
+  {
+    "id": "detail_bypass",
+    "category": "detail",
+    "user_text": "详细分析一下原因",
+    "detail_intent": true,
+    "gate_should_run_thought": true,
+    "short_shell": false,
+    "channels": ["desktop", "qq_private"]
+  },
+  {
+    "id": "detail_steps",
+    "category": "detail",
+    "user_text": "帮我列一下步骤",
+    "detail_intent": true,
+    "gate_should_run_thought": true,
+    "short_shell": false,
+    "channels": ["desktop", "qq_private"]
+  },
+  {
+    "id": "multi_burst",
+    "category": "multi_burst",
+    "user_text": "啊啊啊\n今天好忙\n头都大了",
+    "forbidden_substrings": ["切换得好硬", "落差好大"],
+    "expected_emotion_max": "light",
+    "expect_distress": false,
+    "channels": ["desktop", "qq_private"]
+  },
+  {
+    "id": "multi_burst_2",
+    "category": "multi_burst",
+    "user_text": "刚到\n开会中\n晚点聊",
+    "forbidden_substrings": ["状态不对"],
+    "expected_emotion_max": "light",
+    "expect_distress": false,
+    "channels": ["desktop", "qq_private"]
+  },
+  {
+    "id": "channel_parity_daily",
+    "category": "channel_parity",
+    "user_text": "昨天台风居家办公今天一来就开会了",
+    "channels": ["desktop", "qq_private"],
+    "expect_gate_parity": true
+  },
+  {
+    "id": "group_default_off",
+    "category": "group",
+    "user_text": "大家好",
+    "source": "napcat_qq",
+    "message_type": "group",
+    "group_enabled": false,
+    "expect_scope_matched": false
+  },
+  {
+    "id": "group_enabled_on",
+    "category": "group",
+    "user_text": "大家好",
+    "source": "napcat_qq",
+    "message_type": "group",
+    "group_enabled": true,
+    "expect_scope_matched": true
+  }
+]

@@ -253,9 +253,31 @@ def chat_env(monkeypatch):
     monkeypatch.setattr(ChatService, "_get_current_live2d_emotion", lambda self: ("neutral", 0.4))
     monkeypatch.setattr(ChatService, "_build_current_emotion_context", lambda self, ctx=None: "")
     monkeypatch.setattr(ChatService, "_build_reply_style_context", lambda self, text, ctx=None: "")
-    monkeypatch.setattr(ChatService, "_build_qq_reply_angle_context", lambda self, text, ctx=None: "")
     monkeypatch.setattr(ChatService, "_build_live2d_self_awareness_hint", lambda self, ctx=None: "")
     monkeypatch.setattr(ChatService, "_build_mcp_tool_prompt", lambda self: "")
+
+    async def no_character_thought(self, *args, **kwargs):
+        # Smoke 默认跳过 Thought，避免多一次 chat_with_ai 打乱 LLM 调用计数
+        return "", {
+            "character_thought_used": False,
+            "thought_skipped_reason": "test_stub",
+            "scope_matched": False,
+        }
+
+    monkeypatch.setattr(
+        ChatService, "_maybe_build_character_thought_block", no_character_thought
+    )
+
+    async def passthrough_forbidden(self, *, text, user_text, ctx, regenerate=None):
+        return text, {
+            "forbidden_phrase_hit": False,
+            "forbidden_phrases": [],
+            "forbidden_retries": 0,
+        }
+
+    monkeypatch.setattr(
+        ChatService, "_apply_forbidden_phrase_guard", passthrough_forbidden
+    )
     monkeypatch.setattr(ChatService, "_polish_natural_reply", passthrough_polish)
     monkeypatch.setattr(ChatService, "_apply_character_catchphrase", lambda self, text: text)
     monkeypatch.setattr(ChatService, "_prepare_reply_for_output", passthrough_output)
@@ -384,6 +406,22 @@ async def test_music_event_emotion_updates_personality_continuity(chat_env, monk
 
 
 @pytest.mark.asyncio
+async def test_process_injects_knowledge_without_removing_brain(chat_env, monkeypatch):
+    monkeypatch.setattr(
+        chat_service_module, "chat_with_ai", lambda *args, **kwargs: "ok"
+    )
+    manager = _PluginManager()
+    service = chat_env(plugin_manager=manager)
+    await service.process("正常聊天", ctx={"source": "desktop"})
+    assert manager.direct_calls
+    injected = manager.direct_calls[0][1]
+    assert injected["brain"] is service.brain
+    assert injected["chat_service"] is service
+    assert hasattr(injected["knowledge"], "search_knowledge")
+    assert hasattr(injected["knowledge"], "import_knowledge_from_file")
+
+
+@pytest.mark.asyncio
 async def test_non_stream_reply_reaches_presenter_and_memory_once(chat_env, monkeypatch):
     monkeypatch.setattr(chat_service_module, "chat_with_ai", lambda *args, **kwargs: "非流式回复")
     presenter = _Presenter()
@@ -395,7 +433,8 @@ async def test_non_stream_reply_reaches_presenter_and_memory_once(chat_env, monk
     assert [item["text"] for item in presenter.presented] == ["非流式回复"]
     assert [m["role"] for m in service.brain.short_term_memory] == ["user", "assistant"]
     assert service.brain.short_term_memory[1]["content"] == "非流式回复"
-    assert len([e for e in event_bus.events if e[0] == "ui.append"]) == 1
+    assert presenter.presented[0]["kwargs"].get("append_ui") is True
+    assert [e for e in event_bus.events if e[0] == "ui.append"] == []
 
 
 def _seed_sensor_chain(service):
@@ -650,7 +689,7 @@ async def test_search_flow_result_is_merged_without_duplicate_memory(chat_env, m
 
 
 @pytest.mark.asyncio
-async def test_search_delegate_acknowledges_then_returns_result_without_reasoning_command(
+async def test_search_delegate_returns_result_without_canned_acknowledgement(
     chat_env, monkeypatch
 ):
     timeline = []
@@ -715,12 +754,7 @@ async def test_search_delegate_acknowledges_then_returns_result_without_reasonin
         ctx={"source": "desktop"},
     )
 
-    acknowledgement = timeline[0][1]
-    assert timeline[0][0] == "present"
-    assert "宝可梦风波" in acknowledgement
-    assert acknowledgement != "好，我查一下"
-    assert len(acknowledgement) <= 36
-    assert timeline[1] == (
+    assert timeline[0] == (
         "tool",
         "[CMD: search | 查一下宝可梦风波的最新信息]",
     )
@@ -731,8 +765,127 @@ async def test_search_delegate_acknowledges_then_returns_result_without_reasonin
         for name, payload in event_bus.events
         if name == "chat.log" and payload.get("role") == "assistant"
     ]
-    assert acknowledgement not in assistant_log_texts
     assert "宝可梦风波搜索结果" in assistant_log_texts
+    assert not any("我去看看" in str(text) or "我查查" in str(text) for text in assistant_log_texts)
+
+
+@pytest.mark.asyncio
+async def test_fact_question_skips_guess_pass_and_searches_directly(
+    chat_env, monkeypatch
+):
+    timeline = []
+    model_callers = []
+
+    class SearchPlugin:
+        plugin_trigger = "search_web"
+
+    class TimelinePluginManager(_PluginManager):
+        def __init__(self):
+            super().__init__(
+                command_result=(
+                    True,
+                    "",
+                    ["【search 结果】上周登陆的是台风示例。"],
+                    ["search_web"],
+                )
+            )
+            self.delegate_map = {"search_web": SearchPlugin()}
+
+        def is_delegate_trigger(self, trigger):
+            return trigger in self.delegate_map
+
+        async def execute_commands(
+            self, text, context, allow_tools=True, allowed_types=None
+        ):
+            timeline.append(("tool", text))
+            return await super().execute_commands(
+                text,
+                context,
+                allow_tools=allow_tools,
+                allowed_types=allowed_types,
+            )
+
+    class TimelinePresenter(_Presenter):
+        async def present(self, text, emotion="neutral", **kwargs):
+            timeline.append(("present", text))
+            await super().present(text, emotion, **kwargs)
+
+    async def chat_with_ai(messages, *, task_type, caller):
+        model_callers.append(caller)
+        if caller == "chat_tool_finalize":
+            return "上周登陆的是台风示例。"
+        return "我不太确定，印象里好像是别的名字。"
+
+    monkeypatch.setattr(chat_service_module, "chat_with_ai", chat_with_ai)
+    service = chat_env(
+        plugin_manager=TimelinePluginManager(),
+        tool_router=_ToolRouter(),
+        presenter=TimelinePresenter(),
+    )
+
+    await service.process("上周登陆中国的台风叫什么", ctx={"source": "desktop"})
+
+    assert timeline[0] == ("tool", "[CMD: search | 上周登陆中国的台风叫什么]")
+    assert timeline[-1] == ("present", "上周登陆的是台风示例。")
+    assert model_callers == ["chat_tool_finalize"]
+
+
+@pytest.mark.asyncio
+async def test_place_time_world_question_searches_without_topic_keyword(
+    chat_env, monkeypatch
+):
+    timeline = []
+
+    class SearchPlugin:
+        plugin_trigger = "search_web"
+
+    class TimelinePluginManager(_PluginManager):
+        def __init__(self):
+            super().__init__(
+                command_result=(
+                    True,
+                    "",
+                    ["【search 结果】近期没有登陆上海的台风。"],
+                    ["search_web"],
+                )
+            )
+            self.delegate_map = {"search_web": SearchPlugin()}
+
+        def is_delegate_trigger(self, trigger):
+            return trigger in self.delegate_map
+
+        async def execute_commands(
+            self, text, context, allow_tools=True, allowed_types=None
+        ):
+            timeline.append(("tool", text))
+            return await super().execute_commands(
+                text,
+                context,
+                allow_tools=allow_tools,
+                allowed_types=allowed_types,
+            )
+
+    class TimelinePresenter(_Presenter):
+        async def present(self, text, emotion="neutral", **kwargs):
+            timeline.append(("present", text))
+            await super().present(text, emotion, **kwargs)
+
+    async def chat_with_ai(messages, *, task_type, caller):
+        if caller == "chat_tool_finalize":
+            return "最近没有要打到上海的台风。"
+        return "秋天偶尔会有它的尾巴扫过。"
+
+    monkeypatch.setattr(chat_service_module, "chat_with_ai", chat_with_ai)
+    service = chat_env(
+        plugin_manager=TimelinePluginManager(),
+        tool_router=_ToolRouter(),
+        presenter=TimelinePresenter(),
+    )
+
+    await service.process("上海最近会有什么台风吗", ctx={"source": "desktop"})
+
+    assert timeline[0] == ("tool", "[CMD: search | 上海最近会有什么台风吗]")
+    assert timeline[-1] == ("present", "最近没有要打到上海的台风。")
 
 
 @pytest.mark.asyncio

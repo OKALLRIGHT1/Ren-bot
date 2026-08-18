@@ -58,7 +58,8 @@ class StatusScreenManagerDialog(QtWidgets.QDialog):
         self._emotion_icons: dict[str, dict] = {}
         self.setWindowTitle("状态屏管理")
         self.resize(760, 620)
-        self.setMinimumSize(680, 520)
+        # 独立窗口可用下限；嵌入设置页时由 apply_embedded_mode 清零。
+        self.setMinimumSize(560, 420)
         self._setup_ui()
         self._load_saved_config()
         self._refresh_ready_state()

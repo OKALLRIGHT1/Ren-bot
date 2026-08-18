@@ -4,12 +4,13 @@ import logging
 import os
 import re
 import uuid
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from PySide6 import QtCore, QtWidgets
 
-from config import MEMORY_DB_PATH, MEMORY_SETTINGS
+from config import MEMORY_SETTINGS
 from modules.gui.styles import get_memory_dialog_styles
+from modules.gui.utils import FlowLayout
 from modules.memory_core import MemoryCoreService
 from modules.memory_core.categories import (
     CATEGORIES,
@@ -50,7 +51,14 @@ def _msg(
 class MemoryEditorDialog(QtWidgets.QDialog):
     """Manage SQLite Memory Core records and inspect legacy vector data."""
 
-    def __init__(self, parent=None, embedded: bool = False, brain=None):
+    def __init__(
+        self,
+        parent=None,
+        embedded: bool = False,
+        brain=None,
+        memory_core=None,
+        memory_gui=None,
+    ):
         super().__init__(parent)
         self.embedded = bool(embedded)
         self.brain = brain
@@ -67,13 +75,18 @@ class MemoryEditorDialog(QtWidgets.QDialog):
                 | QtCore.Qt.WindowType.WindowCloseButtonHint
             )
 
-        self.store = get_memory_store()
-        self.memory_core = MemoryCoreService(
-            self.store,
-            settings=MEMORY_SETTINGS,
-            character_catalog_getter=get_character_catalog,
-        )
-        self.memory_core.initialize()
+        self.memory_core, owned_core = self._resolve_memory_core(memory_core, brain)
+        if owned_core or not getattr(self.memory_core, "_initialized", False):
+            self.memory_core.initialize()
+        self.store = getattr(self.memory_core, "store", None) or get_memory_store()
+        if memory_gui is not None:
+            self.memory_gui = memory_gui
+        else:
+            from services.gui_api.memory_service import MemoryGuiService
+
+            self.memory_gui = MemoryGuiService(
+                memory_core=self.memory_core, brain=brain
+            )
         self._memory_core_rows: List[Dict[str, Any]] = []
         self._all_memory_core_rows: List[Dict[str, Any]] = []
         self._memory_category_counts: Dict[str, int] = {}
@@ -103,6 +116,23 @@ class MemoryEditorDialog(QtWidgets.QDialog):
 
         self._reload_memory_core_records()
         self._reload_transcript()
+
+    @staticmethod
+    def _resolve_memory_core(memory_core, brain):
+        if memory_core is not None:
+            return memory_core, False
+        live = getattr(brain, "memory_core", None) if brain is not None else None
+        if live is not None:
+            return live, False
+        store = get_memory_store()
+        return (
+            MemoryCoreService(
+                store,
+                settings=MEMORY_SETTINGS,
+                character_catalog_getter=get_character_catalog,
+            ),
+            True,
+        )
 
     def _build_profile_overview_tab(self) -> None:
         page = QtWidgets.QWidget()
@@ -143,8 +173,8 @@ class MemoryEditorDialog(QtWidgets.QDialog):
         self.memory_category_tree = QtWidgets.QTreeWidget()
         self.memory_category_tree.setObjectName("memoryCategoryTree")
         self.memory_category_tree.setHeaderHidden(True)
-        self.memory_category_tree.setMinimumWidth(210)
-        self.memory_category_tree.setMaximumWidth(270)
+        self.memory_category_tree.setMinimumWidth(140)
+        self.memory_category_tree.setMaximumWidth(240)
         self.memory_category_tree.currentItemChanged.connect(
             self._on_memory_category_changed
         )
@@ -153,11 +183,13 @@ class MemoryEditorDialog(QtWidgets.QDialog):
         right = QtWidgets.QWidget()
         right_layout = QtWidgets.QVBoxLayout(right)
         right_layout.setContentsMargins(10, 0, 0, 0)
-        filters = QtWidgets.QHBoxLayout()
+        filters_wrap = QtWidgets.QWidget()
+        filters = FlowLayout(filters_wrap, margin=0, h_spacing=8, v_spacing=8)
         self.memory_core_search = QtWidgets.QLineEdit()
         self.memory_core_search.setPlaceholderText("在当前分类中搜索")
+        self.memory_core_search.setMinimumWidth(140)
         self.memory_core_search.textChanged.connect(self._reload_memory_core_records)
-        filters.addWidget(self.memory_core_search, 3)
+        filters.addWidget(self.memory_core_search)
 
         self.memory_core_person_filter = QtWidgets.QComboBox()
         self.memory_core_person_filter.addItem("全部人物", "")
@@ -166,7 +198,7 @@ class MemoryEditorDialog(QtWidgets.QDialog):
         self.memory_core_person_filter.currentIndexChanged.connect(
             self._reload_memory_core_records
         )
-        filters.addWidget(self.memory_core_person_filter, 1)
+        filters.addWidget(self.memory_core_person_filter)
 
         self.memory_core_status_filter = QtWidgets.QComboBox()
         self.memory_core_status_filter.addItems(
@@ -175,12 +207,12 @@ class MemoryEditorDialog(QtWidgets.QDialog):
         self.memory_core_status_filter.currentIndexChanged.connect(
             self._reload_memory_core_records
         )
-        filters.addWidget(self.memory_core_status_filter, 1)
+        filters.addWidget(self.memory_core_status_filter)
 
         refresh = QtWidgets.QPushButton("刷新")
         refresh.clicked.connect(self._reload_memory_core_records)
         filters.addWidget(refresh)
-        right_layout.addLayout(filters)
+        right_layout.addWidget(filters_wrap)
 
         self.memory_content_splitter = QtWidgets.QSplitter(
             QtCore.Qt.Orientation.Vertical
@@ -234,8 +266,8 @@ class MemoryEditorDialog(QtWidgets.QDialog):
         primary_form.addRow("当前", self.memory_category_auto_label)
 
         self.memory_core_content = QtWidgets.QPlainTextEdit()
-        self.memory_core_content.setMinimumHeight(60)
-        self.memory_core_content.setMaximumHeight(90)
+        self.memory_core_content.setMinimumHeight(48)
+        self.memory_core_content.setMaximumHeight(120)
         primary_form.addRow("内容", self.memory_core_content)
 
         score_row = QtWidgets.QHBoxLayout()
@@ -455,7 +487,10 @@ class MemoryEditorDialog(QtWidgets.QDialog):
         selected_person_id = str(
             self.profile_person_filter.currentData() or "owner"
         ).strip() or "owner"
-        rows = self.memory_core.list_memory_records(status="active", limit=1000)
+        if hasattr(self.memory_core, "list_current_memory_records"):
+            rows = self.memory_core.list_current_memory_records(limit=1000)
+        else:
+            rows = self.memory_core.list_memory_records(status="active", limit=1000)
         labels = self._memory_person_labels(rows)
         self.profile_person_filter.blockSignals(True)
         self.profile_person_filter.clear()
@@ -549,10 +584,13 @@ class MemoryEditorDialog(QtWidgets.QDialog):
         selected_record_id = self.memory_core_id.text().strip()
         status_text = self.memory_core_status_filter.currentText()
         status = "" if status_text == "全部状态" else status_text
-        rows = self.memory_core.list_memory_records(
-            status=status,
-            limit=1000,
-        )
+        if status == "active" and hasattr(self.memory_core, "list_current_memory_records"):
+            rows = self.memory_core.list_current_memory_records(limit=1000)
+        else:
+            rows = self.memory_core.list_memory_records(
+                status=status,
+                limit=1000,
+            )
         self._rebuild_memory_person_filter(rows)
         selected_person_id = self._selected_memory_person_id()
         if selected_person_id == "owner":
@@ -787,12 +825,13 @@ class MemoryEditorDialog(QtWidgets.QDialog):
         role = self.transcript_role.currentText()
         if role == "全部角色":
             role = None
-        rows = self.store.list_transcript(
-            role=role,
+        listed = self.memory_gui.list_transcript(
+            role=role or "",
             query=self.transcript_search.text().strip(),
             limit=300,
             offset=0,
         )
+        rows = list((listed.get("data") or {}).get("records") or []) if listed.get("ok") else []
         self._transcript_rows = [
             row for row in rows if not self._is_diary_archive_transcript(row)
         ]
@@ -1020,13 +1059,15 @@ class MemoryEditorDialog(QtWidgets.QDialog):
                 f"待保存队列：{' -> '.join(pending_chain) if pending_chain else '旧 EMBEDDING_* 配置'}"
             )
         self.embedding_selection_label.setText("；".join(selection_lines))
-        if self.brain is None or not hasattr(self.brain, "get_memory_vector_status"):
-            self.vector_status_label.setText("当前向量索引未连接；SQLite 记忆仍可正常使用。")
+        status_payload = self.memory_gui.vector_status()
+        if not status_payload.get("ok"):
+            self.vector_status_label.setText(
+                f"读取向量状态失败：{status_payload.get('error') or 'unknown'}"
+            )
             return
-        try:
-            status = dict(self.brain.get_memory_vector_status() or {})
-        except Exception as exc:
-            self.vector_status_label.setText(f"读取向量状态失败：{exc}")
+        status = dict(status_payload.get("data") or {})
+        if not status.get("available"):
+            self.vector_status_label.setText("当前向量索引未连接；SQLite 记忆仍可正常使用。")
             return
         jobs = dict(status.get("jobs") or {})
         embedding = dict(status.get("embedding") or {})
@@ -1096,32 +1137,22 @@ class MemoryEditorDialog(QtWidgets.QDialog):
         query = self.current_vector_query.text().strip()
         if not query:
             return
-        if self.brain is None or not hasattr(self.brain, "query_memory_vector"):
-            _msg(
-                self,
-                "无法搜索",
-                "当前向量索引未连接。",
-                QtWidgets.QMessageBox.Icon.Warning,
-            )
-            return
         person_id = str(
             self.vector_person_filter.currentData() or "owner"
         ).strip() or "owner"
-        try:
-            rows = self.brain.query_memory_vector(
-                query,
-                person_id=person_id,
-                limit=10,
-            )
-        except Exception as exc:
+        found = self.memory_gui.query_vector(query, person_id=person_id, limit=10)
+        if not found.get("ok"):
             self._refresh_vector_status()
             _msg(
                 self,
-                "搜索失败",
-                str(exc),
+                "搜索失败" if found.get("error") != "brain_unavailable" else "无法搜索",
+                "当前向量索引未连接。"
+                if found.get("error") == "brain_unavailable"
+                else str(found.get("error") or "search_failed"),
                 QtWidgets.QMessageBox.Icon.Warning,
             )
             return
+        rows = list((found.get("data") or {}).get("records") or [])
         self.current_vector_results.clear()
         for row in rows or []:
             score = float(row.get("vector_score") or 0.0)
@@ -1132,16 +1163,6 @@ class MemoryEditorDialog(QtWidgets.QDialog):
         self._refresh_vector_status()
 
     def _rebuild_vector_index(self) -> None:
-        if self.brain is None or not hasattr(
-            self.brain, "rebuild_memory_vector_index"
-        ):
-            _msg(
-                self,
-                "无法重建",
-                "当前向量索引未连接；SQLite 记忆没有受到影响。",
-                QtWidgets.QMessageBox.Icon.Warning,
-            )
-            return
         answer = QtWidgets.QMessageBox.question(
             self,
             "确认重建",
@@ -1152,16 +1173,18 @@ class MemoryEditorDialog(QtWidgets.QDialog):
         )
         if answer != QtWidgets.QMessageBox.StandardButton.Yes:
             return
-        try:
-            result = dict(self.brain.rebuild_memory_vector_index() or {})
-        except Exception as exc:
+        rebuilt = self.memory_gui.rebuild_vector_index()
+        if not rebuilt.get("ok"):
             _msg(
                 self,
-                "重建失败",
-                str(exc),
+                "无法重建" if rebuilt.get("error") == "brain_unavailable" else "重建失败",
+                "当前向量索引未连接；SQLite 记忆没有受到影响。"
+                if rebuilt.get("error") == "brain_unavailable"
+                else str(rebuilt.get("error") or "rebuild_failed"),
                 QtWidgets.QMessageBox.Icon.Warning,
             )
             return
+        result = dict(rebuilt.get("data") or {})
         self._refresh_vector_status()
         _msg(self, "已开始重建", f"已重新排队 {int(result.get('queued') or 0)} 条记录。")
 
@@ -1187,14 +1210,6 @@ class MemoryEditorDialog(QtWidgets.QDialog):
     def _initialize_vector_tab(self) -> None:
         if self._vector_initialized:
             return
-        import chromadb
-
-        from config import EMBEDDING_CONFIG, MODELS
-        from modules.embeddings import (
-            ChromaEmbeddingFunction,
-            build_configured_embedding_service,
-        )
-        from modules.runtime_settings import load_runtime_settings
 
         layout = self._legacy_vector_layout
         while layout.count():
@@ -1227,73 +1242,46 @@ class MemoryEditorDialog(QtWidgets.QDialog):
         self.vector_view.setReadOnly(True)
         layout.addWidget(self.vector_view, 1)
 
-        service = getattr(self.brain, "embedding_service", None)
-        if service is None:
-            service = build_configured_embedding_service(
-                models=MODELS,
-                runtime_settings=load_runtime_settings(),
-                legacy_config=EMBEDDING_CONFIG,
-            )
-        embedding_fn = ChromaEmbeddingFunction(service)
-        client = chromadb.PersistentClient(path=MEMORY_DB_PATH)
-        self._memory_collection = client.get_or_create_collection(
-            name="waifu_memory_advanced",
-            embedding_function=embedding_fn,
-        )
+        listed = self.memory_gui.list_legacy_vectors(limit=1)
+        if not listed.get("ok"):
+            raise RuntimeError(listed.get("error") or "legacy_vector_unavailable")
+        count = int((listed.get("data") or {}).get("count") or 0)
         self._vector_initialized = True
         self.lbl_hint.setText(
             "SQLite 是记忆单一事实源；旧向量库条目数："
-            f"{self._memory_collection.count()}"
+            f"{count}"
         )
 
     def _vector_search(self) -> None:
         query = self.vector_query.text().strip()
         if not query:
             return
-        try:
-            result = self._memory_collection.query(
-                query_texts=[query],
-                n_results=int(self.vector_limit.value()),
-                include=["documents", "metadatas", "distances"],
+        listed = self.memory_gui.list_legacy_vectors(
+            query=query, limit=int(self.vector_limit.value())
+        )
+        if not listed.get("ok"):
+            _msg(
+                self,
+                "搜索失败",
+                str(listed.get("error") or "search_failed"),
+                QtWidgets.QMessageBox.Icon.Warning,
             )
-            ids = result.get("ids", [[]])[0]
-            documents = result.get("documents", [[]])[0]
-            metadata = result.get("metadatas", [[]])[0]
-            distances = result.get("distances", [[]])[0]
-            self._vector_rows = [
-                {
-                    "id": item_id,
-                    "document": documents[index] if index < len(documents) else "",
-                    "metadata": metadata[index] if index < len(metadata) else {},
-                    "distance": distances[index] if index < len(distances) else None,
-                }
-                for index, item_id in enumerate(ids)
-            ]
-            self._render_vector_rows()
-        except Exception as exc:
-            _msg(self, "搜索失败", str(exc), QtWidgets.QMessageBox.Icon.Warning)
+            return
+        self._vector_rows = list((listed.get("data") or {}).get("records") or [])
+        self._render_vector_rows()
 
     def _vector_list_some(self) -> None:
-        try:
-            result = self._memory_collection.get(
-                include=["documents", "metadatas"],
-                limit=30,
+        listed = self.memory_gui.list_legacy_vectors(limit=30)
+        if not listed.get("ok"):
+            _msg(
+                self,
+                "读取失败",
+                str(listed.get("error") or "list_failed"),
+                QtWidgets.QMessageBox.Icon.Warning,
             )
-            ids = result.get("ids", [])
-            documents = result.get("documents", [])
-            metadata = result.get("metadatas", [])
-            self._vector_rows = [
-                {
-                    "id": item_id,
-                    "document": documents[index] if index < len(documents) else "",
-                    "metadata": metadata[index] if index < len(metadata) else {},
-                    "distance": None,
-                }
-                for index, item_id in enumerate(ids)
-            ]
-            self._render_vector_rows()
-        except Exception as exc:
-            _msg(self, "读取失败", str(exc), QtWidgets.QMessageBox.Icon.Warning)
+            return
+        self._vector_rows = list((listed.get("data") or {}).get("records") or [])
+        self._render_vector_rows()
 
     def _render_vector_rows(self) -> None:
         self.vector_list.blockSignals(True)

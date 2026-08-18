@@ -39,13 +39,26 @@ class Live2DTransportBus:
         *,
         id_factory: Callable[[], str] | None = None,
         logger: Any | None = None,
+        selector: Callable[[Sequence[Live2DTransport]], Sequence[Live2DTransport]]
+        | None = None,
     ):
         self._transports = list(transports or [])
         self._id_factory = id_factory or (lambda: uuid.uuid4().hex)
         self._logger = logger
+        self._selector = selector
+
+    def _active_transports(self) -> list[Live2DTransport]:
+        if self._selector is None:
+            return list(self._transports)
+        try:
+            selected = list(self._selector(self._transports) or [])
+        except Exception:
+            selected = list(self._transports)
+        return selected
 
     async def send(self, message: dict[str, Any]) -> Live2DDeliveryResult:
-        if not self._transports:
+        transports = self._active_transports()
+        if not transports:
             raise Live2DDeliveryError("no Live2D transports configured", delivered=0, errors=[])
         payload = dict(message or {})
         delivery = Live2DDelivery(
@@ -61,7 +74,7 @@ class Live2DTransportBus:
                 return transport.name, exc
 
         results = await asyncio.gather(
-            *[_run(transport) for transport in self._transports],
+            *[_run(transport) for transport in transports],
             return_exceptions=False,
         )
         errors: list[str] = []
@@ -203,6 +216,26 @@ def get_live2d_transport() -> Live2DTransportBus:
     if _ACTIVE_BUS is None:
         _ACTIVE_BUS = Live2DTransportBus([LegacyLocalWebSocketTransport()])
     return _ACTIVE_BUS
+
+
+def select_live2d_transports(
+    transports: Sequence[Live2DTransport],
+    *,
+    has_gui_client: Callable[[], bool] | None = None,
+) -> list[Live2DTransport]:
+    items = list(transports or [])
+    gui_ready = False
+    if has_gui_client is not None:
+        try:
+            gui_ready = bool(has_gui_client())
+        except Exception:
+            gui_ready = False
+    if gui_ready:
+        selected = [item for item in items if getattr(item, "name", "") == "gui_ws"]
+        if selected:
+            return selected
+    selected = [item for item in items if getattr(item, "name", "") == "legacy_local_ws"]
+    return selected or items
 
 
 async def send_live2d_message(message: dict[str, Any]) -> Live2DDeliveryResult:

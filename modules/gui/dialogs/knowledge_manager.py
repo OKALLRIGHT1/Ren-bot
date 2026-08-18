@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import re
 from datetime import datetime
 from pathlib import Path
@@ -9,6 +8,7 @@ from typing import List
 from PySide6 import QtCore, QtWidgets
 
 from modules.gui.styles import get_tool_dialog_styles
+from modules.gui.utils import FlowLayout
 from modules.gui.dialogs.chat_record_import_wizard import ChatRecordImportWizardDialog
 
 
@@ -16,54 +16,43 @@ class KnowledgeImportWorker(QtCore.QObject):
     progress = QtCore.Signal(dict)
     finished = QtCore.Signal(dict)
 
-    def __init__(self, brain, paths):
+    def __init__(self, importer, paths):
         super().__init__()
-        self.brain = brain
+        self.importer = importer
         self.paths = list(paths or [])
+
+    def _import_file(self, path: str, progress_callback=None):
+        importer = self.importer
+        if hasattr(importer, "import_knowledge_from_file"):
+            return importer.import_knowledge_from_file(
+                path, progress_callback=progress_callback
+            )
+        if hasattr(importer, "import_file"):
+            wrapped = importer.import_file(path, progress_callback=progress_callback)
+            if isinstance(wrapped, dict) and "data" in wrapped:
+                raw = (wrapped.get("data") or {}).get("result")
+                if wrapped.get("ok") is False and not isinstance(raw, dict):
+                    return {"ok": False, "error": wrapped.get("error") or "import_failed"}
+                return raw
+            return wrapped
+        return importer(path, progress_callback=progress_callback)
 
     @QtCore.Slot()
     def run(self):
-        results = []
-        added = 0
-        skipped = 0
-        failed = 0
-        for raw_path in self.paths:
-            path = str(raw_path or "").strip()
-            if not path:
-                continue
-            try:
-                file_index = len(results) + failed + 1
+        from services.gui_api.knowledge_service import ingest_knowledge_paths
 
-                def on_progress(info, *, current_file=path, current_index=file_index):
-                    payload = dict(info or {})
-                    payload["file_index"] = current_index
-                    payload["file_count"] = len(self.paths)
-                    payload["file_path"] = current_file
-                    self.progress.emit(payload)
-
-                result = self.brain.import_knowledge_from_file(path, progress_callback=on_progress)
-                if isinstance(result, dict):
-                    item_added = int(result.get("added", 0) or 0)
-                    item_skipped = int(result.get("skipped", 0) or 0)
-                else:
-                    item_added = int(result or 0)
-                    item_skipped = 0
-                added += item_added
-                skipped += item_skipped
-                results.append(
-                    f"{Path(path).name}: 新增 {item_added} 条，跳过 {item_skipped} 条。"
-                )
-            except Exception as e:
-                failed += 1
-                results.append(f"{Path(path).name}: 导入失败 - {e}")
-
+        payload = ingest_knowledge_paths(
+            self.paths,
+            import_file=self._import_file,
+            on_progress=self.progress.emit,
+        )
         self.finished.emit(
             {
-                "file_count": len(self.paths),
-                "added": added,
-                "skipped": skipped,
-                "failed": failed,
-                "results": results,
+                "file_count": int(payload.get("file_count") or 0),
+                "added": int(payload.get("added") or 0),
+                "skipped": int(payload.get("skipped") or 0),
+                "failed": int(payload.get("failed") or 0),
+                "results": list(payload.get("results") or []),
             }
         )
 
@@ -224,14 +213,25 @@ class KnowledgeDocGeneratorDialog(QtWidgets.QDialog):
 
 
 class KnowledgeManagerDialog(QtWidgets.QDialog):
-    def __init__(self, parent=None, main_app=None):
+    def __init__(self, parent=None, main_app=None, knowledge_gui=None):
         super().__init__(parent)
         self.main_app = main_app
         self.plugin_manager = getattr(main_app, "plugin_manager", None)
+        if knowledge_gui is not None:
+            self.knowledge_gui = knowledge_gui
+        else:
+            from services.gui_api.knowledge_service import KnowledgeGuiService
+
+            self.knowledge_gui = KnowledgeGuiService(
+                plugin_manager=self.plugin_manager,
+                brain=self._brain(),
+            )
         self._knowledge_import_progress = None
+        self._knowledge_job_kind = ""
         self.setWindowTitle("知识库管理")
         self.resize(920, 640)
-        self.setMinimumSize(820, 560)
+        # 独立窗口可用下限；嵌入设置页时由 apply_embedded_mode 清零。
+        self.setMinimumSize(680, 420)
         self._setup_ui()
         self._load_dirs_from_plugin()
         self._refresh_stats()
@@ -270,7 +270,9 @@ class KnowledgeManagerDialog(QtWidgets.QDialog):
         header_layout.addLayout(title_row)
 
         desc = QtWidgets.QLabel(
-            "在这里管理知识来源目录，一键学习并生成语义检索库。支持 .md、.txt、.py、.json 格式文档。"
+            "在这里管理知识来源目录，一键学习并生成语义检索库。支持 .md、.txt、.py、.json。"
+            "升级后的旧按行碎片不会自动迁移：先点「重建索引库」清空，再点「一键学习」。"
+            "未改文件且已是新分块时会跳过；标题栏出现「需要重建」时必须先重建。"
         )
         desc.setObjectName("dialogDesc")
         desc.setWordWrap(True)
@@ -303,7 +305,7 @@ class KnowledgeManagerDialog(QtWidgets.QDialog):
         self.dir_table.setShowGrid(False)
         self.dir_table.setFocusPolicy(QtCore.Qt.FocusPolicy.NoFocus)
         self.dir_table.verticalHeader().setDefaultSectionSize(40)
-        self.dir_table.setMinimumHeight(160)
+        self.dir_table.setMinimumHeight(100)
         top_layout.addWidget(self.dir_table, 1)
 
         action_panel = QtWidgets.QFrame()
@@ -321,7 +323,7 @@ class KnowledgeManagerDialog(QtWidgets.QDialog):
         self.btn_learn = QtWidgets.QPushButton("⚡ 一键学习")
         self.btn_delete_selected = QtWidgets.QPushButton("🗑️ 清理选中目录知识")
         self.btn_rebuild = QtWidgets.QPushButton("⚠️ 重建索引库")
-        
+
         self.btn_learn.setObjectName("primary_btn")
 
         danger_qss = """
@@ -343,38 +345,47 @@ class KnowledgeManagerDialog(QtWidgets.QDialog):
         self.btn_delete_selected.setStyleSheet(danger_qss)
         self.btn_rebuild.setStyleSheet(danger_qss)
 
-        import_row = QtWidgets.QHBoxLayout()
-        import_label = QtWidgets.QLabel("导入与生成")
-        import_label.setStyleSheet("color:#374151; font-weight:600;")
-        import_label.setFixedWidth(100)
-        import_row.addWidget(import_label)
-        import_row.addWidget(self.btn_generate_doc)
-        import_row.addWidget(self.btn_import_file)
-        import_row.addWidget(self.btn_import_chat)
-        import_row.addStretch()
-        action_layout.addLayout(import_row)
+        def _action_section(title: str, title_color: str, buttons: list[QtWidgets.QWidget]):
+            section = QtWidgets.QWidget()
+            section_layout = QtWidgets.QVBoxLayout(section)
+            section_layout.setContentsMargins(0, 0, 0, 0)
+            section_layout.setSpacing(6)
+            label = QtWidgets.QLabel(title)
+            label.setStyleSheet(f"color:{title_color}; font-weight:600;")
+            section_layout.addWidget(label)
+            row_wrap = QtWidgets.QWidget()
+            row = FlowLayout(row_wrap, margin=0, h_spacing=8, v_spacing=8)
+            for btn in buttons:
+                row.addWidget(btn)
+            section_layout.addWidget(row_wrap)
+            return section
 
-        dir_row = QtWidgets.QHBoxLayout()
-        dir_label = QtWidgets.QLabel("目录管理")
-        dir_label.setStyleSheet("color:#374151; font-weight:600;")
-        dir_label.setFixedWidth(100)
-        dir_row.addWidget(dir_label)
-        dir_row.addWidget(self.btn_add_dir)
-        dir_row.addWidget(self.btn_remove_dir)
-        dir_row.addWidget(self.btn_save_dirs)
-        dir_row.addWidget(self.btn_learn)
-        dir_row.addStretch()
-        action_layout.addLayout(dir_row)
-
-        danger_row = QtWidgets.QHBoxLayout()
-        danger_label = QtWidgets.QLabel("危险操作")
-        danger_label.setStyleSheet("color:#B91C1C; font-weight:600;")
-        danger_label.setFixedWidth(100)
-        danger_row.addWidget(danger_label)
-        danger_row.addWidget(self.btn_delete_selected)
-        danger_row.addWidget(self.btn_rebuild)
-        danger_row.addStretch()
-        action_layout.addLayout(danger_row)
+        action_layout.addWidget(
+            _action_section(
+                "导入与生成",
+                "#374151",
+                [self.btn_generate_doc, self.btn_import_file, self.btn_import_chat],
+            )
+        )
+        action_layout.addWidget(
+            _action_section(
+                "目录管理",
+                "#374151",
+                [
+                    self.btn_add_dir,
+                    self.btn_remove_dir,
+                    self.btn_save_dirs,
+                    self.btn_learn,
+                ],
+            )
+        )
+        action_layout.addWidget(
+            _action_section(
+                "危险操作",
+                "#B91C1C",
+                [self.btn_delete_selected, self.btn_rebuild],
+            )
+        )
 
         top_layout.addWidget(action_panel)
 
@@ -461,6 +472,14 @@ class KnowledgeManagerDialog(QtWidgets.QDialog):
                 return candidate
         return None
 
+    def _gui(self):
+        service = self.knowledge_gui
+        if getattr(service, "brain", None) is None:
+            service.brain = self._brain()
+        if getattr(service, "plugin_manager", None) is None:
+            service.plugin_manager = self.plugin_manager
+        return service
+
     def _load_dirs_from_plugin(self):
         if self.plugin_manager is None:
             return
@@ -541,13 +560,13 @@ class KnowledgeManagerDialog(QtWidgets.QDialog):
         self.recent_box.setPlainText("\n".join(lines))
 
     def _refresh_stats(self):
-        brain = self._brain()
-        if brain is None or not hasattr(brain, "get_knowledge_stats"):
+        listed = self._gui().stats()
+        stats = dict(listed.get("data") or {})
+        if not listed.get("ok") or not stats.get("available", True):
             self.stats_label.setText("知识片段数：未知")
             self._refresh_recent_dirs()
             return
         try:
-            stats = brain.get_knowledge_stats()
             chunk_count = int(stats.get("chunk_count", 0))
             embedding = dict(stats.get("embedding") or {})
             state = {
@@ -558,13 +577,26 @@ class KnowledgeManagerDialog(QtWidgets.QDialog):
                 "unconfigured": "未配置",
             }.get(str(embedding.get("state") or ""), "未知")
             rebuild_text = " · 需要重建" if stats.get("rebuild_required") else ""
+            hint = ""
+            if chunk_count <= 1 and not stats.get("rebuild_required"):
+                dirs = self._collect_dirs()
+                enabled = [
+                    str(item.get("path") or "")
+                    for item in dirs
+                    if item.get("enabled", True)
+                ]
+                only_default = bool(enabled) and all(
+                    Path(path).name == "knowledge_docs" for path in enabled
+                )
+                if only_default or not enabled:
+                    hint = " · 当前几乎没资料，加目录再学"
             self.stats_label.setText(
                 f"知识片段数：{chunk_count} · "
                 f"{embedding.get('model') or 'Embedding 未配置'}/"
                 f"{embedding.get('dimension') or '?'} · {state} · "
                 f"调用 {int(embedding.get('calls') or 0)} / "
                 f"失败 {int(embedding.get('failures') or 0)}"
-                f"{rebuild_text}"
+                f"{rebuild_text}{hint}"
             )
         except Exception:
             self.stats_label.setText("知识片段数：读取失败")
@@ -595,25 +627,19 @@ class KnowledgeManagerDialog(QtWidgets.QDialog):
         return paths
 
     def _save_dirs(self, *, show_message: bool = True) -> bool:
-        if self.plugin_manager is None:
-            if show_message:
-                QtWidgets.QMessageBox.warning(self, "失败", "当前上下文没有插件管理器。")
-            return False
-        config = dict(self.plugin_manager.plugin_configs.get("knowledge_base") or {})
-        settings = dict(config.get("settings") or {})
-        field = dict(settings.get("knowledge_source_dirs") or {})
-        field["default"] = self._collect_dirs()
-        settings["knowledge_source_dirs"] = field
-        config["settings"] = settings
-        ok = self.plugin_manager.save_plugin_config("knowledge_base", config)
+        saved = self._gui().save_dirs(self._collect_dirs())
+        ok = bool(saved.get("ok"))
         if ok:
             if show_message:
                 QtWidgets.QMessageBox.information(self, "成功", "知识目录已保存。")
             self._refresh_recent_dirs()
         else:
             if show_message:
-                QtWidgets.QMessageBox.warning(self, "失败", "保存知识目录失败。")
-        return bool(ok)
+                error = str(saved.get("error") or "保存知识目录失败。")
+                if error == "plugin_manager_unavailable":
+                    error = "当前上下文没有插件管理器。"
+                QtWidgets.QMessageBox.warning(self, "失败", error)
+        return ok
 
     def _safe_filename(self, title: str) -> str:
         base = re.sub(r"[\\/:*?\"<>|\s]+", "_", str(title or "").strip())
@@ -678,16 +704,16 @@ class KnowledgeManagerDialog(QtWidgets.QDialog):
 
         message = f"✅ 已生成知识文档：\n{path}"
         if payload.get("ingest_now"):
-            brain = self._brain()
-            if brain is None or not hasattr(brain, "import_knowledge_from_file"):
-                message += "\n\n⚠️ brain 未就绪，稍后可点“一键学习”。"
+            imported = self._gui().import_file(path)
+            if not imported.get("ok"):
+                error = str(imported.get("error") or "brain_unavailable")
+                if error == "brain_unavailable":
+                    message += "\n\n⚠️ brain 未就绪，稍后可点“一键学习”。"
+                else:
+                    message += f"\n\n⚠️ 自动学习失败：{error}"
             else:
-                try:
-                    result = brain.import_knowledge_from_file(path)
-                    self._refresh_stats()
-                    message += f"\n\n学习结果：{result}"
-                except Exception as e:
-                    message += f"\n\n⚠️ 自动学习失败：{e}"
+                self._refresh_stats()
+                message += f"\n\n学习结果：{(imported.get('data') or {}).get('result')}"
         self.result_box.setPlainText(message)
         QtWidgets.QMessageBox.information(self, "知识文档", message)
 
@@ -703,8 +729,7 @@ class KnowledgeManagerDialog(QtWidgets.QDialog):
         self._refresh_recent_dirs()
 
     def _import_knowledge_files(self):
-        brain = self._brain()
-        if brain is None or not hasattr(brain, "import_knowledge_from_file"):
+        if self._gui().brain is None:
             QtWidgets.QMessageBox.warning(self, "知识库", "brain 未就绪，暂时不能导入知识文件。")
             return
         paths, _ = QtWidgets.QFileDialog.getOpenFileNames(
@@ -715,27 +740,13 @@ class KnowledgeManagerDialog(QtWidgets.QDialog):
         )
         if not paths:
             return
-        self.btn_import_file.setEnabled(False)
-        self.btn_import_file.setText("导入中…")
-        progress = QtWidgets.QProgressDialog("准备导入知识文件…", "", 0, 100, self)
-        progress.setWindowTitle("知识库导入")
-        progress.setCancelButton(None)
-        progress.setMinimumDuration(0)
-        progress.setWindowModality(QtCore.Qt.WindowModality.WindowModal)
-        progress.setValue(0)
-        progress.show()
-        self._knowledge_import_progress = progress
-        self.result_box.setPlainText("准备导入知识文件…")
-        self._knowledge_import_thread = QtCore.QThread(self)
-        self._knowledge_import_worker = KnowledgeImportWorker(brain, paths)
-        self._knowledge_import_worker.moveToThread(self._knowledge_import_thread)
-        self._knowledge_import_thread.started.connect(self._knowledge_import_worker.run)
-        self._knowledge_import_worker.progress.connect(self._update_import_knowledge_progress)
-        self._knowledge_import_worker.finished.connect(self._finish_import_knowledge_files)
-        self._knowledge_import_worker.finished.connect(self._knowledge_import_thread.quit)
-        self._knowledge_import_worker.finished.connect(self._knowledge_import_worker.deleteLater)
-        self._knowledge_import_thread.finished.connect(self._knowledge_import_thread.deleteLater)
-        self._knowledge_import_thread.start()
+        self._start_knowledge_import_job(
+            self._gui(),
+            paths,
+            kind="import",
+            title="知识库导入",
+            ready_text="准备导入知识文件…",
+        )
 
     def _update_import_knowledge_progress(
         self, info: dict,
@@ -768,15 +779,58 @@ class KnowledgeManagerDialog(QtWidgets.QDialog):
             self._knowledge_import_progress.setLabelText(message)
         self.result_box.setPlainText(message)
 
+    def _knowledge_busy_buttons(self):
+        return [
+            self.btn_import_file,
+            self.btn_learn,
+            self.btn_rebuild,
+            self.btn_delete_selected,
+        ]
+
+    def _set_knowledge_job_busy(self, busy: bool, *, kind: str = ""):
+        self._knowledge_job_kind = kind if busy else ""
+        for btn in self._knowledge_busy_buttons():
+            btn.setEnabled(not busy)
+        if busy:
+            if kind == "learn":
+                self.btn_learn.setText("学习中…")
+            else:
+                self.btn_import_file.setText("导入中…")
+            return
+        self.btn_learn.setText("⚡ 一键学习")
+        self.btn_import_file.setText("📥 导入知识文件")
+
+    def _start_knowledge_import_job(self, importer, paths, *, kind: str, title: str, ready_text: str):
+        self._set_knowledge_job_busy(True, kind=kind)
+        progress = QtWidgets.QProgressDialog(ready_text, "", 0, 100, self)
+        progress.setWindowTitle(title)
+        progress.setCancelButton(None)
+        progress.setMinimumDuration(0)
+        progress.setWindowModality(QtCore.Qt.WindowModality.WindowModal)
+        progress.setValue(0)
+        progress.show()
+        self._knowledge_import_progress = progress
+        self.result_box.setPlainText(ready_text)
+        self._knowledge_import_thread = QtCore.QThread(self)
+        self._knowledge_import_worker = KnowledgeImportWorker(importer, paths)
+        self._knowledge_import_worker.moveToThread(self._knowledge_import_thread)
+        self._knowledge_import_thread.started.connect(self._knowledge_import_worker.run)
+        self._knowledge_import_worker.progress.connect(self._update_import_knowledge_progress)
+        self._knowledge_import_worker.finished.connect(self._finish_import_knowledge_files)
+        self._knowledge_import_worker.finished.connect(self._knowledge_import_thread.quit)
+        self._knowledge_import_worker.finished.connect(self._knowledge_import_worker.deleteLater)
+        self._knowledge_import_thread.finished.connect(self._knowledge_import_thread.deleteLater)
+        self._knowledge_import_thread.start()
+
     def _finish_import_knowledge_files(
         self,
         result: dict,
     ):
+        kind = self._knowledge_job_kind or "import"
         if self._knowledge_import_progress is not None:
             self._knowledge_import_progress.close()
             self._knowledge_import_progress = None
-        self.btn_import_file.setEnabled(True)
-        self.btn_import_file.setText("导入知识文件")
+        self._set_knowledge_job_busy(False)
         self._refresh_stats()
         file_count = int(result.get("file_count", 0) or 0)
         added = int(result.get("added", 0) or 0)
@@ -788,49 +842,74 @@ class KnowledgeManagerDialog(QtWidgets.QDialog):
             f"\n\n" + "\n".join(results[:80])
         )
         self.result_box.setPlainText(message)
-        QtWidgets.QMessageBox.information(self, "知识库导入", message)
+        box_title = "学习结果" if kind == "learn" else "知识库导入"
+        QtWidgets.QMessageBox.information(self, box_title, message)
 
     def _learn_dirs(self):
-        if not self._save_dirs():
+        if not self._save_dirs(show_message=False):
             return
         plugin = self._knowledge_plugin()
-        brain = self._brain()
-        if plugin is None or brain is None:
+        gui = self._gui()
+        if plugin is None or gui.brain is None:
             QtWidgets.QMessageBox.warning(self, "失败", "知识库插件或 brain 未就绪。")
             return
-        try:
-            result = asyncio.run(plugin.gui_ingest_configured_dirs({"brain": brain}))
-            self.result_box.setPlainText(str(result))
-            self._refresh_stats()
-            QtWidgets.QMessageBox.information(self, "学习结果", str(result))
-        except Exception as e:
-            QtWidgets.QMessageBox.critical(self, "错误", f"学习失败: {e}")
+        stats = dict((gui.stats().get("data") or {}) if gui.stats().get("ok") else {})
+        if stats.get("rebuild_required"):
+            QtWidgets.QMessageBox.warning(
+                self,
+                "需要先重建",
+                "当前知识库向量与嵌入模型不兼容，或缺少模型元数据。"
+                "请先点「重建索引库」清空旧库，再点「一键学习」。",
+            )
+            return
+        list_files = getattr(plugin, "list_configured_learn_files", None)
+        paths = list(list_files()) if callable(list_files) else []
+        if not paths:
+            QtWidgets.QMessageBox.information(
+                self,
+                "一键学习",
+                "配置目录里没有可学习的 .md/.txt/.py/.json 文件。",
+            )
+            return
+        self._start_knowledge_import_job(
+            gui,
+            paths,
+            kind="learn",
+            title="一键学习",
+            ready_text="准备学习知识目录…",
+        )
 
     def _rebuild_knowledge(self):
-        brain = self._brain()
-        if brain is None or not hasattr(brain, "rebuild_knowledge_collection"):
+        gui = self._gui()
+        if gui.brain is None:
             QtWidgets.QMessageBox.warning(self, "失败", "brain 不支持重建知识库。")
             return
         answer = QtWidgets.QMessageBox.question(
             self,
             "确认",
-            "这会清空当前知识库并重新创建集合，是否继续？",
+            "这会清空当前知识库和导入清单，旧的按行碎片会一起删掉。"
+            "重建完成后还要再点一次「一键学习」，才会按新的段落分块重新导入。是否继续？",
         )
         if answer != QtWidgets.QMessageBox.StandardButton.Yes:
             return
-        ok = bool(brain.rebuild_knowledge_collection())
+        rebuilt = gui.rebuild()
+        ok = bool(rebuilt.get("ok"))
         if ok:
             self.result_box.setPlainText(
-                "✅ 已清空并重建知识库。你现在可以重新点“一键学习”。"
+                "✅ 已清空并重建知识库。现在请点「一键学习」，从配置目录重新导入。"
             )
             self._refresh_stats()
-            QtWidgets.QMessageBox.information(self, "完成", "知识库已重建。")
+            QtWidgets.QMessageBox.information(
+                self,
+                "完成",
+                "知识库已清空重建。接下来点「一键学习」才会重新导入文档。",
+            )
         else:
             QtWidgets.QMessageBox.warning(self, "失败", "知识库重建失败。")
 
     def _delete_selected_dirs_from_knowledge(self):
-        brain = self._brain()
-        if brain is None or not hasattr(brain, "delete_knowledge_by_dirs"):
+        gui = self._gui()
+        if gui.brain is None:
             QtWidgets.QMessageBox.warning(self, "失败", "brain 不支持按目录删除知识。")
             return
         targets = self._selected_dir_paths()
@@ -846,7 +925,13 @@ class KnowledgeManagerDialog(QtWidgets.QDialog):
         )
         if answer != QtWidgets.QMessageBox.StandardButton.Yes:
             return
-        removed = int(brain.delete_knowledge_by_dirs(targets))
+        deleted = gui.delete_by_dirs(targets)
+        if not deleted.get("ok"):
+            QtWidgets.QMessageBox.warning(
+                self, "失败", str(deleted.get("error") or "delete_failed")
+            )
+            return
+        removed = int((deleted.get("data") or {}).get("removed") or 0)
         self.result_box.setPlainText(f"✅ 已按目录删除 {removed} 条知识片段。")
         self._refresh_stats()
         QtWidgets.QMessageBox.information(
@@ -854,20 +939,20 @@ class KnowledgeManagerDialog(QtWidgets.QDialog):
         )
 
     def _search_knowledge(self):
-        brain = self._brain()
         query = self.search_input.text().strip()
-        if brain is None:
-            QtWidgets.QMessageBox.warning(self, "失败", "brain 未就绪。")
-            return
         if not query:
             QtWidgets.QMessageBox.information(self, "提示", "请先输入查询词。")
             return
-        try:
-            results = brain.search_knowledge(query, 5)
-            if not results:
-                self.result_box.setPlainText("📭 知识库中没有找到相关内容。")
+        found = self._gui().search(query, limit=5)
+        if not found.get("ok"):
+            error = str(found.get("error") or "search_failed")
+            if error == "brain_unavailable":
+                QtWidgets.QMessageBox.warning(self, "失败", "brain 未就绪。")
                 return
-            text = "\n\n---\n\n".join(results)
-            self.result_box.setPlainText(text)
-        except Exception as e:
-            self.result_box.setPlainText(f"❌ 搜索失败: {e}")
+            self.result_box.setPlainText(f"❌ 搜索失败: {error}")
+            return
+        results = list((found.get("data") or {}).get("results") or [])
+        if not results:
+            self.result_box.setPlainText("📭 知识库中没有找到相关内容。")
+            return
+        self.result_box.setPlainText("\n\n---\n\n".join(results))

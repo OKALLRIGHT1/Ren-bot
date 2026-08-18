@@ -102,7 +102,11 @@ class MemoryGuiService:
         if core is None:
             return {"ok": False, "error": "memory_core_unavailable"}
         try:
-            rows = core.list_memory_records(status=str(status or ""), limit=int(limit or 500))
+            status_text = str(status or "")
+            if status_text == "active" and hasattr(core, "list_current_memory_records"):
+                rows = core.list_current_memory_records(limit=int(limit or 500))
+            else:
+                rows = core.list_memory_records(status=status_text, limit=int(limit or 500))
         except Exception as exc:
             return {"ok": False, "error": str(exc)}
         person_id = str(person_id or "").strip()
@@ -678,3 +682,133 @@ class MemoryGuiService:
             return {"ok": True, "data": result}
         except Exception as exc:
             return {"ok": False, "error": str(exc) or "start_failed"}
+
+    def list_transcript(
+        self,
+        *,
+        role: str = "",
+        query: str = "",
+        limit: int = 300,
+        offset: int = 0,
+    ) -> Dict[str, Any]:
+        core = self._safe_core()
+        store = getattr(core, "store", None) if core is not None else None
+        if store is None or not hasattr(store, "list_transcript"):
+            return {"ok": False, "error": "store_unavailable"}
+        try:
+            rows = store.list_transcript(
+                role=role or None,
+                query=query,
+                limit=int(limit or 300),
+                offset=int(offset or 0),
+            )
+            return {"ok": True, "data": {"records": list(rows or [])}}
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+
+    def query_vector(
+        self,
+        query: str,
+        *,
+        person_id: str = "owner",
+        limit: int = 10,
+    ) -> Dict[str, Any]:
+        query = str(query or "").strip()
+        if not query:
+            return {"ok": False, "error": "empty_query"}
+        brain = self._brain
+        if brain is None or not hasattr(brain, "query_memory_vector"):
+            return {"ok": False, "error": "brain_unavailable"}
+        try:
+            rows = brain.query_memory_vector(
+                query,
+                person_id=str(person_id or "owner").strip() or "owner",
+                limit=int(limit or 10),
+            )
+            return {"ok": True, "data": {"records": list(rows or [])}}
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+
+    def list_legacy_vectors(
+        self,
+        *,
+        query: str = "",
+        limit: int = 30,
+    ) -> Dict[str, Any]:
+        collection = self._legacy_vector_collection()
+        if collection is None:
+            return {"ok": False, "error": "legacy_vector_unavailable"}
+        query = str(query or "").strip()
+        limit = max(1, int(limit or 30))
+        try:
+            if query:
+                result = collection.query(
+                    query_texts=[query],
+                    n_results=limit,
+                    include=["documents", "metadatas", "distances"],
+                )
+                ids = (result.get("ids") or [[]])[0]
+                documents = (result.get("documents") or [[]])[0]
+                metadata = (result.get("metadatas") or [[]])[0]
+                distances = (result.get("distances") or [[]])[0]
+                rows = [
+                    {
+                        "id": item_id,
+                        "document": documents[index] if index < len(documents) else "",
+                        "metadata": metadata[index] if index < len(metadata) else {},
+                        "distance": distances[index] if index < len(distances) else None,
+                    }
+                    for index, item_id in enumerate(ids)
+                ]
+            else:
+                result = collection.get(include=["documents", "metadatas"], limit=limit)
+                ids = result.get("ids") or []
+                documents = result.get("documents") or []
+                metadata = result.get("metadatas") or []
+                rows = [
+                    {
+                        "id": item_id,
+                        "document": documents[index] if index < len(documents) else "",
+                        "metadata": metadata[index] if index < len(metadata) else {},
+                        "distance": None,
+                    }
+                    for index, item_id in enumerate(ids)
+                ]
+            count = 0
+            try:
+                count = int(collection.count() or 0)
+            except Exception:
+                count = len(rows)
+            return {"ok": True, "data": {"records": rows, "count": count}}
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+
+    def _legacy_vector_collection(self):
+        cached = getattr(self, "_legacy_collection", None)
+        if cached is not None:
+            return cached
+        try:
+            import chromadb
+
+            from config import EMBEDDING_CONFIG, MEMORY_DB_PATH, MODELS
+            from modules.embeddings import (
+                ChromaEmbeddingFunction,
+                build_configured_embedding_service,
+            )
+            from modules.runtime_settings import load_runtime_settings
+        except Exception:
+            return None
+        service = getattr(self._brain, "embedding_service", None) if self._brain is not None else None
+        if service is None:
+            service = build_configured_embedding_service(
+                models=MODELS,
+                runtime_settings=load_runtime_settings(),
+                legacy_config=EMBEDDING_CONFIG,
+            )
+        client = chromadb.PersistentClient(path=MEMORY_DB_PATH)
+        collection = client.get_or_create_collection(
+            name="waifu_memory_advanced",
+            embedding_function=ChromaEmbeddingFunction(service),
+        )
+        self._legacy_collection = collection
+        return collection

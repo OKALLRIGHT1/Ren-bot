@@ -42,9 +42,40 @@ def _get_logger():
     return get_logger()
 
 
-def estimate_bubble_display_ms(text: str, *, minimum: int = 3200, maximum: int = 12000) -> int:
+def estimate_bubble_display_ms(
+    text: str,
+    *,
+    minimum: int = 2500,
+    maximum: int = 15000,
+    pace: str = "normal",
+) -> int:
+    """按字数估算气泡停留时间（开/关 TTS 共用）。
+
+    与前端 showBubble 的兜底思路一致：字越多停越久。
+    pace 仅保留兼容参数，不再走两套完全不同的公式。
+    """
     clean = str(text or "").strip()
-    read_ms = 2600 + len(clean) * 160
+    if not clean:
+        return int(minimum)
+    # 去掉空白后按可见字数计时；中日韩略慢一点，ASCII 略快。
+    visible = "".join(ch for ch in clean if not ch.isspace())
+    if not visible:
+        return int(minimum)
+    cjk = sum(
+        1
+        for ch in visible
+        if ("\u4e00" <= ch <= "\u9fff")
+        or ("\u3040" <= ch <= "\u30ff")
+        or ("\uac00" <= ch <= "\ud7af")
+    )
+    other = max(0, len(visible) - cjk)
+    # 约等于前端 text.length * 150 的量级，并加一点底数防止短句闪没。
+    # 中文 ~150ms/字，其它字符 ~90ms/字。
+    read_ms = 1200 + cjk * 150 + other * 90
+    # silent 只做轻微加长，逻辑仍按字数。
+    if str(pace or "").strip().lower() == "silent":
+        read_ms = int(read_ms * 1.08) + 400
+        minimum = max(int(minimum), 2800)
     return max(int(minimum), min(int(read_ms), int(maximum)))
 
 
@@ -720,12 +751,12 @@ async def send_bubble(
     except Exception as e:
         _get_logger().warning(f"动作/表情触发失败: {e}")
 
-    # 语音时长经常比阅读速度短；气泡显示按阅读下限对齐。
-    read_ms = estimate_bubble_display_ms(text)
+    # 有显式时长（通常来自 TTS 音频）时优先信任它，避免字数估算把下一段拖慢。
+    # 无显式时长时（关 TTS）再按字数估算。
     if duration_ms is None or duration_ms <= 0:
-        duration_ms = read_ms
+        duration_ms = estimate_bubble_display_ms(text)
     else:
-        duration_ms = max(int(duration_ms), int(read_ms))
+        duration_ms = max(600, int(duration_ms))
     duration_ms += 80
 
     await _send_to_models(

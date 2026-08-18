@@ -923,6 +923,8 @@ class CharacterEditorWidget(QtWidgets.QWidget):
         cfg = self.mgr.get_tts_config(self.current_char_id)
         try:
             tts.apply_role_tts_config(cfg)
+            if hasattr(tts, "probe_role_tts"):
+                tts.probe_role_tts(force=True)
             import asyncio
 
             loop = getattr(app_ref, "loop", None) or getattr(
@@ -969,6 +971,23 @@ class CharacterEditorWidget(QtWidgets.QWidget):
                 lines.append(f"服务连通: 失败 ({e})")
         else:
             lines.append("服务连通: 未检测（未填写 BASE）")
+
+        app_ref = self.main_app
+        tts = getattr(app_ref, "tts", None)
+        if tts is None:
+            nested_app = getattr(app_ref, "app", None)
+            tts = getattr(nested_app, "tts", None)
+        if tts is not None and hasattr(tts, "tts_status"):
+            try:
+                tts.apply_role_tts_config(cfg)
+                status = tts.tts_status()
+                lines.append(
+                    f"实际后端: {status.get('display') or status.get('backend') or '-'}"
+                )
+                if status.get("reason"):
+                    lines.append(f"回退原因: {status.get('reason')}")
+            except Exception as e:
+                lines.append(f"实际后端: 读取失败 ({e})")
 
         self.tts_status.setPlainText("\n".join(lines))
 

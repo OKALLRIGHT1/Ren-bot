@@ -16,6 +16,7 @@ from modules.gui.styles import (
     get_ui_palette,
     get_current_theme_name,
 )
+from modules.gui.utils import apply_embedded_mode, wrap_in_scroll_area
 from modules.gui.settings_pages.sedentary_page import SedentarySettingsPage
 from modules.gui.settings_pages.info_sources_page import InfoSourcesSettingsPage
 from modules.gui.settings_pages.asr_page import AsrSettingsPage
@@ -1774,7 +1775,8 @@ class SettingsDialog(QtWidgets.QDialog):
 
         self.nav_list.setObjectName("settingsNav")
 
-        self.nav_list.setFixedWidth(220)
+        # 固定导航宽，避免内容区被挤压时导航跟着乱晃。
+        self.nav_list.setFixedWidth(200)
 
         for meta in self._tab_meta:
             item = QtWidgets.QListWidgetItem(meta["nav"])
@@ -2058,9 +2060,8 @@ class SettingsDialog(QtWidgets.QDialog):
         layout = QtWidgets.QVBoxLayout(page)
         layout.setContentsMargins(0, 0, 0, 0)
         widget = SedentarySettingsPage(main_app=self.main_app)
-        widget.setMinimumSize(0, 0)
-        scroll = self._wrap_in_scroll_area(widget)
-        layout.addWidget(scroll, 1)
+        apply_embedded_mode(widget)
+        layout.addWidget(self._wrap_in_scroll_area(widget), 1)
         self.stack.addWidget(page)
 
     def _init_asr_page(self):
@@ -2068,9 +2069,8 @@ class SettingsDialog(QtWidgets.QDialog):
         layout = QtWidgets.QVBoxLayout(page)
         layout.setContentsMargins(0, 0, 0, 0)
         widget = AsrSettingsPage(main_app=self.main_app)
-        widget.setMinimumSize(0, 0)
-        scroll = self._wrap_in_scroll_area(widget)
-        layout.addWidget(scroll, 1)
+        apply_embedded_mode(widget)
+        layout.addWidget(self._wrap_in_scroll_area(widget), 1)
         self.stack.addWidget(page)
 
     # ---------- Info Sources ----------
@@ -2080,9 +2080,8 @@ class SettingsDialog(QtWidgets.QDialog):
         layout = QtWidgets.QVBoxLayout(page)
         layout.setContentsMargins(0, 0, 0, 0)
         widget = InfoSourcesSettingsPage()
-        widget.setMinimumSize(0, 0)
-        scroll = self._wrap_in_scroll_area(widget)
-        layout.addWidget(scroll, 1)
+        apply_embedded_mode(widget)
+        layout.addWidget(self._wrap_in_scroll_area(widget), 1)
         self.stack.addWidget(page)
 
     # ---------- Provider ----------
@@ -2122,10 +2121,9 @@ class SettingsDialog(QtWidgets.QDialog):
 
         self.prov_table.verticalHeader().setDefaultSectionSize(44)
 
-        layout.addWidget(self.prov_table)
+        layout.addWidget(self.prov_table, 1)
 
-        scroll = self._wrap_in_scroll_area(page)
-        self.stack.addWidget(scroll)
+        self.stack.addWidget(self._wrap_in_scroll_area(page))
 
         self._refresh_prov_table()
 
@@ -2219,16 +2217,6 @@ class SettingsDialog(QtWidgets.QDialog):
         layout = QtWidgets.QVBoxLayout(page)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(10)
-
-        scroll = QtWidgets.QScrollArea()
-
-        scroll.setWidgetResizable(True)
-
-        scroll.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
-
-        scroll.setHorizontalScrollBarPolicy(
-            QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff
-        )
 
         body = QtWidgets.QWidget()
 
@@ -2327,25 +2315,37 @@ class SettingsDialog(QtWidgets.QDialog):
             ["ID", "模型名", "用途", "API 地址", "操作"]
         )
 
-        self.llm_table.horizontalHeader().setSectionResizeMode(
-            2, QtWidgets.QHeaderView.ResizeMode.ResizeToContents
+        header = self.llm_table.horizontalHeader()
+        # 只让“模型名”吃剩余宽度；用途/API 固定可读宽；操作列必须装下两个按钮。
+        header.setStretchLastSection(False)
+        header.setMinimumSectionSize(48)
+        header.setSectionResizeMode(0, QtWidgets.QHeaderView.ResizeMode.Interactive)
+        header.setSectionResizeMode(1, QtWidgets.QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(2, QtWidgets.QHeaderView.ResizeMode.Fixed)
+        header.setSectionResizeMode(3, QtWidgets.QHeaderView.ResizeMode.Interactive)
+        header.setSectionResizeMode(4, QtWidgets.QHeaderView.ResizeMode.Fixed)
+        self.llm_table.setColumnWidth(0, 140)
+        self.llm_table.setColumnWidth(2, 72)
+        self.llm_table.setColumnWidth(3, 160)
+        self.llm_table.setColumnWidth(4, 176)
+        self.llm_table.setTextElideMode(QtCore.Qt.TextElideMode.ElideMiddle)
+        self.llm_table.setWordWrap(False)
+        self.llm_table.setHorizontalScrollBarPolicy(
+            QtCore.Qt.ScrollBarPolicy.ScrollBarAsNeeded
         )
-
-        self.llm_table.horizontalHeader().setSectionResizeMode(
-            3, QtWidgets.QHeaderView.ResizeMode.Stretch
+        self.llm_table.setHorizontalScrollMode(
+            QtWidgets.QAbstractItemView.ScrollMode.ScrollPerPixel
         )
-
-        self.llm_table.horizontalHeader().setSectionResizeMode(
-            4, QtWidgets.QHeaderView.ResizeMode.ResizeToContents
-        )
+        self.llm_table.setShowGrid(False)
+        self.llm_table.setAlternatingRowColors(True)
 
         self.llm_table.verticalHeader().setVisible(False)
 
         self.llm_table.setMinimumHeight(0)
 
-        self.llm_table.setMaximumHeight(380)
+        self.llm_table.setMaximumHeight(320)
 
-        self.llm_table.verticalHeader().setDefaultSectionSize(44)
+        self.llm_table.verticalHeader().setDefaultSectionSize(40)
 
         model_layout.addWidget(self.llm_table)
 
@@ -2468,9 +2468,7 @@ class SettingsDialog(QtWidgets.QDialog):
 
         body_layout.addStretch(1)
 
-        scroll.setWidget(body)
-
-        layout.addWidget(scroll, 1)
+        layout.addWidget(self._wrap_in_scroll_area(body), 1)
 
         llm_action_bar = QtWidgets.QFrame()
 
@@ -2522,8 +2520,7 @@ class SettingsDialog(QtWidgets.QDialog):
 
         layout.addWidget(llm_action_bar, 0)
 
-        scroll = self._wrap_in_scroll_area(page)
-        self.stack.addWidget(scroll)
+        self.stack.addWidget(page)
 
         self._refresh_llm_table()
 
@@ -2554,15 +2551,24 @@ class SettingsDialog(QtWidgets.QDialog):
 
             h = QtWidgets.QHBoxLayout(action_widget)
 
-            h.setContentsMargins(4, 4, 4, 4)
+            h.setContentsMargins(2, 1, 2, 1)
 
-            h.setSpacing(8)
+            h.setSpacing(4)
+
+            h.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
 
             btn_edit = QtWidgets.QPushButton("编辑")
-
+            btn_edit.setFixedHeight(28)
+            btn_edit.setMinimumWidth(56)
+            btn_edit.setMaximumWidth(72)
+            btn_edit.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
             btn_edit.clicked.connect(lambda c=False, m=mid: self._on_edit_model(m))
 
             btn_del = QtWidgets.QPushButton("删除")
+            btn_del.setFixedHeight(28)
+            btn_del.setMinimumWidth(56)
+            btn_del.setMaximumWidth(72)
+            btn_del.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
 
             btn_edit.setObjectName("tableActionBtn")
 
@@ -2574,7 +2580,10 @@ class SettingsDialog(QtWidgets.QDialog):
 
             h.addWidget(btn_del)
 
-            h.addStretch()
+            for col in (0, 1, 3):
+                item = self.llm_table.item(row, col)
+                if item is not None and item.text():
+                    item.setToolTip(item.text())
 
             self.llm_table.setCellWidget(row, 4, action_widget)
 
@@ -2748,8 +2757,7 @@ class SettingsDialog(QtWidgets.QDialog):
 
         self.dep_rows = []
 
-        scroll = self._wrap_in_scroll_area(page)
-        self.stack.addWidget(scroll)
+        self.stack.addWidget(self._wrap_in_scroll_area(page))
 
         self._refresh_dependency_rows()
 
@@ -2984,8 +2992,7 @@ class SettingsDialog(QtWidgets.QDialog):
         footer.addWidget(btn_save)
         layout.addLayout(footer)
 
-        scroll = self._wrap_in_scroll_area(page)
-        self.stack.addWidget(scroll)
+        self.stack.addWidget(self._wrap_in_scroll_area(page))
         self._refresh_color_inputs()
 
     def _on_theme_apply_clicked(self):
@@ -4757,12 +4764,6 @@ class SettingsDialog(QtWidgets.QDialog):
 
         root.setContentsMargins(0, 0, 0, 0)
 
-        scroll = QtWidgets.QScrollArea()
-
-        scroll.setWidgetResizable(True)
-
-        scroll.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
-
         container = QtWidgets.QWidget()
 
         layout = QtWidgets.QVBoxLayout(container)
@@ -5157,9 +5158,7 @@ class SettingsDialog(QtWidgets.QDialog):
 
         self._refresh_gateway_preview()
 
-        scroll.setWidget(container)
-
-        root.addWidget(scroll, 1)
+        root.addWidget(self._wrap_in_scroll_area(container), 1)
 
         self.stack.addWidget(page)
 
@@ -5169,12 +5168,6 @@ class SettingsDialog(QtWidgets.QDialog):
         root = QtWidgets.QVBoxLayout(page)
 
         root.setContentsMargins(0, 0, 0, 0)
-
-        scroll = QtWidgets.QScrollArea()
-
-        scroll.setWidgetResizable(True)
-
-        scroll.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
 
         container = QtWidgets.QWidget()
 
@@ -5638,37 +5631,14 @@ class SettingsDialog(QtWidgets.QDialog):
 
         self._refresh_gateway_preview()
 
-        scroll.setWidget(container)
-
-        root.addWidget(scroll, 1)
+        root.addWidget(self._wrap_in_scroll_area(container), 1)
 
         self.stack.addWidget(page)
 
     # ---------- Other tabs ----------
 
     def _wrap_in_scroll_area(self, widget: QtWidgets.QWidget) -> QtWidgets.QScrollArea:
-        scroll = QtWidgets.QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
-        scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        scroll.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        # 关键：阻止被包裹控件的大 minimumSizeHint 顶住外层对话框高度。
-        # setMinimumSize(0,0) 只清显式最小值，不覆盖 minimumSizeHint()；
-        # 而 QStackedWidget 取所有页 minimumSizeHint 的最大值，会把窗口高度顶死。
-        # 给外层 scroll 纵向设 Ignored 策略，布局将忽略其 minimumSizeHint，
-        # 滚动区即可真正压缩，超出部分由滚动条兜底。内部 widget 则使用 Preferred 策略
-        # 以展现其完整的 natural/minimumSizeHint 高度，避免内部元素被挤压重叠。
-        widget.setSizePolicy(
-            QtWidgets.QSizePolicy.Policy.Preferred,
-            QtWidgets.QSizePolicy.Policy.Preferred,
-        )
-        scroll.setSizePolicy(
-            QtWidgets.QSizePolicy.Policy.Preferred,
-            QtWidgets.QSizePolicy.Policy.Ignored,
-        )
-        scroll.setWidget(widget)
-        scroll.setMinimumSize(0, 0)
-        return scroll
+        return wrap_in_scroll_area(widget)
 
     def _init_costume_page(self):
         from modules.gui.dialogs.character_editor import CharacterEditorWidget
@@ -5677,9 +5647,8 @@ class SettingsDialog(QtWidgets.QDialog):
         layout = QtWidgets.QVBoxLayout(page)
         layout.setContentsMargins(0, 0, 0, 0)
         widget = CharacterEditorWidget(self.main_app)
-        widget.setMinimumSize(0, 0)
-        scroll = self._wrap_in_scroll_area(widget)
-        layout.addWidget(scroll, 1)
+        apply_embedded_mode(widget)
+        layout.addWidget(self._wrap_in_scroll_area(widget), 1)
         self.stack.addWidget(page)
 
     def _init_plugin_page(self):
@@ -5700,9 +5669,13 @@ class SettingsDialog(QtWidgets.QDialog):
                 main_app=self.main_app,
                 embedded=True,
             )
-            widget.setMinimumSize(0, 0)
-            scroll = self._wrap_in_scroll_area(widget)
-            layout.addWidget(scroll, 1)
+            apply_embedded_mode(widget)
+            # 插件页以表格为主，直接填满内容区，不要外层 scroll 吃掉表格高度。
+            widget.setSizePolicy(
+                QtWidgets.QSizePolicy.Policy.Expanding,
+                QtWidgets.QSizePolicy.Policy.Expanding,
+            )
+            layout.addWidget(widget, 1)
         self.stack.addWidget(page)
 
     def _add_embedded_dialog_page(self, dialog_cls, label: str):
@@ -5711,10 +5684,8 @@ class SettingsDialog(QtWidgets.QDialog):
         layout.setContentsMargins(0, 0, 0, 0)
         try:
             widget = dialog_cls(parent=page, main_app=self.main_app)
-            widget.setWindowFlags(QtCore.Qt.WindowType.Widget)
-            widget.setMinimumSize(0, 0)
-            scroll = self._wrap_in_scroll_area(widget)
-            layout.addWidget(scroll, 1)
+            apply_embedded_mode(widget)
+            layout.addWidget(self._wrap_in_scroll_area(widget), 1)
         except Exception as exc:
             fallback = QtWidgets.QLabel(f"{label}加载失败：{exc}")
             fallback.setWordWrap(True)
@@ -5745,9 +5716,8 @@ class SettingsDialog(QtWidgets.QDialog):
         layout = QtWidgets.QVBoxLayout(page)
         layout.setContentsMargins(0, 0, 0, 0)
         widget = DiaryManagerDialog(parent=page, embedded=True)
-        widget.setMinimumSize(0, 0)
-        scroll = self._wrap_in_scroll_area(widget)
-        layout.addWidget(scroll, 1)
+        apply_embedded_mode(widget)
+        layout.addWidget(self._wrap_in_scroll_area(widget), 1)
         self.stack.addWidget(page)
 
     def _init_memory_page(self):
@@ -5756,14 +5726,19 @@ class SettingsDialog(QtWidgets.QDialog):
         page = QtWidgets.QWidget()
         layout = QtWidgets.QVBoxLayout(page)
         layout.setContentsMargins(0, 0, 0, 0)
+        from services.gui_api.memory_service import MemoryGuiService
+
+        brain = getattr(self.main_app, "brain", None)
+        live_core = getattr(brain, "memory_core", None) if brain is not None else None
         widget = MemoryEditorDialog(
             parent=page,
             embedded=True,
-            brain=getattr(self.main_app, "brain", None),
+            brain=brain,
+            memory_core=live_core,
+            memory_gui=MemoryGuiService(memory_core=live_core, brain=brain),
         )
-        widget.setMinimumSize(0, 0)
-        scroll = self._wrap_in_scroll_area(widget)
-        layout.addWidget(scroll, 1)
+        apply_embedded_mode(widget)
+        layout.addWidget(self._wrap_in_scroll_area(widget), 1)
         self.stack.addWidget(page)
 
     def _init_status_screen_page(self):

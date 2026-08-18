@@ -94,6 +94,7 @@ def revalidate_focus_for_sensor(
     event_title: str,
     app_name: str = "",
     active_title_getter: Optional[Callable[[], str]] = None,
+    alternate_titles: Optional[list[str]] = None,
 ) -> SensorFocusRevalidateResult:
     getter = active_title_getter
     if getter is None:
@@ -108,12 +109,19 @@ def revalidate_focus_for_sensor(
     except Exception:
         return SensorFocusRevalidateResult(ok=True, reason="active_title_unavailable")
 
-    if titles_soft_match(event_title, active_title, app_name=app_name):
-        return SensorFocusRevalidateResult(
-            ok=True,
-            active_title=active_title,
-            reason="matched",
-        )
+    candidates = [active_title]
+    for extra in alternate_titles or []:
+        cleaned = clean_sensor_title(str(extra or "")).strip()
+        if cleaned and cleaned not in candidates:
+            candidates.append(cleaned)
+
+    for candidate in candidates:
+        if titles_soft_match(event_title, candidate, app_name=app_name):
+            return SensorFocusRevalidateResult(
+                ok=True,
+                active_title=candidate,
+                reason="matched",
+            )
     return SensorFocusRevalidateResult(
         ok=False,
         active_title=active_title,

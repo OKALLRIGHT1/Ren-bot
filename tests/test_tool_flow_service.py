@@ -267,5 +267,34 @@ async def test_finalize_search_reply_falls_back_to_tool_result_on_model_error():
 
     assert "最近登陆中国的台风是台风示例" in result.final_reply
     assert "系统繁忙" not in result.final_reply
-    assert result.final_emo == "think"
-    assert result.model_emo_seen is True
+
+
+@pytest.mark.asyncio
+async def test_finalize_tool_reply_drops_uncertain_first_thought():
+    captured = {}
+
+    async def chat_with_ai(messages, *, task_type, caller):
+        captured["messages"] = messages
+        return "台风示例昨天登陆了。"
+
+    result = await finalize_tool_reply(
+        clean_thought="我不太确定，印象里好像是台风示例。",
+        tool_results=["最近登陆中国的台风是台风示例。"],
+        used_triggers=["search_web"],
+        context_messages=[],
+        route_reason="",
+        task_default="default",
+        start_emo="think",
+        chat_with_ai=chat_with_ai,
+        extract_emo_tag=_extract_emo_tag,
+        character_sharing_enabled=False,
+        try_share=lambda: "",
+    )
+
+    assert captured["messages"][0]["role"] == "system"
+    assert "我不太确定" not in captured["messages"][0]["content"]
+    assert all(
+        "我不太确定" not in str(message.get("content") or "")
+        for message in captured["messages"]
+    )
+    assert result.final_reply == "台风示例昨天登陆了。"

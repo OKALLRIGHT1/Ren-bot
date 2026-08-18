@@ -94,22 +94,47 @@ def test_create_doc_and_import(tmp_path: Path):
     assert brain.imported
 
 
-def test_learn_configured_dirs_supports_async_in_running_loop():
-    import asyncio
+def test_ingest_knowledge_paths_counts_failures():
+    from services.gui_api.knowledge_service import ingest_knowledge_paths
 
-    class AsyncPlugin:
-        async def gui_ingest_configured_dirs(self, context):
-            await asyncio.sleep(0)
-            assert context.get("brain") is not None
-            return "学习完成: 1 文件"
+    def _import(path, progress_callback=None):
+        if progress_callback:
+            progress_callback({"stage": "prepared", "batch": 0, "batches": 1})
+        if path.endswith("bad.md"):
+            return {"ok": False, "error": "boom"}
+        return {"ok": True, "added": 2, "skipped": 1}
 
+    payload = ingest_knowledge_paths(
+        ["good.md", "bad.md"],
+        import_file=_import,
+    )
+    assert payload["file_count"] == 2
+    assert payload["added"] == 2
+    assert payload["skipped"] == 1
+    assert payload["failed"] == 1
+    assert "good.md" in payload["results"][0]
+    assert "失败" in payload["results"][1]
+
+
+def test_learn_configured_dirs_uses_shared_ingest(tmp_path: Path):
+    class Plugin:
+        def __init__(self, files):
+            self.files = files
+
+        def list_configured_learn_files(self):
+            return list(self.files)
+
+        def _slow_ingest_config(self):
+            return False, 20, 0, False
+
+    first = tmp_path / "a.md"
+    first.write_text("a", encoding="utf-8")
     manager = FakeManager()
-    manager.plugins["knowledge_base"] = AsyncPlugin()
-    service = KnowledgeGuiService(plugin_manager=manager, brain=FakeBrain())
-
-    async def _call_from_loop():
-        return service.learn_configured_dirs()
-
-    result = asyncio.run(_call_from_loop())
+    manager.plugins["knowledge_base"] = Plugin([str(first)])
+    brain = FakeBrain()
+    service = KnowledgeGuiService(plugin_manager=manager, brain=brain)
+    result = service.learn_configured_dirs()
     assert result["ok"] is True
+    assert result["data"]["file_count"] == 1
+    assert brain.imported == [str(first)]
     assert "学习完成" in str(result["data"]["result"])

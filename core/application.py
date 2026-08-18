@@ -159,6 +159,7 @@ from modules.live2d_transport import (
     LegacyLocalWebSocketTransport,
     Live2DTransportBus,
     configure_live2d_transport,
+    select_live2d_transports,
 )
 
 
@@ -1323,6 +1324,11 @@ class Live2DApplication:
                 Events.UI_BUBBLE, text=text, emotion=emo, duration_ms=duration_ms
             )
 
+        async def _line_to_event(text: str):
+            await self.event_bus.emit(
+                Events.UI_APPEND, role="assistant", text=text
+            )
+
         async def _tts_go_idle_to_event():
             await self.event_bus.emit(Events.LIVE2D_GO_IDLE)
 
@@ -1331,6 +1337,7 @@ class Live2DApplication:
             verbose=True,
             log_each_utterance=True,
             bubble_sender=_bubble_to_event,
+            line_sender=_line_to_event,
             go_idle_fn=_tts_go_idle_to_event,
             split_long_default=TTS_SPLIT_LONG_TEXT,
             chunk_chars_default=TTS_CHUNK_CHARS,
@@ -1403,6 +1410,13 @@ class Live2DApplication:
                     ),
                 ],
                 logger=self.logger,
+                selector=lambda transports: select_live2d_transports(
+                    transports,
+                    has_gui_client=lambda: bool(
+                        self.gui_ws_server
+                        and self.gui_ws_server.has_capable_client("live2d.protocol.v1")
+                    ),
+                ),
             )
         )
         self.gui_http_server = GuiHttpServer(
@@ -2215,70 +2229,74 @@ class Live2DApplication:
         interrupt = bool(payload.get("interrupt", True))
         show_bubble = bool(payload.get("show_bubble", True))
         speak = bool(payload.get("speak", True))
+        append_ui = bool(payload.get("append_ui", False))
 
         if not speak:
-            if show_bubble:
-                try:
-                    self._silent_bubble_seq += 1
-                    bubble_seq = self._silent_bubble_seq
-                    await self.state_machine.set_state(
-                        AgentState.SPEAKING, reason="tts_disabled_preview"
-                    )
+            if show_bubble or append_ui:
+                self._silent_bubble_seq += 1
+                bubble_seq = self._silent_bubble_seq
+                await self.state_machine.set_state(
+                    AgentState.SPEAKING, reason="tts_disabled_preview"
+                )
+                # 关 TTS 也分段：节奏贴近“一段一段说”，但没有音频，只能按字数估每段时长。
+                bubble_parts = split_local_bubble_text_parts(text) or [text]
+
+                async def _emit_silent_bubbles(seq: int, parts: list[str], emo):
                     from modules.live2d import send_lip_sync
                     from modules.text_lip_sync import (
                         build_text_lip_sync,
                         estimate_text_speech_duration,
                     )
 
-                    fake_duration = estimate_text_speech_duration(text)
-                    lip_data = build_text_lip_sync(text, fake_duration)
-                    if lip_data:
-                        await send_lip_sync(lip_data)
-                    read_ms = estimate_bubble_display_ms(text)
-                    duration_ms = max(int(fake_duration * 1000) + 600, int(read_ms))
-                except Exception as exc:
-                    self.logger.debug(f"Text lip sync fallback skipped: {exc}")
-                    duration_ms = estimate_bubble_display_ms(text)
-                    bubble_seq = self._silent_bubble_seq
-                bubble_parts = split_local_bubble_text_parts(text) or [text]
-                per_part_ms = max(1200, int(duration_ms / max(1, len(bubble_parts))))
-
-                async def _emit_silent_bubbles(seq: int):
-                    for part in bubble_parts:
+                    for part in parts:
                         if seq != self._silent_bubble_seq:
                             return
-                        await self.event_bus.emit(
-                            Events.UI_BUBBLE,
-                            text=part,
-                            emotion=emotion,
-                            duration_ms=per_part_ms,
+                        speech_sec = estimate_text_speech_duration(part)
+                        # 无音频：按字数估时长（与前端 text.length*150 同量级）
+                        duration_ms = estimate_bubble_display_ms(part, pace="silent")
+                        duration_ms = max(
+                            int(speech_sec * 1000) + 450,
+                            int(duration_ms),
+                            2200,
                         )
-                        await asyncio.sleep(max(0.35, per_part_ms / 1000.0 + 0.08))
+                        duration_ms = min(duration_ms, 12000)
+                        try:
+                            lip_data = build_text_lip_sync(
+                                part,
+                                max(0.9, min(speech_sec + 0.15, duration_ms / 1000.0 - 0.25)),
+                            )
+                            if lip_data:
+                                await send_lip_sync(lip_data)
+                        except Exception as exc:
+                            self.logger.debug(f"Text lip sync fallback skipped: {exc}")
 
-                asyncio.create_task(_emit_silent_bubbles(bubble_seq))
-                if duration_ms and duration_ms > 0:
-                    async def _idle_after_silent_bubble(delay_ms: int, seq: int):
-                        total_delay = len(bubble_parts) * (per_part_ms / 1000.0 + 0.08)
-                        await asyncio.sleep(max(0.35, total_delay + 0.18))
-                        if seq != self._silent_bubble_seq:
-                            return
-                        if self.state_machine.state != AgentState.SPEAKING:
-                            return
-                        self.logger.debug("TTS disabled; set idle")
-                        await self.state_machine.set_state(
-                            AgentState.IDLE, reason="tts_disabled"
-                        )
-                        await self.event_bus.emit(Events.LIVE2D_GO_IDLE)
+                        if append_ui:
+                            await self.event_bus.emit(
+                                Events.UI_APPEND, role="assistant", text=part
+                            )
+                        if show_bubble:
+                            await self.event_bus.emit(
+                                Events.UI_BUBBLE,
+                                text=part,
+                                emotion=emo,
+                                duration_ms=duration_ms,
+                            )
+                        # 段间等待对齐本段展示时长，上一句结束后再发下一句。
+                        await asyncio.sleep(max(0.4, duration_ms / 1000.0 + 0.08))
 
-                    asyncio.create_task(
-                        _idle_after_silent_bubble(duration_ms, bubble_seq)
-                    )
-                else:
+                    if seq != self._silent_bubble_seq:
+                        return
+                    if self.state_machine.state != AgentState.SPEAKING:
+                        return
                     self.logger.debug("TTS disabled; set idle")
                     await self.state_machine.set_state(
                         AgentState.IDLE, reason="tts_disabled"
                     )
                     await self.event_bus.emit(Events.LIVE2D_GO_IDLE)
+
+                asyncio.create_task(
+                    _emit_silent_bubbles(bubble_seq, bubble_parts, emotion)
+                )
             else:
                 self.logger.debug("Silent output finished; UI only")
                 await self.state_machine.set_state(
@@ -2291,7 +2309,11 @@ class Live2DApplication:
         self.logger.debug(f"TTS预览: {text[:50]}...")
         self._silent_bubble_seq += 1
         await self.tts.say(
-            text, emotion=emotion, interrupt=interrupt, show_bubble=show_bubble
+            text,
+            emotion=emotion,
+            interrupt=interrupt,
+            show_bubble=show_bubble,
+            append_ui=append_ui,
         )
 
     async def _on_stream_start(self, payload: Dict[str, Any]):
@@ -2299,7 +2321,7 @@ class Live2DApplication:
         self._silent_bubble_seq += 1
         if not self.tts_enabled or not bool(payload.get("speak", True)):
             return
-        self.tts.start_stream()
+        self.tts.start_stream(append_ui=bool(payload.get("append_ui", False)))
 
     async def _on_stream_feed(self, payload: Dict[str, Any]):
         # Handle stream chunk event.
@@ -3490,6 +3512,7 @@ class EventPresenter:
         speak: Optional[bool] = None,
         interrupt: bool = True,
         show_bubble: bool = True,
+        append_ui: bool = False,
     ):
         # Present text.
         text = (text or "").strip()
@@ -3509,6 +3532,7 @@ class EventPresenter:
             interrupt=interrupt,  # <--- 浣跨敤浼犲叆鐨勫弬鏁帮紝鑰屼笉鏄啓姝?True
             speak=want_speak,
             show_bubble=bool(show_bubble),
+            append_ui=bool(append_ui),
         )
 
     async def present_direct(self, text: str, emotion: Optional[str] = None):

@@ -7,7 +7,8 @@
 - SQLite `memory_records`（经 Memory Core / `memory_sqlite`）是**语义记忆的唯一写入真相源**（偏好、事实、画像、证据等）。
 - `transcript`：原始对话。
 - `memory_items`：**仅任务存储**，产品允许的 type 默认只有 `todo`。不要把偏好/事实写入此表；HTTP `/memory/items*` 已按此门禁，非 todo 写入失败。
-- Chroma 等向量库只保存**派生索引**，损坏后必须能从 SQLite 重建。
+- Chroma 等向量库只保存 Memory Core 的**派生索引**，损坏后必须能从 SQLite 重建。
+- 资料知识库目前仍以 Chroma `waifu_knowledge_base` 为库+索引（见下方「资料知识库」）；不要把它当成人设时间线。
 - 旧 `waifu_memory_advanced` 集合仅只读查看，不参与当前 Memory Core 召回。
 - 日记使用独立窗口与调度，不混入语义分类树的「经历与事件」。
 - 长期方向：`todo` 可迁到独立 tasks 表；在此之前**禁止扩大** `memory_items` 业务语义。
@@ -45,7 +46,9 @@
 3. **原始对话**：Transcript。
 4. **向量与检索**：索引健康、任务队列、模型与维度；旧向量只读折叠区。
 
-档案概览与记忆记录是同一批 SQLite 记录的两种投影。
+档案概览与记忆记录是同一批 SQLite 记录的两种投影。默认列表走 **当前有效**（`list_current_records` / `is_current`），不是「所有 `status=active`」。`list_records(status=active)` 仍是列语义，可含已过 `valid_until` 的条，只给「全部状态」筛选用。
+
+设置页打开记忆窗口时必须注入进程内那份 `brain.memory_core`，经 `MemoryGuiService` 读转写 / 向量，禁止再 `initialize()` 第二套 Core（会再挂一套写回钩子）。独立打开或测试没有 live core 时才允许自己建。CRUD 仍可打在同一份 `MemoryCoreService` 上。旧 Chroma 浏览不要在对话框里 `import chromadb`，走门面 `list_legacy_vectors`。
 
 ## Embedding 与向量索引
 
@@ -82,6 +85,25 @@
 
 `mid_term_segments` 与长期写回的 `memory_records(kind=summary)` 不是同一层：前者只承托当前 conversation 的连续性，后者保存可跨会话使用的长期语义摘要。两者不得互相回写或重复入库。
 
+## 当前有效人设（B0）
+
+普通读路径只取 **current**，不取全部 active：
+
+```text
+is_current(record, now) =
+    status == "active"
+    AND (valid_from IS NULL OR valid_from <= now)
+    AND (valid_until IS NULL OR valid_until > now)
+```
+
+- 纠正走仓储级 `replace_current_record`：废止旧条、写 `valid_until`、插入新条、写 evidence、入队向量，同一事务。
+- 人设唯一索引只约束 `preference / fact / rule / profile / relation`。日记、任务等同名多条允许并存；启动时不得因它们建索引失败。
+- 废止通用 `valid_days` TTL。habit / fact / preference / rule 只有用户明确给出终点才写 `valid_until`。
+- 人设身份不含会话号：habit / preference / profile / rule 默认 `session_id=''`。desktop / QQ 只隔离近史。
+- 不支持预约人设：禁止写入未来才生效的第二条 `valid_from`。
+- 普通聊天不召回 `superseded`。问「以前 / 改之前」要等 B3，现在还不会自动带旧值。
+- 关系三元组（B1）和钉日期经历（B2）尚未落地；不要把知识库文档抽成人生关系。
+
 ## 长期记忆写回（Person Fact / Chat Summary）
 
 实现：`services/memory_writeback.py`，由 `MemoryCoreService.record_message` 在写入 transcript 后触发。
@@ -112,6 +134,20 @@
 - 把用户问句本身写成事实；
 - 用日记长文噪声覆盖短习惯事实（召回侧已对 habit 查询加权）；
 - 把写回再做成「以后再补」的旁路存储。
+
+## 资料知识库（A0–A4）
+
+资料层回答「文档里写了什么」，不是「他现在什么为真」。实现入口：`modules/memory/knowledge_store.py`、`knowledge_gate.py`、`retrieval.py`；聊天注入在 `AdvancedMemorySystem.build_prompt`。
+
+- **分块：** 普通 `.md/.txt` 按空行 / 标题切，目标 400–1200 字；列表和 `术语：定义` 不拆成单行。宝可梦 / OpenIE JSON 仍走特化路径。旧按行碎片不自动迁移，需清空重建。
+- **自动门：** 闲聊默认不查。只有「资料 / 设定 / 知识库 / 文档里 / 词条」才自动检索。「皮卡丘有什么特性」不查；「设定里皮卡丘的特性是什么」才查。`KNOWLEDGE_AUTO_RETRIEVAL_ENABLED=0` 只关聊天自动注入，插件 / GUI 搜索仍可用。
+- **注入：** 结构化 `KnowledgeHit`。块前写明只当资料、不要说成「你说过」；正文包在 `<knowledge_data>`。最多 2 条，单条正文 400 字、合计约 800 字。
+- **检索后：** 向量先多取再按 `entity_name / aliases` 词面加分，并按 id / 包含关系去重。别名不加宽自动门。
+- **导入：** `data/knowledge_import_manifest.json` 记 sha256、chunk IDs 和 `chunker_version`。未改文件且版本一致才 skip；旧清单没有版本号、集合里还留着按行碎片、或点了 force，都会按新段落分块重导。改过则先写齐新块再删该文件旧块。失败不推进清单。删除源文件不会自动清库。
+- **GUI：** 知识库管理走 `KnowledgeGuiService`（统计 / 搜索 / 重建 / 按目录删除 / 导入）。不要在对话框里直调 `brain.import_knowledge_from_file`。
+- **插件：** 聊天回合 `ctx["knowledge"]` 是 `BrainKnowledgePort`（转发导入 / 检索 / 统计）。`local_knowledge` 优先用它，没有则回退 `ctx["brain"]`。`ctx["brain"]` 与 `ctx["chat_service"]` 仍在，其它插件还要用。
+- **共用 ingest：** `ingest_knowledge_paths()` 给 GUI worker、插件 `learn` / `gui_ingest`、门面 `learn_configured_dirs`。慢导入参数仍由插件配置提供。
+- **未做：** chunk 尚未进 SQLite（A5）；插件 BM25（A6）未开。Chroma 知识库换 embedding 仍可能要清空重导。Gateway / Presenter 端口未做，禁止先撤整颗 `chat_service`。
 
 ## 过渡态提醒
 

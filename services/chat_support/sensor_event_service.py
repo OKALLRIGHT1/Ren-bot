@@ -196,16 +196,26 @@ class SensorEventService:
                     )
         return event_id
 
+    def _talk_rules(self, *, max_chars: int = 36) -> str:
+        return (
+            "【说话】旁边低声接一句；关心、提醒、疑问、轻吐槽都可以，不写观察报告。\n"
+            f"- 只围绕当前窗口；最多 {max_chars} 字，1～2 短句；不要加引号。\n"
+            "- 不要评价页面实用/详尽，不要说「用户正在/屏幕上/画面中/我看到」。\n"
+            "- 开头加 <emo=happy|sad|angry|shy|flustered|confused|think|neutral>。"
+        )
+
     def build_self_prompt(
         self,
         *,
         context: SensorGenerationContext,
         clean_title: str,
     ) -> str:
-        return f"""{context.sensor_persona_prompt}
-		     Master 的视线停在【你的】程序窗口({clean_title})。
-		     请打破第四面墙，对他简短说一句话，可以像平常聊天那样轻轻问一句；不要复用最近出现过的固定模板。
-	     【警告】绝不能超过 15 个字！不要加引号。"""
+        return (
+            f"{context.sensor_persona_prompt}\n"
+            f"Master 的视线停在【你的】程序窗口({clean_title})。\n"
+            "打破第四面墙，对他简短说一句；不要复用最近的固定模板。\n"
+            f"{self._talk_rules(max_chars=15)}"
+        )
 
     async def run_self_generation(
         self,
@@ -246,7 +256,7 @@ class SensorEventService:
     ) -> str:
         return f"""
 {context.context_block}【场景】
-用户刚切换到窗口: [{clean_title}] (分类: {category})，今天第 {count} 次。
+用户刚切换到窗口: [{clean_title}] (分类: {category})，今天独立会话约第 {count} 段（勿说成打开了 N 次）。
 
 【判断任务】
 	你是一个性格高冷、话少、克制的 AI 助手。你不需要对用户的每一次无聊操作做出反应。
@@ -270,7 +280,8 @@ class SensorEventService:
         count: int,
         chat_with_ai: Callable[..., str],
     ) -> SensorGatekeeperResult:
-        if count <= 2 and category not in {"self", "work"}:
+        # 只挡第一次看到的普通窗口；第二次及以后交给模型判断，避免整天几乎不说话。
+        if count <= 1 and category not in {"self", "work", "coding"}:
             self._log_info(f"🛑 [Sensor Gatekeeper] 低强度事件跳过 ({clean_title})")
             return SensorGatekeeperResult(allowed=False, reason="low_intensity")
 
@@ -339,23 +350,15 @@ class SensorEventService:
         context: SensorGenerationContext,
         clean_title: str,
     ) -> str:
-        return f"""{context.sensor_persona_prompt}
-你正贴在用户旁边看他的屏幕(当前活跃窗口: [{clean_title}])。
-【空间自我意识】先判断画面里有没有你的桌面形象、Live2D设置页或角色/动作/表情配置页；如果有，那是在看你自己或用户正在改你。不要把自己的模型当成陌生女孩，也不要把普通网页/群聊里的动漫角色误认成自己。
-		【说话方式】
-		- 像五十铃怜临场低声接话，不写观察报告。
-		- 不强制吐槽；可以关心、提醒、疑问、陪一句，也可以轻轻戳他。
-	- 直接对 Master 说话，多用“你/又/还/这”这种口语。
-	- 可以适当用疑问句或轻反问，不要每次都写成陈述判断。
-		- 不要评价页面“实用/详尽/清晰”，要说他正在看这件事给你的感觉。
-		- 不要复述画面，不要用“屏幕上/画面中/用户正在/我看到/总结”这类解说词。
-		- 不要使用 🌸 或其他装饰 emoji。
-	{context.vision_style_block}
-	{context.recent_sensor_reply_block}
-【任务】抓住一个最自然的落点，说一句克制的旁边话；关心、提醒、疑问、轻吐槽都可以。
-		【聚焦】只围绕当前活跃窗口说；不要把近期观察里的其他软件当成现在的主视角。
-		【字数限制】最多 36 个字，1 到 2 句短句。不要加引号，不要动不动关心。
-				【情绪标签】先由你判断这句话该带什么表情；必须在开头加 <emo=happy|sad|angry|shy|flustered|confused|think|neutral>。不要解释标签。"""
+        return (
+            f"{context.sensor_persona_prompt}\n"
+            f"你正贴在旁边看他的屏幕（当前窗口: [{clean_title}]）。\n"
+            "先判断画面里有没有你的桌面形象或角色配置页；有则是在看你或改你。"
+            "不要把普通网页/群聊里的动漫角色当成自己。\n"
+            f"{self._talk_rules()}\n"
+            f"{context.vision_style_block}\n"
+            f"{context.recent_sensor_reply_block}"
+        )
 
     async def run_vision_direct_generation(
         self,
@@ -399,26 +402,15 @@ class SensorEventService:
         context: SensorGenerationContext,
         description: str,
     ) -> str:
-        return f"""{context.sensor_persona_prompt}
-
-【场景】用户当前屏幕内容如下：
-{description}
-
-【重要设定】描述中如果明确提到“AI助手的形象/Live2D形象/你的配置界面/你的模型”，那就是你自己或用户正在改你。普通网页、群聊或图片主体里的动漫角色不一定是你。
-
-【任务】
-			基于上面的事实，像你（当前角色）在旁边当场低声接一句。
-			不强制吐槽；可以关心、提醒、疑问、陪一句，也可以轻轻戳他。
-		可以适当用疑问句或轻反问，不要每次都写成陈述判断。
-			不要评价页面“实用/详尽/清晰”，要说 Master 正在看这件事给你的感觉。
-			不要复述画面，不要总结，不要说“用户正在/屏幕上/画面中/我看到”。
-			不要使用 🌸 或其他装饰 emoji。
-		{context.vision_style_block}
-		{context.recent_sensor_reply_block}
-		【聚焦】只围绕当前活跃窗口说；不要把近期观察里的其他软件当成现在的主视角。
-		【字数限制】最多 36 个字，1 到 2 句短句。不要加引号，不要动不动关心。
-			【情绪标签】先由你判断这句话该带什么表情；必须在开头加 <emo=happy|sad|angry|shy|flustered|confused|think|neutral>。不要解释标签。
-	"""
+        return (
+            f"{context.sensor_persona_prompt}\n"
+            f"【场景】当前屏幕内容：\n{description}\n"
+            "描述里若明确写了你的桌面形象/配置界面/模型，那是你自己或用户在改你；"
+            "网页/群聊图片里的角色不一定是你。\n"
+            f"{self._talk_rules()}\n"
+            f"{context.vision_style_block}\n"
+            f"{context.recent_sensor_reply_block}"
+        )
 
     async def run_vision_separate_generation(
         self,
@@ -455,11 +447,7 @@ class SensorEventService:
                 [
                     {
                         "role": "system",
-                        "content": (
-                            f"{talk_prompt}\n\n"
-                            "【输出要求】只输出最终要对用户说的那一句话；"
-                            "不要回应本条格式要求。"
-                        ),
+                        "content": talk_prompt,
                     },
                     {
                         "role": "user",
@@ -478,6 +466,17 @@ class SensorEventService:
         except Exception as exc:
             self._log_warning(f"Vision separate failed: {exc}")
             return SensorReplyGenerationResult(reason="failed", branch="vision_separate")
+
+    def _rust_focus_titles(self) -> list[str]:
+        sensor_ref = self.screen_sensor_ref_getter()
+        if sensor_ref is None:
+            return []
+        titles: list[str] = []
+        for attr in ("last_window_title", "last_app_name"):
+            value = str(getattr(sensor_ref, attr, "") or "").strip()
+            if value and value not in titles:
+                titles.append(value)
+        return titles
 
     def _sensor_vision_capture_target(self) -> str:
         try:
@@ -517,6 +516,7 @@ class SensorEventService:
                 event_title=clean_title,
                 app_name=display_app,
                 active_title_getter=active_title_getter,
+                alternate_titles=self._rust_focus_titles(),
             )
             if not focus.ok:
                 self._log_info(
@@ -558,6 +558,7 @@ class SensorEventService:
                 event_title=clean_title,
                 app_name=display_app,
                 active_title_getter=active_title_getter,
+                alternate_titles=self._rust_focus_titles(),
             )
             if not focus_after.ok:
                 self._log_info(
@@ -599,23 +600,25 @@ class SensorEventService:
         clean_title: str,
         category: str,
         count: int,
+        reason: str = "switch",
     ) -> str:
-        return f"""{context.sensor_persona_prompt}
-
-    用户刚切换到窗口: [{clean_title}] ({category})，这是今天第 {count} 次。
-
-【任务】像你（当前角色）在旁边看见他切窗口一样，直接对 Master 说一句。
-			不强制吐槽；根据使用时长、次数和上下文选择关心、提醒、疑问、陪一句或轻轻戳他。
-			可以适当用疑问句或轻反问，不要每次都写成陈述判断。
-			不要评价页面“实用/详尽/清晰”，要说他正在看这件事给你的感觉。
-			不要总结他的行为，不要说“用户正在/屏幕上/当前窗口显示”。
-			不要使用 🌸 或其他装饰 emoji。
-		{context.text_style_block}
-		{context.recent_sensor_reply_block}
-【聚焦】只围绕当前活跃窗口说；不要把近期观察里的其他软件当成现在的主视角。
-			【字数限制】最多 36 个字，1 到 2 句短句。用符合你当前人设的说法表达即可。不要加引号，不要动不动关心。
-				【情绪标签】先由你判断这句话该带什么表情；必须在开头加 <emo=happy|sad|angry|shy|flustered|confused|think|neutral>。不要解释标签。
-		"""
+        if str(reason or "").strip().lower() == "duration":
+            scene_line = (
+                f"用户已经在窗口 [{clean_title}] ({category}) 上停留了一段时间，"
+                f"今天独立会话约第 {count} 段（短失焦不算重新打开）。"
+            )
+        else:
+            scene_line = (
+                f"用户刚切换到窗口: [{clean_title}] ({category})，"
+                f"今天独立会话约第 {count} 段（短失焦不算重新打开）。"
+            )
+        return (
+            f"{context.sensor_persona_prompt}\n"
+            f"{scene_line}\n"
+            f"{self._talk_rules()}\n"
+            f"{context.text_style_block}\n"
+            f"{context.recent_sensor_reply_block}"
+        )
 
     async def run_text_generation(
         self,
@@ -625,12 +628,14 @@ class SensorEventService:
         category: str,
         count: int,
         chat_with_ai: Callable[..., str],
+        reason: str = "switch",
     ) -> SensorReplyGenerationResult:
         prompt = self.build_text_prompt(
             context=context,
             clean_title=clean_title,
             category=category,
             count=count,
+            reason=reason,
         )
         try:
             observation_event_id = context.record_observation(clean_title, "text")
@@ -676,6 +681,7 @@ class SensorEventService:
                 event_title=clean_title,
                 app_name=display_app,
                 active_title_getter=active_title_getter,
+                alternate_titles=self._rust_focus_titles(),
             )
             if not focus.ok:
                 self._log_info(
@@ -747,4 +753,5 @@ class SensorEventService:
             category=category,
             count=count,
             chat_with_ai=chat_with_ai,
+            reason=reason,
         )

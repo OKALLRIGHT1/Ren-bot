@@ -14,10 +14,54 @@ from typing import Any, Iterable, Optional
 CURRENT_SCHEMA_VERSION = 1
 CHARACTER_SUBJECT_PREFIX = "character:"
 CHARACTER_PROFILE_REPAIR_KEY = "character_profile_repair_v1"
+PERSONA_CURRENT_REPAIR_KEY = "persona_current_repair_v1"
+USER_TASK_QUESTION_ARCHIVE_KEY = "user_task_question_archive_v1"
+PERSONA_KINDS = frozenset({"preference", "fact", "rule", "profile", "relation"})
+PERSONA_SUPERSEDE_KINDS = ("preference", "fact", "rule", "profile", "relation")
 
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def parse_memory_time(value: Any) -> Optional[float]:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except Exception:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.timestamp()
+
+
+def normalize_memory_time(value: Any) -> Optional[str]:
+    timestamp = parse_memory_time(value)
+    if timestamp is None:
+        return None
+    return datetime.fromtimestamp(timestamp, tz=timezone.utc).isoformat()
+
+
+def is_current(record: Optional[dict[str, Any]], now: Any = None) -> bool:
+    if not record:
+        return False
+    if str(record.get("status") or "") != "active":
+        return False
+    if isinstance(now, (int, float)):
+        now_ts = float(now)
+    else:
+        now_ts = parse_memory_time(now)
+    if now_ts is None:
+        now_ts = time.time()
+    valid_from = parse_memory_time(record.get("valid_from"))
+    valid_until = parse_memory_time(record.get("valid_until"))
+    if valid_from is not None and valid_from > now_ts:
+        return False
+    if valid_until is not None and valid_until <= now_ts:
+        return False
+    return True
 
 
 def _json(value: Any) -> str:
@@ -138,11 +182,13 @@ class MemoryCoreRepository:
                     evidence_id TEXT NOT NULL DEFAULT '',
                     quote TEXT NOT NULL DEFAULT '',
                     created_at TEXT NOT NULL,
+                    observed_at TEXT,
                     UNIQUE(memory_id, evidence_type, evidence_id),
                     FOREIGN KEY(memory_id) REFERENCES memory_records(id) ON DELETE CASCADE
                 )
                 """
             )
+            self._ensure_evidence_observed_at(conn)
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS person_profile_snapshots (
@@ -233,12 +279,15 @@ class MemoryCoreRepository:
 
         migrated = self._migrate_legacy_rows() + self._migrate_legacy_files()
         repaired = self._repair_legacy_character_profiles(character_catalog or {})
+        current_repaired = self._repair_persona_current_records()
+        archived_tasks = self._archive_question_user_tasks()
+        self._ensure_persona_unique_indexes()
         self._archive_empty_records()
         self.enqueue_missing_vector_jobs()
         return {
             "schema_version": CURRENT_SCHEMA_VERSION,
             "migrated": migrated,
-            "repaired": repaired,
+            "repaired": repaired + current_repaired + archived_tasks,
         }
 
     def _archive_empty_records(self) -> None:
@@ -287,6 +336,167 @@ class MemoryCoreRepository:
         for column, ddl in additions.items():
             if column not in columns:
                 conn.execute(f"ALTER TABLE expression_patterns ADD COLUMN {ddl}")
+
+    @staticmethod
+    def _ensure_evidence_observed_at(conn: sqlite3.Connection) -> None:
+        rows = conn.execute("PRAGMA table_info(memory_evidence)").fetchall()
+        columns = {str(row[1]) for row in rows}
+        if "observed_at" not in columns:
+            conn.execute("ALTER TABLE memory_evidence ADD COLUMN observed_at TEXT")
+
+    def _meta_value(self, conn: sqlite3.Connection, key: str) -> str:
+        row = conn.execute(
+            "SELECT value FROM memory_core_meta WHERE key=?",
+            (key,),
+        ).fetchone()
+        return str(row["value"] if row else "")
+
+    def _set_meta_value(self, conn: sqlite3.Connection, key: str, value: str) -> None:
+        conn.execute(
+            "INSERT INTO memory_core_meta(key,value,updated_at) VALUES(?,?,?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
+            (key, value, _now_iso()),
+        )
+
+    def _repair_persona_current_records(self) -> int:
+        conn = self._connect()
+        if self._meta_value(conn, PERSONA_CURRENT_REPAIR_KEY) == "done":
+            return 0
+        now = _now_iso()
+        now_ts = time.time()
+        rows = conn.execute(
+            "SELECT * FROM memory_records WHERE status='active' AND key<>'' "
+            "AND kind IN (" + ",".join("?" for _ in PERSONA_KINDS) + ")",
+            tuple(PERSONA_KINDS),
+        ).fetchall()
+        groups: dict[tuple[str, str, str], list[sqlite3.Row]] = {}
+        for row in rows:
+            identity = (
+                str(row["subject_id"] or ""),
+                str(row["kind"] or ""),
+                str(row["key"] or ""),
+            )
+            groups.setdefault(identity, []).append(row)
+        locked_conflicts: list[str] = []
+        for members in groups.values():
+            locked = [row for row in members if bool(row["manual_lock"])]
+            if len(locked) > 1:
+                locked_conflicts.extend(str(row["id"]) for row in locked)
+        if locked_conflicts:
+            raise RuntimeError(
+                "persona current repair stopped: multiple manual_lock actives "
+                + ",".join(locked_conflicts)
+            )
+        repaired = 0
+        for members in groups.values():
+            keep = max(
+                members,
+                key=lambda row: (
+                    1 if bool(row["manual_lock"]) else 0,
+                    str(row["last_confirmed_at"] or ""),
+                    str(row["updated_at"] or ""),
+                ),
+            )
+            keep_id = str(keep["id"])
+            if str(keep["session_id"] or ""):
+                conn.execute(
+                    "UPDATE memory_records SET session_id='', updated_at=? WHERE id=?",
+                    (now, keep_id),
+                )
+                repaired += 1
+            for row in members:
+                if str(row["id"]) == keep_id:
+                    continue
+                conn.execute(
+                    "UPDATE memory_records SET status='superseded', valid_until=?, updated_at=? WHERE id=?",
+                    (now, now, str(row["id"])),
+                )
+                self._enqueue_vector_job_conn(conn, str(row["id"]), "delete", now)
+                repaired += 1
+            valid_until = parse_memory_time(keep["valid_until"])
+            if valid_until is not None and valid_until <= now_ts:
+                conn.execute(
+                    "UPDATE memory_records SET status='superseded', updated_at=? WHERE id=?",
+                    (now, keep_id),
+                )
+                self._enqueue_vector_job_conn(conn, keep_id, "delete", now)
+                repaired += 1
+        self._set_meta_value(conn, PERSONA_CURRENT_REPAIR_KEY, "done")
+        conn.commit()
+        return repaired
+
+    @staticmethod
+    def _looks_like_question_user_task(content: str) -> bool:
+        raw = str(content or "").strip()
+        if not raw:
+            return False
+        if "?" in raw or "？" in raw:
+            return True
+        if raw.rstrip().endswith(("吗", "么", "呢", "嘛")):
+            return True
+        return any(
+            cue in raw
+            for cue in ("还记得", "记得吗", "记得不", "你记得", "记得我", "记得上次", "记得之前")
+        )
+
+    def _archive_question_user_tasks(self) -> int:
+        conn = self._connect()
+        now = _now_iso()
+        rows = conn.execute(
+            "SELECT id, content FROM memory_records "
+            "WHERE status='active' AND kind='other' AND key='user_task'"
+        ).fetchall()
+        archived = 0
+        for row in rows:
+            if not self._looks_like_question_user_task(str(row["content"] or "")):
+                continue
+            conn.execute(
+                "UPDATE memory_records SET status='archived', updated_at=? WHERE id=?",
+                (now, str(row["id"])),
+            )
+            self._enqueue_vector_job_conn(conn, str(row["id"]), "delete", now)
+            archived += 1
+        self._set_meta_value(conn, USER_TASK_QUESTION_ARCHIVE_KEY, "done")
+        conn.commit()
+        return archived
+
+    def _persona_unique_kind_clause(self) -> str:
+        kinds = ",".join(f"'{item}'" for item in sorted(PERSONA_KINDS))
+        return f"kind IN ({kinds})"
+
+    def _ensure_persona_unique_indexes(self) -> None:
+        kind_clause = self._persona_unique_kind_clause()
+        with self._connect() as conn:
+            existing = {
+                str(row[0]): str(row[1] or "")
+                for row in conn.execute(
+                    "SELECT name, sql FROM sqlite_master "
+                    "WHERE type='index' AND name IN ("
+                    "'idx_memory_records_persona_active',"
+                    "'idx_memory_records_session_active')"
+                )
+            }
+            persona_sql = (
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_memory_records_persona_active "
+                "ON memory_records(subject_id, kind, key) "
+                f"WHERE status='active' AND key<>'' AND session_id='' AND {kind_clause}"
+            )
+            session_sql = (
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_memory_records_session_active "
+                "ON memory_records(subject_id, session_id, kind, key) "
+                f"WHERE status='active' AND key<>'' AND session_id<>'' AND {kind_clause}"
+            )
+            if existing.get("idx_memory_records_persona_active") and kind_clause not in existing[
+                "idx_memory_records_persona_active"
+            ]:
+                conn.execute("DROP INDEX IF EXISTS idx_memory_records_persona_active")
+            if existing.get("idx_memory_records_session_active") and kind_clause not in existing[
+                "idx_memory_records_session_active"
+            ]:
+                conn.execute("DROP INDEX IF EXISTS idx_memory_records_session_active")
+            conn.execute(persona_sql)
+            conn.execute(session_sql)
+            conn.commit()
 
     def _migrate_legacy_rows(self) -> int:
         migrated = 0
@@ -834,6 +1044,18 @@ class MemoryCoreRepository:
         source = re.sub(r"\s+", "", source)
         return hashlib.sha256(source.encode("utf-8")).hexdigest()[:24]
 
+    def _is_persona_kind(self, kind: str) -> bool:
+        return str(kind or "").strip().lower() in PERSONA_KINDS
+
+    def _normalize_valid_from(self, value: Any, *, now_ts: float) -> Optional[str]:
+        normalized = normalize_memory_time(value)
+        if not normalized:
+            return None
+        parsed = parse_memory_time(normalized)
+        if parsed is not None and parsed > now_ts:
+            return None
+        return normalized
+
     def upsert_record(
         self,
         *,
@@ -852,6 +1074,49 @@ class MemoryCoreRepository:
         manual_lock: bool = False,
         metadata: Optional[dict[str, Any]] = None,
         evidence: Optional[list[dict[str, Any]]] = None,
+        supersede_keys: Optional[Iterable[str]] = None,
+        observed_at: Optional[str] = None,
+    ) -> tuple[str, bool]:
+        return self.replace_current_record(
+            kind=kind,
+            content=content,
+            key=key,
+            subject_id=subject_id,
+            session_id=session_id,
+            source_type=source_type,
+            source_id=source_id,
+            confidence=confidence,
+            importance=importance,
+            status=status,
+            valid_from=valid_from,
+            valid_until=valid_until,
+            manual_lock=manual_lock,
+            metadata=metadata,
+            evidence=evidence,
+            supersede_keys=supersede_keys,
+            observed_at=observed_at,
+        )
+
+    def replace_current_record(
+        self,
+        *,
+        kind: str,
+        content: str,
+        key: str = "",
+        subject_id: str = "",
+        session_id: str = "",
+        source_type: str = "",
+        source_id: str = "",
+        confidence: float = 0.5,
+        importance: float = 0.5,
+        status: str = "active",
+        valid_from: Optional[str] = None,
+        valid_until: Optional[str] = None,
+        manual_lock: bool = False,
+        metadata: Optional[dict[str, Any]] = None,
+        evidence: Optional[list[dict[str, Any]]] = None,
+        supersede_keys: Optional[Iterable[str]] = None,
+        observed_at: Optional[str] = None,
     ) -> tuple[str, bool]:
         kind = str(kind or "other").strip().lower() or "other"
         content = str(content or "").strip()
@@ -859,40 +1124,97 @@ class MemoryCoreRepository:
             raise ValueError("memory record content is empty")
         key = str(key or "").strip()
         subject_id = str(subject_id or "").strip()
-        session_id = str(session_id or "").strip()
+        if self._is_persona_kind(kind):
+            session_id = ""
+        else:
+            session_id = str(session_id or "").strip()
         source_type = str(source_type or "").strip()
         source_id = str(source_id or "").strip()
         confidence = max(0.0, min(1.0, float(confidence)))
         importance = max(0.0, min(1.0, float(importance)))
-        normalized_key = self._normalize_key(kind, key, content)
+        status = str(status or "active").strip() or "active"
         now = _now_iso()
+        now_ts = time.time()
+        raw_valid_from = parse_memory_time(valid_from)
+        if raw_valid_from is not None and raw_valid_from > now_ts:
+            existing = self._find_active_identity(
+                subject_id=subject_id,
+                kind=kind,
+                key=key,
+                session_id=session_id,
+            )
+            return (str(existing["id"]), False) if existing is not None else ("", False)
+        valid_from = self._normalize_valid_from(valid_from, now_ts=now_ts)
+        valid_until = normalize_memory_time(valid_until)
+        observed_at = normalize_memory_time(observed_at)
+        extra_keys = [
+            str(item or "").strip()
+            for item in (supersede_keys or [])
+            if str(item or "").strip() and str(item or "").strip() != key
+        ]
         conn = self._connect()
-
-        if source_type and source_id:
-            row = conn.execute(
-                "SELECT id FROM memory_records WHERE source_type=? AND source_id=?",
-                (source_type, source_id),
-            ).fetchone()
-            if row:
-                return str(row["id"]), False
-
-        if key and subject_id:
-            existing = conn.execute(
-                "SELECT * FROM memory_records WHERE status='active' AND subject_id=? AND kind=? AND key=? "
-                "ORDER BY manual_lock DESC, confidence DESC, updated_at DESC LIMIT 1",
-                (subject_id, kind, key),
-            ).fetchone()
-            if existing and bool(existing["manual_lock"]) and not manual_lock:
-                return str(existing["id"]), False
-            if existing and str(existing["content"] or "").strip() != content:
-                conn.execute(
-                    "UPDATE memory_records SET status='superseded', updated_at=? WHERE id=?",
-                    (now, existing["id"]),
-                )
-                self._enqueue_vector_job_conn(conn, str(existing["id"]), "delete", now)
-
-        record_id = f"mr_{uuid.uuid4().hex[:16]}"
+        conn.execute("BEGIN IMMEDIATE")
         try:
+            if source_type and source_id:
+                existing_source = conn.execute(
+                    "SELECT * FROM memory_records WHERE source_type=? AND source_id=?",
+                    (source_type, source_id),
+                ).fetchone()
+                if existing_source is not None:
+                    same_payload = (
+                        str(existing_source["kind"] or "") == kind
+                        and str(existing_source["content"] or "").strip() == content
+                    )
+                    if same_payload:
+                        conn.commit()
+                        return str(existing_source["id"]), False
+                    source_id = f"{source_id}:{uuid.uuid4().hex[:8]}"
+
+            if key and subject_id and status == "active":
+                locked = self._find_locked_active(
+                    conn,
+                    subject_id=subject_id,
+                    kind=kind,
+                    key=key,
+                    session_id=session_id,
+                )
+                if locked is not None and not manual_lock:
+                    conn.commit()
+                    return str(locked["id"]), False
+                kept = self._supersede_identity_rows(
+                    conn,
+                    subject_id=subject_id,
+                    kind=kind,
+                    key=key,
+                    session_id=session_id,
+                    now=now,
+                    now_ts=now_ts,
+                    keep_content=content,
+                    observed_at=observed_at,
+                )
+                for old_key in extra_keys:
+                    self._supersede_identity_rows(
+                        conn,
+                        subject_id=subject_id,
+                        kind=kind,
+                        key=old_key,
+                        session_id=session_id,
+                        now=now,
+                        now_ts=now_ts,
+                        keep_content=None,
+                        observed_at=observed_at,
+                        kinds=PERSONA_SUPERSEDE_KINDS if self._is_persona_kind(kind) else (kind,),
+                    )
+                if kept is not None:
+                    self._insert_evidence(conn, str(kept["id"]), evidence or [], now, observed_at)
+                    conn.execute(
+                        "UPDATE memory_records SET last_confirmed_at=?, updated_at=? WHERE id=?",
+                        (now, now, str(kept["id"])),
+                    )
+                    conn.commit()
+                    return str(kept["id"]), False
+
+            record_id = f"mr_{uuid.uuid4().hex[:16]}"
             conn.execute(
                 """
                 INSERT INTO memory_records(
@@ -908,12 +1230,12 @@ class MemoryCoreRepository:
                     subject_id,
                     session_id,
                     content,
-                    normalized_key,
+                    self._normalize_key(kind, key, content),
                     source_type,
                     source_id,
                     confidence,
                     importance,
-                    str(status or "active"),
+                    status,
                     valid_from,
                     valid_until,
                     1 if manual_lock else 0,
@@ -923,30 +1245,132 @@ class MemoryCoreRepository:
                     now,
                 ),
             )
-        except sqlite3.IntegrityError:
-            row = conn.execute(
-                "SELECT id FROM memory_records WHERE normalized_key=? AND status='active' LIMIT 1",
-                (normalized_key,),
-            ).fetchone()
-            if row:
-                return str(row["id"]), False
+            self._insert_evidence(conn, record_id, evidence or [], now, observed_at)
+            operation = "upsert" if status == "active" else "delete"
+            self._enqueue_vector_job_conn(conn, record_id, operation, now)
+            conn.commit()
+            return record_id, True
+        except Exception:
+            conn.rollback()
             raise
-        for item in evidence or []:
+
+    def _find_active_identity(
+        self,
+        *,
+        subject_id: str,
+        kind: str,
+        key: str,
+        session_id: str,
+    ) -> Optional[sqlite3.Row]:
+        if not key or not subject_id:
+            return None
+        conn = self._connect()
+        if self._is_persona_kind(kind):
+            return conn.execute(
+                "SELECT * FROM memory_records WHERE status='active' AND subject_id=? AND kind=? AND key=? "
+                "ORDER BY manual_lock DESC, last_confirmed_at DESC, updated_at DESC LIMIT 1",
+                (subject_id, kind, key),
+            ).fetchone()
+        return conn.execute(
+            "SELECT * FROM memory_records WHERE status='active' AND subject_id=? AND kind=? AND key=? "
+            "AND session_id=? ORDER BY manual_lock DESC, last_confirmed_at DESC, updated_at DESC LIMIT 1",
+            (subject_id, kind, key, session_id),
+        ).fetchone()
+
+    def _find_locked_active(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        subject_id: str,
+        kind: str,
+        key: str,
+        session_id: str,
+    ) -> Optional[sqlite3.Row]:
+        if self._is_persona_kind(kind):
+            return conn.execute(
+                "SELECT * FROM memory_records WHERE status='active' AND subject_id=? AND kind=? AND key=? "
+                "AND manual_lock=1 ORDER BY last_confirmed_at DESC, updated_at DESC LIMIT 1",
+                (subject_id, kind, key),
+            ).fetchone()
+        return conn.execute(
+            "SELECT * FROM memory_records WHERE status='active' AND subject_id=? AND kind=? AND key=? "
+            "AND session_id=? AND manual_lock=1 ORDER BY last_confirmed_at DESC, updated_at DESC LIMIT 1",
+            (subject_id, kind, key, session_id),
+        ).fetchone()
+
+    def _supersede_identity_rows(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        subject_id: str,
+        kind: str,
+        key: str,
+        session_id: str,
+        now: str,
+        now_ts: float,
+        keep_content: Optional[str],
+        observed_at: Optional[str],
+        kinds: Optional[Iterable[str]] = None,
+    ) -> Optional[sqlite3.Row]:
+        kind_list = [str(item).strip() for item in (kinds or (kind,)) if str(item).strip()]
+        placeholders = ",".join("?" for _ in kind_list)
+        args: list[Any] = [subject_id, key, *kind_list]
+        sql = (
+            f"SELECT * FROM memory_records WHERE status='active' AND subject_id=? AND key<>'' "
+            f"AND key=? AND kind IN ({placeholders})"
+        )
+        if not self._is_persona_kind(kind):
+            sql += " AND session_id=?"
+            args.append(session_id)
+        rows = conn.execute(sql, args).fetchall()
+        until = observed_at or now
+        kept: Optional[sqlite3.Row] = None
+        for row in rows:
+            if (
+                keep_content is not None
+                and kept is None
+                and str(row["content"] or "").strip() == keep_content
+            ):
+                valid_until = parse_memory_time(row["valid_until"])
+                if valid_until is None or valid_until > now_ts:
+                    if self._is_persona_kind(kind) and str(row["session_id"] or ""):
+                        conn.execute(
+                            "UPDATE memory_records SET session_id='', updated_at=? WHERE id=?",
+                            (now, str(row["id"])),
+                        )
+                    kept = row
+                    continue
             conn.execute(
-                "INSERT OR IGNORE INTO memory_evidence(memory_id,evidence_type,evidence_id,quote,created_at) "
-                "VALUES(?,?,?,?,?)",
+                "UPDATE memory_records SET status='superseded', valid_until=?, session_id=CASE "
+                "WHEN ? THEN '' ELSE session_id END, updated_at=? WHERE id=?",
+                (until, 1 if self._is_persona_kind(kind) else 0, now, str(row["id"])),
+            )
+            self._enqueue_vector_job_conn(conn, str(row["id"]), "delete", now)
+        return kept
+
+    def _insert_evidence(
+        self,
+        conn: sqlite3.Connection,
+        record_id: str,
+        evidence: list[dict[str, Any]],
+        now: str,
+        default_observed_at: Optional[str],
+    ) -> None:
+        for item in evidence:
+            observed_at = normalize_memory_time(item.get("observed_at")) or default_observed_at
+            conn.execute(
+                "INSERT OR IGNORE INTO memory_evidence("
+                "memory_id,evidence_type,evidence_id,quote,created_at,observed_at"
+                ") VALUES(?,?,?,?,?,?)",
                 (
                     record_id,
                     str(item.get("type") or "transcript"),
                     str(item.get("id") or ""),
                     str(item.get("quote") or "")[:500],
                     now,
+                    observed_at,
                 ),
             )
-        operation = "upsert" if str(status or "active") == "active" else "delete"
-        self._enqueue_vector_job_conn(conn, record_id, operation, now)
-        conn.commit()
-        return record_id, True
 
     def list_records(
         self,
@@ -983,6 +1407,24 @@ class MemoryCoreRepository:
         args.append(max(1, min(2000, int(limit))))
         rows = self._connect().execute(sql, args).fetchall()
         return [self._row_to_record(row) for row in rows]
+
+    def list_current_records(
+        self,
+        *,
+        subject_id: str = "",
+        session_id: str = "",
+        kinds: Optional[Iterable[str]] = None,
+        limit: int = 200,
+        now: Any = None,
+    ) -> list[dict[str, Any]]:
+        rows = self.list_records(
+            status="active",
+            subject_id=subject_id,
+            session_id=session_id,
+            kinds=kinds,
+            limit=max(1, min(2000, int(limit))),
+        )
+        return [row for row in rows if is_current(row, now)]
 
     def get_record(self, record_id: str) -> Optional[dict[str, Any]]:
         row = self._connect().execute(
@@ -1238,6 +1680,7 @@ class MemoryCoreRepository:
             "metadata": _parse_json(row["metadata_json"], {}),
             "created_at": row["created_at"],
             "updated_at": row["updated_at"],
+            "last_confirmed_at": row["last_confirmed_at"] if "last_confirmed_at" in row.keys() else None,
         }
 
     def list_transcript_candidates(

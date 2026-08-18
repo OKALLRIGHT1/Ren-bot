@@ -63,9 +63,8 @@ class EmotionReplyService:
             lines.extend(mood_context)
         lines.extend(
             [
-                "- 回复时把它当作上一秒的情绪状态：可以延续、变淡，也可以根据语境直接改变。",
-                "- 每次回复都必须在正文最开头输出一个情绪标签：<emo=happy|sad|angry|shy|flustered|confused|think|neutral>。",
-                "- 情绪由你根据当前语境判断；不要因为旧表情而机械保持，也不要无理由固定 neutral。",
+                "- 把这当作上一秒的状态：可以延续、变淡，也可以按语境改。",
+                "- 不要因为旧表情机械保持，也不要无理由固定 neutral。",
             ]
         )
         return "\n".join(lines)

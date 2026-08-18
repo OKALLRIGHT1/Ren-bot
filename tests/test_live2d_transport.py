@@ -7,6 +7,7 @@ from modules.live2d_transport import (
     Live2DDelivery,
     Live2DDeliveryError,
     Live2DTransportBus,
+    select_live2d_transports,
 )
 
 
@@ -119,6 +120,42 @@ async def test_gui_transport_rejects_silent_no_delivery():
                 message={"msg": 13200, "msgId": 2, "data": {"mtn": "idle"}},
             )
         )
+
+
+@pytest.mark.asyncio
+async def test_bus_skips_legacy_when_gui_client_is_capable():
+    local = RecordingTransport("legacy_local_ws")
+    gui = RecordingTransport("gui_ws")
+    bus = Live2DTransportBus(
+        [local, gui],
+        id_factory=lambda: "cmd-gui",
+        selector=lambda transports: select_live2d_transports(
+            transports, has_gui_client=lambda: True
+        ),
+    )
+    result = await bus.send({"msg": 13200, "msgId": 2, "data": {"mtn": "idle"}})
+    assert result.delivered == 1
+    assert result.errors == []
+    assert local.calls == []
+    assert len(gui.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_bus_uses_legacy_when_no_gui_client():
+    local = RecordingTransport("legacy_local_ws")
+    gui = RecordingTransport("gui_ws")
+    bus = Live2DTransportBus(
+        [local, gui],
+        id_factory=lambda: "cmd-legacy",
+        selector=lambda transports: select_live2d_transports(
+            transports, has_gui_client=lambda: False
+        ),
+    )
+    result = await bus.send({"msg": 13302, "msgId": 4, "data": {}})
+    assert result.delivered == 1
+    assert result.errors == []
+    assert len(local.calls) == 1
+    assert gui.calls == []
 
 
 def test_live2d_connection_timeout_is_five_seconds():

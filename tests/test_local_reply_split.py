@@ -1,4 +1,7 @@
-from services.chat_support.text_splitter import split_chat_text_parts
+from services.chat_support.text_splitter import (
+    split_assistant_display_parts,
+    split_chat_text_parts,
+)
 
 
 def test_split_chat_text_parts_splits_natural_paragraphs_like_qq():
@@ -47,3 +50,18 @@ def test_silent_bubble_segments_use_chat_part_splitting():
     text = "第一段。\n\n第二段。\n第三段。"
 
     assert split_local_bubble_text_parts(text) == ["第一段。", "第二段。", "第三段。"]
+
+
+def test_finished_sentences_stay_separate_even_when_under_chunk_limit():
+    text = (
+        "嗯……Master酱说的“完美”，我会好好收在心里的。"
+        "台风的话，上海这边……秋天偶尔会有它的尾巴扫过。"
+        "但比起那个，我更担心你加班太晚，路上被风吹到。"
+    )
+
+    assert split_chat_text_parts(text, max_len=80) == [
+        "嗯……Master酱说的“完美”，我会好好收在心里的。",
+        "台风的话，上海这边……秋天偶尔会有它的尾巴扫过。",
+        "但比起那个，我更担心你加班太晚，路上被风吹到。",
+    ]
+    assert split_assistant_display_parts(text) == split_chat_text_parts(text, max_len=80)

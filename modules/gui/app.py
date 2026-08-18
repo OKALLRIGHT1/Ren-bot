@@ -18,7 +18,7 @@ from modules.gui.styles import (
     get_tool_dialog_styles,
     get_memory_dialog_styles,
 )
-from modules.gui.utils import resolve_icon, set_dot_status, classify_status
+from modules.gui.utils import resolve_icon, set_dot_status, classify_status, elide_label_text
 from modules.gui.runtime_health_view import (
     RUNTIME_HEALTH_REFRESH_INTERVAL_MS,
     overall_presentation,
@@ -43,7 +43,11 @@ except ImportError:
 
 
 WORK_SESSION_EMPTY_LABEL = "久坐时间 --"
-WORK_SESSION_LABEL_WIDTH = 168
+WORK_SESSION_LABEL_MIN_WIDTH = 88
+WORK_SESSION_LABEL_MAX_WIDTH = 168
+PANEL_MIN_WIDTH = 360
+PANEL_COMPACT_HEIGHT = 156
+PANEL_EXPANDED_MIN_HEIGHT = 280
 WORK_SESSION_REFRESH_INTERVAL_MS = 10_000
 
 
@@ -336,24 +340,37 @@ class QtChatTrayApp(QtCore.QObject):
 
         self._lbl_status = QtWidgets.QLabel("Ready")
         self._lbl_status.setObjectName("statusLabel")
+        self._lbl_status.setMinimumWidth(48)
+        self._lbl_status.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Preferred,
+            QtWidgets.QSizePolicy.Policy.Fixed,
+        )
 
         self._lbl_character = QtWidgets.QLabel("")
         self._lbl_character.setObjectName("characterLabel")
+        self._lbl_character.setMinimumWidth(0)
+        self._lbl_character.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Ignored,
+            QtWidgets.QSizePolicy.Policy.Fixed,
+        )
+        self._character_full_text = ""
         self._current_costume_name = self._resolve_initial_costume_name()
         self._refresh_character_status()
 
         self._lbl_work_session = QtWidgets.QLabel("")
         self._lbl_work_session.setObjectName("workSessionLabel")
-        self._lbl_work_session.setFixedWidth(WORK_SESSION_LABEL_WIDTH)
+        self._lbl_work_session.setMinimumWidth(WORK_SESSION_LABEL_MIN_WIDTH)
+        self._lbl_work_session.setMaximumWidth(WORK_SESSION_LABEL_MAX_WIDTH)
         self._lbl_work_session.setAlignment(
             QtCore.Qt.AlignmentFlag.AlignCenter
             | QtCore.Qt.AlignmentFlag.AlignVCenter
         )
         self._lbl_work_session.setSizePolicy(
-            QtWidgets.QSizePolicy.Policy.Fixed,
+            QtWidgets.QSizePolicy.Policy.Preferred,
             QtWidgets.QSizePolicy.Policy.Fixed,
         )
         self._lbl_work_session.setTextFormat(QtCore.Qt.TextFormat.PlainText)
+        self._work_session_full_text = WORK_SESSION_EMPTY_LABEL
 
         self._btn_runtime_health = QtWidgets.QPushButton("●")
         self._btn_runtime_health.setObjectName("runtimeHealthButton")
@@ -389,10 +406,9 @@ class QtChatTrayApp(QtCore.QObject):
 
         top_bar.addWidget(self._dot)
         top_bar.addWidget(self._lbl_status)
-        top_bar.addWidget(self._lbl_character)
+        top_bar.addWidget(self._lbl_character, 1)
         top_bar.addWidget(self._lbl_work_session)
         top_bar.addWidget(self._btn_runtime_health)
-        top_bar.addStretch(1)
         top_bar.addWidget(window_ctl)
         main_vbox.addWidget(title_bar)
 
@@ -490,10 +506,47 @@ class QtChatTrayApp(QtCore.QObject):
             "background: transparent; width: 20px; height: 20px;"
         )
         self._stack.addWidget(self._panel_widget)
+        # 默认启动为悬浮球；面板最小尺寸在切入 panel 时再施加。
+        w.setMinimumSize(0, 0)
         self._enable_drag(w)
         self._refresh_companion_summary()
+        self._install_panel_resize_guard(w)
 
         return w
+
+    def _install_panel_resize_guard(self, window: QtWidgets.QWidget) -> None:
+        original_resize = window.resizeEvent
+
+        def _on_resize(event):
+            if callable(original_resize):
+                original_resize(event)
+            self._adapt_panel_for_width(window.width())
+
+        window.resizeEvent = _on_resize  # type: ignore[method-assign]
+
+    def _adapt_panel_for_width(self, width: int) -> None:
+        if getattr(self, "_is_ball_mode", False):
+            return
+        # 窄宽时优先保住输入区和窗口控制，次要信息做省略/隐藏。
+        narrow = width < 420
+        very_narrow = width < 380
+        if hasattr(self, "_lbl_character"):
+            self._lbl_character.setVisible(not very_narrow)
+            if self._lbl_character.isVisible():
+                elide_label_text(
+                    self._lbl_character,
+                    getattr(self, "_character_full_text", "") or self._lbl_character.text(),
+                    max_width=max(48, self._lbl_character.width() - 4),
+                )
+        if hasattr(self, "_lbl_work_session"):
+            self._lbl_work_session.setVisible(not narrow)
+            if self._lbl_work_session.isVisible():
+                full = getattr(self, "_work_session_full_text", "") or self._lbl_work_session.text()
+                elide_label_text(
+                    self._lbl_work_session,
+                    full,
+                    max_width=max(48, self._lbl_work_session.width() - 8),
+                )
 
     def _refresh_companion_summary(self, status_text: Optional[str] = None):
         try:
@@ -602,14 +655,18 @@ class QtChatTrayApp(QtCore.QObject):
 
         if not hasattr(self, "_lbl_work_session"):
             return
-        metrics = self._lbl_work_session.fontMetrics()
-        text_width = max(24, self._lbl_work_session.contentsRect().width() - 16)
-        display_text = metrics.elidedText(
-            label, QtCore.Qt.TextElideMode.ElideRight, text_width
-        )
-        self._lbl_work_session.setText(display_text)
+        self._work_session_full_text = label
         self._lbl_work_session.setToolTip(tooltip or label)
-        self._lbl_work_session.setVisible(True)
+        win = getattr(self, "_win", None)
+        if win is not None and not getattr(self, "_is_ball_mode", False):
+            self._adapt_panel_for_width(win.width())
+        else:
+            elide_label_text(
+                self._lbl_work_session,
+                label,
+                max_width=max(48, self._lbl_work_session.width() - 8),
+            )
+            self._lbl_work_session.setVisible(True)
 
     def _show_more_menu(self):
         menu = QtWidgets.QMenu(self._btn_more)
@@ -709,15 +766,27 @@ class QtChatTrayApp(QtCore.QObject):
         if (x, y) != (win.x(), win.y()):
             self._win.move(x, y)
 
+    def _apply_panel_size_constraints(self, *, expanded: Optional[bool] = None) -> None:
+        """Panel mode keeps a safe floor; ball mode must not inherit panel mins."""
+        if expanded is None:
+            expanded = bool(getattr(self._win, "_is_full_mode", False))
+        min_h = PANEL_EXPANDED_MIN_HEIGHT if expanded else PANEL_COMPACT_HEIGHT
+        # 解除 setFixedSize 留下的 max 限制，允许用户继续拖大。
+        self._win.setMaximumSize(16777215, 16777215)
+        self._win.setMinimumSize(PANEL_MIN_WIDTH, min_h)
+
     def _switch_to_ball(self):
-        if self._is_ball_mode:
-            return
         curr = self._win.geometry()
+        was_panel = not self._is_ball_mode
+        if was_panel:
+            self._last_panel_size = curr.size()
         self._is_ball_mode = True
         self._stack.setCurrentIndex(0)
         s = BALL_CONFIG.get("size", 60)
-        self._win.resize(s + 10, s + 10)
-        self._win.move(curr.x() + OFFSET_X, curr.y())
+        # QStackedLayout 会取各页最大 minimum；球模式用 fixed size 彻底脱开面板下限。
+        self._win.setFixedSize(s + 10, s + 10)
+        if was_panel:
+            self._win.move(curr.x() + OFFSET_X, curr.y())
         self._ensure_on_screen()
 
     def _switch_to_panel(self):
@@ -726,22 +795,42 @@ class QtChatTrayApp(QtCore.QObject):
         curr = self._win.geometry()
         self._is_ball_mode = False
         self._stack.setCurrentIndex(1)
-        self._win.resize(self._last_panel_size)
+        self._apply_panel_size_constraints()
+        target = self._last_panel_size
+        if target.width() < PANEL_MIN_WIDTH:
+            target.setWidth(PANEL_MIN_WIDTH)
+        min_h = (
+            PANEL_EXPANDED_MIN_HEIGHT
+            if getattr(self._win, "_is_full_mode", False)
+            else PANEL_COMPACT_HEIGHT
+        )
+        if target.height() < min_h:
+            target.setHeight(min_h)
+        self._win.resize(target)
         self._win.move(curr.x() - OFFSET_X, curr.y())
         self._ensure_on_screen()
+        self._adapt_panel_for_width(self._win.width())
 
     def _toggle_full(self):
         is_full = getattr(self._win, "_is_full_mode", False)
+        width = max(PANEL_MIN_WIDTH, self._win.width())
         if is_full:
             self._win._is_full_mode = False
             self._history.setVisible(False)
             self._btn_expand.setText("⌄")
-            self._win.resize(self._win.width(), 156)
+            self._apply_panel_size_constraints(expanded=False)
+            self._win.resize(width, PANEL_COMPACT_HEIGHT)
         else:
             self._win._is_full_mode = True
             self._history.setVisible(True)
             self._btn_expand.setText("⌃")
-            self._win.resize(self._win.width(), 376)
+            self._apply_panel_size_constraints(expanded=True)
+            expanded_h = max(
+                PANEL_EXPANDED_MIN_HEIGHT, self._last_panel_size.height(), 360
+            )
+            self._win.resize(width, expanded_h)
+        self._last_panel_size = self._win.size()
+        self._adapt_panel_for_width(width)
 
     # 🟢 新增：免打扰切换逻辑
     def _toggle_dnd(self):
@@ -904,7 +993,12 @@ class QtChatTrayApp(QtCore.QObject):
             self._current_costume_name = "未设定"
 
         costume_name = self._current_costume_name or "未设定"
-        self._lbl_character.setText(f"角色: {char_name} | 服装: {costume_name}")
+        self._character_full_text = f"角色: {char_name} | 服装: {costume_name}"
+        win = getattr(self, "_win", None)
+        if win is not None and not getattr(self, "_is_ball_mode", False):
+            self._adapt_panel_for_width(win.width())
+        else:
+            self._lbl_character.setText(self._character_full_text)
         self._refresh_companion_summary()
         self._publish_display_state()
 

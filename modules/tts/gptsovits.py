@@ -2,6 +2,7 @@
 import os
 import asyncio
 import tempfile
+import time
 import requests
 import wave
 from typing import Callable, Awaitable, Optional, Tuple
@@ -62,6 +63,8 @@ class GPTSoVITSTTS(BaseTTS):
         self.verbose = bool(verbose)
         self.lock = asyncio.Lock()
         self.ready = False
+        self.last_error = ""
+        self.last_probe_at = 0.0
         self.runtime_cfg = {
             "enabled": False,
             "gpt_w": str(GPT_W or "").strip(),
@@ -125,11 +128,15 @@ class GPTSoVITSTTS(BaseTTS):
             self._req("/set_sovits_weights", {"weights_path": sov_path})
 
             self.ready = True
+            self.last_error = ""
+            self.last_probe_at = time.time()
             if self.verbose:
                 print(f"✅ [GPT-SoVITS] 就绪 | base={self.base}")
 
         except Exception as e:
             self.ready = False
+            self.last_error = str(e)
+            self.last_probe_at = time.time()
             if self.verbose:
                 print(f"⚠️ [GPT-SoVITS] 不可用: {e}")
 
@@ -233,6 +240,25 @@ class GPTSoVITSTTS(BaseTTS):
                     lip_data = self.lip_sync_engine.fade_lip_data(lip_data)
             except Exception:
                 pass
+        # 即使没开 Rhubarb，也给一段时长回退口型，避免“有声但不张嘴”。
+        if not lip_data:
+            try:
+                from modules.lip_sync import RhubarbLipSync
+                from modules.text_lip_sync import build_text_lip_sync
+
+                duration = 0.0
+                try:
+                    duration = float(
+                        RhubarbLipSync()._estimate_audio_duration(wav_path) or 0.0
+                    )
+                except Exception:
+                    duration = 0.0
+                if duration <= 0:
+                    duration = _estimate_wav_duration_sec(wav_path, "")
+                if duration > 0:
+                    lip_data = build_text_lip_sync("说话中", duration)
+            except Exception:
+                lip_data = None
 
         if emotion:
             try:

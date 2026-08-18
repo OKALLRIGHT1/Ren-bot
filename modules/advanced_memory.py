@@ -32,8 +32,8 @@ from modules.memory import (
     build_memory_metadata,
     clean_injected_context,
     deserialize_vector_metadata,
+    format_knowledge_hits_for_prompt,
     post_process_memory_candidates,
-    retrieve_knowledge_chunks,
     serialize_vector_metadata,
 )
 from modules.memory.short_term import ShortTermMemoryManager
@@ -44,7 +44,9 @@ from modules.embeddings import (
 )
 from modules.runtime_settings import load_runtime_settings_strict
 from modules.memory_core import MemoryCoreService, MemoryVectorIndex
+from modules.memory.knowledge_gate import knowledge_retrieval_decision
 from modules.memory.knowledge_store import (
+    clear_knowledge_manifest,
     delete_knowledge_by_dirs,
     import_knowledge_from_file as import_knowledge_file_modular,
     search_knowledge as search_knowledge_modular,
@@ -161,6 +163,10 @@ class AdvancedMemorySystem:
 
         # 5. 短期记忆 (RAM)
         self.max_short_term = int(MEMORY_SETTINGS.get("max_short_term", 12))
+        self.short_term_max_age_sec = max(
+            0,
+            int(MEMORY_SETTINGS.get("short_term_max_age_sec", 86400) or 86400),
+        )
         self.short_term_manager = ShortTermMemoryManager(
             self.sqlite_store, self.max_short_term
         )
@@ -325,6 +331,9 @@ class AdvancedMemorySystem:
         self.debug_prompt_injection = bool(
             MEMORY_SETTINGS.get("debug_prompt_injection", False)
         )
+        self.knowledge_auto_retrieval_enabled = bool(
+            MEMORY_SETTINGS.get("knowledge_auto_retrieval_enabled", True)
+        )
 
         # 缓存
         self._query_cache = {}
@@ -401,7 +410,7 @@ class AdvancedMemorySystem:
     def _ensure_knowledge_collection_compatible(self) -> None:
         if self.knowledge_embedding_compatibility.get("rebuild_required"):
             raise EmbeddingUnavailableError(
-                "知识库向量与当前嵌入模型不兼容，请清空并重新导入知识库"
+                "知识库向量与当前嵌入模型不兼容，请在知识库管理里先点「重建索引库」，再点「一键学习」"
             )
 
     def get_memory_vector_status(self) -> dict:
@@ -540,6 +549,7 @@ class AdvancedMemorySystem:
                     dimension=self.embedding_service.expected_dimension,
                 )
             )
+            clear_knowledge_manifest()
             return True
         except Exception:
             return False
@@ -584,6 +594,9 @@ class AdvancedMemorySystem:
                         event_store.list_dialog_window(
                             conversation_scope,
                             limit=max(1, int(self.max_short_term)),
+                            max_age_sec=int(
+                                getattr(self, "short_term_max_age_sec", 86400) or 0
+                            ),
                         )
                     )
                 except Exception as exc:
@@ -1270,10 +1283,14 @@ Output ONLY "YES" or "NO".
         return items[: max(1, int(limit))]
 
     # ---------- 新增：导入知识（修复 hash(chunk) 不稳定问题） ----------
-    def import_knowledge_from_file(self, file_path, progress_callback=None):
+    def import_knowledge_from_file(self, file_path, progress_callback=None, *, force: bool = False):
         self._ensure_knowledge_collection_compatible()
         result = import_knowledge_file_modular(
-            self.knowledge_collection, self._stable_md5, file_path, progress_callback=progress_callback
+            self.knowledge_collection,
+            self._stable_md5,
+            file_path,
+            progress_callback=progress_callback,
+            force=force,
         )
         if isinstance(result, dict):
             return result
@@ -1729,10 +1746,24 @@ Output ONLY "YES" or "NO".
                 character_profile_text = ""
 
         know_text = ""
-        if not tool_mode and memory_intent == "none" and len(raw_user) >= 8:
+        retrieve_knowledge, knowledge_reason = knowledge_retrieval_decision(
+            raw_user,
+            memory_intent=memory_intent,
+            tool_mode=tool_mode,
+            enabled=bool(
+                getattr(self, "knowledge_auto_retrieval_enabled", True)
+            ),
+        )
+        self._last_knowledge_skip_reason = (
+            None if retrieve_knowledge else knowledge_reason
+        )
+        if retrieve_knowledge:
             know_items = self._retrieve_knowledge(raw_user, k=2)
-            if know_items:
-                know_text = "\n".join([f"· {item}" for item in know_items])
+            know_text = format_knowledge_hits_for_prompt(know_items)
+        else:
+            logger = getattr(self, "_logger", None)
+            if logger is not None:
+                logger.debug("knowledge_skipped_reason=%s", knowledge_reason)
 
         sqlite_tasks_text = ""
         try:

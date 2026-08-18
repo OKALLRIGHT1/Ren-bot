@@ -240,3 +240,59 @@ def test_router_uses_vision_screen_capability_when_available():
     assert route.need_tools is True
     assert route.tool_triggers == ["vision"]
     assert route.reason == "capability:vision.screen"
+
+
+class _DiaryPlugin:
+    name = "日记管家"
+    aliases = ["check_history", "check_diary", "review_yesterday"]
+
+
+class _TaskPlugin:
+    name = "任务中枢"
+    aliases = ["任务", "待办", "todo", "计划"]
+
+
+def test_router_does_not_treat_casual_yesterday_as_diary():
+    route = ToolRouter(
+        react_map={"diary_manager": _DiaryPlugin()},
+        direct_map={},
+        delegate_map={},
+    ).route("昨天好累")
+
+    assert route.need_tools is False
+    assert route.reason == "no_tool_intent"
+
+
+def test_router_routes_explicit_diary_recall():
+    route = ToolRouter(
+        react_map={"diary_manager": _DiaryPlugin()},
+        direct_map={},
+        delegate_map={},
+    ).route("昨天干了什么")
+
+    assert route.need_tools is True
+    assert route.tool_triggers == ["diary_manager"]
+    assert route.reason == "intent_keyword_matched"
+
+
+def test_router_does_not_treat_casual_task_mention_as_task_tool():
+    route = ToolRouter(
+        react_map={"task": _TaskPlugin()},
+        direct_map={},
+        delegate_map={},
+    ).route("这个任务好烦")
+
+    assert route.need_tools is False
+    assert route.reason == "no_tool_intent"
+
+
+def test_router_routes_explicit_task_list_request():
+    route = ToolRouter(
+        react_map={"task": _TaskPlugin()},
+        direct_map={},
+        delegate_map={},
+    ).route("看看我的任务")
+
+    assert route.need_tools is True
+    assert route.tool_triggers == ["task"]
+    assert route.reason == "intent_keyword_matched"

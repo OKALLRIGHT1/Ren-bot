@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Any, Awaitable, Callable
+from typing import Any, Callable
 
 
 class ActiveAlertService:
@@ -12,7 +12,6 @@ class ActiveAlertService:
         event_bus: Any,
         presenter: Any,
         extract_emo_tag: Callable[[str], tuple[str | None, str]],
-        polish_natural_reply: Callable[..., Awaitable[str]],
         apply_character_catchphrase: Callable[[str], str],
         logger: Any = None,
         conversation_event_service: Any = None,
@@ -21,7 +20,6 @@ class ActiveAlertService:
         self.event_bus = event_bus
         self.presenter = presenter
         self.extract_emo_tag = extract_emo_tag
-        self.polish_natural_reply = polish_natural_reply
         self.apply_character_catchphrase = apply_character_catchphrase
         self.logger = logger
         self.conversation_event_service = conversation_event_service
@@ -44,11 +42,12 @@ class ActiveAlertService:
 {base_prompt}
 
 【当前情况】
-用户已经在 [{app_name}] 上连续专注了 {minutes} 分钟，一直没动过。
+用户已经连续使用电脑（键盘/鼠标一直有活动）{minutes} 分钟了，中间没有真正休息。
+这是整机久坐，不是盯着某一个窗口。显示名「{app_name}」只表示电脑本身。
 
 【任务】
-请主动弹窗提醒他休息、喝水或活动一下。
-用你自己的语气和方式提醒，不要写成通用模板。
+请主动提醒他起来活动、喝水或休息一下。
+用你自己的语气和方式提醒，不要写成通用模板，也不要说成某个软件用太久。
 字数限制：30字以内。
 """
         try:
@@ -63,20 +62,14 @@ class ActiveAlertService:
             if not reply:
                 return
             extracted_emo, clean_reply = self.extract_emo_tag(reply)
-            clean_reply = await self.polish_natural_reply(
-                user_text=f"{app_name} {minutes}分钟提醒",
-                draft_text=clean_reply,
-                ctx={"source": "desktop"},
-                scene="chat",
-            )
             clean_reply = self.apply_character_catchphrase(clean_reply)
             if not clean_reply:
                 return
-            await self.event_bus.emit(
-                "ui.append", role="assistant", text=f"【温馨提醒】{clean_reply}"
-            )
             await self.presenter.present(
-                clean_reply, emotion=extracted_emo or "concern", interrupt=True
+                f"【温馨提醒】{clean_reply}",
+                emotion=extracted_emo or "concern",
+                interrupt=True,
+                append_ui=True,
             )
             event_service = self.conversation_event_service
             if event_service is not None and getattr(event_service, "is_ready", False):

@@ -106,6 +106,10 @@ class FakeCore:
     def list_memory_records(self, **kwargs: Any) -> List[Dict[str, Any]]:
         return self.repository.list_records(**kwargs)
 
+    def list_current_memory_records(self, **kwargs: Any) -> List[Dict[str, Any]]:
+        rows = self.repository.list_records(status="active")
+        return [row for row in rows if str(row.get("status") or "") == "active"]
+
     def list_persons(self) -> List[Dict[str, Any]]:
         return self.repository.list_persons()
 
@@ -238,6 +242,31 @@ def test_delete_core_record():
     assert deleted["ok"] is True
     missing = service.get_core_record("r1")
     assert missing["ok"] is False
+
+
+def test_list_transcript_uses_core_store():
+    class Store:
+        def list_transcript(self, **kwargs):
+            assert kwargs["role"] == "user"
+            return [{"role": "user", "content": "hi", "ts_iso": "2026-01-01T00:00:00"}]
+
+    core = FakeCore()
+    core.store = Store()
+    service = MemoryGuiService(memory_core=core, brain=FakeBrain())
+    listed = service.list_transcript(role="user", query="", limit=10)
+    assert listed["ok"] is True
+    assert listed["data"]["records"][0]["content"] == "hi"
+
+
+def test_query_vector_uses_brain():
+    class Brain(FakeBrain):
+        def query_memory_vector(self, query, *, person_id, limit):
+            return [{"id": "v1", "document": query, "vector_score": 0.5}]
+
+    service = MemoryGuiService(memory_core=FakeCore(), brain=Brain())
+    found = service.query_vector("会议", person_id="owner", limit=5)
+    assert found["ok"] is True
+    assert found["data"]["records"][0]["document"] == "会议"
 
 
 def test_vector_status_and_rebuild():

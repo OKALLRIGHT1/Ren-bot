@@ -105,6 +105,53 @@ def test_sync_skips_cooled_model_and_uses_backup(monkeypatch, clear_cooldowns):
     assert "rate limit reached" not in str(component)
 
 
+def test_sync_forwards_max_tokens(monkeypatch):
+    seen = {}
+
+    class FakeResponse:
+        class Choice:
+            class Message:
+                content = "ok"
+
+            message = Message()
+
+        choices = [Choice()]
+
+    class FakeCompletions:
+        def create(self, **kwargs):
+            seen.update(kwargs)
+            return FakeResponse()
+
+    class FakeOpenAI:
+        def __init__(self, *, api_key, base_url):
+            self.chat = type("Chat", (), {"completions": FakeCompletions()})()
+
+    monkeypatch.setattr(llm, "OpenAI", FakeOpenAI)
+    monkeypatch.setattr(
+        llm,
+        "MODELS",
+        {
+            "only": {
+                "model": "one",
+                "api_key": "x",
+                "base_url": "only",
+            }
+        },
+    )
+    monkeypatch.setattr(llm, "_build_attempt_order", lambda config, key: ["openai"])
+
+    reply = llm.chat_with_ai(
+        [{"role": "user", "content": "hello"}],
+        caller="test",
+        model_keys_override=["only"],
+        timeout_sec=2.5,
+        max_tokens=220,
+    )
+    assert reply == "ok"
+    assert seen["max_tokens"] == 220
+    assert seen["timeout"] == 2.5
+
+
 @pytest.mark.asyncio
 async def test_stream_observes_same_sync_cooldown_and_recovers_after_expiry(
     monkeypatch,
@@ -138,6 +185,40 @@ async def test_stream_observes_same_sync_cooldown_and_recovers_after_expiry(
     now["value"] = 2006.0
     assert llm._model_cooldown_remaining("shared", now=now["value"]) == 0.0
     assert "shared" not in llm._MODEL_COOLDOWNS
+
+
+def test_blocked_error_starts_model_cooldown():
+    delay = llm._start_model_cooldown(
+        "grok",
+        RuntimeError("Your request was blocked."),
+        now=1000.0,
+    )
+    assert delay == llm._BLOCKED_MODEL_COOLDOWN_SECONDS
+    remaining = llm._model_cooldown_remaining("grok", now=1000.0)
+    assert remaining == llm._BLOCKED_MODEL_COOLDOWN_SECONDS
+    assert llm._MODEL_COOLDOWNS["grok"]["reason"] == "blocked"
+
+
+def test_single_transport_timeout_does_not_cool_model():
+    delay = llm._start_model_cooldown(
+        "grok",
+        TimeoutError("Read timed out."),
+        now=1000.0,
+        all_transports_failed=False,
+    )
+    assert delay is None
+    assert "grok" not in llm._MODEL_COOLDOWNS
+
+
+def test_all_transport_timeouts_start_short_cooldown():
+    delay = llm._start_model_cooldown(
+        "grok",
+        TimeoutError("Read timed out."),
+        now=1000.0,
+        all_transports_failed=True,
+    )
+    assert delay == llm._TIMEOUT_MODEL_COOLDOWN_SECONDS
+    assert llm._MODEL_COOLDOWNS["grok"]["reason"] == "timeout"
 
 
 def test_success_clears_existing_model_cooldown():

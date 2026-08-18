@@ -10,6 +10,7 @@ from typing import Any, Dict, List
 from PySide6 import QtCore, QtWidgets
 
 from modules.gui.styles import get_tool_dialog_styles
+from modules.gui.utils import FlowLayout
 from modules.gui.dialogs.chat_record_import_wizard import ChatRecordImportWizardDialog
 
 try:
@@ -292,7 +293,8 @@ class ExpressionLibraryManagerDialog(QtWidgets.QDialog):
         self.main_app = main_app
         self.setWindowTitle("表达学习库")
         self.resize(980, 640)
-        self.setMinimumSize(860, 560)
+        # 独立窗口可用下限；嵌入设置页时由 apply_embedded_mode 清零。
+        self.setMinimumSize(720, 480)
         self._setup_ui()
         self._load_runtime_controls()
         self._refresh_table()
@@ -368,33 +370,35 @@ class ExpressionLibraryManagerDialog(QtWidgets.QDialog):
         runtime_layout.addWidget(self.btn_save_runtime, 1, 2)
         container_layout.addWidget(runtime_card)
 
-        # 过滤工具栏
-        toolbar = QtWidgets.QHBoxLayout()
-        toolbar.setSpacing(8)
-        
+        # 过滤工具栏：窄宽自动换行
+        toolbar_wrap = QtWidgets.QWidget()
+        toolbar = FlowLayout(toolbar_wrap, margin=0, h_spacing=8, v_spacing=8)
+
         self.inp_query = QtWidgets.QLineEdit()
         self.inp_query.setPlaceholderText("🔍 搜索角色 / 情境 / 风格 / 示例")
-        
+        self.inp_query.setMinimumWidth(180)
+
         self.inp_character_filter = QtWidgets.QLineEdit()
         self.inp_character_filter.setPlaceholderText("角色过滤...")
-        
+        self.inp_character_filter.setMinimumWidth(120)
+
         self.cmb_scene_filter = QtWidgets.QComboBox()
         self.cmb_scene_filter.addItem("全部场景", "")
         self.cmb_scene_filter.addItem("普通聊天", "chat")
         self.cmb_scene_filter.addItem("屏幕吐槽", "sensor")
         self.cmb_scene_filter.addItem("通用", "any")
-        
+
         self.chk_enabled_only = QtWidgets.QCheckBox("仅看启用")
-        
+
         self.btn_refresh = QtWidgets.QPushButton("⟳ 刷新")
         self.btn_refresh.setObjectName("main_btn")
-        
-        toolbar.addWidget(self.inp_query, 2)
-        toolbar.addWidget(self.inp_character_filter, 1)
+
+        toolbar.addWidget(self.inp_query)
+        toolbar.addWidget(self.inp_character_filter)
         toolbar.addWidget(self.cmb_scene_filter)
         toolbar.addWidget(self.chk_enabled_only)
         toolbar.addWidget(self.btn_refresh)
-        container_layout.addLayout(toolbar)
+        container_layout.addWidget(toolbar_wrap)
 
         # 表格
         self.table = QtWidgets.QTableWidget(0, 9)
@@ -427,15 +431,15 @@ class ExpressionLibraryManagerDialog(QtWidgets.QDialog):
         header.setSectionResizeMode(8, QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
         container_layout.addWidget(self.table, 1)
 
-        # 底部操作栏
-        actions = QtWidgets.QHBoxLayout()
-        actions.setSpacing(8)
-        
+        # 底部操作栏：窄宽自动换行
+        actions_wrap = QtWidgets.QWidget()
+        actions = FlowLayout(actions_wrap, margin=0, h_spacing=8, v_spacing=8)
+
         self.btn_add = QtWidgets.QPushButton("➕ 新增")
         self.btn_edit = QtWidgets.QPushButton("📝 编辑")
         self.btn_enable = QtWidgets.QPushButton("🟢 批量启用")
         self.btn_disable = QtWidgets.QPushButton("🔴 批量禁用")
-        
+
         self.btn_delete = QtWidgets.QPushButton("🗑️ 删除")
         danger_qss = """
             QPushButton {
@@ -458,17 +462,19 @@ class ExpressionLibraryManagerDialog(QtWidgets.QDialog):
         self.btn_close.setObjectName("main_btn")
         self.btn_close.setMinimumWidth(80)
 
-        actions.addWidget(self.btn_add)
-        actions.addWidget(self.btn_edit)
-        actions.addWidget(self.btn_enable)
-        actions.addWidget(self.btn_disable)
-        actions.addWidget(self.btn_delete)
-        actions.addStretch()
-        actions.addWidget(self.btn_import)
-        actions.addWidget(self.btn_import_chat)
-        actions.addWidget(self.btn_export)
-        actions.addWidget(self.btn_close)
-        container_layout.addLayout(actions)
+        for btn in (
+            self.btn_add,
+            self.btn_edit,
+            self.btn_enable,
+            self.btn_disable,
+            self.btn_delete,
+            self.btn_import,
+            self.btn_import_chat,
+            self.btn_export,
+            self.btn_close,
+        ):
+            actions.addWidget(btn)
+        container_layout.addWidget(actions_wrap)
 
         layout.addWidget(self.container)
 

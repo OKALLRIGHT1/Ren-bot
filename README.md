@@ -158,7 +158,7 @@ memory/memory.pre-memory-core-v1.bak.sqlite
 
 旧 `profile.json`、`learning.db` 和 reply effect 数据只会幂等迁移，不再作为运行时写入目标。记忆管理中心分为“档案概览 / 记忆记录 / 原始对话 / 向量与检索”；概览按人物及“喜欢 / 音乐 / 游戏 / 食物 / 习惯 / 近期状态”等语义分区展示，记录页负责完整编辑。手动调整分类仅写入记录的 `metadata.category_override`，不会产生第二套分类事实源。用户与 QQ 人物使用独立人物档案，角色补充档案使用稳定 `character:<角色ID>` 隔离，并只注入当前角色的自我认知上下文。
 
-当前 Memory Core 向量集合是 `memory_records` 的派生索引，SQLite 始终是唯一事实源。向量模型也在“设置中心 → 模型与路由”统一维护：给模型勾选“向量”，填写嵌入路径和维度，再到记忆管理中心的“向量与检索”页单选、测试并保存；保存后重启生效。向量模型不进入普通 LLM 多模型回退链。模型名或维度变化时，程序会阻止新旧向量混用并要求显式重建；相同 `bge-m3/1024` 的 Memory Core 派生索引迁移不会触发重建。非空且没有模型元数据的旧知识库无法证明向量来源，会要求清空后从原知识文件重新导入。旧 `waifu_memory_advanced` 继续作为按需加载的只读历史查看器。Embedding 失败时保留索引任务错误并退回 SQLite 文本召回，不会写入零向量，也不会切换到不同维度的本地模型伪装成功。
+当前 Memory Core 向量集合是 `memory_records` 的派生索引，SQLite 始终是唯一事实源。人设默认只取当前有效记录（`is_current`）；纠正会废止旧条而不是并列两条当前习惯。人设事实不带 desktop / QQ 会话号。向量模型也在“设置中心 → 模型与路由”统一维护：给模型勾选“向量”，填写嵌入路径和维度，再到记忆管理中心的“向量与检索”页单选、测试并保存；保存后重启生效。向量模型不进入普通 LLM 多模型回退链。模型名或维度变化时，程序会阻止新旧向量混用并要求显式重建；相同 `bge-m3/1024` 的 Memory Core 派生索引迁移不会触发重建。资料知识库与人设分开：普通文档按段落导入，未改文件再学会跳过；闲聊默认不查知识库，只有明确问设定 / 资料时才自动注入，并带来源文件名。非空且没有模型元数据的旧知识库无法证明向量来源，会要求清空后从原知识文件重新导入。旧 `waifu_memory_advanced` 继续作为按需加载的只读历史查看器。Embedding 失败时保留索引任务错误并退回 SQLite 文本召回，不会写入零向量，也不会切换到不同维度的本地模型伪装成功。知识库导入清单在 `data/knowledge_import_manifest.json`。
 
 角色日记使用 `episodes` 中的 `daily_log` 记录，并在“设置中心 → 高级 → 日记”单独管理。日记窗口支持搜索、编辑、删除、Markdown 导出和独立窗口打开；原始 Transcript 页面默认不再重复显示日记归档消息。
 
@@ -174,6 +174,7 @@ MEMORY_CORE_IMPRESSION_WINDOW=8
 MEMORY_CORE_PROFILE_LEARNING_ENABLED=1
 MEMORY_CORE_EXPRESSION_LEARNING_ENABLED=1
 MEMORY_CORE_LEARNING_BATCH_MESSAGES=10
+KNOWLEDGE_AUTO_RETRIEVAL_ENABLED=1
 EMBEDDING_ENABLED=1
 EMBEDDING_PROVIDER=ollama
 EMBEDDING_API_URL=http://127.0.0.1:11434/v1/embeddings
@@ -181,7 +182,7 @@ EMBEDDING_MODEL_NAME=bge-m3
 EMBEDDING_EXPECTED_DIMENSION=1024
 ```
 
-使用本地 Ollama 向量模型时，`ollama serve` 必须保持运行。知识库管理和知识插件会明确显示连接错误；普通聊天会跳过本轮知识召回继续回复，不会把连接失败伪装成“知识库没有内容”。
+使用本地 Ollama 向量模型时，`ollama serve` 必须保持运行。知识库管理和知识插件会明确显示连接错误；普通聊天会跳过本轮知识召回继续回复，不会把连接失败伪装成“知识库没有内容”。把 `KNOWLEDGE_AUTO_RETRIEVAL_ENABLED` 设为 `0` 只关闭闲聊自动查库，插件和知识库管理窗的手动搜索仍可用。升级后第一次请在知识库管理里「重建索引库」再「一键学习」；旧清单没有分块版本时，再点学习也会按新段落重导。步骤见 `docs/TROUBLESHOOTING.md` 第 4.1 节。记忆与知识库边界见 `docs/architecture/memory.md`，当前接线与收敛批次见 `docs/architecture/README.md`，人设/知识时间线计划见 `docs/superpowers/plans/2026-08-13-knowledge-and-persona-timeline.md`。
 
 统一能力插件 `memory_tools` 提供 `memory.query`、`memory.person_profile` 和 `activity.query`，自然语言请求会通过现有能力层交给副脑执行。远程 QQ 仅 owner 可调用，其他 QQ 不能读取本机活动或长期记忆。
 

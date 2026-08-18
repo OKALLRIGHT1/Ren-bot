@@ -71,6 +71,19 @@ fallback embedding
 - 推荐本地 Ollama `bge-m3`。
 - 开启慢速导入或自适应慢速模式。
 - 大 JSON / XML 文件先确认解析器能抽出有效条目，否则可能显示“导入 0 条”。
+- 普通 `.md/.txt` 已改为按段落 / 标题分块。旧按行碎片不会在库里自动变形；点「一键学习」时，没有 `chunker_version` 的旧清单会重新导入并删掉该文件残留的按行块。
+- 标题栏出现「需要重建」、或换过 embedding 模型时：先点「重建索引库」清空集合和清单，再点「一键学习」。只点学习不会清掉不兼容向量。
+- 同一文件未改内容且已是新分块再学会按 checksum 跳过；改过的文件会先写入新块再删旧块。导入失败不会推进 `data/knowledge_import_manifest.json`。删除源文件不会自动清库，需要目录重建或显式删除。
+
+## 4.1 怎么重新学习知识库
+
+1. 确认知识目录还在：`更多功能 → 知识库管理`，目录表里勾选要学的文件夹，点「保存目录」。
+2. 看标题栏统计。出现「需要重建」就先点「重建索引库」，确认清空。
+3. 即使没有红字，升级后第一次也建议：`重建索引库` → `一键学习`。这样旧按行碎片和旧清单一起清掉。
+4. 点「一键学习」，等结果。应看到新增条数；若全是「跳过」且片段数几乎没变，说明还在用旧块，回到第 2 步清空后再学。
+5. 用下方「检索验证」搜一句文档里的原话。命中应是整段，而不是单行。
+6. 聊天里要用资料时，明确说「设定 / 资料 / 知识库 / 文档里 / 词条」。闲聊默认不查库。
+7. 插件命令 `learn ||| 目录` 和 GUI 一键学习同一套导入；未改文件会 skip。要整库重来仍先重建。
 
 推荐本地配置：
 
@@ -79,6 +92,17 @@ EMBEDDING_API_URL=http://127.0.0.1:11434/v1/embeddings
 EMBEDDING_API_KEY=ollama
 EMBEDDING_MODEL_NAME=bge-m3
 ```
+
+## 4.2 启动闪退：UNIQUE constraint failed memory_records
+
+日志里如果是：
+
+```text
+_ensure_persona_unique_indexes
+sqlite3.IntegrityError: UNIQUE constraint failed: memory_records.subject_id, memory_records.kind, memory_records.key
+```
+
+原因是人设唯一索引曾经误套到日记 / 任务（`episode` / `other`）上。库里本来就可以有同名日记副本。当前索引只约束 `preference / fact / rule / profile / relation`。更新代码后再启动即可，不用删库。
 
 ## 5. Ollama bge-m3 没跑
 
@@ -182,6 +206,34 @@ NapCat HTTP Webhook 要求 `Access Token`。启动时优先使用 `data/runtime_
 - 如果吐槽说到一半动作突然回 idle，优先查 `services/chat_service.py` 的 `_reset_sensor_motion_after()`；它现在只应做兜底，且有新回复插入时应取消，不该覆盖正常 TTS 收尾。屏幕吐槽的发送编排在 `services/chat_support/sensor_reply_service.py`，但 idle 兜底判定仍由 `ChatService` 持有。
 - 如果吐槽太频繁，先看 `config.py` 的 `SCREEN_GLOBAL_COOLDOWN` 和 `SCREEN_REACTION_COOLDOWN`。当前默认全局冷却是 180 秒，`ChatService` 的感知兜底也跟随这个值。
 - 如果一直不吐槽，先看是否出现 `ChatService 未实际吐槽，不进入冷却`、`Sensor Gatekeeper`、`吐槽仍像观察报告/助手话术，已跳过`。当前设计是只有 `ChatService.handle_sensor_event()` 最终实际发出吐槽时，`modules/screen_sensor.py` 才会写入全局/分类冷却；被锁、低强度、Gatekeeper 或模板过滤跳过的尝试不会消耗冷却。
+
+### 她说我「打开了 N 次」（同页挂机误报）
+
+**结论：只改 `live2d-llm` 即可修；不要求改 `live2d-enhanced-connection-profiles`。** Tauri 只报焦点事实，会话语义与话术在 Python。
+
+根因简述：
+
+1. 旧计数对每次应用前台切换 `+1`，通知/Alt-Tab 闪一下再回来也会涨。
+2. Prompt 若写成「今天打开第 N 次」，模型容易照念。
+
+当前口径：
+
+- `daily_counts` = **独立前台会话**段数（离开 ≥ gap 再回才 +1），日统计展示为 `({n} 段会话)`。
+- 吐槽上下文优先用 **本次停留 / 今日累计时长**；禁止夸张「打开了 N 次」。
+- 输出侧有规则护栏（`sensor_utils.sanitize_sensor_open_count_reply`），命中则 strip 或丢弃，**不另开 polish LLM**。
+
+可调：
+
+```text
+# config.py 或环境变量
+SCREEN_APP_SESSION_REOPEN_GAP_SEC=90   # 默认 90；更钝可 180–300，更敏可 ~30
+```
+
+排查：
+
+- 看 `data/sensor_stats.json` 的 `counts`：同页挂机不应线性涨到十几。
+- 日志是否出现 `已去掉打开次数夸张表述`。
+- 实现入口：`modules/screen_sensor.py`、`services/chat_support/sensor_utils.py`；可调 `SCREEN_APP_SESSION_REOPEN_GAP_SEC`（默认 90）。
 
 ## 9. 硬件状态没有回复 / 没进思考状态
 

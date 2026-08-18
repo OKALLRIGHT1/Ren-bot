@@ -1,6 +1,7 @@
 # modules/tts/router.py
 import asyncio
 import re
+import time
 from dataclasses import dataclass
 from typing import Optional, Callable, Awaitable
 
@@ -48,6 +49,7 @@ class SpeakItem:
     split_long: bool
     chunk_chars: int
     show_bubble: bool
+    append_ui: bool = False
 
 
 @dataclass
@@ -58,6 +60,8 @@ class AudioItem:
     emotion: str
     backend: object  # 对应的 TTS 实例 (gpt 或 edge)
     tail_padding: float = 0.5
+    show_bubble: bool = True
+    append_ui: bool = False
 
 
 def _split_text(text: str, max_chars: int) -> list[str]:
@@ -73,6 +77,7 @@ class TTSRouter:
         bubble_sender: Optional[
             Callable[[str, Optional[str], Optional[int]], Awaitable[None]]
         ] = None,
+        line_sender: Optional[Callable[[str], Awaitable[None]]] = None,
         go_idle_fn: Optional[Callable[[], Awaitable[None]]] = None,
         split_long_default: bool = True,
         chunk_chars_default: int = 90,
@@ -85,11 +90,13 @@ class TTSRouter:
         self.verbose = bool(verbose)
         self.log_each_utterance = bool(log_each_utterance)
         self.bubble_sender = bubble_sender
+        self.line_sender = line_sender
         self.go_idle_fn = go_idle_fn
         self.split_long_default = bool(split_long_default)
         self.chunk_chars_default = int(chunk_chars_default)
         self.segment_pause_sec = 0.18
         self.final_pause_sec = 0.50
+        self.text_linger_sec = 0.35
         self.sm = state_machine
 
         cfg_enable_lip_sync = bool(edge_cfg.get("enable_lip_sync", False))
@@ -109,6 +116,11 @@ class TTSRouter:
         self.gpt = None
         self._active = "edge"
         self.role_tts_config = {}
+        self._probe_interval_sec = 300.0
+        self._last_probe_at = 0.0
+        self._last_probe_error = ""
+        self._fallback_warned = False
+        self._last_fallback_reason = ""
 
         self._q: asyncio.Queue[SpeakItem] = asyncio.Queue()  # 文本队列
         self._audio_q: asyncio.Queue[AudioItem] = asyncio.Queue()  # 音频队列 (流水线)
@@ -119,6 +131,7 @@ class TTSRouter:
 
         self._current_stream_id = 0
         self._stream_buffer: Optional[StreamSentenceBuffer] = None
+        self._stream_append_ui = False
         self._emo_tag_any_re = re.compile(
             r"<\s*/?\s*(?:emo(?:tion)?|happy|sad|angry|shy|flustered|confused|neutral|think|idle)\b[^>]*>",
             flags=re.IGNORECASE,
@@ -169,6 +182,20 @@ class TTSRouter:
                 self._player_loop()
             )  # 新增：播放循环
 
+    def _utterance_display_ms(self, item: AudioItem, audio_sec: float) -> int:
+        linger_ms = int(max(0.0, float(self.text_linger_sec)) * 1000)
+        audio_ms = int(max(0.0, float(audio_sec)) * 1000)
+        return max(audio_ms + linger_ms, 400)
+
+    async def _emit_utterance(self, item: AudioItem, display_ms: int) -> None:
+        text = str(item.text_for_bubble or "").strip()
+        if not text:
+            return
+        if item.append_ui and self.line_sender:
+            await self.line_sender(text)
+        if item.show_bubble and self.bubble_sender:
+            await self.bubble_sender(text, item.emotion, display_ms)
+
     def _resolve_tail_padding(self, item: AudioItem) -> float:
         padding = float(getattr(item, "tail_padding", self.final_pause_sec) or 0.0)
         padding = max(0.0, padding)
@@ -197,15 +224,56 @@ class TTSRouter:
             self._ensure_gpt_instance()
         if self.gpt and hasattr(self.gpt, "apply_runtime_config"):
             self.gpt.apply_runtime_config(cfg)
+            self._last_probe_at = time.time()
+            self._last_probe_error = str(getattr(self.gpt, "last_error", "") or "")
             if cfg.get("enabled") and getattr(self.gpt, "ready", False):
+                self._fallback_warned = False
+                self._last_fallback_reason = ""
                 self._switch_to("gpt", "角色TTS配置生效")
                 return
         if cfg.get("enabled"):
-            if self.verbose:
-                print(
-                    "⚠️ [TTS] 角色TTS已启用，但 GPT-SoVITS 当前未就绪，回退到 Edge-TTS"
-                )
+            reason = self._last_probe_error or "GPT-SoVITS 当前未就绪"
+            self._last_fallback_reason = reason
+            if self.verbose and not self._fallback_warned:
+                print(f"⚠️ [TTS] 角色TTS已启用，但 {reason}，回退到 Edge-TTS")
+                self._fallback_warned = True
         self._switch_to("edge", "角色TTS未就绪")
+
+    def probe_role_tts(self, *, force: bool = False) -> dict:
+        cfg = self.role_tts_config if isinstance(self.role_tts_config, dict) else {}
+        if not cfg.get("enabled"):
+            return self.tts_status()
+        now = time.time()
+        if (
+            not force
+            and self._active == "gpt"
+            and getattr(self.gpt, "ready", False)
+        ):
+            return self.tts_status()
+        if (
+            not force
+            and self._last_probe_at
+            and now - self._last_probe_at < self._probe_interval_sec
+        ):
+            return self.tts_status()
+        self.apply_role_tts_config(cfg)
+        return self.tts_status()
+
+    def tts_status(self) -> dict:
+        cfg = self.role_tts_config if isinstance(self.role_tts_config, dict) else {}
+        enabled = bool(cfg.get("enabled"))
+        gpt_ready = bool(self.gpt and getattr(self.gpt, "ready", False))
+        backend = self._active
+        fallback = enabled and backend != "gpt"
+        return {
+            "enabled": enabled,
+            "backend": backend,
+            "display": "edge(fallback)" if fallback else backend,
+            "gpt_ready": gpt_ready,
+            "reason": self._last_fallback_reason if fallback else "",
+            "last_error": self._last_probe_error,
+            "last_probe_at": self._last_probe_at,
+        }
 
     def _current_prompt_lang(self) -> str:
         cfg = self.role_tts_config if isinstance(self.role_tts_config, dict) else {}
@@ -283,6 +351,7 @@ Output:
         if not clean:
             return None, 0.0
 
+        self.probe_role_tts()
         text_to_speak = clean
         if (
             self.gpt
@@ -303,10 +372,11 @@ Output:
 
         return await self.edge.synthesize(clean)
 
-    def start_stream(self):
+    def start_stream(self, *, append_ui: bool = False):
         self._ensure_worker()
         self._current_stream_id += 1
         self._interrupt_event.set()  # 打断旧的
+        self._stream_append_ui = bool(append_ui)
 
         # 清空所有队列
         while not self._q.empty():
@@ -332,7 +402,7 @@ Output:
 
     async def feed_stream(self, chunk: str, emotion: Optional[str] = None):
         if self._stream_buffer is None:
-            self.start_stream()
+            self.start_stream(append_ui=self._stream_append_ui)
         for sentence in self._stream_buffer.feed(chunk):
             await self._add_stream_item(sentence, emotion)
 
@@ -353,6 +423,7 @@ Output:
             split_long=self.split_long_default,
             chunk_chars=self.chunk_chars_default,
             show_bubble=True,
+            append_ui=self._stream_append_ui,
         )
         await self._q.put(item)
 
@@ -365,8 +436,16 @@ Output:
         split_long=None,
         chunk_chars=None,
         show_bubble=True,
+        append_ui=False,
     ):
         if not self.enabled:
+            if append_ui and self.line_sender:
+                parts = _split_text(
+                    self._sanitize_tts_text(text),
+                    int(self.chunk_chars_default if chunk_chars is None else chunk_chars),
+                )
+                for part in parts:
+                    await self.line_sender(part)
             return
         text = self._sanitize_tts_text(text)
         if not text:
@@ -394,6 +473,7 @@ Output:
             if chunk_chars is None
             else int(chunk_chars),
             show_bubble=show_bubble,
+            append_ui=bool(append_ui),
         )
         await self._q.put(item)
 
@@ -494,6 +574,8 @@ Output:
                             emotion=item.emotion,
                             backend=backend,
                             tail_padding=tail_padding,
+                            show_bubble=item.show_bubble,
+                            append_ui=item.append_ui,
                         )
                         await self._audio_q.put(audio_item)
                         if self.verbose:
@@ -511,6 +593,8 @@ Output:
                                 item.emotion,
                                 None,
                                 tail_padding=tail_padding,
+                                show_bubble=item.show_bubble,
+                                append_ui=item.append_ui,
                             )
                         )
 
@@ -549,42 +633,43 @@ Output:
                         item.audio_path, self._interrupt_event, item.emotion
                     )
 
-                    bubble_ms = int(item.duration * 1000) + 500
-                    read_ms = estimate_bubble_display_ms(item.text_for_bubble)
-                    display_ms = max(bubble_ms, int(read_ms))
-                    wait_time = max(display_ms / 1000.0, max(0, item.duration)) + self._resolve_tail_padding(item)
-                    if self.bubble_sender:
-                        # 将秒转为毫秒，气泡显示时间稍微比音频长一点点 (500ms) 增加连贯性
-                        asyncio.create_task(
-                            self.bubble_sender(item.text_for_bubble, item.emotion, display_ms)
-                        )
+                    # TTS 核心规则：
+                    # 1) 文本分段是为了流水线合成/连续播，不能等整段合成完才开口；
+                    # 2) 段间等待与气泡时长都以真实音频时长为准，不要用字数估算拖慢下一段。
+                    audio_sec = max(0.0, float(item.duration or 0.0))
+                    display_ms = self._utterance_display_ms(item, audio_sec)
+                    wait_time = max(
+                        audio_sec + self._resolve_tail_padding(item),
+                        display_ms / 1000.0,
+                    )
+                    await self._emit_utterance(item, display_ms)
 
-                    # 按“中间段短、收尾段稳”的策略等待：
-                    # - 同一轮内部的分段句间停顿更短；
-                    # - 最后一段仍保留更稳妥的尾缓冲，避免截尾或抢状态。
-                    slept = 0
+                    # 中间段短停顿、收尾段更稳；文字略长于语音，上一句结束再发下一句。
+                    slept = 0.0
                     while slept < wait_time:
-                        # 实时检查是否被打断
                         if self._interrupt_event.is_set():
-                            # 立即通知前端停止当前频道声音
                             try:
                                 from modules.live2d import stop_sound
 
                                 await stop_sound()
-                            except:
+                            except Exception:
                                 pass
                             break
                         await asyncio.sleep(0.1)
                         slept += 0.1
                 else:
+                    # 合成失败的静默兜底：按字数估一段时长，至少保证气泡可见。
+                    from modules.text_lip_sync import estimate_text_speech_duration
+
+                    speech_ms = int(
+                        estimate_text_speech_duration(item.text_for_bubble) * 1000
+                    ) + 450
                     read_ms = estimate_bubble_display_ms(item.text_for_bubble)
-                    ms = max(int(item.duration * 1000) + 500, int(read_ms))
-                    if self.bubble_sender:
-                        asyncio.create_task(
-                            self.bubble_sender(item.text_for_bubble, item.emotion, ms)
-                        )
-                    # 静默兜底模式
-                    await asyncio.sleep(ms / 1000.0)
+                    ms = max(speech_ms, int(read_ms))
+                    ms = max(1800, min(ms, 12000))
+                    display_ms = max(ms, self._utterance_display_ms(item, ms / 1000.0))
+                    await self._emit_utterance(item, display_ms)
+                    await asyncio.sleep(display_ms / 1000.0)
 
                 # 任务完成
                 self._audio_q.task_done()

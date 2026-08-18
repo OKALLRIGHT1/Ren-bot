@@ -112,6 +112,7 @@ _write_probe_root.tmp
 recovered_chat_service.py
 _cleanup_*.py
 _review_scan.py
+技术总结.md
 
 # =========================
 # Local-only project areas

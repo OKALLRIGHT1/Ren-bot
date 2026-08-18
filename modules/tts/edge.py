@@ -132,6 +132,16 @@ class EdgeTTS:
                     lip_data = self.lip_sync_engine.fade_lip_data(lip_data)
             except:
                 pass
+        # 没开 Rhubarb / 分析失败时，仍按音频时长做口型回退。
+        if not lip_data:
+            try:
+                from modules.text_lip_sync import build_text_lip_sync
+
+                duration = self._estimate_duration_sec(mp3_path, "")
+                if duration > 0:
+                    lip_data = build_text_lip_sync("说话中", duration)
+            except Exception:
+                lip_data = None
 
         if self.use_live2d_player:
             if emotion:

@@ -8,6 +8,8 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict
 
+from services.chat_support.text_utils import looks_like_uncertain_answer
+
 
 MAX_TOOL_RESULT_CHARS = 1500
 MAX_TOOL_FEEDBACK_CHARS = 4000
@@ -288,6 +290,8 @@ async def finalize_tool_reply(
     model_emo_seen = False
 
     _, clean_first = extract_emo_tag(clean_thought or "")
+    if looks_like_uncertain_answer(clean_first):
+        clean_first = ""
     if clean_first:
         messages.append({"role": "assistant", "content": clean_first})
 
@@ -304,7 +308,8 @@ async def finalize_tool_reply(
             compact_hint = "__direct_result__"
         elif used_set & {"search", "search_web"}:
             compact_hint = (
-                "\n只输出关键信息，最多 3 条；不要表格，不要展示思考过程，"
+                "\n只根据工具结果回答当前问题，不要引用更早轮次的夸奖、称呼或闲聊。"
+                "只输出关键信息，最多 3 条；不要表格，不要展示思考过程，"
                 "不要输出完整链接。行情、价格、汇率、指数问题尽量给出具体数值、单位和时间。"
             )
         elif (

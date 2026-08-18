@@ -4,6 +4,23 @@ import re
 from typing import List
 
 
+def _default_utterance_max_len() -> int:
+    try:
+        from config import TTS_CHUNK_CHARS
+
+        return int(TTS_CHUNK_CHARS)
+    except Exception:
+        return 80
+
+
+def split_assistant_display_parts(text: str, *, max_len: int | None = None) -> List[str]:
+    parts = split_chat_text_parts(
+        text, max_len=_default_utterance_max_len() if max_len is None else max_len
+    )
+    raw = str(text or "").strip()
+    return parts or ([raw] if raw else [])
+
+
 def split_chat_text_parts(text: str, *, max_len: int = 55) -> List[str]:
     clean = str(text or "").replace("\r\n", "\n").replace("\r", "\n").strip()
     if not clean:
@@ -35,13 +52,15 @@ def split_chat_text_parts(text: str, *, max_len: int = 55) -> List[str]:
 
 def split_long_chat_text_part(text: str, *, max_len: int = 55) -> List[str]:
     raw = str(text or "").strip()
-    if not raw or len(raw) <= max_len:
-        return [raw] if raw else []
+    if not raw:
+        return []
     if re.search(r"https?://|```", raw):
         return [raw]
 
     chunks = [item.strip() for item in re.split(r"(?<=[。！？!?])\s*", raw) if item.strip()]
     if len(chunks) <= 1:
+        if len(raw) <= max_len:
+            return [raw]
         chunks = [item.strip() for item in re.split(r"(?<=[；;、])\s*", raw) if item.strip()]
     if len(chunks) <= 1:
         hard_max = 260
@@ -49,11 +68,17 @@ def split_long_chat_text_part(text: str, *, max_len: int = 55) -> List[str]:
             return [raw]
         return [raw[i : i + hard_max].strip() for i in range(0, len(raw), hard_max)]
 
+    ended = tuple("。！？!?")
     parts: List[str] = []
     current = ""
     for chunk in chunks:
+        finished = bool(current) and current.endswith(ended)
         candidate = f"{current}{chunk}" if current else chunk
-        if current and len(candidate) > max_len:
+        # Finished sentences stay their own bubble; only glue tiny leftovers.
+        if finished and (len(chunk) > 8 or chunk.endswith(ended)):
+            parts.append(current.strip())
+            current = chunk
+        elif current and len(candidate) > max_len:
             parts.append(current.strip())
             current = chunk
         else:

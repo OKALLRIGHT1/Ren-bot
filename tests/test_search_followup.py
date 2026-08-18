@@ -38,19 +38,72 @@ def test_search_with_explicit_topic_is_not_generic_followup() -> None:
     assert text_utils.is_generic_search_followup_request("搜索一下天气接口怎么配置") is False
 
 
-def test_search_acknowledgement_is_topic_aware_and_not_fixed() -> None:
-    acknowledgement = search_flow_service.build_search_acknowledgement(
-        "查一下宝可梦风波的最新信息"
+def test_direct_fact_question_is_searchworthy_without_guessing() -> None:
+    assert text_utils.is_direct_fact_search_question("上周登陆中国的台风叫什么") is True
+    assert text_utils.is_direct_fact_search_question("上海今天天气怎么样") is True
+    assert text_utils.is_direct_fact_search_question("上海最近会有什么台风吗") is True
+    assert text_utils.is_direct_fact_search_question("最近会不会下雨") is True
+    assert text_utils.is_direct_fact_search_question("你今天怎么样") is False
+    assert text_utils.is_direct_fact_search_question("晚饭吃什么") is False
+    assert text_utils.is_direct_fact_search_question("你最近会不会来") is False
+    assert text_utils.is_direct_fact_search_question("最近怎么样") is False
+
+
+def test_forced_search_runs_for_fact_question_even_if_first_reply_is_confident() -> None:
+    query = search_flow_service.choose_forced_search_query(
+        user_text="上周登陆中国的台风叫什么",
+        first_reply="印象里好像有一个，不过我先按记得的说吧。",
+        followup_query="",
+        triggered=False,
+        tool_results=[],
+        delegate_triggers=[],
+        looks_like_uncertain_answer=text_utils.looks_like_uncertain_answer,
+        is_searchworthy_question=text_utils.is_searchworthy_question,
     )
 
-    assert "宝可梦风波" in acknowledgement
-    assert acknowledgement != "好，我查一下"
-    assert len(acknowledgement) <= 36
+    assert query == "上周登陆中国的台风叫什么"
 
 
-def test_search_acknowledgement_avoids_duplicate_possessive_particle() -> None:
-    acknowledgement = search_flow_service.build_search_acknowledgement(
-        "搜索一下北京今天的天气"
+def test_forced_search_still_runs_when_casual_question_sounds_uncertain() -> None:
+    query = search_flow_service.choose_forced_search_query(
+        user_text="你今天怎么样",
+        first_reply="我不太确定该怎么接。",
+        followup_query="",
+        triggered=False,
+        tool_results=[],
+        delegate_triggers=[],
+        looks_like_uncertain_answer=text_utils.looks_like_uncertain_answer,
+        is_searchworthy_question=text_utils.is_searchworthy_question,
     )
 
-    assert "天气的最新情况" not in acknowledgement
+    assert query == "你今天怎么样"
+
+
+def test_forced_search_skips_confident_casual_chat() -> None:
+    query = search_flow_service.choose_forced_search_query(
+        user_text="晚饭吃什么",
+        first_reply="随便炒个菜就行。",
+        followup_query="",
+        triggered=False,
+        tool_results=[],
+        delegate_triggers=[],
+        looks_like_uncertain_answer=text_utils.looks_like_uncertain_answer,
+        is_searchworthy_question=text_utils.is_searchworthy_question,
+    )
+
+    assert query == ""
+
+
+def test_forced_search_runs_for_place_time_world_question() -> None:
+    query = search_flow_service.choose_forced_search_query(
+        user_text="上海最近会有什么台风吗",
+        first_reply="秋天偶尔会有它的尾巴扫过。",
+        followup_query="",
+        triggered=False,
+        tool_results=[],
+        delegate_triggers=[],
+        looks_like_uncertain_answer=text_utils.looks_like_uncertain_answer,
+        is_searchworthy_question=text_utils.is_searchworthy_question,
+    )
+
+    assert query == "上海最近会有什么台风吗"

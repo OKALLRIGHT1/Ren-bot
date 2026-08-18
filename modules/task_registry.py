@@ -45,6 +45,8 @@ CALLER_TASK_REGISTRY: dict[str, str] = {
     "qq_music_comment": "default",
     "chat_record_knowledge_import": "default",
     "chat_record_expression_import": "default",
+    "character_thought": "gatekeeper",
+    "forbidden_phrase_retry": "gatekeeper",
 }
 
 CALLER_TASK_PATTERNS: dict[str, str] = {
@@ -91,6 +93,8 @@ CALLER_DESCRIPTIONS: dict[str, str] = {
     "qq_music_comment": "QQ 点歌成功后的简短角色化点评。",
     "chat_record_knowledge_import": "聊天记录导入为知识库时的整理。",
     "chat_record_expression_import": "聊天记录导入为表达库时的整理。",
+    "character_thought": "角色自然对话的轻量内心草稿（立场/情绪档/意图）。",
+    "forbidden_phrase_retry": "自然对话禁词命中后的约束重写。",
 }
 
 CALLER_PATTERN_DESCRIPTIONS: dict[str, str] = {

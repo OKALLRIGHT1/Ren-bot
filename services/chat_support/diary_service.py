@@ -62,13 +62,17 @@ class DiaryService:
         profile = output_profile or build_output_profile(
             str((ctx or {}).get("source") or "text_input")
         )
-        if profile.get("ui_append", True):
+        pace_ui = bool(profile.get("ui_append", True)) and (
+            bool(profile.get("speak", True)) or bool(profile.get("show_bubble", True))
+        )
+        if profile.get("ui_append", True) and not pace_ui:
             await self.event_bus.emit("ui.append", role="assistant", text=failure_text)
         await self.presenter.present(
             failure_text,
             emotion="neutral",
             speak=profile.get("speak", True),
             show_bubble=profile.get("show_bubble", True),
+            append_ui=pace_ui,
         )
         await self.send_gateway_reply(failure_text, ctx, emotion="neutral")
 
@@ -514,7 +518,11 @@ class DiaryService:
 
             if not auto:
                 profile = output_profile or build_output_profile("text_input")
-                if profile.get("ui_append", True):
+                pace_ui = bool(profile.get("ui_append", True)) and (
+                    bool(profile.get("speak", True))
+                    or bool(profile.get("show_bubble", True))
+                )
+                if profile.get("ui_append", True) and not pace_ui:
                     await self.event_bus.emit(
                         "ui.append", role="assistant", text=diary_content
                     )
@@ -524,6 +532,7 @@ class DiaryService:
                     interrupt=False,
                     speak=profile.get("speak", True),
                     show_bubble=profile.get("show_bubble", True),
+                    append_ui=pace_ui,
                 )
             return diary_content
 

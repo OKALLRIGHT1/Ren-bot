@@ -117,15 +117,19 @@ class InfoSourcesSettingsPage(QtWidgets.QWidget):
             return None
 
     def _build_ui(self):
-        # 设最小宽度：外层 settings 的 scroll 区 setWidgetResizable(True) 会把本页
-        # 缩到 viewport 宽度；不给下限的话右栏 form 的 label+输入框会被压到挤一起。
-        # 设了这个值后，窄宽时外层出横向滚动条，而不是内部控件互相挤压。
-        self.setMinimumWidth(720)
+        # 内容区给出合理内容最小宽，窄窗时由外层 scroll 横向兜底，而不是把
+        # 设置中心整窗顶死在 720。
+        self.setMinimumWidth(640)
         layout = QtWidgets.QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(12)
 
-        left = QtWidgets.QVBoxLayout()
+        splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Horizontal)
+        splitter.setChildrenCollapsible(False)
+
+        left_panel = QtWidgets.QWidget()
+        left = QtWidgets.QVBoxLayout(left_panel)
+        left.setContentsMargins(0, 0, 0, 0)
         left.setSpacing(8)
         title = QtWidgets.QLabel("信息源接口")
         title.setObjectName("header")
@@ -137,7 +141,7 @@ class InfoSourcesSettingsPage(QtWidgets.QWidget):
 
         self.endpoint_list = QtWidgets.QListWidget()
         self.endpoint_list.currentRowChanged.connect(self._on_select_endpoint)
-        self.endpoint_list.setMinimumWidth(180)
+        self.endpoint_list.setMinimumWidth(140)
         left.addWidget(self.endpoint_list, 1)
 
         left_actions = QtWidgets.QHBoxLayout()
@@ -148,13 +152,15 @@ class InfoSourcesSettingsPage(QtWidgets.QWidget):
         left_actions.addWidget(btn_new)
         left_actions.addWidget(btn_refresh)
         left.addLayout(left_actions)
-        layout.addLayout(left, 1)
+        splitter.addWidget(left_panel)
 
-        right = QtWidgets.QVBoxLayout()
+        right_panel = QtWidgets.QWidget()
+        right = QtWidgets.QVBoxLayout(right_panel)
+        right.setContentsMargins(0, 0, 0, 0)
         right.setSpacing(10)
 
         token_group = QtWidgets.QGroupBox("Provider 凭据")
-        token_group.setMinimumWidth(360)
+        token_group.setMinimumWidth(280)
         token_layout = QtWidgets.QFormLayout(token_group)
         token_layout.setLabelAlignment(QtCore.Qt.AlignmentFlag.AlignRight)
         token_layout.setFieldGrowthPolicy(
@@ -166,7 +172,7 @@ class InfoSourcesSettingsPage(QtWidgets.QWidget):
         self.alapi_token_input = QtWidgets.QLineEdit()
         self.alapi_token_input.setEchoMode(QtWidgets.QLineEdit.EchoMode.Password)
         self.alapi_token_input.setPlaceholderText("ALAPI Token")
-        self.alapi_token_input.setMinimumWidth(220)
+        self.alapi_token_input.setMinimumWidth(140)
         self.alapi_token_input.setText(read_alapi_token(self.alapi_secret_store))
         self.btn_toggle_alapi_token = QtWidgets.QPushButton("显示")
         self.btn_toggle_alapi_token.setMinimumWidth(56)
@@ -181,20 +187,20 @@ class InfoSourcesSettingsPage(QtWidgets.QWidget):
         right.addWidget(token_group)
 
         form_group = QtWidgets.QGroupBox("接口配置")
-        form_group.setMinimumWidth(360)
+        form_group.setMinimumWidth(280)
         form = QtWidgets.QFormLayout(form_group)
         form.setLabelAlignment(QtCore.Qt.AlignmentFlag.AlignRight)
         form.setFieldGrowthPolicy(
             QtWidgets.QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow
         )
         self.inp_id = QtWidgets.QLineEdit()
-        self.inp_id.setMinimumWidth(200)
+        self.inp_id.setMinimumWidth(120)
         self.inp_name = QtWidgets.QLineEdit()
-        self.inp_name.setMinimumWidth(200)
+        self.inp_name.setMinimumWidth(120)
         self.inp_method = QtWidgets.QComboBox()
         self.inp_method.addItems(["GET", "POST"])
         self.inp_path = QtWidgets.QLineEdit()
-        self.inp_path.setMinimumWidth(200)
+        self.inp_path.setMinimumWidth(120)
         self.inp_cache = QtWidgets.QSpinBox()
         self.inp_cache.setRange(0, 86400)
         self.inp_cache.setSuffix(" 秒")
@@ -210,7 +216,7 @@ class InfoSourcesSettingsPage(QtWidgets.QWidget):
         self.params_edit.setPlaceholderText(
             '{\n  "city": {"type": "string", "required": false},\n  "format": {"type": "string", "default": "json"}\n}'
         )
-        self.params_edit.setMinimumHeight(120)
+        self.params_edit.setMinimumHeight(80)
         right.addWidget(QtWidgets.QLabel("参数 JSON"))
         right.addWidget(self.params_edit, 1)
 
@@ -218,7 +224,7 @@ class InfoSourcesSettingsPage(QtWidgets.QWidget):
         draft_layout = QtWidgets.QVBoxLayout(draft_group)
         self.doc_edit = QtWidgets.QPlainTextEdit()
         self.doc_edit.setPlaceholderText("粘贴接口说明、URL 或截图 OCR 文本。生成后只填表，不会自动保存。")
-        self.doc_edit.setMinimumHeight(80)
+        self.doc_edit.setMinimumHeight(60)
         btn_draft = QtWidgets.QPushButton("从说明生成草稿")
         btn_draft.clicked.connect(self.generate_draft)
         draft_layout.addWidget(self.doc_edit)
@@ -232,7 +238,7 @@ class InfoSourcesSettingsPage(QtWidgets.QWidget):
         self.test_params_edit.setMaximumHeight(70)
         self.test_result = QtWidgets.QPlainTextEdit()
         self.test_result.setReadOnly(True)
-        self.test_result.setMinimumHeight(110)
+        self.test_result.setMinimumHeight(80)
         self.btn_test = QtWidgets.QPushButton("测试接口")
         self.btn_test.clicked.connect(self.test_endpoint)
         test_layout.addWidget(self.test_params_edit)
@@ -248,7 +254,11 @@ class InfoSourcesSettingsPage(QtWidgets.QWidget):
         footer.addWidget(btn_save)
         right.addLayout(footer)
 
-        layout.addLayout(right, 3)
+        splitter.addWidget(right_panel)
+        splitter.setStretchFactor(0, 1)
+        splitter.setStretchFactor(1, 3)
+        splitter.setSizes([220, 520])
+        layout.addWidget(splitter)
 
     def refresh_providers(self):
         current = self.manager.provider_id

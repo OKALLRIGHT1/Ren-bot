@@ -638,6 +638,59 @@ def test_expression_selection_uses_stable_character_id_after_rename(tmp_path):
     assert any("保持简短" in hint for hint in hints)
 
 
+def test_expression_selection_skips_llm_when_disabled(tmp_path):
+    calls = []
+
+    def fake_llm(messages, *, task_type="summary", caller=""):
+        calls.append(caller)
+        return '{"selected_ids":[]}'
+
+    core = MemoryCoreService(_store(tmp_path), llm_call=fake_llm)
+    core.initialize()
+    core.upsert_expression_pattern(
+        character_name="高松灯",
+        scene="chat",
+        situation="用户确认结果",
+        style="短短地松一口气",
+        examples=["嗯，这样就好了"],
+        source="test",
+        quality_score=9.0,
+    )
+    hints = core.select_expressions(
+        user_text="已经修好了",
+        character_name="高松灯",
+        scene="chat",
+        use_llm=False,
+    )
+    assert calls == []
+    assert hints
+    assert "松一口气" in hints[0]
+
+
+def test_expression_selection_falls_back_when_llm_unparseable(tmp_path):
+    def fake_llm(messages, *, task_type="summary", caller=""):
+        return "not-json"
+
+    core = MemoryCoreService(_store(tmp_path), llm_call=fake_llm)
+    core.initialize()
+    core.upsert_expression_pattern(
+        character_name="高松灯",
+        scene="chat",
+        situation="用户确认结果",
+        style="短短地松一口气",
+        examples=["嗯，这样就好了"],
+        source="test",
+        quality_score=9.0,
+    )
+    hints = core.select_expressions(
+        user_text="已经修好了",
+        character_name="高松灯",
+        scene="chat",
+    )
+    assert hints
+    assert "松一口气" in hints[0]
+
+
 def test_explicit_owner_profile_statement_is_learned(tmp_path):
     store = _store(tmp_path)
 
@@ -652,7 +705,7 @@ def test_explicit_owner_profile_statement_is_learned(tmp_path):
             return (
                 '{"items":[{"kind":"preference","key":"preferred_address",'
                 '"content":"称呼用户为 master","confidence":0.98,'
-                f'"valid_days":0,"evidence_ids":["{evidence_id}"]}}]}}'
+                f'"evidence_ids":["{evidence_id}"]}}]}}'
             )
         return '{"items":[]}'
 
@@ -686,7 +739,7 @@ def test_meeting_weekday_correction_triggers_profile_learning(tmp_path):
             return (
                 '{"items":[{"kind":"fact","key":"habit.meeting_weekday",'
                 '"content":"用户固定周四开会","confidence":0.95,'
-                f'"valid_days":0,"evidence_ids":["{evidence_id}"]}}]}}'
+                f'"evidence_ids":["{evidence_id}"]}}]}}'
             )
         return '{"items":[]}'
 

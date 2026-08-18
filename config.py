@@ -323,6 +323,19 @@ SEDENTARY_POPUP_AUTO_CLOSE_SECONDS = 20  # 自动关闭秒数，设为0则不自
 SCREEN_OBSERVATION_MAX_ITEMS = 120  # 观察记录最大条数
 SCREEN_ACTIVITY_MAX_ITEMS = 200  # 活动片段最大条数
 
+# 同一应用「独立前台会话」去抖间隔（秒）：离开后在此时间内再回来不算新会话。
+# 默认 90；觉得仍把挂机算成多次可调大（180–300），想更敏感可调小（约 30）。
+# 环境变量 SCREEN_APP_SESSION_REOPEN_GAP_SEC 可覆盖。
+try:
+    SCREEN_APP_SESSION_REOPEN_GAP_SEC = float(
+        os.getenv("SCREEN_APP_SESSION_REOPEN_GAP_SEC", "90") or 90
+    )
+except Exception:
+    SCREEN_APP_SESSION_REOPEN_GAP_SEC = 90.0
+SCREEN_APP_SESSION_REOPEN_GAP_SEC = max(
+    15.0, min(600.0, float(SCREEN_APP_SESSION_REOPEN_GAP_SEC or 90.0))
+)
+
 # 窗口分类关键词映射
 # 格式： "类别": ["关键词1", "关键词2"...]
 WINDOW_CATEGORIES = {
@@ -574,6 +587,8 @@ MEMORY_SETTINGS = {
     "memory_writeback_inline": get_env_bool("MEMORY_WRITEBACK_INLINE", "0"),
     # 短期记忆配置
     "max_short_term": 12,  # 短期记忆窗口大小（对话轮数）
+    # 超过这个时长的旧轮次不再当「刚说过」；条数窗口挡不住隔天/隔周的闲聊。
+    "short_term_max_age_sec": int(os.getenv("SHORT_TERM_MAX_AGE_SEC", "86400")),
     # 长期记忆配置
     "long_term_enabled": True,  # 是否启用长期记忆
     "store_roles": [
@@ -639,6 +654,10 @@ MEMORY_SETTINGS = {
     "owner_cross_channel_max_age_sec": int(
         os.getenv("OWNER_CROSS_CHANNEL_MAX_AGE_SEC", str(6 * 3600))
     ),
+    # Chat auto-inject only. Plugin / GUI search ignore this switch.
+    "knowledge_auto_retrieval_enabled": get_env_bool(
+        "KNOWLEDGE_AUTO_RETRIEVAL_ENABLED", "1"
+    ),
 }
 
 # ==================== 角色设定 ====================
@@ -676,12 +695,41 @@ SYSTEM_RULES_PROMPT = """
 # 是否允许在正常回复后额外拼接“角色分享”文本（会引入随机建议/反问）
 CHARACTER_SHARING_ENABLED = get_env_bool("CHARACTER_SHARING_ENABLED", "0")
 
+# 角色自然对话：桌面 + QQ 私聊同源 Thought / 表达 / 禁词护栏
+# 接线与批次见 docs/architecture/README.md
+# 开启 Thought ≈ 每条闲聊多 1 次 LLM；可 character_thought_enabled=False 关闭。
+_CHARACTER_NATURAL_CHAT_DEFAULT = {
+    "character_thought_enabled": True,
+    # desktop_and_qq_private | desktop_only | qq_private_only | qq_all | all_chat_sources | off
+    "character_thought_scope": "desktop_and_qq_private",
+    # 群聊产品未开放测试时默认关；打开后与桌面/私聊同一 pipeline
+    "group_chat_natural_enabled": False,
+    "character_thought_timeout_ms": 2500,
+    "character_thought_max_tokens": 220,
+    "expression_inject_in_main_reply": True,
+    # 默认 1 条：多了会变成「背参考答案」
+    "expression_inject_max_items": 1,
+    # skip_thought | block_reply
+    "character_thought_on_error": "skip_thought",
+    "forbidden_phrase_max_retries": 1,
+    "detail_intent_bypass_short_shell": True,
+}
+CHARACTER_NATURAL_CHAT = get_env_json(
+    "CHARACTER_NATURAL_CHAT_JSON", _CHARACTER_NATURAL_CHAT_DEFAULT
+)
+if not isinstance(CHARACTER_NATURAL_CHAT, dict):
+    CHARACTER_NATURAL_CHAT = dict(_CHARACTER_NATURAL_CHAT_DEFAULT)
+else:
+    merged_natural = dict(_CHARACTER_NATURAL_CHAT_DEFAULT)
+    merged_natural.update(CHARACTER_NATURAL_CHAT)
+    CHARACTER_NATURAL_CHAT = merged_natural
+
 # 2. 默认性格 (只包含五十铃怜的个性)
 
 DEFAULT_PERSONA = """
-你将扮演角色「五十铃怜」。
+你将扮演角色「五十铃怜」，用于日常连续聊天。
 【性格设定】
-你将扮演角色「五十铃怜」，用于日常连续聊天。她说话冷静、克制，语句偏简短，语气平稳，很少使用感叹句或夸张表达。
+她说话冷静、克制，语句偏简短，语气平稳，很少使用感叹句或夸张表达。
 固定语癖会由发送系统处理，正文不要自行添加固定结尾，也不要为固定结尾单独换行。
 面对不熟悉的人，她保持礼貌与距离感；在逐渐熟悉后，会以更柔和、真诚的方式回应，但仍不过度外露情绪。
 她习惯先思考再回答，常直入重点，不要长篇大论。
@@ -819,8 +867,8 @@ AUTO_DIARY_TIME = "23:30"  # 每天在这个时间点触发总结
 # 开启 TTS 自动翻译（中显日配）
 TTS_AUTO_TRANSLATE = True
 
-# 如果换成direct会是视觉模型直接吐槽
-VISION_MODE = "separate"
+# 停留吐槽默认先描述再说话；VISION_MODE=direct 可改回一次视觉+说话
+VISION_MODE = (os.getenv("VISION_MODE") or "separate").strip().lower() or "separate"
 # 屏幕吐槽视觉采样目标：active_monitor 跟随前台窗口所在屏；primary 可回退旧行为
 SENSOR_VISION_CAPTURE_TARGET = "active_monitor"
 

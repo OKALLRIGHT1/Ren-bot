@@ -1,10 +1,12 @@
 import asyncio
 from concurrent.futures import Future
+from datetime import datetime, timezone
 import logging
+import time
 import types
 
 import modules.screen_sensor as screen_sensor_module
-from modules.screen_sensor import ScreenSensor
+from modules.screen_sensor import ScreenSensor, rust_activity_stale_threshold_sec
 from services.runtime_health import RuntimeHealthCenter
 
 
@@ -98,7 +100,6 @@ def test_screen_reaction_switch_can_stay_text_only(monkeypatch):
     sensor.current_window_start_time = 0.0
 
     monkeypatch.setattr("modules.screen_sensor.time.time", lambda: 10_000.0)
-    monkeypatch.setattr("modules.screen_sensor.random.random", lambda: 0.99)
 
     def run_immediately(coroutine, target_loop):
         assert target_loop is loop
@@ -130,6 +131,11 @@ def test_screen_reaction_switch_can_stay_text_only(monkeypatch):
             "current_stay_sec": 5.0,
         }
     ]
+
+
+def test_rust_activity_stale_threshold_is_injectable():
+    assert rust_activity_stale_threshold_sec(10) == 200.0
+    assert rust_activity_stale_threshold_sec(1) == 120.0
 
 
 def test_rust_activity_warning_logs_once_and_recovery_reports_healthy(caplog):
@@ -279,6 +285,55 @@ def test_rust_only_ignores_idle_foreground_placeholder():
     assert sensor._last_rust_event_id == "idle-placeholder"
 
 
+def test_same_batch_prefers_duration_over_earlier_switch():
+    sensor = ScreenSensor(DummyChatService())
+    now = time.time()
+    reactions = []
+    sensor.daily_counts = {"Code.exe": 2}
+    sensor.daily_durations = {"Code.exe": 0.0}
+    sensor.last_app_name = ""
+    sensor.last_window_title = ""
+    sensor._analyze_window_context = lambda app="", title="", domain="": (
+        "coding",
+        app or title or "unknown",
+    )
+    sensor._try_trigger_reaction = lambda *args, **kwargs: reactions.append(
+        (args, kwargs)
+    )
+
+    def _iso(ts: float) -> str:
+        return datetime.fromtimestamp(ts, tz=timezone.utc).isoformat()
+
+    sensor._recent_rust_events = lambda limit=20: [
+        {
+            "event_id": "sample-long",
+            "ts": _iso(now),
+            "kind": "activity_sample",
+            "presence": "active",
+            "source": "live2d-tauri",
+            "app": {"name": "Code.exe"},
+            "window_title": "main.py - Visual Studio Code",
+            "browser": {},
+        },
+        {
+            "event_id": "switch-code",
+            "ts": _iso(now - 21 * 60),
+            "kind": "foreground_changed",
+            "presence": "active",
+            "source": "live2d-tauri",
+            "app": {"name": "Code.exe"},
+            "window_title": "main.py - Visual Studio Code",
+            "browser": {},
+        },
+    ]
+
+    sensor._process_rust_events_for_reaction(now)
+
+    assert len(reactions) == 1
+    _args, kwargs = reactions[0]
+    assert kwargs.get("reason") == "duration"
+
+
 def test_sanitize_screen_stats_removes_polluted_local_entries():
     sensor = ScreenSensor(DummyChatService())
     sensor.daily_counts = {
@@ -381,8 +436,120 @@ def test_reconcile_screen_counts_caps_polluted_counts_to_raw_live2d_events(monke
 
     sensor._reconcile_daily_counts_with_rust_events()
 
+    # 连续同一 app 的 raw foreground 只算 1 个会话；linuxdo 两次事件若无夹别的 app 也只算 1
+    # 本 fixture 里 chrome×3 连续 → browser 会话 cap=1；linuxdo×2 连续 → 1；但中间无切换间隔时
+    # 会话重建按「切离再回来」计：chrome 段 1 次，linuxdo 段 1 次，codex 1 次。
+    # 若 linuxdo 两条连续同 app，cap=1；与旧「raw 条数」不同。
     assert sensor.daily_counts == {
-        "browser": 3,
-        "linuxdo-accelerator.exe": 2,
+        "browser": 1,
+        "linuxdo-accelerator.exe": 1,
         "Codex.exe": 1,
     }
+
+
+def test_app_session_count_debounces_brief_refocus():
+    sensor = ScreenSensor(DummyChatService())
+    sensor.daily_counts = {}
+    sensor._app_last_left_ts = {}
+
+    assert sensor._maybe_increment_app_session_count("chrome.exe", event_ts=1000.0) is True
+    assert sensor.daily_counts["chrome.exe"] == 1
+
+    # 离开 chrome
+    sensor._app_last_left_ts["chrome.exe"] = 1010.0
+    # 60 秒内回来 → 同会话，不计次
+    assert sensor._maybe_increment_app_session_count("chrome.exe", event_ts=1070.0) is False
+    assert sensor.daily_counts["chrome.exe"] == 1
+
+    sensor._app_last_left_ts["chrome.exe"] = 1100.0
+    # 离开超过 90 秒再回来 → 新会话
+    assert sensor._maybe_increment_app_session_count("chrome.exe", event_ts=1200.0) is True
+    assert sensor.daily_counts["chrome.exe"] == 2
+
+
+def test_count_sessions_from_foreground_ignores_rapid_bounce():
+    sensor = ScreenSensor(DummyChatService())
+    sensor._analyze_window_context = lambda app="", title="", domain="": ("browser", app)
+    sensor._is_ignored_rust_screen_event = lambda **kwargs: False
+    sensor._is_polluted_stats_key = lambda name: False
+    sensor._parse_rust_event_ts = lambda item: float(item.get("_ts") or 0)
+
+    # 同一页面挂机：chrome 与别的窗口快速来回，不应把 chrome 吹成十几次
+    events = []
+    t = 1000.0
+    for i in range(6):
+        events.append(
+            {
+                "kind": "foreground_changed",
+                "app": {"name": "chrome.exe"},
+                "window_title": "Docs",
+                "browser": {},
+                "_ts": t,
+            }
+        )
+        t += 5
+        events.append(
+            {
+                "kind": "foreground_changed",
+                "app": {"name": "SearchHost.exe"},
+                "window_title": "Search",
+                "browser": {},
+                "_ts": t,
+            }
+        )
+        t += 5  # 来回间隔 5s，远小于 90s 会话阈值
+
+    caps = sensor._count_sessions_from_foreground_events(events)
+    # 首次 chrome + 首次 search，之后来回都在 gap 内 → 各 1 次
+    assert caps.get("chrome.exe") == 1
+    assert caps.get("SearchHost.exe") == 1
+
+
+def test_formatted_report_uses_session_wording():
+    sensor = ScreenSensor(DummyChatService())
+    sensor.daily_counts = {"chrome.exe": 2}
+    sensor.daily_durations = {"chrome.exe": 120.0}
+    sensor.observation_entries = []
+    sensor.activity_segments = []
+    report = sensor.get_formatted_report()
+    assert "段会话" in report
+    assert "打开" not in report
+    # 旧口径「(2 次)」不应再出现
+    assert "(2 次)" not in report
+    assert "(2 段会话)" in report
+
+
+def test_session_gap_respects_config_60s(monkeypatch):
+    monkeypatch.setattr(
+        screen_sensor_module.config, "SCREEN_APP_SESSION_REOPEN_GAP_SEC", 60.0
+    )
+    sensor = ScreenSensor(DummyChatService())
+    sensor.daily_counts = {}
+    sensor._app_last_left_ts = {}
+
+    assert sensor._maybe_increment_app_session_count("app.exe", event_ts=1000.0) is True
+    sensor._app_last_left_ts["app.exe"] = 1000.0
+    # 50s < 60s → 同会话
+    assert sensor._maybe_increment_app_session_count("app.exe", event_ts=1050.0) is False
+    sensor._app_last_left_ts["app.exe"] = 1000.0
+    # 70s >= 60s → 新会话
+    assert sensor._maybe_increment_app_session_count("app.exe", event_ts=1070.0) is True
+    assert sensor.daily_counts["app.exe"] == 2
+
+
+def test_session_gap_respects_config_180s(monkeypatch):
+    monkeypatch.setattr(
+        screen_sensor_module.config, "SCREEN_APP_SESSION_REOPEN_GAP_SEC", 180.0
+    )
+    sensor = ScreenSensor(DummyChatService())
+    sensor.daily_counts = {}
+    sensor._app_last_left_ts = {}
+
+    assert sensor._maybe_increment_app_session_count("app.exe", event_ts=1000.0) is True
+    sensor._app_last_left_ts["app.exe"] = 1000.0
+    # 120s < 180s → 同会话（默认 90 时会算新会话）
+    assert sensor._maybe_increment_app_session_count("app.exe", event_ts=1120.0) is False
+    assert sensor.daily_counts["app.exe"] == 1
+    sensor._app_last_left_ts["app.exe"] = 1000.0
+    assert sensor._maybe_increment_app_session_count("app.exe", event_ts=1200.0) is True
+    assert sensor.daily_counts["app.exe"] == 2

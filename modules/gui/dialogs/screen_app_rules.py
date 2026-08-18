@@ -32,7 +32,8 @@ class ScreenAppRulesDialog(QtWidgets.QDialog):
         self.registry = ScreenAppRegistry()
         self.setWindowTitle("应用识别规则")
         self.resize(920, 620)
-        self.setMinimumSize(760, 480)
+        # 独立窗口可用下限；嵌入设置页时由 apply_embedded_mode 清零。
+        self.setMinimumSize(640, 420)
         self._setup_ui()
         self._load_rules()
 

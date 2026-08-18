@@ -129,6 +129,40 @@ class ToolRouter:
         "bing",
         "搜索",
     ]
+    _CONTEXT_REQUIRED_KEYWORDS = {
+        "任务": (
+            "待办",
+            "添加",
+            "完成",
+            "查看",
+            "看看",
+            "列表",
+            "日程",
+            "逾期",
+            "紧急",
+            "提醒",
+            "我的任务",
+        ),
+        "计划": ("任务", "日程", "待办", "今天"),
+        "生活": ("记账", "账单", "提醒", "支出", "消费"),
+        "昨天": ("日记", "干了什么", "做了什么"),
+        "前天": ("日记", "干了什么", "做了什么"),
+        "总结": ("日记", "回顾"),
+        "回顾": ("日记", "昨天"),
+    }
+    _DIARY_INTENT_PHRASES = [
+        "日记",
+        "查日记",
+        "看日记",
+        "导出日记",
+        "回顾日记",
+        "日记总结",
+        "昨天干了什么",
+        "昨天做了什么",
+        "前天干了什么",
+        "前天做了什么",
+        "回顾昨天",
+    ]
 
     def __init__(
         self,
@@ -365,25 +399,23 @@ class ToolRouter:
             if not is_diary:
                 is_diary = any(("diary" in a or "history" in a) for a in kw_list)
             if is_diary:
-                kw_list.extend(
-                    [
-                        "昨天",
-                        "前天",
-                        "总结",
-                        "回顾",
-                        "日记",
-                        "复盘",
-                        "干了什么",
-                        "做了什么",
-                    ]
-                )
+                kw_list.extend(self._DIARY_INTENT_PHRASES)
 
             if "task" in trigger or "schedule" in trigger:
-                kw_list.extend(["任务", "待办", "日程"])
+                kw_list.extend(["任务", "待办", "日程", "我的任务"])
 
             keywords[trigger] = list(dict.fromkeys(kw_list))
 
         return keywords
+
+    def _keyword_matches_intent(self, keyword: str, text: str) -> bool:
+        kw = str(keyword or "").strip().lower()
+        if not kw or kw not in text:
+            return False
+        extra = self._CONTEXT_REQUIRED_KEYWORDS.get(kw)
+        if not extra:
+            return True
+        return any(hint in text for hint in extra)
 
     @staticmethod
     def _serialize_capability_candidates(candidates: List[Any]) -> List[Dict[str, Any]]:
@@ -493,7 +525,7 @@ class ToolRouter:
         if self.enable_intent_keywords:
             for trigger, kws in self.intent_keywords.items():
                 for kw in kws:
-                    if kw.lower() in text and trigger in combined_map:
+                    if self._keyword_matches_intent(kw, text) and trigger in combined_map:
                         matched.add(trigger)
 
         if matched:
