@@ -55,7 +55,7 @@ Current critical/high files:
 
 | File | Size | Status | First split target |
 | --- | ---: | --- | --- |
-| `modules/gui/dialogs/settings.py` | 5761 | Critical | extract one settings page at a time into `settings_pages/` |
+| `modules/gui/dialogs/settings.py` | ~4750 after page extract | Critical | more pages already live in `settings_pages/`; QQ/MCP still in the shell |
 | `services/chat_service.py` | 5184 | Critical | integrate `ChatFlowResult`, then move final orchestration/output paths |
 | `core/application.py` | 3399 | Critical | avoid new orchestration; pass narrow dependencies into services |
 | `integrations/gui_http.py` | 3394 | Critical | HTTP surface only; business via `services/gui_api/*` |
@@ -66,7 +66,7 @@ Current critical/high files:
 
 - `ChatService`: conversation orchestration only; no plugin media-send implementation and no ad hoc flow result parsing after `ChatFlowResult` migration.
 - `services/chat_support/*`: small services for routing, flow results, output, active alerts, gateway sending, and sensor replies.
-- `modules/gui/dialogs/settings.py`: shell dialog and tab composition only; page-specific UI and save/load logic move to `modules/gui/settings_pages/*`.
+- `modules/gui/dialogs/settings.py`: shell dialog and tab composition only; page-specific UI and save/load logic move to `modules/gui/settings_pages/*`. Extracted: sedentary, ASR, info sources, color, dependency, provider, LLM/router.
 - `modules/screen_sensor.py`: sensor loop coordination only; sedentary state and GUI snapshot logic move to focused modules first.
 - `modules/plugin_manager.py`: plugin loading and dispatch coordination only; access policy, executor, prompt metadata, and config normalization must be one-way dependencies.
 - `integrations/gui_http.py`: HTTP surface only; no business rules.
@@ -77,7 +77,8 @@ Current critical/high files:
 - **Settings gate:** any new settings page or major settings option must not add more page-specific save/load logic to `modules/gui/dialogs/settings.py` unless a matching extraction is already scheduled.
 - **ScreenSensor gate:** 久坐提醒 and 屏幕吐槽 remain separate paths. Sedentary state extraction must not change screen commentary trigger behavior.
 - **Flow gate:** do not broaden `OutputCoordinator` until at least one flow returns `ChatFlowResult` and `tests/test_chat_service_smoke.py` covers that path.
-- **Gateway gate:** do not delete `_send_gateway_*` wrappers until `rg` shows plugins no longer call them directly.
+- **Gateway gate:** do not delete `_send_gateway_*` wrappers until `rg` shows plugins no longer call them directly. Ports wrap them; plugins must use `ctx["gateway"]`.
+- **Plugin ctx gate:** do not re-inject `ctx["chat_service"]`. Plugins use `gateway` / `tts` / `app` / `knowledge` plus injected runtime keys. `resolve_*` may wrap a test double. Skill is optional prompt injection (`ctx["skills"]`), not a port.
 - **PluginManager gate:** do not split child modules until dependencies are proven one-way.
 - **Runtime config gate:** touched code should not add new direct mutable reads from `config.py`; use a value object or runtime snapshot.
 

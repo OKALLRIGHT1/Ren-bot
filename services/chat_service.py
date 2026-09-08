@@ -12,7 +12,7 @@ from datetime import datetime, timedelta, date
 from pathlib import Path
 from typing import Optional, Dict, Any, Awaitable, Callable, List
 
-from modules.llm import chat_with_ai
+from modules.llm import chat_complete, chat_with_ai
 
 try:
     from modules.llm import chat_with_ai_stream
@@ -28,7 +28,6 @@ from core.message_source import REMOTE_CHAT_SOURCES, build_output_profile
 from services.chat_support import (
     active_alert_service,
     diary_service,
-    diary_utils,
     delegate_flow_service,
     emotion_reply_service,
     gateway_context_service,
@@ -40,7 +39,6 @@ from services.chat_support import (
     reply_flow_service,
     reply_style_service,
     sensor_event_service,
-    sensor_event_guard,
     sensor_reply_service,
     sensor_utils,
     search_flow_service,
@@ -48,29 +46,36 @@ from services.chat_support import (
     tool_flow_service,
     tool_result_formatter,
 )
+from services.chat_support.direct_flow_service import DirectFlowHooks, run_direct_turn
+from services.chat_support.followup_service import FollowupService
+from services.chat_support.reply_gatekeeper import should_reply as gatekeeper_should_reply
+from services.chat_support.flow_result import STATUS_REPLIED
+from services.chat_support.qq_input_service import QqInputConfig, QqInputService
 from services.chat_support.qq_link_enrichment import QqLinkEnrichmentService
 from services.chat_support.qq_private_buffer import QqPrivateMessageBuffer
-from services.chat_support.character_thought import (
-    format_thought_for_prompt,
-    generate_character_thought,
-)
 from services.chat_support.natural_chat_pipeline import (
     NaturalChatConfig,
+    PlainChatHooks,
+    apply_forbidden_phrase_guard,
+    assemble_chat_context_messages,
+    build_character_thought_block,
     build_scene_prompt,
-    decide_thought_gate,
-    evaluate_forbidden_reply,
+    chat_message_type,
     format_expression_block,
+    looks_like_chat_command,
+    retry_reply_without_forbidden,
+    run_plain_chat,
     scope_matches,
+    should_run_plain_chat,
 )
 from services.agent_runtime import AgentRuntime
-from services.plugin_ports import BrainKnowledgePort
-from services.capability_manager import is_force_executable_capability
-from services.capability_gatekeeper import (
-    build_forced_capability_command,
-    refine_capability_args,
-    resolve_ambiguous_capability,
+from services.plugin_ports import AppPort, BrainKnowledgePort, ChatGatewayPort, TtsPort
+from services.capability_gatekeeper import resolve_ambiguous_capability
+from services.chat_support.tool_invocation import (
+    get_tool_invocation_mode,
+    should_attach_deferred_tool_catalog,
+    should_attach_mcp_tool_prompt,
 )
-
 # 引入 Gatekeeper 配置
 try:
     from config import (
@@ -80,7 +85,6 @@ try:
         GATEKEEPER_BLACKLIST,
         GATEKEEPER_PROMPT_TEMPLATE,
         GATEKEEPER_ACTIVE_SESSION_WINDOW,
-        PERSONA_PROMPT,
         DEFAULT_PERSONA,
         VISION_MODE,
         WAKE_KEYWORDS,
@@ -119,7 +123,7 @@ except ImportError:
         "character_thought_enabled": True,
         "character_thought_scope": "desktop_and_qq_private",
         "group_chat_natural_enabled": False,
-        "character_thought_timeout_ms": 2500,
+        "character_thought_timeout_ms": 4000,
         "character_thought_max_tokens": 220,
         "expression_inject_in_main_reply": True,
         "expression_inject_max_items": 1,
@@ -154,6 +158,27 @@ LEGACY_OWNER_PRIVATE_SESSION_IDS = {
     for item in (NAPCAT_OWNER_USER_IDS or [])
     if str(item).strip()
 }
+
+
+# ── ASR 纠错「修正：原词→改成词」解析 ──────────────────────────────
+
+_CORRECTION_RE = re.compile(
+    r"^\s*修正[:：]\s*(.+?)\s*(?:→|->|=>|➝|➔)\s*(.+?)\s*$"
+)
+
+
+def _parse_correction_pair(text: str) -> Optional[tuple[str, str]]:
+    """Parse ``修正：原词→改成词`` (full/half-width colon, →/->/=> accepted)."""
+    if not text:
+        return None
+    match = _CORRECTION_RE.match(str(text).strip())
+    if not match:
+        return None
+    src = match.group(1).strip()
+    dst = match.group(2).strip()
+    if not src or not dst or src == dst:
+        return None
+    return src, dst
 
 
 class ChatService:
@@ -222,133 +247,6 @@ class ChatService:
         "not helpful",
     )
     APPLY_CONFIRM_KEYWORDS = ("确认", "应用", "执行", "同意", "apply")
-    TASK_CREATE_KEYWORDS = (
-        "待办",
-        "todo",
-        "to do",
-        "提醒我",
-        "记得",
-        "别忘了",
-        "要记得",
-        "今天要",
-        "明天要",
-        "今晚要",
-        "等会要",
-        "待会要",
-        "周末要",
-        "计划",
-        "打算",
-        "安排",
-        "准备",
-        "要去",
-        "需要",
-        "得去",
-        "我得",
-        "我要",
-    )
-    TASK_DONE_KEYWORDS = (
-        "做完了",
-        "搞定了",
-        "完成了",
-        "弄完了",
-        "处理完了",
-        "解决了",
-        "写完了",
-        "提交了",
-        "发了",
-        "结束了",
-        "done",
-        "finished",
-        "搞好了",
-        "已经好了",
-    )
-    TASK_STATUS_KEYWORDS = (
-        "任务",
-        "待办",
-        "todo",
-        "进度",
-        "安排",
-        "计划",
-        "打算",
-        "提醒",
-    )
-    FOLLOWUP_TOPICS = {
-        "health": (
-            "腹泻",
-            "拉肚子",
-            "肚子疼",
-            "胃痛",
-            "发烧",
-            "咳嗽",
-            "头痛",
-            "生病",
-            "不舒服",
-            "断食",
-            "补液",
-            "电解质",
-            "医院",
-            "就医",
-        ),
-        "sleep": (
-            "熬夜",
-            "失眠",
-            "没睡好",
-            "睡不着",
-            "睡眠",
-            "困",
-            "早睡",
-            "晚睡",
-            "睡觉",
-        ),
-        "diet": (
-            "没吃饭",
-            "吃不下",
-            "胃口",
-            "饮食",
-            "喝水",
-            "脱水",
-            "饿",
-            "早餐",
-            "午饭",
-            "晚饭",
-        ),
-        "work_study": (
-            "加班",
-            "赶工",
-            "ddl",
-            "截止",
-            "写代码",
-            "开题",
-            "报告",
-            "复习",
-            "考试",
-            "作业",
-            "项目",
-        ),
-        "emotion": (
-            "焦虑",
-            "压力",
-            "难受",
-            "烦",
-            "崩溃",
-            "低落",
-            "紧张",
-            "心情",
-            "不开心",
-            "累",
-        ),
-        "plan": (
-            "明天",
-            "计划",
-            "打算",
-            "安排",
-            "要去",
-            "准备",
-            "目标",
-            "待办",
-        ),
-    }
-    CARE_FOLLOWUP_TOPICS = {"health", "sleep", "diet", "emotion"}
 
     def __init__(
         self,
@@ -366,7 +264,6 @@ class ChatService:
         self.agent_runtime = AgentRuntime(
             plugin_manager=plugin_manager,
             mcp_bridge_getter=lambda: self.mcp_bridge,
-            chat_service=self,
         )
         self.tool_router = tool_router
         self.presenter = presenter
@@ -399,8 +296,6 @@ class ChatService:
             r"\b([0-9a-fA-F]{10})\b[\s\S]{0,120}\b([0-9a-fA-F]{8})\b",
             flags=re.IGNORECASE,
         )
-        self._last_proactive_followup_day = ""
-        self._last_task_followup_day = ""
         self.gateway_voice_reply_enabled = False
         self.gateway_voice_reply_probability = 0
         self.gateway_voice_renderer: Optional[
@@ -421,13 +316,35 @@ class ChatService:
             max_links=QQ_PRIVATE_LINK_ENRICHMENT_MAX_LINKS,
             timeout_sec=QQ_PRIVATE_LINK_ENRICHMENT_TIMEOUT_SEC,
         )
-        self._last_tool_triggers_by_session: Dict[str, List[str]] = {}
-        self._last_search_topic_by_session: Dict[str, str] = {}
+        self.qq_input_service = QqInputService(
+            gateway_getter=lambda: self.chat_gateway,
+            message_buffer=self.qq_private_message_buffer,
+            link_enrichment=self.qq_link_enrichment,
+            config=QqInputConfig(
+                enable_forward_context=QQ_PRIVATE_CONTINUOUS_ENABLE_FORWARD_CONTEXT,
+                enable_recall=QQ_PRIVATE_CONTINUOUS_ENABLE_RECALL,
+                enable_typing=QQ_PRIVATE_CONTINUOUS_ENABLE_TYPING,
+            ),
+            logger=self.logger,
+        )
+        self.tool_trigger_store = tool_flow_service.ToolTriggerStore()
+        self.search_topic_store = search_flow_service.SearchTopicStore()
         self._recent_sensor_replies: List[str] = []
         self._sensor_event_lock = asyncio.Lock()
         self.gateway_context_service = self._create_gateway_context_service()
         self.conversation_event_service = self._create_conversation_event_service()
         self.gateway_sender = self._create_gateway_sender()
+        self.gateway_port = ChatGatewayPort(
+            gateway_getter=lambda: self.chat_gateway,
+            send_text=self.gateway_sender.send_reply,
+            send_image=self.gateway_sender.send_image_reply,
+        )
+        self.tts_port = TtsPort(presenter_getter=lambda: self.presenter)
+        self.app_port = AppPort(
+            app_getter=lambda: self._app_ref,
+            app_root_getter=lambda: str(getattr(self, "app_root", "") or ""),
+            music_handler=self.handle_music_event,
+        )
         self.idle_status_service = self._create_idle_status_service()
         self.reply_style_service = self._create_reply_style_service()
         self.emotion_reply_service = self._create_emotion_reply_service()
@@ -437,6 +354,11 @@ class ChatService:
         self.sensor_event_service = self._create_sensor_event_service()
         self.sensor_reply_service = self._create_sensor_reply_service()
         self.diary_service = self._create_diary_service()
+        self.followup_service = FollowupService(
+            memory_store_getter=self._get_memory_store,
+            add_memory_safe=self._add_memory_safe,
+            logger=self.logger,
+        )
 
     def _create_gateway_sender(self) -> gateway_sender.GatewaySender:
         return gateway_sender.GatewaySender(
@@ -460,6 +382,8 @@ class ChatService:
             qq_remote_sources=QQ_REMOTE_SOURCES,
             owner_shared_session_id=OWNER_SHARED_SESSION_ID,
             owner_shared_local_sources=OWNER_SHARED_LOCAL_SOURCES,
+            memory_store_getter=self._get_memory_store,
+            logger=self.logger,
         )
 
     def _create_conversation_event_service(self):
@@ -690,17 +614,16 @@ class ChatService:
             looks_like_sensor_template_reply=lambda text: sensor_utils.looks_like_sensor_template_reply(
                 text, clean_text_fn=self._clean_text_for_tts
             ),
-            rescue_sensor_template_reply=self._rescue_sensor_template_reply,
             remember_sensor_reply=self._remember_sensor_reply,
             update_active_time=self._update_active_time,
             infer_reply_emotion_with_llm=self._infer_reply_emotion_with_llm,
             get_current_live2d_emotion=self._get_current_live2d_emotion,
-            reset_sensor_motion_after=self._reset_sensor_motion_after,
             add_memory_safe=self._add_memory_safe,
             last_reply_time_getter=lambda: self._last_reply_time,
             conversation_event_service=getattr(
                 self, "conversation_event_service", None
             ),
+            clean_text_for_tts=self._clean_text_for_tts,
         )
 
     def _create_diary_service(self) -> diary_service.DiaryService:
@@ -712,15 +635,14 @@ class ChatService:
             add_memory_safe=self._add_memory_safe,
             emit_idle_status_when_safe=self._emit_idle_status_when_safe,
             send_gateway_reply=self._send_gateway_reply,
-            backfill_napcat_history_for_day=self._backfill_napcat_history_for_day,
-            load_day_transcript_rows=self._load_day_transcript_rows,
-            get_runtime_owner_label=self._get_runtime_owner_label,
             owner_ids=[str(item).strip() for item in (NAPCAT_OWNER_USER_IDS or [])],
             owner_shared_session_id=OWNER_SHARED_SESSION_ID,
             legacy_owner_private_session_ids=LEGACY_OWNER_PRIVATE_SESSION_IDS,
             owner_shared_local_sources=OWNER_SHARED_LOCAL_SOURCES,
             qq_remote_sources=QQ_REMOTE_SOURCES,
             get_active_character_context=self._get_active_character_context,
+            chat_gateway_getter=lambda: self.chat_gateway,
+            app_getter=lambda: self.app,
         )
 
     def configure_gateway_voice_reply(
@@ -791,6 +713,11 @@ class ChatService:
         clean = str(text or "").strip()
         if not clean:
             return ""
+        clean = self._strip_internal_tags(
+            self._strip_cmd_anywhere(self._strip_emo_tags_anywhere(clean))
+        ).strip()
+        if not clean:
+            return ""
         if self._looks_like_upstream_error_reply(clean):
             preview = re.sub(r"\s+", " ", clean)[:180]
             try:
@@ -810,211 +737,190 @@ class ChatService:
     async def _maybe_buffer_qq_private_message(
         self, user_text: str, ctx: Optional[Dict[str, Any]]
     ) -> Optional[str]:
-        await self._enrich_qq_reply_context(ctx)
-        await self._enrich_qq_forward_context(ctx)
-        result = await self.qq_private_message_buffer.wait(user_text, ctx)
-        if result is None:
-            return None
-        if result.bypassed:
-            return result.text
-        try:
-            channel_meta = (ctx or {}).get("channel_meta") or {}
-            session_id = str(channel_meta.get("session_id") or "").strip()
-            count = int((ctx or {}).get("qq_buffered_count") or 0)
-            self.logger.info(
-                f"[QQ-BUFFER][{session_id}] merged count={count} chars={len(result.text)}"
-            )
-        except Exception:
-            pass
-        channel_meta = (ctx or {}).get("channel_meta") or {}
-        images = channel_meta.get("images") if isinstance(channel_meta, dict) else []
-        enriched_text, enriched_images = await self.qq_link_enrichment.enrich(
-            result.text, images if isinstance(images, list) else []
-        )
-        if isinstance(channel_meta, dict):
-            channel_meta["images"] = enriched_images
-            channel_meta["has_image"] = bool(enriched_images)
-            channel_meta["image_count"] = len(enriched_images)
-        return enriched_text
-
-    async def _enrich_qq_reply_context(self, ctx: Optional[Dict[str, Any]]) -> None:
-        if not isinstance(ctx, dict):
-            return
-        meta = ctx.get("channel_meta") or {}
-        if not isinstance(meta, dict):
-            return
-        reply = meta.get("reply") or {}
-        if not isinstance(reply, dict):
-            return
-        message_id = str(reply.get("message_id") or "").strip()
-        if not message_id:
-            return
-        adapter = str(meta.get("adapter") or "napcat_qq").strip() or "napcat_qq"
-        session_id = str(meta.get("session_id") or "").strip()
-        gateway = getattr(self, "chat_gateway", None)
-        if gateway is None or not hasattr(gateway, "fetch_message_by_id"):
-            return
-        try:
-            result = await gateway.fetch_message_by_id(
-                adapter, session_id, message_id, timeout=5
-            )
-        except Exception as exc:
-            try:
-                self.logger.warning(f"QQ quoted message fetch failed: {exc}")
-            except Exception:
-                pass
-            return
-        if not isinstance(result, dict) or not result.get("ok"):
-            return
-        item = result.get("item") or {}
-        if not isinstance(item, dict):
-            return
-        text = str(item.get("content") or item.get("text") or "").strip()
-        item_meta = item.get("meta") if isinstance(item.get("meta"), dict) else {}
-        if text and not str(reply.get("text") or reply.get("content") or "").strip():
-            reply["text"] = text
-        sender_name = str(
-            item_meta.get("sender_name")
-            or item_meta.get("user_id")
-            or reply.get("user_id")
-            or ""
-        ).strip()
-        if sender_name:
-            reply["sender_name"] = sender_name
-        quoted_images = item.get("images")
-        if not isinstance(quoted_images, list):
-            quoted_images = item_meta.get("images")
-        quoted_images = [
-            dict(image) for image in (quoted_images or []) if isinstance(image, dict)
-        ]
-        if quoted_images:
-            reply["images"] = quoted_images
-            merged_images = [
-                dict(image)
-                for image in (meta.get("images") or [])
-                if isinstance(image, dict)
-            ]
-            seen = {
-                str(
-                    image.get("url")
-                    or image.get("file")
-                    or image.get("name")
-                    or image
-                )
-                for image in merged_images
-            }
-            for image in quoted_images:
-                key = str(
-                    image.get("url")
-                    or image.get("file")
-                    or image.get("name")
-                    or image
-                )
-                if key in seen:
-                    continue
-                seen.add(key)
-                merged_images.append(image)
-            meta["images"] = merged_images
-            meta["has_image"] = bool(merged_images)
-            meta["image_count"] = len(merged_images)
-
-    async def _enrich_qq_forward_context(self, ctx: Optional[Dict[str, Any]]) -> None:
-        if not isinstance(ctx, dict) or not QQ_PRIVATE_CONTINUOUS_ENABLE_FORWARD_CONTEXT:
-            return
-        meta = ctx.get("channel_meta") or {}
-        if not isinstance(meta, dict):
-            return
-        components = meta.get("components") if isinstance(meta.get("components"), list) else []
-        forward_ids = []
-        for component in components:
-            if not isinstance(component, dict):
-                continue
-            if str(component.get("type") or "").strip().lower() != "forward":
-                continue
-            data = component.get("data") if isinstance(component.get("data"), dict) else {}
-            forward_id = str(
-                data.get("id") or data.get("message_id") or data.get("res_id") or ""
-            ).strip()
-            if forward_id:
-                forward_ids.append(forward_id)
-        if not forward_ids:
-            return
-        adapter = str(meta.get("adapter") or "napcat_qq").strip() or "napcat_qq"
-        session_id = str(meta.get("session_id") or "").strip()
-        gateway = getattr(self, "chat_gateway", None)
-        if gateway is None or not hasattr(gateway, "fetch_forward_message"):
-            return
-        forward_contexts = []
-        merged_images = list(meta.get("images") or [])
-        for forward_id in forward_ids[:2]:
-            try:
-                result = await gateway.fetch_forward_message(
-                    adapter, session_id, forward_id, timeout=8
-                )
-            except Exception as exc:
-                try:
-                    self.logger.warning(f"QQ forward fetch failed: {exc}")
-                except Exception:
-                    pass
-                continue
-            if not isinstance(result, dict) or not result.get("ok"):
-                continue
-            items = result.get("items") if isinstance(result.get("items"), list) else []
-            lines = []
-            for item in items[:30]:
-                if not isinstance(item, dict):
-                    continue
-                sender = str(item.get("sender_name") or "unknown").strip()
-                text = str(item.get("text") or "").strip()
-                if text:
-                    lines.append(f"{sender}: {text}")
-                for image in item.get("images") or []:
-                    if isinstance(image, dict):
-                        merged_images.append(image)
-            if lines:
-                forward_contexts.append(
-                    "<forward_content>\n" + "\n".join(lines) + "\n</forward_content>"
-                )
-        if forward_contexts:
-            meta["forward_contexts"] = forward_contexts
-            meta["images"] = merged_images
-            meta["has_image"] = bool(merged_images)
-            meta["image_count"] = len(merged_images)
+        return await self.qq_input_service.prepare_private_message(user_text, ctx)
 
     async def handle_external_chat_notice(self, event: Any) -> None:
-        event_type = ""
-        session_id = ""
-        metadata: Dict[str, Any] = {}
-        if isinstance(event, dict):
-            event_type = str(event.get("event_type") or "").strip()
-            session_id = str(event.get("session_id") or "").strip()
-            raw_meta = event.get("metadata") or {}
-            metadata = raw_meta if isinstance(raw_meta, dict) else {}
-        else:
-            event_type = str(getattr(event, "event_type", "") or "").strip()
-            session_id = str(getattr(event, "session_id", "") or "").strip()
-            raw_meta = getattr(event, "metadata", {}) or {}
-            metadata = raw_meta if isinstance(raw_meta, dict) else {}
+        await self.qq_input_service.handle_notice(event)
 
-        if not session_id:
-            return
-        if event_type == "qq_private_recall" and QQ_PRIVATE_CONTINUOUS_ENABLE_RECALL:
-            message_id = str(metadata.get("message_id") or "").strip()
-            removed = await self.qq_private_message_buffer.handle_recall(
-                session_id, message_id
-            )
-            if removed:
-                try:
-                    self.logger.info(
-                        f"[QQ-BUFFER][{session_id}] recall removed message_id={message_id}"
+    def _make_plain_chat_hooks(
+        self, *, ctx: Optional[Dict[str, Any]], user_text: str
+    ) -> PlainChatHooks:
+        return PlainChatHooks(
+            brain=self.brain,
+            plugin_manager=self.plugin_manager,
+            chat_with_ai=chat_with_ai,
+            thought_chat_fn=chat_with_ai,
+            natural_config=self._get_natural_chat_config(),
+            get_active_character_context=self._get_active_character_context,
+            consume_character_switch=self._consume_character_switch_flag,
+            wants_detailed_answer=self._wants_detailed_answer,
+            looks_like_command=self._looks_like_chat_command,
+            clean_retry_text=self._clean_forbidden_retry_text,
+            normalize_qq_reply=self._normalize_qq_reply_style,
+            build_expression=self._build_expression_inject_block,
+            get_short_term_messages=self._get_short_term_messages,
+            build_user_address_context=self._build_user_address_context,
+            build_external_sender_context=self._build_external_sender_context,
+            build_live2d_self_awareness_hint=self._build_live2d_self_awareness_hint,
+            build_current_emotion_context=self._build_current_emotion_context,
+            build_reply_style_context=self._build_reply_style_context,
+            get_memory_person_id=self._get_memory_person_id,
+            extract_emo_tag=self._extract_emo_tag,
+            clean_text_for_tts=self._clean_text_for_tts,
+            strip_internal_tags=self._strip_internal_tags,
+            strip_cmd_anywhere=self._strip_cmd_anywhere,
+            strip_emo_tags_anywhere=self._strip_emo_tags_anywhere,
+            should_suppress_followup_preface=self._should_suppress_followup_preface,
+            merge_preface_texts=self._merge_preface_texts,
+            apply_character_catchphrase=self._apply_character_catchphrase,
+            prepare_reply_for_output=self._prepare_reply_for_output,
+            infer_reply_emotion_with_llm=self._infer_reply_emotion_with_llm,
+            contains_cmd=self._contains_cmd,
+            looks_like_uncertain_answer=self._looks_like_uncertain_answer,
+            is_searchworthy_question=self._is_searchworthy_question,
+            skill_manager=getattr(self, "skill_manager", None),
+            personality=self.personality,
+            logger=self.logger,
+            record_tool_execution=lambda event_state, **event: self._record_tool_execution_events(
+                ctx=ctx or {},
+                user_text=user_text,
+                event_state=event_state,
+                **event,
+            ),
+            trace_process=self._trace_process,
+        )
+
+    def _make_direct_flow_hooks(self) -> DirectFlowHooks:
+        return DirectFlowHooks(
+            send_text=self._send_gateway_reply,
+            send_image=self._send_gateway_image_reply,
+            send_file=self._send_gateway_file_reply,
+            send_voice=self._send_gateway_voice_reply,
+            cleanup_image=self.gateway_sender.cleanup_image_file,
+            present_direct_tool_text=self._present_direct_tool_text,
+            presenter=self.presenter,
+            event_bus=self.event_bus,
+            add_memory_safe=self._add_memory_safe,
+            update_active_time=self._update_active_time,
+            set_codex_task_state=self._set_codex_task_state,
+            emit_idle_status_when_safe=self._emit_idle_status_when_safe,
+            schedule_app_restart=self._schedule_app_restart,
+            logger=self.logger,
+        )
+
+    @property
+    def _last_tool_triggers_by_session(self) -> Dict[str, List[str]]:
+        store = getattr(self, "tool_trigger_store", None)
+        if store is None:
+            self.tool_trigger_store = tool_flow_service.ToolTriggerStore()
+            store = self.tool_trigger_store
+        return store.by_session
+
+    @_last_tool_triggers_by_session.setter
+    def _last_tool_triggers_by_session(self, value: Dict[str, List[str]]) -> None:
+        store = getattr(self, "tool_trigger_store", None)
+        if store is None:
+            self.tool_trigger_store = tool_flow_service.ToolTriggerStore()
+            store = self.tool_trigger_store
+        store.by_session = dict(value or {})
+
+    @property
+    def _last_search_topic_by_session(self) -> Dict[str, str]:
+        store = getattr(self, "search_topic_store", None)
+        if store is None:
+            self.search_topic_store = search_flow_service.SearchTopicStore()
+            store = self.search_topic_store
+        return store.by_session
+
+    @_last_search_topic_by_session.setter
+    def _last_search_topic_by_session(self, value: Dict[str, str]) -> None:
+        store = getattr(self, "search_topic_store", None)
+        if store is None:
+            self.search_topic_store = search_flow_service.SearchTopicStore()
+            store = self.search_topic_store
+        store.by_session = dict(value or {})
+
+    def _make_tool_turn_hooks(self, *, ctx: Dict[str, Any], user_text: str):
+        from services.chat_support.tool_turn import ToolTurnHooks
+
+        return ToolTurnHooks(
+            plugin_manager=self.plugin_manager,
+            loop_chat=chat_with_ai,
+            plain_chat=chat_with_ai,
+            contains_cmd=self._contains_cmd,
+            strip_cmd_anywhere=self._strip_cmd_anywhere,
+            strip_emo_tags_anywhere=self._strip_emo_tags_anywhere,
+            clean_text_for_tts=self._clean_text_for_tts,
+            extract_emo_tag=self._extract_emo_tag,
+            try_share=self.personality.try_share,
+            looks_like_uncertain_answer=self._looks_like_uncertain_answer,
+            is_searchworthy_question=self._is_searchworthy_question,
+            is_search_delegate=self._is_search_delegate_route,
+            extract_workspace_read_path=self._extract_workspace_read_path,
+            record_tool_execution=lambda event_state, **event: self._record_tool_execution_events(
+                ctx=ctx,
+                user_text=user_text,
+                event_state=event_state,
+                **event,
+            ),
+            set_delegate_task_state=self._set_delegate_task_state,
+            add_delegate_session_event=self._add_delegate_session_event,
+            queue_background_delegate=lambda **kwargs: asyncio.create_task(
+                self._run_background_delegate_task(**kwargs)
+            ),
+            add_codex_session_event=self._add_codex_session_event,
+            add_memory_safe=self._add_memory_safe,
+            apply_forbidden_guard=self._apply_forbidden_phrase_guard,
+            reply_start_emotion=self._reply_start_emotion,
+            looks_like_upstream_error=self._looks_like_upstream_error_reply,
+            strip_internal_tags=self._strip_internal_tags,
+            should_suppress_followup_preface=self._should_suppress_followup_preface,
+            merge_preface_texts=self._merge_preface_texts,
+            apply_character_catchphrase=self._apply_character_catchphrase,
+            prepare_reply_for_output=self._prepare_reply_for_output,
+            infer_reply_emotion_with_llm=self._infer_reply_emotion_with_llm,
+            remember_search_topic=self._remember_search_topic,
+            trace_process=self._trace_process,
+            logger=self.logger,
+        )
+
+    def _make_stream_turn_hooks(self):
+        from services.chat_support.stream_turn import StreamTurnHooks
+
+        return StreamTurnHooks(
+            event_bus=self.event_bus,
+            add_codex_session_event=self._add_codex_session_event,
+            reply_start_emotion=self._reply_start_emotion,
+            strip_complete_cmd=lambda buffer: self._cmd_re.sub("", buffer),
+            emo_tag_re=self._emo_tag_re,
+            normalize_emo=self._normalize_emo,
+            clean_text_for_tts=self._clean_text_for_tts,
+            strip_internal_tags=self._strip_internal_tags,
+            strip_cmd_anywhere=self._strip_cmd_anywhere,
+            strip_emo_tags_anywhere=self._strip_emo_tags_anywhere,
+            strip_model_catchphrase=self._strip_model_catchphrase,
+            apply_forbidden_guard=self._apply_forbidden_phrase_guard,
+            try_share=self.personality.try_share,
+            apply_character_catchphrase=self._apply_character_catchphrase,
+            prepare_reply_for_output=self._prepare_reply_for_output,
+            presenter_output_controls_idle=self._presenter_output_controls_idle,
+            sensor_emotion_intensity=sensor_utils.sensor_emotion_intensity,
+            trace_process=self._trace_process,
+            logger=self.logger,
+        )
+
+    def _clean_forbidden_retry_text(self, text: str) -> str:
+        return self._strip_model_catchphrase(
+            self._clean_text_for_tts(
+                self._strip_wrapping_quotes(
+                    self._strip_internal_tags(
+                        self._strip_cmd_anywhere(
+                            self._strip_emo_tags_anywhere(text or "")
+                        )
                     )
-                except Exception:
-                    pass
-            return
-        if event_type == "qq_private_typing" and QQ_PRIVATE_CONTINUOUS_ENABLE_TYPING:
-            await self.qq_private_message_buffer.handle_typing(
-                session_id, is_typing=bool(metadata.get("is_typing"))
+                )
             )
+        ).strip()
 
     def _get_natural_chat_config(self) -> NaturalChatConfig:
         try:
@@ -1026,20 +932,10 @@ class ChatService:
         return NaturalChatConfig.from_mapping(raw)
 
     def _natural_chat_message_type(self, ctx: Optional[Dict[str, Any]]) -> str:
-        if not isinstance(ctx, dict):
-            return "private"
-        meta = ctx.get("channel_meta") or {}
-        if not isinstance(meta, dict):
-            return "private"
-        return str(meta.get("message_type") or "private").strip().lower() or "private"
+        return chat_message_type(ctx)
 
     def _looks_like_chat_command(self, user_text: str) -> bool:
-        raw = str(user_text or "").strip()
-        if not raw:
-            return False
-        if raw.startswith(("/", "!", "！", "#")):
-            return True
-        return False
+        return looks_like_chat_command(user_text)
 
     def _consume_character_switch_flag(self) -> bool:
         """True once after active character id changes (first natural-chat turn)."""
@@ -1063,89 +959,21 @@ class ChatService:
         recent: Optional[List[Dict[str, Any]]] = None,
     ) -> tuple[str, Dict[str, Any]]:
         """Run Character Thought when gate allows; returns (prompt_block, trace)."""
-        config = self._get_natural_chat_config()
-        source = str((ctx or {}).get("source") or "").strip().lower()
-        message_type = self._natural_chat_message_type(ctx)
-        detail = self._wants_detailed_answer(user_text)
-        gate = decide_thought_gate(
+        return await build_character_thought_block(
             user_text=user_text,
-            source=source,
-            message_type=message_type,
-            config=config,
+            ctx=ctx,
+            config=self._get_natural_chat_config(),
             need_tools=need_tools,
             codex_mode=codex_mode,
-            wants_detailed_answer=detail,
-            is_command=self._looks_like_chat_command(user_text),
+            recent=recent,
+            get_active_character_context=self._get_active_character_context,
+            consume_character_switch=self._consume_character_switch_flag,
+            wants_detailed_answer=self._wants_detailed_answer,
+            looks_like_command=self._looks_like_chat_command,
+            chat_fn=chat_with_ai,
+            get_short_term_messages=self._get_short_term_messages,
+            logger=self.logger,
         )
-        just_switched = self._consume_character_switch_flag()
-        trace: Dict[str, Any] = {
-            "character_thought_used": False,
-            "scope_matched": gate.scope_matched,
-            "thought_skipped_reason": gate.reason if not gate.should_run else "",
-            "thought_latency_ms": 0.0,
-            "emotion_level": "",
-            "want": "",
-            "angle": "",
-            "just_switched_character": just_switched,
-            "short_shell": gate.short_shell,
-            "detail_intent": gate.detail_intent,
-            "source": source,
-            "message_type": message_type,
-        }
-        if not gate.should_run:
-            return "", trace
-
-        char_name, _char_id, base_prompt = self._get_active_character_context()
-        recent_window = list(recent if recent is not None else self._get_short_term_messages(ctx))[-6:]
-        try:
-            thought, skip_reason, latency_ms = await asyncio.to_thread(
-                generate_character_thought,
-                chat_fn=chat_with_ai,
-                character_name=char_name,
-                character_prompt_excerpt=str(base_prompt or ""),
-                recent=recent_window,
-                user_text=user_text,
-                just_switched_character=just_switched,
-                timeout_ms=config.character_thought_timeout_ms,
-                max_tokens=config.character_thought_max_tokens,
-                on_error=config.character_thought_on_error,
-            )
-        except TimeoutError:
-            trace["thought_skipped_reason"] = "timeout"
-            return "", trace
-        except Exception as exc:
-            try:
-                self.logger.warning("character thought failed: %s", exc)
-            except Exception:
-                pass
-            trace["thought_skipped_reason"] = "error"
-            return "", trace
-
-        trace["thought_latency_ms"] = round(float(latency_ms or 0.0), 1)
-        if thought is None:
-            trace["thought_skipped_reason"] = skip_reason or "error"
-            return "", trace
-
-        if gate.detail_intent and thought.want == "light_ack":
-            thought.want = "direct_answer"
-            thought.angle = "direct"
-
-        block = format_thought_for_prompt(
-            thought,
-            short_shell=gate.short_shell,
-            just_switched_character=just_switched,
-        )
-        trace.update(
-            {
-                "character_thought_used": True,
-                "thought_skipped_reason": "",
-                "emotion_level": thought.emotion_level,
-                "want": thought.want,
-                "angle": thought.angle,
-                "avoid": list(thought.avoid or []),
-            }
-        )
-        return block, trace
 
     def _build_expression_inject_block(
         self,
@@ -1174,46 +1002,16 @@ class ChatService:
         ctx: Optional[Dict[str, Any]] = None,
     ) -> str:
         """One-shot constrained rewrite only when forbidden phrases hit (not polish mode)."""
-        char_name, _cid, _prompt = self._get_active_character_context()
-        system = (
-            f"你正在修正角色「{char_name}」的一句回复草稿。"
-            "只去掉点评腔/抽象标签，保持原意与短句，不新增事实。"
-            "只输出修正后的回复正文。"
+        return await retry_reply_without_forbidden(
+            user_text=user_text,
+            draft_text=draft_text,
+            constraint=constraint,
+            ctx=ctx,
+            get_active_character_context=self._get_active_character_context,
+            chat_fn=chat_with_ai,
+            clean_retry_text=self._clean_forbidden_retry_text,
+            normalize_qq_reply=self._normalize_qq_reply_style,
         )
-        messages = [
-            {"role": "system", "content": system},
-            {
-                "role": "user",
-                "content": (
-                    f"{constraint}\n\n"
-                    f"【用户原话】\n{str(user_text or '').strip()}\n\n"
-                    f"【回复草稿】\n{str(draft_text or '').strip()}"
-                ),
-            },
-        ]
-        try:
-            reply = await asyncio.to_thread(
-                chat_with_ai,
-                messages,
-                task_type="gatekeeper",
-                caller="forbidden_phrase_retry",
-            )
-            polished = self._clean_text_for_tts(
-                self._strip_wrapping_quotes(
-                    self._strip_internal_tags(
-                        self._strip_cmd_anywhere(
-                            self._strip_emo_tags_anywhere(reply or "")
-                        )
-                    )
-                )
-            )
-            polished = self._strip_model_catchphrase(polished).strip()
-            source = str((ctx or {}).get("source") or "").strip().lower()
-            if polished and source in QQ_REMOTE_SOURCES:
-                polished = self._normalize_qq_reply_style(polished)
-            return polished or ""
-        except Exception:
-            return ""
 
     async def _apply_forbidden_phrase_guard(
         self,
@@ -1223,67 +1021,15 @@ class ChatService:
         ctx: Optional[Dict[str, Any]],
         regenerate: Optional[Callable[..., Awaitable[str]]] = None,
     ) -> tuple[str, Dict[str, Any]]:
-        config = self._get_natural_chat_config()
-        max_retries = int(config.forbidden_phrase_max_retries or 0)
-        current = str(text or "")
-        retries_done = 0
-        last_hits: List[str] = []
-        source = str((ctx or {}).get("source") or "").strip().lower()
-        message_type = self._natural_chat_message_type(ctx)
-        # 仅在自然聊作用域内做护栏，避免改工具长文
-        if not scope_matches(source, message_type, config):
-            return current, {
-                "forbidden_phrase_hit": False,
-                "forbidden_phrases": [],
-                "forbidden_retries": 0,
-                "forbidden_skipped": "scope_miss",
-            }
-
-        async def _default_regen(constraint: str) -> str:
-            return await self._retry_reply_without_forbidden(
-                user_text=user_text,
-                draft_text=current,
-                constraint=constraint,
-                ctx=ctx,
-            )
-
-        regen = regenerate or _default_regen
-
-        while True:
-            result = evaluate_forbidden_reply(
-                current,
-                retries_done=retries_done,
-                max_retries=max_retries,
-            )
-            hits = list(result.get("hits") or [])
-            last_hits = hits
-            if not hits:
-                return current, {
-                    "forbidden_phrase_hit": False,
-                    "forbidden_phrases": [],
-                    "forbidden_retries": retries_done,
-                }
-            if result.get("should_retry"):
-                constraint = str(result.get("retry_constraint") or "")
-                try:
-                    retried = await regen(constraint=constraint)
-                    if retried:
-                        current = str(retried)
-                        retries_done += 1
-                        continue
-                except Exception as exc:
-                    try:
-                        self.logger.warning("forbidden phrase retry failed: %s", exc)
-                    except Exception:
-                        pass
-            stripped = str(result.get("stripped") or current)
-            if not stripped.strip():
-                stripped = "嗯……这样啊"
-            return stripped, {
-                "forbidden_phrase_hit": True,
-                "forbidden_phrases": last_hits,
-                "forbidden_retries": retries_done,
-            }
+        return await apply_forbidden_phrase_guard(
+            text=text,
+            user_text=user_text,
+            ctx=ctx,
+            config=self._get_natural_chat_config(),
+            retry_reply=self._retry_reply_without_forbidden,
+            logger=self.logger,
+            regenerate=regenerate,
+        )
 
     async def _send_gateway_reply(
         self,
@@ -1328,7 +1074,6 @@ class ChatService:
         try:
             return bool(
                 await plugin.maybe_send_auto_meme(
-                    chat_service=self,
                     user_text=user_text,
                     reply_text=reply_text,
                     emotion=emotion,
@@ -1398,7 +1143,7 @@ class ChatService:
         suffix = " ".join(parts)
         self.logger.debug(f"[ProcessTrace] {stage}{(' ' + suffix) if suffix else ''}")
 
-    def _build_mcp_tool_prompt(self, max_tools: int = 16) -> str:
+    def _build_mcp_tool_prompt(self, max_tools: int = 16, invocation_mode: str = "") -> str:
         if not self.mcp_bridge:
             return ""
         if not self.plugin_manager or "mcp_tools" not in getattr(
@@ -1425,14 +1170,23 @@ class ChatService:
             if len(desc) > 72:
                 desc = desc[:72] + "…"
             lines.append(f"- {spec.name}: {desc or 'MCP tool'}")
-        return (
-            "\n\n【远程MCP工具】\n"
-            "这些工具需要通过副脑委托调用。需要使用时，先委托 mcp_tools，并说明目标工具和参数。\n"
-            "委托示例：\n"
-            "[CMD: mcp_tools | call_tool ||| 工具名 ||| JSON参数]\n"
-            "如需查看当前可用远程工具，可委托：\n"
-            "[CMD: mcp_tools | list_tools]\n" + "\n".join(lines)
-        )
+        from services.chat_support.tool_invocation import normalize_invocation_mode
+
+        mode = normalize_invocation_mode(invocation_mode or get_tool_invocation_mode())
+        if mode in {"dual", "function"}:
+            how = (
+                "这些工具需要通过副脑委托 mcp_tools。"
+                "需要时调用 mcp_tools，并说明目标工具和参数。不要在正文写工具协议。\n"
+            )
+        else:
+            how = (
+                "这些工具需要通过副脑委托调用。需要使用时，先委托 mcp_tools，并说明目标工具和参数。\n"
+                "委托示例：\n"
+                "[CMD: mcp_tools | call_tool ||| 工具名 ||| JSON参数]\n"
+                "如需查看当前可用远程工具，可委托：\n"
+                "[CMD: mcp_tools | list_tools]\n"
+            )
+        return "\n\n【远程MCP工具】\n" + how + "\n".join(lines)
 
     def _remember_search_topic(self, text: str, ctx: Optional[Dict[str, Any]]) -> None:
         if not text_utils.is_search_topic_candidate(
@@ -1555,110 +1309,8 @@ class ChatService:
             if self.logger:
                 self.logger.debug(f"Reply effect record failed: {exc}")
 
-    def _day_range_ts(self, date_str: str) -> tuple[int, int]:
-        try:
-            dt = datetime.strptime(date_str, "%Y-%m-%d")
-        except ValueError:
-            dt = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
-        start_ts = int(dt.timestamp())
-        return start_ts, start_ts + 86400
-
-    def _existing_transcript_keys_for_day(self, date_str: str) -> set[tuple]:
-        keys: set[tuple] = set()
-        for row in self._load_day_transcript_rows(date_str):
-            meta = diary_utils.row_meta(row)
-            session_id = str(row.get("session_id") or "").strip()
-            role = str(row.get("role") or "").strip().lower()
-            content = str(row.get("content") or "").strip()
-            message_id = str(meta.get("message_id") or "").strip()
-            if message_id:
-                keys.add(("message_id", session_id, message_id))
-            if content:
-                keys.add(("content", session_id, role, int(row.get("ts") or 0), content))
-        return keys
-
     async def _backfill_napcat_history_for_day(self, date_str: str) -> int:
-        gateway = getattr(self, "chat_gateway", None)
-        if gateway is None:
-            return 0
-        adapter = getattr(gateway, "adapters", {}).get("napcat_qq")
-        if adapter is None or not hasattr(adapter, "fetch_recent_history"):
-            return 0
-        store = getattr(self.brain, "sqlite_store", None)
-        if store is None:
-            return 0
-
-        sessions: List[str] = []
-        seen_sessions = set()
-        for owner_id in (NAPCAT_OWNER_USER_IDS or []):
-            owner_text = str(owner_id).strip()
-            if not owner_text:
-                continue
-            session_id = f"private:{owner_text}"
-            if session_id not in seen_sessions:
-                seen_sessions.add(session_id)
-                sessions.append(session_id)
-        for group_id in sorted(getattr(adapter, "group_whitelist", set()) or set()):
-            group_text = str(group_id).strip()
-            if not group_text:
-                continue
-            session_id = f"group:{group_text}"
-            if session_id not in seen_sessions:
-                seen_sessions.add(session_id)
-                sessions.append(session_id)
-        if not sessions:
-            return 0
-
-        start_ts, end_ts = self._day_range_ts(date_str)
-        existing_keys = self._existing_transcript_keys_for_day(date_str)
-        imported = 0
-        for session_id in sessions:
-            try:
-                result = await gateway.fetch_recent_history(
-                    "napcat_qq", session_id, limit=120, timeout=10
-                )
-            except Exception as exc:
-                self.logger.warning(
-                    f"NapCat history fetch failed for {session_id}: {exc}"
-                )
-                continue
-            if not isinstance(result, dict) or not result.get("ok"):
-                continue
-            for item in result.get("items") or []:
-                if not isinstance(item, dict):
-                    continue
-                ts = int(item.get("ts") or 0)
-                if ts < start_ts or ts >= end_ts:
-                    continue
-                role = str(item.get("role") or "").strip().lower() or "user"
-                content = str(item.get("content") or "").strip()
-                if not content:
-                    continue
-                row_session_id = str(item.get("session_id") or session_id).strip()
-                meta = item.get("meta") if isinstance(item.get("meta"), dict) else {}
-                message_id = str(meta.get("message_id") or "").strip()
-                dedupe_key = (
-                    ("message_id", row_session_id, message_id)
-                    if message_id
-                    else ("content", row_session_id, role, ts, content)
-                )
-                if dedupe_key in existing_keys:
-                    continue
-                await asyncio.to_thread(
-                    store.add_transcript,
-                    role,
-                    content,
-                    meta,
-                    ts,
-                    row_session_id,
-                )
-                existing_keys.add(dedupe_key)
-                imported += 1
-        if imported:
-            self.logger.info(
-                f"NapCat history backfill imported {imported} transcript rows for {date_str}"
-            )
-        return imported
+        return await self.diary_service.backfill_napcat_history_for_day(date_str)
 
     @property
     def app(self):
@@ -1676,157 +1328,16 @@ class ChatService:
         self._app_ref = value
 
     async def _sync_qq_user_profile(self, ctx: Optional[Dict[str, Any]]) -> None:
-        if not self.gateway_context_service.is_qq_source(ctx):
-            return
-        channel_meta = (ctx or {}).get("channel_meta") or {}
-        user_id = str(channel_meta.get("user_id") or "").strip()
-        if not user_id:
-            return
-        store = self._get_memory_store()
-        if not store:
-            return
-        sender = channel_meta.get("sender") or {}
-        sender_name = str(
-            channel_meta.get("sender_name") or sender.get("nickname") or user_id
-        ).strip()
-        remark_name = str(sender.get("card") or sender.get("remark") or "").strip()
-        message_type = (
-            str(channel_meta.get("message_type") or "private").strip().lower()
-            or "private"
-        )
-        is_owner = bool(channel_meta.get("is_owner"))
-        relationship = (
-            "owner"
-            if is_owner
-            else ("group_member" if message_type == "group" else "contact")
-        )
-        memory_scope = (
-            OWNER_SHARED_SESSION_ID
-            if is_owner
-            else ("group_shared" if message_type == "group" else "private")
-        )
-        profile_payload = {
-            "user_id": user_id,
-            "nickname": sender_name,
-            "remark_name": remark_name,
-            "relationship_to_owner": relationship,
-            "permission_level": "owner" if is_owner else "default",
-            "memory_scope": memory_scope,
-            "is_owner": is_owner,
-        }
-        try:
-            await asyncio.to_thread(store.upsert_qq_user_profile, profile_payload)
-        except Exception as exc:
-            self.logger.warning(f"QQ user profile sync failed: {exc}")
+        await self.gateway_context_service.sync_qq_user_profile(ctx)
 
     def _build_external_sender_context(self, ctx: Optional[Dict[str, Any]]) -> str:
-        if not self.gateway_context_service.is_qq_source(ctx):
-            return ""
-        channel_meta = ctx.get("channel_meta") or {}
-        sender_name = str(
-            channel_meta.get("sender_name")
-            or channel_meta.get("user_id")
-            or "Unknown Contact"
-        ).strip()
-        user_id = str(channel_meta.get("user_id") or "").strip()
-        session_id = str(channel_meta.get("session_id") or "").strip()
-        group_id = str(channel_meta.get("group_id") or "").strip()
-        message_type = (
-            str(channel_meta.get("message_type") or "private").strip() or "private"
-        )
-        is_owner = bool(channel_meta.get("is_owner"))
-        owner_label = (
-            self._get_active_user_address(ctx)
-            if is_owner
-            else str(channel_meta.get("owner_label") or "Owner").strip()
-        ) or "Owner"
-        relation = (
-            f"The current sender is {owner_label}."
-            if is_owner
-            else f"The current sender is not {owner_label}; they are another QQ contact or a group member."
-        )
-        parts = [
-            "[QQ Message Context]",
-            f"chat_type: {message_type}",
-            f"sender: {sender_name}",
-            relation,
-            "Always distinguish the owner from other QQ contacts.",
-            "Keep using the current local persona and tone.",
-            "QQ messages are text-only and must not drive Live2D or desktop voice.",
-            "Reply like an instant message, not a formal report or customer-service answer.",
-        ]
-        if user_id:
-            parts.append(f"sender_qq: {user_id}")
-        if group_id:
-            parts.append(f"group_id: {group_id}")
-        if session_id:
-            parts.append(f"session_id: {session_id}")
-
-        store = self._get_memory_store()
-        profile = None
-        if store and user_id:
-            try:
-                profile = store.get_qq_user_profile(user_id)
-            except Exception as exc:
-                self.logger.warning(f"Load QQ user profile failed: {exc}")
-        if profile:
-            relation_map = {
-                "owner": f"{owner_label} (owner)",
-                "contact": "QQ private contact",
-                "group_member": "QQ group member",
-            }
-            scope_map = {
-                OWNER_SHARED_SESSION_ID: "owner shared memory",
-                "private": "private memory",
-                "group_shared": "group shared memory",
-            }
-            display_name = str(
-                profile.get("remark_name") or profile.get("nickname") or ""
-            ).strip()
-            if display_name and display_name != sender_name:
-                parts.append(f"profile_name: {display_name}")
-            profile_relation = relation_map.get(
-                str(profile.get("relationship_to_owner") or "").strip()
-            )
-            if profile_relation:
-                parts.append(f"profile_relation: {profile_relation}")
-            identity_summary = str(profile.get("identity_summary") or "").strip()
-            if identity_summary:
-                parts.append(f"profile_summary: {identity_summary}")
-            notes = str(profile.get("notes") or "").strip()
-            if notes:
-                parts.append(f"profile_notes: {notes}")
-            permission_level = str(profile.get("permission_level") or "").strip()
-            if permission_level:
-                parts.append(f"permission_level: {permission_level}")
-            scope_label = scope_map.get(str(profile.get("memory_scope") or "").strip())
-            if scope_label:
-                parts.append(f"memory_scope: {scope_label}")
-        return "\n".join(parts)
+        return self.gateway_context_service.build_external_sender_context(ctx)
 
     def _get_active_user_address(self, ctx: Optional[Dict[str, Any]] = None) -> str:
-        if self.gateway_context_service.is_qq_source(ctx):
-            channel_meta = (ctx or {}).get("channel_meta") or {}
-            if not bool(channel_meta.get("is_owner")):
-                return ""
-        try:
-            from modules.character_manager import character_manager
-
-            active_char = character_manager.get_active_character() or {}
-            address = str(active_char.get("user_address") or "").strip()
-            return address or "Master"
-        except Exception:
-            return "Master"
+        return self.gateway_context_service.get_active_user_address(ctx)
 
     def _build_user_address_context(self, ctx: Optional[Dict[str, Any]] = None) -> str:
-        address = self._get_active_user_address(ctx)
-        if not address:
-            return ""
-        return (
-            "【称呼规则】"
-            f"当前角色称呼用户为「{address}」。"
-            "回复中需要称呼用户时优先使用这个称呼，不要自行改成“主人”。"
-        )
+        return self.gateway_context_service.build_user_address_context(ctx)
 
     def _looks_like_explicit_code_agent_request(self, text: str) -> bool:
         raw = str(text or "").strip()
@@ -2437,13 +1948,13 @@ class ChatService:
         normal_triggers: List[str],
         used_triggers: List[str],
     ) -> bool:
-        if not is_force_executable_capability(route_reason):
-            return False
-        selected_triggers = {str(trigger or "") for trigger in normal_triggers or []}
-        if not selected_triggers:
-            return False
-        executed_triggers = {str(trigger or "") for trigger in used_triggers or []}
-        return not bool(selected_triggers & executed_triggers)
+        from services.chat_support.tool_turn import should_force_capability_route
+
+        return should_force_capability_route(
+            route_reason=route_reason,
+            normal_triggers=normal_triggers,
+            used_triggers=used_triggers,
+        )
 
     def _looks_like_preserved_tool_output(self, text: str) -> bool:
         raw = str(text or "").strip()
@@ -2528,18 +2039,18 @@ class ChatService:
                 pass
 
             costume_line = f"- 你当前穿着/模型服装：{costume_name}。" if costume_name else ""
-            return "\n".join(
-                [
-                    "【Live2D自我识别】",
-                    f"- 你当前不是旁观的通用AI，而是桌面上的 Live2D 角色「{active_name}」。",
-                    costume_line,
-                    "- 如果截图边缘、右下角、悬浮窗、桌宠层或 Live2D Agent 窗口里出现动漫女孩/Live2D模型，那优先识别为“我自己的桌面形象/实体投影”，不要当成陌生女孩。",
-                    "- 如果窗口标题或内容包含：Live2D Agent、系统设置中心、换装、角色、服装、表情、动作、emotion、motion、model3、TTS、口型、live2d-suzu、live2d-llm，这通常是在配置或修改你自己。",
-                    "- 用户说“给你改代码、给你换装、给你配表情/动作/音色/知识库”时，指的就是你这套桌面身体和人格系统。",
-                    "- 但不要过度认领：网页正文、QQ聊天内容、游戏/番剧/图片主体里的动漫角色，除非明确是桌宠/Live2D窗口/当前角色配置，否则不要默认说成是你。",
-                    "- 回应时可以自然使用“我”“我的动作”“我的表情”“这套身体/模型”，但不要解释这条规则。",
-                ]
+            from modules.sensor_prompts import format_sensor_prompt, join_prompt_parts
+
+            hint = format_sensor_prompt(
+                "self_awareness",
+                active_name=active_name,
+                costume_line=costume_line,
             )
+            if str((ctx or {}).get("sensor_category") or "") != "self":
+                hint = join_prompt_parts(
+                    hint, format_sensor_prompt("self_awareness_screenshot")
+                )
+            return hint
         return ""
 
     def _get_current_live2d_emotion(self) -> tuple[str, float]:
@@ -2597,9 +2108,11 @@ class ChatService:
             str(base_prompt or "").strip(),
             self._build_current_emotion_context(ctx),
         ]
-        parts.append(
-            "【屏幕感知】旁边轻轻接一句，不要总结屏幕或评价软件好不好。"
-        )
+        from modules.sensor_prompts import format_sensor_prompt
+
+        persona_extra = format_sensor_prompt("persona_extra")
+        if persona_extra:
+            parts.append(persona_extra)
         self_awareness_hint = self._build_live2d_self_awareness_hint(ctx)
         if self_awareness_hint:
             parts.append(self_awareness_hint)
@@ -2666,426 +2179,22 @@ class ChatService:
     def _get_memory_store(self):
         return getattr(self.brain, "sqlite_store", None)
 
-    def _split_text_clauses(self, text: str) -> list[str]:
-        if not text:
-            return []
-        return [
-            seg.strip(" ，,、\t")
-            for seg in re.split(r"[\n。！？!?；;]+", text or "")
-            if seg.strip(" ，,、\t")
-        ]
-
-    def _normalize_task_text(self, text: str) -> str:
-        t = (text or "").strip()
-        if not t:
-            return ""
-        t = re.sub(r"^(待办|todo|to do)\s*[:：]?\s*", "", t, flags=re.IGNORECASE)
-        t = re.sub(r"^(提醒我|记得|别忘了|要记得)\s*", "", t)
-        t = re.sub(
-            r"^(我(今天|明天|今晚|等会|待会|周末|之后|最近)?(要|得|想|准备|打算)|今天要|明天要|今晚要|等会要|待会要|周末要)\s*",
-            "",
-            t,
-        )
-        t = re.sub(r"^(安排|计划|打算|准备|需要|要去|得去)\s*", "", t)
-        t = re.sub(r"(一下|一下子|这件事|这个事|这事)$", "", t)
-        t = re.sub(r"^[：:、，,\-\s]+|[：:、，,。！？!?；;\s]+$", "", t)
-        return t[:80].strip()
-
-    def _is_task_related_message(self, text: str) -> bool:
-        lower = (text or "").strip().lower()
-        if not lower:
-            return False
-        if any(k in lower for k in self.TASK_CREATE_KEYWORDS):
-            return True
-        if any(k in lower for k in self.TASK_DONE_KEYWORDS):
-            return True
-        if any(k in lower for k in self.TASK_STATUS_KEYWORDS):
-            return True
-        return False
-
-    @staticmethod
-    def _looks_like_question_or_recall(text: str) -> bool:
-        """True for memory-recall questions / interrogatives that must not become todos."""
-        raw = str(text or "").strip()
-        if not raw:
-            return False
-        lower = raw.lower()
-        if "?" in raw or "？" in raw:
-            return True
-        if raw.rstrip().endswith(("吗", "么", "呢", "嘛")):
-            return True
-        # "还记得…吗" / "你记得…" are recall, not "记得帮我…" task imperatives.
-        if any(
-            cue in lower
-            for cue in (
-                "还记得",
-                "记得吗",
-                "记得不",
-                "你记得",
-                "记得我",
-                "记得上次",
-                "记得之前",
-            )
-        ):
-            return True
-        return False
+    def _looks_like_question_or_recall(self, text: str) -> bool:
+        return FollowupService.looks_like_question_or_recall(text)
 
     def _extract_task_candidates(self, text: str) -> list[str]:
-        candidates = []
-        seen = set()
-        for raw in self._split_text_clauses(text):
-            parts = [
-                seg.strip(" ，,、\t")
-                for seg in re.split(r"[，,、]+", raw)
-                if seg.strip(" ，,、\t")
-            ]
-            for part in parts or [raw]:
-                lower = part.lower()
-                if len(part) < 4 or self._looks_like_question_or_recall(part):
-                    continue
-                if any(k in lower for k in self.TASK_DONE_KEYWORDS):
-                    continue
-                if not any(k in lower for k in self.TASK_CREATE_KEYWORDS):
-                    continue
-                # Bare "记得" without imperative task shape is usually chat, not a todo.
-                create_hits = [k for k in self.TASK_CREATE_KEYWORDS if k in lower]
-                if create_hits == ["记得"] and not any(
-                    cue in lower
-                    for cue in ("记得要", "记得帮", "记得把", "记得去", "记得给", "记得买")
-                ):
-                    continue
-                cleaned = self._normalize_task_text(part)
-                if len(cleaned) < 2:
-                    continue
-                if self._looks_like_question_or_recall(cleaned):
-                    continue
-                if cleaned in seen:
-                    continue
-                seen.add(cleaned)
-                candidates.append(cleaned)
-                if len(candidates) >= 2:
-                    return candidates
-        return candidates
-
-    def _extract_task_completion_hint(self, text: str) -> str:
-        for raw in self._split_text_clauses(text):
-            lower = raw.lower()
-            if not any(k in lower for k in self.TASK_DONE_KEYWORDS):
-                continue
-            hint = raw
-            for key in self.TASK_DONE_KEYWORDS:
-                hint = re.sub(re.escape(key), "", hint, flags=re.IGNORECASE)
-            hint = re.sub(r"^(这个|那个|这件事|这事|任务|待办)\s*", "", hint)
-            hint = self._normalize_task_text(hint)
-            return hint
-        return ""
-
-    def _task_match_score(self, hint: str, task_text: str) -> float:
-        hint_norm = self._normalize_task_text(hint)
-        task_norm = self._normalize_task_text(task_text)
-        if not task_norm:
-            return -1.0
-        if not hint_norm:
-            return 0.1
-        score = 0.0
-        if hint_norm == task_norm:
-            score += 8.0
-        if hint_norm and hint_norm in task_norm:
-            score += 5.0
-        if task_norm and task_norm in hint_norm:
-            score += 3.5
-        for token in re.findall(r"[\u4e00-\u9fffA-Za-z0-9]{2,}", hint_norm):
-            if token in task_norm:
-                score += 1.0
-        return score
-
-    def _find_matching_active_task(self, hint: str = "") -> Optional[Dict[str, Any]]:
-        store = self._get_memory_store()
-        if not store:
-            return None
-        try:
-            items = store.list_items(status="active", type_="todo", limit=12, offset=0)
-        except Exception:
-            return None
-        if not items:
-            return None
-        if not hint:
-            return items[0]
-        best = None
-        best_score = -1.0
-        for idx, item in enumerate(items):
-            score = self._task_match_score(hint, str(item.get("text") or "")) - (
-                idx * 0.05
-            )
-            if score > best_score:
-                best = item
-                best_score = score
-        return best if best_score >= 1.0 else None
-
-    async def _append_hidden_transcript_note(
-        self, role: str, text: str, meta: Optional[Dict[str, Any]] = None
-    ):
-        store = self._get_memory_store()
-        note = str(text or "").strip()
-        if not store or not note:
-            return
-        try:
-            safe_meta = (meta or {}).copy()
-            session_id = str(safe_meta.get("session_id") or "").strip() or None
-            await asyncio.to_thread(
-                store.add_transcript, role, note, safe_meta, None, session_id
-            )
-        except Exception as e:
-            self.logger.warning(f"隐藏 transcript 记录失败: {e}")
-
-    async def _upsert_user_tasks_from_text(self, user_text: str) -> list[str]:
-        store = self._get_memory_store()
-        if not store:
-            return []
-        created = []
-        for task_text in self._extract_task_candidates(user_text):
-            existing = self._find_matching_active_task(task_text)
-            if (
-                existing
-                and self._task_match_score(task_text, str(existing.get("text") or ""))
-                >= 5.0
-            ):
-                item = dict(existing)
-                item["text"] = task_text
-                item["source"] = "task_agent"
-                await asyncio.to_thread(store.upsert_item, item)
-                created.append(task_text)
-                continue
-            item = {
-                "type": "todo",
-                "status": "active",
-                "pin": any(k in task_text for k in ("今天", "明天", "ddl", "截止")),
-                "confidence": 0.86,
-                "tags": ["user_task", "auto"],
-                "text": task_text,
-                "source": "task_agent",
-            }
-            await asyncio.to_thread(store.upsert_item, item)
-            created.append(task_text)
-        return created
-
-    async def _complete_task_from_text(self, user_text: str) -> Optional[str]:
-        store = self._get_memory_store()
-        if not store:
-            return None
-        lower = (user_text or "").strip().lower()
-        if not any(k in lower for k in self.TASK_DONE_KEYWORDS):
-            return None
-        hint = self._extract_task_completion_hint(user_text)
-        target = self._find_matching_active_task(hint)
-        if not target:
-            return None
-        await asyncio.to_thread(
-            store.set_item_status, str(target.get("id") or ""), "done"
-        )
-        return str(target.get("text") or "").strip() or None
+        return self.followup_service.extract_task_candidates(text)
 
     async def _update_task_agent(self, user_text: str):
-        completed = await self._complete_task_from_text(user_text)
-        created = await self._upsert_user_tasks_from_text(user_text)
-        return {"completed": completed, "created": created}
-
-    def _build_task_followup_text(self, task_text: str) -> str:
-        return "昨天那件事，今天还要继续吗？"
-
-    def _is_short_life_task_text(self, text: str) -> bool:
-        raw = str(text or "").strip().lower()
-        if not raw:
-            return False
-        hints = [
-            "睡觉",
-            "睡一觉",
-            "去睡",
-            "休息",
-            "吃饭",
-            "吃个饭",
-            "洗澡",
-            "洗个澡",
-            "出门",
-            "回家",
-            "喝水",
-            "上厕所",
-            "午睡",
-            "躺会儿",
-        ]
-        return any(hint in raw for hint in hints)
-
-    def _is_followup_worthy_task_item(self, item: Dict[str, Any]) -> bool:
-        text = str((item or {}).get("text") or "").strip().lower()
-        if not text:
-            return False
-        if bool((item or {}).get("pin")):
-            return True
-        worthy_hints = (
-            "ddl",
-            "deadline",
-            "截止",
-            "考试",
-            "复习",
-            "作业",
-            "报告",
-            "开题",
-            "提交",
-            "交稿",
-            "报名",
-            "面试",
-            "打卡",
-            "今天",
-            "明天",
-            "今晚",
-            "这周",
-            "周一",
-            "周二",
-            "周三",
-            "周四",
-            "周五",
-            "周六",
-            "周日",
-        )
-        return any(hint in text for hint in worthy_hints)
+        return await self.followup_service.update_task_agent(user_text)
 
     def _should_suppress_followup_preface(self, user_text: str) -> bool:
-        raw = str(user_text or "").strip().lower()
-        if not raw:
-            return False
-        high_priority_hints = [
-            "摔",
-            "摔倒",
-            "受伤",
-            "流血",
-            "疼",
-            "疼死",
-            "崩溃",
-            "难受",
-            "不舒服",
-            "发烧",
-            "生病",
-            "住院",
-            "急",
-            "出事",
-            "救命",
-            "害怕",
-            "想哭",
-            "焦虑",
-            "头晕",
-            "吐了",
-        ]
-        return any(hint in raw for hint in high_priority_hints)
-
-    def _has_today_task_followup(self) -> bool:
-        store = self._get_memory_store()
-        if not store:
-            return False
-        today = datetime.now().date()
-        try:
-            rows = store.list_transcript(role="assistant", limit=220, offset=0)
-            for r in rows:
-                ts = int(r.get("ts", 0) or 0)
-                if not ts or datetime.fromtimestamp(ts).date() != today:
-                    continue
-                meta = r.get("meta") or {}
-                if str(meta.get("path") or "").strip() == "task_followup":
-                    return True
-        except Exception:
-            return False
-        return False
-
-    def _has_task_followup_for_item(self, item_id: str) -> bool:
-        target = str(item_id or "").strip()
-        if not target:
-            return False
-        store = self._get_memory_store()
-        if not store:
-            return False
-        try:
-            rows = store.list_transcript(role="assistant", limit=420, offset=0)
-            for r in rows:
-                meta = r.get("meta") or {}
-                if str(meta.get("path") or "").strip() != "task_followup":
-                    continue
-                if str(meta.get("item_id") or "").strip() == target:
-                    return True
-        except Exception:
-            return False
-        return False
-
-    def _find_task_followup_candidate(self) -> Optional[Dict[str, Any]]:
-        store = self._get_memory_store()
-        if not store:
-            return None
-        try:
-            items = store.list_items(status="active", type_="todo", limit=12, offset=0)
-        except Exception:
-            return None
-        if not items:
-            return None
-        today = datetime.now().date()
-        yesterday = today - timedelta(days=1)
-        oldest_allowed = today - timedelta(days=2)
-        fallback = None
-        for item in items:
-            updated_at = str(item.get("updated_at") or "").strip()
-            item_text = str(item.get("text") or "").strip()
-            item_id = str(item.get("id") or "").strip()
-            if self._is_short_life_task_text(item_text):
-                continue
-            if not self._is_followup_worthy_task_item(item):
-                continue
-            if item_id and self._has_task_followup_for_item(item_id):
-                continue
-            try:
-                updated_date = datetime.fromisoformat(
-                    updated_at.replace("Z", "+00:00")
-                ).date()
-            except Exception:
-                updated_date = None
-            if updated_date and updated_date < oldest_allowed:
-                continue
-            if updated_date == yesterday:
-                return item
-            if updated_date and updated_date < today and fallback is None:
-                fallback = item
-        return fallback
+        return FollowupService.should_suppress_followup_preface(user_text)
 
     async def _maybe_send_task_followup(
         self, user_text: str, ctx: Optional[Dict[str, Any]] = None
     ) -> Optional[Dict[str, str]]:
-        try:
-            source = str((ctx or {}).get("source", ""))
-            if source and source != "text_input":
-                return None
-            if bool((ctx or {}).get("codex_mode", False)):
-                return None
-            today_str = datetime.now().strftime("%Y-%m-%d")
-            if self._last_task_followup_day == today_str:
-                return None
-            if self._should_suppress_followup_preface(user_text or ""):
-                return None
-            if self._is_task_related_message(user_text or ""):
-                return None
-            if self._has_today_task_followup():
-                self._last_task_followup_day = today_str
-                return None
-            candidate = self._find_task_followup_candidate()
-            if not candidate:
-                return None
-            task_text = str(candidate.get("text") or "").strip()
-            if not task_text:
-                return None
-            self._last_task_followup_day = today_str
-            return {
-                "text": self._build_task_followup_text(task_text),
-                "task": task_text,
-                "item_id": str(candidate.get("id") or ""),
-            }
-        except Exception as e:
-            self.logger.warning(f"任务跟进触发失败: {e}")
-        return None
+        return await self.followup_service.maybe_send_task_followup(user_text, ctx)
 
     def _merge_preface_texts(self, *texts: str) -> str:
         parts = [str(t or "").strip() for t in texts if str(t or "").strip()]
@@ -3316,151 +2425,30 @@ class ChatService:
         chat_log_source: str,
         output_profile: Dict[str, Any],
     ) -> None:
-        try:
-            self._set_delegate_task_state(
-                ctx,
-                "running",
-                summary=user_text[:200],
-                triggers=delegate_triggers,
-                meta={"background": True},
-            )
-            self._add_delegate_session_event(
-                "background_running",
-                ctx=ctx,
-                user_text=user_text,
-                triggers=delegate_triggers,
-                text=user_text,
-                meta={"background": True},
-            )
-            delegate_flow_result = await delegate_flow_service.run_delegate_round(
-                user_text=user_text,
-                ctx=ctx,
-                context_messages=context_messages,
-                delegate_triggers=delegate_triggers,
-                task_reasoning=task_reasoning,
-                plugin_manager=self.plugin_manager,
-                chat_with_ai=chat_with_ai,
-                logger=self.logger,
-            )
-            delegate_triggered = delegate_flow_result.triggered
-            delegate_clean = delegate_flow_result.clean
-            delegate_results = delegate_flow_result.results
-            delegate_used = delegate_flow_result.used
-            if "moegirl_wiki" in set(delegate_used or delegate_triggers):
-                if self.tool_result_formatter.should_fallback_from_moegirl(
-                    delegate_results
-                ):
-                    (
-                        fallback_results,
-                        fallback_used,
-                    ) = await search_flow_service.run_search_fallback_for_moegirl(
-                        user_text=user_text,
-                        ctx=ctx,
-                        plugin_manager=self.plugin_manager,
-                    )
-                    if fallback_results:
-                        merged_results = list(delegate_results or [])
-                        merged_results.append(
-                            "\n【萌百未给出明确主词条，以下是联网补充】"
-                        )
-                        merged_results.extend(fallback_results)
-                        delegate_results = merged_results
-                    if fallback_used:
-                        delegate_used = list(
-                            dict.fromkeys(
-                                list(delegate_used or []) + list(fallback_used)
-                            )
-                        )
-            summary = (
-                "\n".join(delegate_results)[:200]
-                if delegate_results
-                else (delegate_clean or user_text[:200])
-            )
-            self._set_delegate_task_state(
-                ctx,
-                "done" if delegate_results or delegate_used else "skipped",
-                summary=summary,
-                triggers=delegate_triggers,
-                meta={
-                    "background": True,
-                    "delegate_triggered": bool(delegate_triggered),
-                    "delegate_used": list(delegate_used or []),
-                },
-            )
-            self._add_delegate_session_event(
-                "background_completed"
-                if (delegate_results or delegate_used)
-                else "background_skipped",
-                ctx=ctx,
-                user_text=user_text,
-                triggers=delegate_triggers,
-                text=(
-                    "\n".join(delegate_results)[:600]
-                    if delegate_results
-                    else (delegate_clean or "")
-                ),
-                meta={
-                    "background": True,
-                    "delegate_used": list(delegate_used or []),
-                },
-            )
-            final_text = ""
-            if delegate_results:
-                final_text = "\n".join(
-                    str(item) for item in delegate_results if str(item).strip()
-                )
-            elif delegate_clean:
-                final_text = delegate_clean
-            if not final_text:
-                final_text = "后台任务已处理完成。"
-            final_text, final_emo = await self.tool_result_formatter.polish_background_delegate_reply(
-                user_text=user_text,
-                delegate_triggers=delegate_triggers,
-                delegate_results=delegate_results,
-                delegate_clean=delegate_clean,
-            )
-            await output_coordinator.emit_background_delegate_reply(
-                text=final_text,
-                emotion=final_emo,
-                ctx=ctx,
-                transcript_meta=transcript_meta,
-                chat_log_source=chat_log_source,
-                output_profile=output_profile,
-                emit_assistant_text=self._emit_assistant_text,
-            )
-            self._add_delegate_session_event(
-                "background_reply",
-                ctx=ctx,
-                user_text=user_text,
-                triggers=delegate_triggers,
-                text=final_text,
-                meta={"emotion": final_emo, "background": True},
-            )
-        except Exception as e:
-            self._set_delegate_task_state(
-                ctx,
-                "failed",
-                summary=str(e)[:200],
-                triggers=delegate_triggers,
-                meta={"background": True},
-            )
-            self._add_delegate_session_event(
-                "background_failed",
-                ctx=ctx,
-                user_text=user_text,
-                triggers=delegate_triggers,
-                text=str(e),
-                meta={"background": True},
-            )
-            await output_coordinator.emit_background_delegate_reply(
-                text=f"刚才委托的后台任务失败了：{e}",
-                emotion="neutral",
-                ctx=ctx,
-                transcript_meta=transcript_meta,
-                chat_log_source=chat_log_source,
-                output_profile=output_profile,
-                emit_assistant_text=self._emit_assistant_text,
-            )
+        invocation_mode = get_tool_invocation_mode()
+        await delegate_flow_service.run_background_delegate_task(
+            user_text=user_text,
+            ctx=ctx,
+            context_messages=context_messages,
+            delegate_triggers=delegate_triggers,
+            task_reasoning=task_reasoning,
+            transcript_meta=transcript_meta,
+            chat_log_source=chat_log_source,
+            output_profile=output_profile,
+            plugin_manager=self.plugin_manager,
+            chat_with_ai=(
+                chat_complete
+                if invocation_mode in {"dual", "function"}
+                else chat_with_ai
+            ),
+            set_delegate_task_state=self._set_delegate_task_state,
+            add_delegate_session_event=self._add_delegate_session_event,
+            should_fallback_from_moegirl=self.tool_result_formatter.should_fallback_from_moegirl,
+            polish_background_delegate_reply=self.tool_result_formatter.polish_background_delegate_reply,
+            emit_assistant_text=self._emit_assistant_text,
+            logger=self.logger,
+            invocation_mode=invocation_mode,
+        )
 
     def _update_active_time(self):
         """更新活跃时间戳"""
@@ -3542,320 +2530,37 @@ class ChatService:
                 **safe_meta,
             )
 
-    # ==================== Gatekeeper 逻辑 ====================
     async def _should_reply(
         self, user_text: str, ctx: Optional[Dict[str, Any]] = None
     ) -> bool:
-        """
-        判断是否需要回复用户消息
-        """
-        text_clean = (user_text or "").strip()
-        if len(text_clean) < 2:
-            return False
-
-        # Wake-word rule (inlined; former ListenerPlugin module removed): force reply
-        lower_text = text_clean.lower()
-        wake_words = [
-            str(word).lower() for word in (WAKE_KEYWORDS or []) if str(word).strip()
-        ]
-        if any(word in lower_text for word in wake_words):
-            self.logger.info("🟢 [Gatekeeper] 命中唤醒词 -> 强制回复")
-            return True
-        if self._is_searchworthy_question(text_clean):
-            self.logger.info("🟢 [Gatekeeper] 明确问题 -> 强制回复")
-            return True
-
-        # Inlined gate: avoid assistant consecutive self-talk
-        short_term_messages = self._get_short_term_messages(ctx)
-        if short_term_messages:
-            last_msg = short_term_messages[-1]
-            if last_msg.get("role") == "assistant":
-                self.logger.info("🛑 [Gatekeeper] 上一条为 assistant -> 忽略")
-                return False
-
-        if not GATEKEEPER_ENABLED:
-            return True
-
-        # 1. 黑名单检查 (直接忽略)
-        for w in GATEKEEPER_BLACKLIST:
-            if w in text_clean:
-                self.logger.info(f"🛑 [Gatekeeper] 命中黑名单 [{w}] -> 忽略")
-                return False
-
-        # 2. 白名单检查 (直接回复)
-        for w in GATEKEEPER_WHITELIST:
-            if w.lower() in text_clean.lower():
-                self.logger.info(f"🟢 [Gatekeeper] 命中白名单 [{w}] -> 强制回复")
-                return True
-
-        # 3. 活跃会话窗口检查 (连贯对话必回)
-        time_diff = time.time() - self._last_reply_time
-        if time_diff < GATEKEEPER_ACTIVE_SESSION_WINDOW:
-            self.logger.info(
-                f"🟢 [Gatekeeper] 处于活跃会话窗口 ({int(time_diff)}s < {GATEKEEPER_ACTIVE_SESSION_WINDOW}s) -> 强制回复"
-            )
-            return True
-
-        # 4. LLM 智能判断 (调用 cheap model)
-        try:
-            last_ai_reply = "无"
-            if short_term_messages:
-                for msg in reversed(short_term_messages):
-                    if msg.get("role") == "assistant":
-                        last_ai_reply = msg.get("content", "")[:50]
-                        break
-
-            prompt = GATEKEEPER_PROMPT_TEMPLATE.format(
-                user_text=text_clean, last_ai_reply=last_ai_reply
-            )
-
-            messages = [{"role": "user", "content": prompt}]
-
-            # 使用 'gatekeeper' 路由
-            decision = await asyncio.to_thread(
-                chat_with_ai,
-                messages,
-                task_type="gatekeeper",
-                caller="chat_gatekeeper",
-            )
-            decision = decision.strip().upper()
-
-            self.logger.info(
-                f"⚖️ [Gatekeeper] LLM 判断结果: {decision} | 输入: {text_clean[:20]}..."
-            )
-
-            if "YES" in decision:
-                return True
-            else:
-                return False
-
-        except Exception as e:
-            self.logger.error(f"⚠️ [Gatekeeper] 判断出错，默认放行: {e}")
-            return True
-
-    def _match_followup_topic(self, text: str) -> str:
-        t = (text or "").strip().lower()
-        if not t:
-            return ""
-        for topic, kws in self.FOLLOWUP_TOPICS.items():
-            if any(k in t for k in kws):
-                return topic
-        return ""
-
-    def _render_followup_label(self, topic: str, text: str) -> str:
-        t = (text or "").strip()
-        if topic == "health":
-            if "腹泻" in t or "拉肚子" in t:
-                return "腹泻"
-            if "断食" in t:
-                return "断食和补液"
-            return "身体情况"
-        if topic == "sleep":
-            return "休息和睡眠"
-        if topic == "diet":
-            return "饮食和补水"
-        if topic == "work_study":
-            return "工作/学习进度"
-        if topic == "emotion":
-            return "心情和压力"
-        if topic == "plan":
-            return "你的计划安排"
-        return "近况"
-
-    def _build_followup_text(self, topic: str, label: str) -> str:
-        if topic == "health":
-            return "今天身体还行吗？"
-        if topic == "sleep":
-            return "今天精神还撑得住吗？"
-        if topic == "diet":
-            return "今天有好好吃点东西吗？"
-        if topic == "work_study":
-            return ""
-        if topic == "emotion":
-            return "今天状态缓过来一点了吗？"
-        if topic == "plan":
-            return ""
-        return ""
+        return await gatekeeper_should_reply(
+            user_text,
+            ctx=ctx,
+            last_reply_time=self._last_reply_time,
+            get_short_term_messages=self._get_short_term_messages,
+            is_searchworthy_question=self._is_searchworthy_question,
+            chat_with_ai=chat_with_ai,
+            logger=self.logger,
+            enabled=bool(GATEKEEPER_ENABLED),
+            wake_keywords=WAKE_KEYWORDS or (),
+            whitelist=GATEKEEPER_WHITELIST or (),
+            blacklist=GATEKEEPER_BLACKLIST or (),
+            prompt_template=GATEKEEPER_PROMPT_TEMPLATE or "",
+            active_session_window=int(GATEKEEPER_ACTIVE_SESSION_WINDOW or 20),
+        )
 
     async def _record_proactive_followup(
         self, followup: Optional[Dict[str, Any]]
     ) -> None:
-        if not isinstance(followup, dict):
-            return
-        text = str(followup.get("text") or "").strip()
-        topic = str(followup.get("topic") or "").strip()
-        snippet = str(followup.get("snippet") or "").strip()
-        if not text:
-            return
-        note = text
-        if snippet:
-            note = f"{text}（主题:{topic or 'unknown'}，依据：{snippet}）"
-        await self._append_hidden_transcript_note(
-            "assistant",
-            note,
-            meta={
-                "path": "proactive_followup",
-                "topic": topic,
-                "hidden": True,
-            },
-        )
-        await self._add_memory_safe(
-            "assistant",
-            note,
-            meta={
-                "path": "proactive_followup",
-                "topic": topic,
-                "hidden": True,
-            },
-        )
+        await self.followup_service.record_proactive_followup(followup)
 
     async def _record_task_followup(self, followup: Optional[Dict[str, Any]]) -> None:
-        if not isinstance(followup, dict):
-            return
-        text = str(followup.get("text") or "").strip()
-        task_text = str(followup.get("task") or "").strip()
-        item_id = str(followup.get("item_id") or "").strip()
-        if not text:
-            return
-        note = text if not task_text else f"{text}（任务:{task_text}）"
-        await self._append_hidden_transcript_note(
-            "assistant",
-            note,
-            meta={
-                "path": "task_followup",
-                "task": task_text,
-                "item_id": item_id,
-                "hidden": True,
-            },
-        )
-        await self._add_memory_safe(
-            "assistant",
-            note,
-            meta={
-                "path": "task_followup",
-                "task": task_text,
-                "item_id": item_id,
-                "hidden": True,
-            },
-        )
-
-    def _find_yesterday_followup_note(self) -> tuple[str, str, str]:
-        """
-        从 transcript 中找昨天用户提到、适合今天关心的主题。
-        返回: (topic, label, snippet)
-        """
-        store = getattr(self.brain, "sqlite_store", None)
-        if not store:
-            return "", "", ""
-        now_dt = datetime.now()
-        today = now_dt.date()
-        yesterday = today - timedelta(days=1)
-        max_age = timedelta(hours=18)
-        try:
-            rows = store.list_transcript(limit=420, offset=0)
-            for r in rows:
-                if (r.get("role") or "").strip() != "user":
-                    continue
-                ts = int(r.get("ts", 0) or 0)
-                if not ts:
-                    continue
-                msg_dt = datetime.fromtimestamp(ts)
-                if msg_dt.date() != yesterday:
-                    continue
-                if (now_dt - msg_dt) > max_age:
-                    continue
-                content = str(r.get("content") or "").strip()
-                if not content:
-                    continue
-                meta = r.get("meta") or {}
-                path = str(meta.get("path") or "").strip().lower()
-                if path in {
-                    "direct",
-                    "tool_use",
-                    "proactive_followup",
-                    "task_followup",
-                }:
-                    continue
-                if content.startswith("/"):
-                    continue
-                topic = self._match_followup_topic(content)
-                if not topic:
-                    continue
-                if topic not in self.CARE_FOLLOWUP_TOPICS:
-                    continue
-                label = self._render_followup_label(topic, content)
-                snippet = content[:80] + ("..." if len(content) > 80 else "")
-                return topic, label, snippet
-        except Exception:
-            return "", "", ""
-        return "", "", ""
-
-    def _has_today_proactive_followup(self) -> bool:
-        store = getattr(self.brain, "sqlite_store", None)
-        if not store:
-            return False
-        today = datetime.now().date()
-        try:
-            rows = store.list_transcript(role="assistant", limit=260, offset=0)
-            for r in rows:
-                ts = int(r.get("ts", 0) or 0)
-                if not ts:
-                    continue
-                if datetime.fromtimestamp(ts).date() != today:
-                    continue
-                content = str(r.get("content") or "")
-                meta = r.get("meta") or {}
-                if str(meta.get("path") or "").strip() == "proactive_followup":
-                    return True
-                if "[主动关心]" in content:
-                    return True
-        except Exception:
-            return False
-        return False
+        await self.followup_service.record_task_followup(followup)
 
     async def _maybe_send_proactive_followup(
         self, user_text: str, ctx: Optional[Dict[str, Any]] = None
     ) -> Optional[Dict[str, str]]:
-        """
-        今日首次文本交互时，基于昨天用户话题生成一次主动关心前缀。
-        """
-        try:
-            source = str((ctx or {}).get("source", ""))
-            if source and source != "text_input":
-                return None
-            if bool((ctx or {}).get("codex_mode", False)):
-                return None
-
-            today_str = datetime.now().strftime("%Y-%m-%d")
-            if self._last_proactive_followup_day == today_str:
-                return None
-            if self._should_suppress_followup_preface(user_text or ""):
-                return None
-
-            # 主动关心只在每天较早时段触发，避免把昨天的话题拖得太久。
-            if datetime.now().hour >= 12:
-                return None
-
-            # 用户当前已经在主动聊这些话题，就不插入
-            if self._match_followup_topic(user_text or ""):
-                return None
-
-            if self._has_today_proactive_followup():
-                self._last_proactive_followup_day = today_str
-                return None
-
-            topic, label, snippet = self._find_yesterday_followup_note()
-            if not topic:
-                return None
-
-            followup_text = self._build_followup_text(topic, label)
-            if not followup_text:
-                return None
-            self._last_proactive_followup_day = today_str
-            return {"text": followup_text, "topic": topic, "snippet": snippet}
-        except Exception as e:
-            self.logger.warning(f"主动关心触发失败: {e}")
-        return None
+        return await self.followup_service.maybe_send_proactive_followup(user_text, ctx)
 
     def _build_recent_transcript_context(
         self,
@@ -3899,6 +2604,47 @@ class ChatService:
 
     # ==================== 主处理逻辑 ====================
 
+    async def _handle_asr_correction_learn(
+        self, src: str, dst: str, ctx: Optional[Dict[str, Any]]
+    ) -> Optional[str]:
+        """Record a manual ASR fix (「修正：src→dst」) and reply with a confirmation.
+
+        Returns the reply text on success (caller should stop here).  Falls back
+        to a freshly-built corrector (persisting to the same JSON files) when the
+        voice sensor is not running, so fixes are recorded regardless.
+        """
+        corrector = None
+        app = getattr(self, "app", None)
+        sensor = getattr(app, "voice_sensor", None)
+        if sensor is not None:
+            corrector = getattr(sensor, "corrector", None)
+        if corrector is None:
+            try:
+                from modules.asr.adapter import build_corrector
+
+                corrector = build_corrector()
+            except Exception as exc:
+                self.logger.warning(f"ASR 纠错学习失败（无法构造 corrector）: {exc}")
+                return None
+        try:
+            entry = corrector.learn(src, dst)
+        except Exception as exc:
+            self.logger.warning(f"ASR 纠错学习失败: {exc}")
+            return None
+        count = entry.get("count", 0)
+        promoted = entry.get("promoted")
+        if promoted:
+            reply = f"记住了，以后把「{src}」纠正成「{dst}」（第 {count} 次，已设为规则）。"
+        else:
+            reply = f"已记下这次修改：{src} → {dst}（第 {count} 次，再记一次就固定成规则）。"
+        try:
+            from services.chat_support.output_coordinator import emit_assistant_ui_parts
+
+            await emit_assistant_ui_parts(self.event_bus, reply)
+        except Exception as exc:
+            self.logger.warning(f"ASR 纠错确认回复发送失败: {exc}")
+        return reply
+
     async def process(self, user_text: str, ctx: Optional[Dict[str, Any]] = None):
         """
         处理用户输入 (主入口)
@@ -3906,13 +2652,28 @@ class ChatService:
         """
         self._dbg(f"process() 开始，用户输入: {user_text}")
 
+        # 0. ASR 纠错学习：解析「修正：原词→改成词」并记录，不进入 LLM。
+        pair = _parse_correction_pair(user_text)
+        if pair is not None:
+            src, dst = pair
+            confirm = await self._handle_asr_correction_learn(src, dst, ctx)
+            if confirm is not None:
+                return
+
         # 1. 初始化上下文
         if ctx is None:
             ctx = {}
-        ctx["chat_service"] = self
         ctx["brain"] = self.brain
         ctx["knowledge"] = BrainKnowledgePort(self.brain)
+        ctx["gateway"] = getattr(self, "gateway_port", None) or ChatGatewayPort.from_chat_service(
+            self
+        )
+        ctx["tts"] = getattr(self, "tts_port", None) or TtsPort.from_chat_service(self)
+        ctx["app"] = getattr(self, "app_port", None) or AppPort.from_chat_service(self)
+        ctx["plugin_manager"] = self.plugin_manager
+        ctx["agent_runtime"] = self.agent_runtime
         ctx["mcp_bridge"] = self.mcp_bridge
+        ctx["skills"] = getattr(self, "skill_manager", None)
         # Explicit for on-demand tools (e.g. owner_channel_bridge); keeps hard isolation elsewhere.
         if getattr(self, "conversation_event_service", None) is not None:
             ctx["conversation_event_service"] = self.conversation_event_service
@@ -4056,207 +2817,16 @@ class ChatService:
 
         if is_direct:
             self._dbg("进入 Direct 命令处理流程")
-            direct_meta = {"path": "direct"}
-            if memory_session_id:
-                direct_meta["session_id"] = memory_session_id
-            direct_reply_text = str(direct_result) if direct_result is not None else ""
-            direct_memory_reply = direct_reply_text
-            handled_gateway_voice = False
-            handled_gateway_image = False
-            handled_gateway_file = False
-            pending_restart_result = None
-            if (
-                isinstance(direct_result, dict)
-                and str(direct_result.get("__type__") or "").strip() == "app_restart"
-            ):
-                direct_reply_text = str(
-                    direct_result.get("message") or "收到，正在重启主程序。"
-                ).strip()
-                direct_memory_reply = direct_reply_text
-                pending_restart_result = direct_result
-            if (
-                isinstance(direct_result, dict)
-                and str(direct_result.get("__type__") or "").strip() == "gateway_voice"
-            ):
-                voice_path = str(direct_result.get("voice_path") or "").strip()
-                post_send_text = str(direct_result.get("post_send_text") or "").strip()
-                success_text = str(
-                    direct_result.get("success_text") or "🔊 已把语音发给你了。"
-                )
-                fallback_text = str(
-                    direct_result.get("fallback_text")
-                    or "⚠️ 语音已准备好，但回发失败了。"
-                )
-                voice_ok = await self._send_gateway_voice_reply(voice_path, ctx)
-                direct_reply_text = success_text if voice_ok else fallback_text
-                direct_memory_reply = (
-                    (post_send_text or success_text) if voice_ok else fallback_text
-                )
-                handled_gateway_voice = voice_ok
-                if voice_ok:
-                    direct_reply_text = ""
-                    if post_send_text and str(ctx.get("source") or "").strip().lower() in {
-                        "qq_gateway",
-                        "napcat_qq",
-                    }:
-                        await self._send_gateway_reply(
-                            post_send_text, ctx, emotion="neutral"
-                        )
-            if (
-                isinstance(direct_result, dict)
-                and str(direct_result.get("__type__") or "").strip() == "gateway_file"
-            ):
-                file_path = str(direct_result.get("file_path") or "").strip()
-                file_name = str(direct_result.get("file_name") or "").strip()
-                success_text = str(
-                    direct_result.get("success_text") or "📎 已把文件发给你了。"
-                )
-                fallback_text = str(
-                    direct_result.get("fallback_text")
-                    or "⚠️ 文件已准备好，但回发失败了。"
-                )
-                file_ok = await self._send_gateway_file_reply(
-                    file_path, ctx, file_name=file_name
-                )
-                direct_reply_text = success_text if file_ok else fallback_text
-                direct_memory_reply = direct_reply_text
-                handled_gateway_file = file_ok
-                if not file_ok and str(ctx.get("source") or "").strip().lower() in {
-                    "qq_gateway",
-                    "napcat_qq",
-                }:
-                    await self._send_gateway_reply(
-                        direct_reply_text, ctx, emotion="neutral"
-                    )
-            if (
-                isinstance(direct_result, dict)
-                and str(direct_result.get("__type__") or "").strip() == "gateway_image"
-            ):
-                image_path = str(direct_result.get("image_path") or "").strip()
-                image_caption = str(direct_result.get("caption") or "")
-                post_send_text = str(direct_result.get("post_send_text") or "").strip()
-                send_caption_with_image = bool(
-                    direct_result.get("send_caption_with_image")
-                )
-                success_text = str(
-                    direct_result.get("success_text") or "🖼️ 已把当前截图发给你了。"
-                )
-                fallback_text = str(
-                    direct_result.get("fallback_text") or "⚠️ 截图已生成，但回发失败了。"
-                )
-                suppress_fallback_reply = bool(
-                    direct_result.get("suppress_fallback_reply")
-                )
-                image_ok = await self._send_gateway_image_reply(
-                    image_path,
-                    ctx,
-                    caption=image_caption if send_caption_with_image else "",
-                )
-                if image_path and bool(direct_result.get("cleanup", True)):
-                    asyncio.create_task(
-                        self.gateway_sender.cleanup_image_file(image_path)
-                    )
-                direct_reply_text = "" if image_ok else fallback_text
-                direct_memory_reply = (
-                    (image_caption or success_text) if image_ok else fallback_text
-                )
-                handled_gateway_image = image_ok
-                if image_ok and post_send_text and str(ctx.get("source") or "").strip().lower() in {
-                    "qq_gateway",
-                    "napcat_qq",
-                }:
-                    await self._send_gateway_reply(
-                        post_send_text, ctx, emotion="neutral"
-                    )
-                if (
-                    not image_ok
-                    and not suppress_fallback_reply
-                    and str(ctx.get("source") or "").strip().lower()
-                    in {
-                        "qq_gateway",
-                        "napcat_qq",
-                    }
-                ):
-                    await self._send_gateway_reply(
-                        direct_reply_text, ctx, emotion="neutral"
-                    )
-                    direct_reply_text = ""
-                elif not image_ok and suppress_fallback_reply:
-                    direct_reply_text = ""
-
-            if direct_reply_text and not isinstance(direct_result, dict):
-                direct_reply_text = await self._present_direct_tool_text(
-                    user_text=user_text,
-                    direct_text=direct_reply_text,
-                    ctx=ctx,
-                )
-                direct_memory_reply = direct_reply_text
-
-            if direct_reply_text:
-                pace_ui = output_coordinator.should_pace_assistant_ui(output_profile)
-                if output_profile.get("ui_append", True) and not pace_ui:
-                    await output_coordinator.emit_assistant_ui_parts(
-                        self.event_bus, direct_reply_text
-                    )
-                await self.presenter.present(
-                    direct_reply_text,
-                    emotion="neutral",
-                    speak=output_profile.get("speak", True),
-                    show_bubble=output_profile.get("show_bubble", True),
-                    append_ui=pace_ui,
-                )
-                if (
-                    not handled_gateway_voice
-                    and not handled_gateway_image
-                    and not handled_gateway_file
-                ):
-                    await self._send_gateway_reply(
-                        direct_reply_text, ctx, emotion="neutral"
-                    )
-                self._update_active_time()
-                if codex_mode:
-                    self._set_codex_task_state(
-                        ctx, "finalize", summary=direct_reply_text[:200]
-                    )
-            if pending_restart_result is not None:
-                self._schedule_app_restart(pending_restart_result)
-
-            direct_user_meta = {
-                "path": "direct",
-                "source": chat_log_source,
-                **transcript_channel_meta,
-            }
-            direct_assistant_meta = {
-                "path": "direct",
-                "source": chat_log_source,
-                "tool": True,
-                "emotion": "neutral",
-                **transcript_channel_meta,
-            }
-            if memory_session_id:
-                direct_user_meta["session_id"] = memory_session_id
-                direct_assistant_meta["session_id"] = memory_session_id
-            await self.event_bus.emit(
-                "chat.log", role="user", content=user_text, meta=direct_user_meta
-            )
-            await self._add_memory_safe("user", user_text, meta=direct_user_meta)
-            direct_memory_reply = str(direct_memory_reply or "").strip()
-            if direct_memory_reply:
-                await self.event_bus.emit(
-                    "chat.log",
-                    role="assistant",
-                    content=direct_memory_reply,
-                    meta=direct_assistant_meta,
-                )
-                await self._add_memory_safe(
-                    "assistant", direct_memory_reply, meta=direct_assistant_meta
-                )
-
-            self._dbg("Direct 流程结束，检查是否需要立即 Idle")
-            await self._emit_idle_status_when_safe(
-                output_profile,
-                reason="direct_complete",
-                had_presenter_output=bool(direct_reply_text),
+            await run_direct_turn(
+                user_text=user_text,
+                direct_result=direct_result,
+                ctx=ctx,
+                output_profile=output_profile,
+                transcript_channel_meta=transcript_channel_meta,
+                chat_log_source=chat_log_source,
+                memory_session_id=memory_session_id,
+                codex_mode=codex_mode,
+                hooks=self._make_direct_flow_hooks(),
             )
             return
 
@@ -4641,180 +3211,191 @@ class ChatService:
         ):
             return
 
-        current_time = datetime.now().strftime("%Y-%m-%d %H:%M")
-        natural_reply_candidate = plain_direct_chat_candidate
-
-        # 历史回溯
-        special_context = ""
-        route_reason_text = str(getattr(route, "reason", "") or "")
-        if route_reason_text.startswith("capability_unavailable:"):
-            unavailable_reason = str(
-                getattr(route, "capability_match_reason", "") or "capability unavailable"
-            )
-            special_context += (
-                "\n\n【工具状态】用户请求命中了可用能力声明，但当前工具不可执行："
-                f"{route_reason_text}；原因：{unavailable_reason}。"
-                "请不要假装已经查询成功，直接用自然语言说明该工具当前不可用。"
-            )
-        user_address_context = self._build_user_address_context(ctx)
-        if user_address_context:
-            special_context += f"\n\n{user_address_context}"
-        external_sender_context = self._build_external_sender_context(ctx)
-        if external_sender_context:
-            special_context += f"\n\n{external_sender_context}"
-        try:
-            from config import PERSONA_PROMPT
-        except:
-            PERSONA_PROMPT = ""
-
-        self_awareness_hint = self._build_live2d_self_awareness_hint(ctx)
-        current_emotion_context = self._build_current_emotion_context(ctx)
-        reply_style_context = self._build_reply_style_context(user_text, ctx)
-        natural_cfg = self._get_natural_chat_config()
-        short_term_messages = self._get_short_term_messages(ctx)
-        thought_block, thought_trace = await self._maybe_build_character_thought_block(
-            user_text=user_text,
-            ctx=ctx,
-            need_tools=need_tools,
-            codex_mode=codex_mode,
-            recent=short_term_messages,
-        )
-        expression_block, expression_hints = self._build_expression_inject_block(
-            user_text,
-            ctx,
-            config=natural_cfg,
-            recent=short_term_messages,
-        )
-        system_text = (
-            f"【当前时间】{current_time}\n{PERSONA_PROMPT}\n"
-            f"{current_emotion_context}\n{reply_style_context}\n{special_context}"
-        )
-        if thought_block:
-            system_text += f"\n{thought_block}"
-        if expression_block:
-            system_text += f"\n{expression_block}"
-        try:
-            self._trace_process(
-                "character_natural_chat",
-                **{
-                    **thought_trace,
-                    "expression_count": len(expression_hints or []),
-                    "expression_ids_or_hints": (expression_hints or [])[:3],
-                },
-            )
-        except Exception:
-            pass
-        if self_awareness_hint:
-            system_text += f"\n{self_awareness_hint}"
-        skill_prompt = ""
-        if self.skill_manager is not None:
-            try:
-                skill_prompt = self.skill_manager.build_prompt_addition()
-            except Exception as e:
-                if self.logger:
-                    self.logger.warning(f"Skill prompt build failed: {e}")
-        if skill_prompt:
-            system_text += "\n" + skill_prompt
-        if codex_mode:
-            codex_hint = (
-                "【代码助手模式】你正在处理代码任务。\n"
-                "1) 不要臆造文件内容，先读取再修改；\n"
-                "2) 修改文件时优先使用 workspace_ops 工具；\n"
-                "3) 写入前先生成 diff 预览(change_id + confirm_token)，等待用户确认后再 apply_change；\n"
-                "4) 仅当用户在本轮消息显式提供 change_id + confirm_token 时才可 apply_change；\n"
-                "5) 回答中给出关键文件路径与变更点。"
-            )
-            if code_path:
-                codex_hint += f"\n【用户指定代码路径】{code_path}"
-            codex_hint += f"\n【任务ID】{ctx.get('codex_task_id', '')}"
-            codex_hint += f"\n【权限】allow_read={allow_read}, allow_write={allow_write}, allow_exec={allow_exec}"
-            system_text += "\n" + codex_hint
-
-        tool_prompt = ""
         deferred_tool_flow = False
-        if need_tools:
-            tool_prompt = self.plugin_manager.get_tool_prompt_for_triggers(
-                list(normal_triggers), compact=True
-            )
-        else:
-            tool_prompt = self.plugin_manager.get_system_prompt_addition()
+        if not need_tools:
             try:
                 deferred_tool_flow = bool(
                     self.plugin_manager.should_use_deferred_tool_flow(user_text)
                 )
             except Exception:
                 deferred_tool_flow = False
-        if tool_prompt:
-            system_text += "\n" + tool_prompt
-        delegate_prompt = self.plugin_manager.get_delegate_prompt_for_triggers(
-            list(delegate_triggers), compact=True
-        )
-        if delegate_prompt:
-            system_text += "\n" + delegate_prompt
-        mcp_prompt = self._build_mcp_tool_prompt()
-        if mcp_prompt:
-            system_text += "\n" + mcp_prompt
 
-        conversation_scope = ctx.get("conversation_scope")
-        context_messages = await asyncio.to_thread(
-            self.brain.build_prompt,
-            user_text,
-            system_persona=system_text,
-            tool_intent=list(effective_triggers),
-            session_id=conversation_session_id,
-            memory_session_id=memory_session_id,
-            person_id=self._get_memory_person_id(ctx) or "owner",
-            conversation_scope=conversation_scope,
-        )
-        cleaned_context_messages = []
-        for message in context_messages:
-            if not isinstance(message, dict):
-                continue
-            role = str(message.get("role") or "")
-            content = message.get("content")
-            if role != "system":
-                cleaned_context_messages.append(message)
-                continue
-            try:
-                from modules.memory import clean_injected_context
-
-                sanitized = dict(message)
-                sanitized["content"] = clean_injected_context(str(content or ""))
-                cleaned_context_messages.append(sanitized)
-            except Exception:
-                cleaned_context_messages.append(message)
-        context_messages = cleaned_context_messages
-
-        guard_requires_non_stream = bool(
-            (
-                output_profile.get("speak", True)
-                or output_profile.get("show_bubble", True)
-            )
-            and scope_matches(
-                source_key,
-                self._natural_chat_message_type(ctx),
-                natural_cfg,
-            )
-        )
-        use_non_stream_flow = reply_flow_service.should_use_non_stream_flow(
-            need_tools=need_tools,
+        skip_prompt_and_first_pass = False
+        react_first_pass = None
+        tool_event_state: Dict[str, str] = {}
+        if should_run_plain_chat(
+            plain_direct_chat_candidate=plain_direct_chat_candidate,
             deferred_tool_flow=deferred_tool_flow,
-            stream_available=chat_with_ai_stream is not None,
-            natural_reply_candidate=natural_reply_candidate,
-            guard_requires_non_stream=guard_requires_non_stream,
-        )
-        self._trace_process(
-            "branch",
-            source=source_key,
-            non_stream=use_non_stream_flow,
-            need_tools=need_tools,
-            deferred_tool_flow=deferred_tool_flow,
-            stream_available=chat_with_ai_stream is not None,
-            natural_reply_candidate=natural_reply_candidate,
-            has_external_images=has_external_images,
-            preface=bool(preface_text),
-            codex_mode=codex_mode,
-        )
+            delegate_triggers=delegate_triggers,
+            search_delegate_requested=search_delegate_requested,
+        ):
+            invocation_mode = get_tool_invocation_mode()
+            loop_chat = (
+                chat_complete
+                if invocation_mode in {"dual", "function"}
+                else chat_with_ai
+            )
+            start_emo, start_intensity = self._reply_start_emotion(ctx)
+            hooks = self._make_plain_chat_hooks(ctx=ctx, user_text=user_text)
+            hooks.chat_with_ai = loop_chat
+            plain_outcome = await run_plain_chat(
+                user_text=user_text,
+                ctx=ctx,
+                hooks=hooks,
+                conversation_session_id=conversation_session_id,
+                memory_session_id=memory_session_id,
+                source_key=source_key,
+                route_reason=str(getattr(route, "reason", "") or ""),
+                capability_match_reason=str(
+                    getattr(route, "capability_match_reason", "") or ""
+                ),
+                preface_text=preface_text,
+                followup_search_query=followup_search_query,
+                invocation_mode=invocation_mode,
+                task_default=task_default,
+                task_reasoning=task_reasoning,
+                character_sharing_enabled=CHARACTER_SHARING_ENABLED,
+                start_emo=start_emo,
+            )
+            if plain_outcome.flow.status == STATUS_REPLIED:
+                final_reply = plain_outcome.flow.reply_text
+                final_emo = plain_outcome.flow.emotion or "neutral"
+                self._observe_final_reply_emotion(final_emo)
+                await output_coordinator.emit_non_stream_reply(
+                    final_reply=final_reply,
+                    final_emo=final_emo,
+                    user_text=user_text,
+                    ctx=ctx,
+                    output_profile=output_profile,
+                    transcript_meta=transcript_channel_meta,
+                    chat_log_source=chat_log_source,
+                    memory_session_id=memory_session_id,
+                    feedback_type=feedback_type,
+                    feedback_reaction=feedback_reaction,
+                    triggered=False,
+                    learning=self.learning,
+                    live2d_enabled=live2d_enabled,
+                    start_emo=start_emo,
+                    start_intensity=start_intensity,
+                    codex_mode=codex_mode,
+                    proactive_followup=proactive_followup,
+                    task_followup=task_followup,
+                    event_bus=self.event_bus,
+                    presenter=self.presenter,
+                    update_active_time=self._update_active_time,
+                    add_codex_session_event=self._add_codex_session_event,
+                    presenter_output_controls_idle=self._presenter_output_controls_idle,
+                    sensor_emotion_intensity=sensor_utils.sensor_emotion_intensity,
+                    send_gateway_reply=self._send_gateway_reply,
+                    maybe_send_auto_meme_reply=self._maybe_send_auto_meme_reply,
+                    record_reply_effect=self._record_reply_effect,
+                    record_proactive_followup=self._record_proactive_followup,
+                    record_task_followup=self._record_task_followup,
+                    set_codex_task_state=self._set_codex_task_state,
+                    add_memory_safe=self._add_memory_safe,
+                    emit_idle_status_when_safe=self._emit_idle_status_when_safe,
+                    record_message_pair=self._record_message_pair_events,
+                )
+                return
+            skip_prompt_and_first_pass = True
+            react_first_pass = plain_outcome.react_first_pass
+            context_messages = list(plain_outcome.context_messages)
+            tool_event_state = dict(plain_outcome.tool_event_state or {})
+
+        if skip_prompt_and_first_pass:
+            use_non_stream_flow = True
+        else:
+            natural_reply_candidate = plain_direct_chat_candidate
+            invocation_mode = get_tool_invocation_mode()
+            tool_prompt = ""
+            if need_tools:
+                tool_prompt = self.plugin_manager.get_tool_prompt_for_triggers(
+                    list(normal_triggers),
+                    compact=True,
+                    invocation_mode=invocation_mode,
+                )
+            elif should_attach_deferred_tool_catalog(
+                need_tools=need_tools, deferred_tool_flow=deferred_tool_flow
+            ):
+                tool_prompt = self.plugin_manager.get_system_prompt_addition(
+                    invocation_mode=invocation_mode
+                )
+            delegate_prompt = self.plugin_manager.get_delegate_prompt_for_triggers(
+                list(delegate_triggers),
+                compact=True,
+                invocation_mode=invocation_mode,
+            )
+            mcp_prompt = ""
+            if should_attach_mcp_tool_prompt(
+                list(effective_triggers or []) + list(delegate_triggers or [])
+            ):
+                mcp_prompt = self._build_mcp_tool_prompt(invocation_mode=invocation_mode)
+            codex_hint = ""
+            if codex_mode:
+                codex_hint = (
+                    "【代码助手模式】你正在处理代码任务。\n"
+                    "1) 不要臆造文件内容，先读取再修改；\n"
+                    "2) 修改文件时优先使用 workspace_ops 工具；\n"
+                    "3) 写入前先生成 diff 预览(change_id + confirm_token)，等待用户确认后再 apply_change；\n"
+                    "4) 仅当用户在本轮消息显式提供 change_id + confirm_token 时才可 apply_change；\n"
+                    "5) 回答中给出关键文件路径与变更点。"
+                )
+                if code_path:
+                    codex_hint += f"\n【用户指定代码路径】{code_path}"
+                codex_hint += f"\n【任务ID】{ctx.get('codex_task_id', '')}"
+                codex_hint += f"\n【权限】allow_read={allow_read}, allow_write={allow_write}, allow_exec={allow_exec}"
+
+            prompt_hooks = self._make_plain_chat_hooks(ctx=ctx, user_text=user_text)
+            assembled = await assemble_chat_context_messages(
+                user_text=user_text,
+                ctx=ctx,
+                hooks=prompt_hooks,
+                conversation_session_id=conversation_session_id,
+                memory_session_id=memory_session_id,
+                route_reason=str(getattr(route, "reason", "") or ""),
+                capability_match_reason=str(
+                    getattr(route, "capability_match_reason", "") or ""
+                ),
+                invocation_mode=invocation_mode,
+                need_tools=need_tools,
+                codex_mode=codex_mode,
+                extra_runtime_sections=(codex_hint,),
+                tool_sections=(tool_prompt, delegate_prompt, mcp_prompt),
+                tool_intent=list(effective_triggers),
+            )
+            context_messages = list(assembled.context_messages)
+            natural_cfg = prompt_hooks.natural_config
+
+            guard_requires_non_stream = bool(
+                (
+                    output_profile.get("speak", True)
+                    or output_profile.get("show_bubble", True)
+                )
+                and scope_matches(
+                    source_key,
+                    self._natural_chat_message_type(ctx),
+                    natural_cfg,
+                )
+            )
+            use_non_stream_flow = reply_flow_service.should_use_non_stream_flow(
+                need_tools=need_tools,
+                deferred_tool_flow=deferred_tool_flow,
+                stream_available=chat_with_ai_stream is not None,
+                natural_reply_candidate=natural_reply_candidate,
+                guard_requires_non_stream=guard_requires_non_stream,
+            )
+            self._trace_process(
+                "branch",
+                source=source_key,
+                non_stream=use_non_stream_flow,
+                need_tools=need_tools,
+                deferred_tool_flow=deferred_tool_flow,
+                stream_available=chat_with_ai_stream is not None,
+                natural_reply_candidate=natural_reply_candidate,
+                has_external_images=has_external_images,
+                preface=bool(preface_text),
+                codex_mode=codex_mode,
+            )
 
         # =========================================================================
         # 6. 分支 A: ReAct 工具链
@@ -4822,335 +3403,52 @@ class ChatService:
         if use_non_stream_flow:
             self._dbg("进入非流式回复/工具流程")
             await self.event_bus.emit("ui.status", text="Thinking (Tools)...")
-            tool_event_state: Dict[str, str] = {}
+            invocation_mode = get_tool_invocation_mode()
+            tool_hooks = self._make_tool_turn_hooks(ctx=ctx, user_text=user_text)
+            tool_hooks.loop_chat = (
+                chat_complete
+                if invocation_mode in {"dual", "function"}
+                else chat_with_ai
+            )
+            from services.chat_support.tool_turn import run_non_stream_tool_turn
 
-            if search_delegate_requested:
-                react_first_pass = tool_flow_service.ReactFirstPassResult(
-                    context_messages=list(context_messages)
-                )
-            else:
-                react_first_pass = await tool_flow_service.run_react_first_pass(
-                    context_messages=context_messages,
-                    ctx=ctx,
-                    need_tools=need_tools,
-                    deferred_tool_flow=deferred_tool_flow,
-                    task_reasoning=task_reasoning,
-                    task_default=task_default,
-                    plugin_manager=self.plugin_manager,
-                    chat_with_ai=chat_with_ai,
-                    contains_cmd=self._contains_cmd,
-                    strip_cmd_anywhere=self._strip_cmd_anywhere,
-                    record_tool_execution=lambda **event: self._record_tool_execution_events(
-                        ctx=ctx,
-                        user_text=user_text,
-                        event_state=tool_event_state,
-                        **event,
-                    ),
-                )
-            reply1 = react_first_pass.reply
-            triggered = react_first_pass.triggered
-            clean_thought = react_first_pass.clean_thought
-            tool_results = react_first_pass.tool_results
-            used_triggers = react_first_pass.used_triggers
-            context_messages = react_first_pass.context_messages
-            if self._should_force_capability_route(
-                route_reason=str(route.reason or ""),
-                normal_triggers=normal_triggers or [],
-                used_triggers=used_triggers or [],
-            ):
-                forced_trigger = str((normal_triggers or [""])[0] or "").strip()
-                capability_id = str(getattr(route, "capability_id", "") or "").strip()
-                capability_args = dict(getattr(route, "capability_args", None) or {})
-                gate_decision = await refine_capability_args(
-                    user_text=user_text,
-                    capability_id=capability_id,
-                    initial_args=capability_args,
-                    chat_with_ai=chat_with_ai,
-                )
-                if gate_decision is not None and gate_decision.approved:
-                    capability_args = dict(gate_decision.args or capability_args)
-                forced_capability_cmd = build_forced_capability_command(
-                    trigger=forced_trigger,
-                    user_text=user_text,
-                    capability_id=capability_id,
-                    capability_args=capability_args,
-                )
-                (
-                    capability_triggered,
-                    capability_clean,
-                    capability_results,
-                    capability_used,
-                ) = await self.plugin_manager.execute_commands(
-                    forced_capability_cmd,
-                    ctx,
-                    allow_tools=True,
-                    allowed_types={"react", "delegate"},
-                )
-                if capability_clean and not clean_thought:
-                    clean_thought = capability_clean
-                if capability_triggered:
-                    triggered = True
-                if capability_results:
-                    tool_results.extend(capability_results)
-                if capability_used:
-                    used_triggers.extend(capability_used)
-            forced_search_query = ""
-            if not triggered and not tool_results and not delegate_triggers:
-                forced_search_query = search_flow_service.choose_forced_search_query(
-                    user_text=user_text,
-                    first_reply=reply1 or "",
-                    followup_query=followup_search_query,
-                    triggered=triggered,
-                    tool_results=tool_results,
-                    delegate_triggers=delegate_triggers,
-                    looks_like_uncertain_answer=self._looks_like_uncertain_answer,
-                    is_searchworthy_question=self._is_searchworthy_question,
-                )
-                if forced_search_query:
-                    (
-                        search_triggered,
-                        search_clean,
-                        search_results,
-                        search_used,
-                    ) = await search_flow_service.run_search_delegate_query(
-                        query=forced_search_query,
-                        ctx=ctx,
-                        plugin_manager=self.plugin_manager,
-                    )
-                    if search_clean and not clean_thought:
-                        clean_thought = search_clean
-                    if search_triggered:
-                        triggered = True
-                    if search_results:
-                        tool_results.extend(search_results)
-                    if search_used:
-                        used_triggers.extend(search_used)
-            if delegate_triggers:
-                self._set_delegate_task_state(
-                    ctx,
-                    "running",
-                    summary=user_text[:200],
-                    triggers=delegate_triggers,
-                )
-                self._add_delegate_session_event(
-                    "running",
-                    ctx=ctx,
-                    user_text=user_text,
-                    triggers=delegate_triggers,
-                    text=user_text,
-                )
-                delegate_decision = delegate_flow_service.choose_delegate_execution(
-                    route_reason=str(route.reason or ""),
-                    delegate_triggers=delegate_triggers,
-                    ctx=ctx,
-                    user_text=user_text,
-                    followup_search_query=followup_search_query,
-                    is_search_delegate=self._is_search_delegate_route,
-                )
-                background_delegate = delegate_decision.background_delegate
-                delegate_flow_result = await delegate_flow_service.run_delegate_flow(
-                    decision=delegate_decision,
-                    user_text=user_text,
-                    ctx=ctx,
-                    context_messages=context_messages,
-                    delegate_triggers=delegate_triggers,
-                    task_reasoning=task_reasoning,
-                    plugin_manager=self.plugin_manager,
-                    chat_with_ai=chat_with_ai,
-                    extract_workspace_read_path=self._extract_workspace_read_path,
-                    run_search_delegate_query=lambda *, query, ctx: search_flow_service.run_search_delegate_query(
-                        query=query,
-                        ctx=ctx,
-                        plugin_manager=self.plugin_manager,
-                    ),
-                    followup_search_query=followup_search_query,
-                    logger=self.logger,
-                )
-                delegate_triggered = delegate_flow_result.triggered
-                delegate_clean = delegate_flow_result.clean
-                delegate_results = delegate_flow_result.results
-                delegate_used = delegate_flow_result.used
-                background_delegate = delegate_flow_result.background_delegate
-                if background_delegate:
-                    self._set_delegate_task_state(
-                        ctx,
-                        "queued",
-                        summary=user_text[:200],
-                        triggers=delegate_triggers,
-                        meta={"background": True},
-                    )
-                    self._add_delegate_session_event(
-                        "queued",
-                        ctx=ctx,
-                        user_text=user_text,
-                        triggers=delegate_triggers,
-                        text="后台排队中",
-                        meta={"background": True},
-                    )
-                    asyncio.create_task(
-                        self._run_background_delegate_task(
-                            user_text=user_text,
-                            ctx=dict(ctx or {}),
-                            context_messages=list(context_messages),
-                            delegate_triggers=list(delegate_triggers),
-                            task_reasoning=task_reasoning,
-                            transcript_meta=dict(transcript_channel_meta or {}),
-                            chat_log_source=chat_log_source,
-                            output_profile=dict(output_profile or {}),
-                        )
-                    )
-                if delegate_clean and not clean_thought:
-                    clean_thought = delegate_clean
-                if delegate_triggered:
-                    triggered = True
-                if delegate_results:
-                    tool_results.extend(delegate_results)
-                if delegate_used:
-                    used_triggers.extend(delegate_used)
-                self._set_delegate_task_state(
-                    ctx,
-                    (
-                        "queued"
-                        if background_delegate
-                        else (
-                            "done" if delegate_results or delegate_used else "skipped"
-                        )
-                    ),
-                    summary=(
-                        "\n".join(delegate_results)[:200]
-                        if delegate_results
-                        else (delegate_clean or user_text[:200])
-                    ),
-                    triggers=delegate_triggers,
-                    meta={
-                        "background": bool(background_delegate),
-                        "delegate_triggered": bool(delegate_triggered),
-                        "delegate_used": list(delegate_used or []),
-                    },
-                )
-                self._add_delegate_session_event(
-                    "completed" if (delegate_results or delegate_used) else "skipped",
-                    ctx=ctx,
-                    user_text=user_text,
-                    triggers=delegate_triggers,
-                    text=(
-                        "\n".join(delegate_results)[:600]
-                        if delegate_results
-                        else (delegate_clean or "")
-                    ),
-                    meta={
-                        "background": bool(background_delegate),
-                        "delegate_used": list(delegate_used or []),
-                    },
-                )
-            ctx["_tool_results"] = tool_results
-            if session_key:
-                remembered_tools = list(dict.fromkeys(used_triggers or effective_triggers))
-                if remembered_tools:
-                    self._last_tool_triggers_by_session[session_key] = remembered_tools
-                if used_triggers and any(
-                    str(trigger or "").strip().lower() in {"search", "search_web"}
-                    for trigger in used_triggers
-                ):
-                    self._remember_search_topic(
-                        followup_search_query or forced_search_query or user_text,
-                        ctx,
-                    )
-            reasoning_text = self._clean_text_for_tts(
-                self._strip_cmd_anywhere(
-                    self._strip_emo_tags_anywhere(clean_thought or reply1 or "")
-                )
-            ).strip()
-            if reasoning_text:
-                self._add_codex_session_event(
-                    "assistant_reasoning",
-                    text=reasoning_text,
-                    ctx=ctx,
-                    meta={"used_triggers": list(used_triggers or [])[:8]},
-                )
-
-            start_emo, start_intensity = self._reply_start_emotion(ctx)
-            if triggered and tool_results and used_triggers:
-                tool_use_meta = {"path": "tool_use"}
-                if memory_session_id:
-                    tool_use_meta["session_id"] = memory_session_id
-                asyncio.create_task(
-                    self._add_memory_safe(
-                        "assistant",
-                        f"[tool_use] {used_triggers}",
-                        meta=tool_use_meta,
-                    )
-                )
-
-            if triggered and tool_results:
-                tool_finalize = await tool_flow_service.finalize_tool_reply(
-                    clean_thought=clean_thought,
-                    tool_results=tool_results,
-                    used_triggers=used_triggers,
-                    context_messages=context_messages,
-                    route_reason=str(route.reason or ""),
-                    task_default=task_default,
-                    start_emo=start_emo,
-                    chat_with_ai=chat_with_ai,
-                    extract_emo_tag=self._extract_emo_tag,
-                    character_sharing_enabled=CHARACTER_SHARING_ENABLED,
-                    try_share=self.personality.try_share,
-                    is_model_error_reply=self._looks_like_upstream_error_reply,
-                )
-                final_reply = tool_finalize.final_reply
-                final_emo = tool_finalize.final_emo
-                model_emo_seen = tool_finalize.model_emo_seen
-                context_messages = tool_finalize.context_messages
-            else:
-                model_finalize = reply_flow_service.finalize_model_reply(
-                    reply=reply1,
-                    start_emo=start_emo,
-                    extract_emo_tag=self._extract_emo_tag,
-                    character_sharing_enabled=CHARACTER_SHARING_ENABLED,
-                    try_share=self.personality.try_share,
-                )
-                final_reply = model_finalize.final_reply
-                final_emo = model_finalize.final_emo
-                model_emo_seen = model_finalize.model_emo_seen
-
-            prepared_reply = await reply_flow_service.prepare_final_reply(
-                final_reply=final_reply,
-                final_emo=final_emo,
-                model_emo_seen=model_emo_seen,
+            turn = await run_non_stream_tool_turn(
                 user_text=user_text,
                 ctx=ctx,
+                context_messages=context_messages,
+                route=route,
+                need_tools=need_tools,
+                deferred_tool_flow=deferred_tool_flow,
+                normal_triggers=normal_triggers,
+                delegate_triggers=delegate_triggers,
+                effective_triggers=effective_triggers,
+                followup_search_query=followup_search_query,
+                search_delegate_requested=search_delegate_requested,
+                task_reasoning=task_reasoning,
+                task_default=task_default,
+                invocation_mode=invocation_mode,
+                session_key=session_key,
+                memory_session_id=memory_session_id,
                 preface_text=preface_text,
-                clean_text_for_tts=self._clean_text_for_tts,
-                strip_internal_tags=self._strip_internal_tags,
-                strip_cmd_anywhere=self._strip_cmd_anywhere,
-                strip_emo_tags_anywhere=self._strip_emo_tags_anywhere,
-                should_suppress_followup_preface=self._should_suppress_followup_preface,
-                merge_preface_texts=self._merge_preface_texts,
-                apply_character_catchphrase=self._apply_character_catchphrase,
-                prepare_reply_for_output=self._prepare_reply_for_output,
-                infer_reply_emotion_with_llm=self._infer_reply_emotion_with_llm,
+                transcript_channel_meta=transcript_channel_meta,
+                chat_log_source=chat_log_source,
+                output_profile=output_profile,
+                hooks=tool_hooks,
+                tool_trigger_store=self.tool_trigger_store,
+                character_sharing_enabled=CHARACTER_SHARING_ENABLED,
+                existing_first_pass=(
+                    react_first_pass
+                    if skip_prompt_and_first_pass and react_first_pass is not None
+                    else None
+                ),
+                existing_tool_event_state=(
+                    tool_event_state if skip_prompt_and_first_pass else None
+                ),
             )
-            final_reply = prepared_reply.text
-            final_emo = prepared_reply.emotion
-            model_emo_seen = prepared_reply.model_emo_seen
-            if not triggered:
-                final_reply, guard_trace = await self._apply_forbidden_phrase_guard(
-                    text=final_reply,
-                    user_text=user_text,
-                    ctx=ctx,
-                )
-                try:
-                    if guard_trace.get("forbidden_phrase_hit") or guard_trace.get(
-                        "forbidden_retries"
-                    ):
-                        self._trace_process("forbidden_phrase_guard", **guard_trace)
-                except Exception:
-                    pass
-            self._observe_final_reply_emotion(final_emo)
-
+            self._observe_final_reply_emotion(turn.emotion)
             await output_coordinator.emit_non_stream_reply(
-                final_reply=final_reply,
-                final_emo=final_emo,
+                final_reply=turn.reply,
+                final_emo=turn.emotion,
                 user_text=user_text,
                 ctx=ctx,
                 output_profile=output_profile,
@@ -5159,11 +3457,11 @@ class ChatService:
                 memory_session_id=memory_session_id,
                 feedback_type=feedback_type,
                 feedback_reaction=feedback_reaction,
-                triggered=triggered,
+                triggered=turn.triggered,
                 learning=self.learning,
                 live2d_enabled=live2d_enabled,
-                start_emo=start_emo,
-                start_intensity=start_intensity,
+                start_emo=turn.start_emo,
+                start_intensity=turn.start_intensity,
                 codex_mode=codex_mode,
                 proactive_followup=proactive_followup,
                 task_followup=task_followup,
@@ -5183,10 +3481,10 @@ class ChatService:
                 emit_idle_status_when_safe=self._emit_idle_status_when_safe,
                 record_message_pair=lambda **message: self._record_message_pair_events(
                     existing_user_event_id=str(
-                        tool_event_state.get("user_event_id") or ""
+                        turn.tool_event_state.get("user_event_id") or ""
                     ),
                     assistant_parent_event_id=str(
-                        tool_event_state.get("assistant_parent_event_id") or ""
+                        turn.tool_event_state.get("assistant_parent_event_id") or ""
                     ),
                     **message,
                 ),
@@ -5197,181 +3495,24 @@ class ChatService:
         # =========================================================================
         else:
             self._dbg("进入流式对话流程")
-            self._add_codex_session_event(
-                "assistant_reasoning",
-                text="进入流式回复，正在生成中。",
-                ctx=ctx,
-                meta={"stream": True, "triggers": list(effective_triggers or [])[:8]},
-            )
-            await self.event_bus.emit("ui.status", text="Streaming...")
-            await self.event_bus.emit(
-                "assistant.stream.start",
-                interrupt=True,
-                speak=output_profile.get("speak", True),
-                show_bubble=output_profile.get("show_bubble", True),
-                append_ui=output_coordinator.should_pace_assistant_ui(output_profile),
-            )
+            from services.chat_support.stream_turn import run_stream_turn
 
-            buffer = ""
-            start_emo, start_intensity = self._reply_start_emotion(ctx)
-            curr_emo = start_emo
-            model_emo_seen = False
-            first = False
-            full_reply = ""
-
-            if preface_text:
-                first = True
-                proactive_chunk = reply_flow_service.build_stream_preface_chunk(
-                    preface_text
-                )
-                full_reply += proactive_chunk
-                await self.event_bus.emit(
-                    "assistant.stream.feed",
-                    chunk=proactive_chunk,
-                    emotion=curr_emo,
-                    speak=output_profile.get("speak", True),
-                    show_bubble=output_profile.get("show_bubble", True),
-                )
-
-            try:
-                async for chunk in chat_with_ai_stream(
-                    context_messages,
-                    task_type=task_default,
-                    caller="chat_stream_reply",
-                ):
-                    if not chunk:
-                        continue
-                    if not first:
-                        first = True
-
-                    buffer += chunk
-
-                    if "[CMD:" in buffer and "]" in buffer:
-                        buffer = self._cmd_re.sub("", buffer)
-
-                    emotion_tag = reply_flow_service.consume_stream_emotion_tag(
-                        buffer,
-                        emo_tag_re=self._emo_tag_re,
-                        normalize_emo=self._normalize_emo,
-                    )
-                    buffer = emotion_tag.buffer
-                    if emotion_tag.found:
-                        curr_emo = emotion_tag.emotion
-                        model_emo_seen = True
-                        print(f"🎭 [Stream] 检测到模型情绪标签: {curr_emo}")
-                        if live2d_enabled:
-                            defer_motion = self._presenter_output_controls_idle(
-                                output_profile,
-                                had_presenter_output=True,
-                            )
-                            asyncio.create_task(
-                                self.event_bus.emit(
-                                    "live2d.emotion",
-                                    emotion=curr_emo,
-                                    intensity=sensor_utils.sensor_emotion_intensity(curr_emo),
-                                    prefer_motion=not defer_motion,
-                                    reason="model_stream_reply",
-                                )
-                            )
-
-                    flushed = reply_flow_service.flush_stream_buffer(
-                        buffer,
-                        clean_text_for_tts=self._clean_text_for_tts,
-                        strip_internal_tags=self._strip_internal_tags,
-                        strip_cmd_anywhere=self._strip_cmd_anywhere,
-                        strip_emo_tags_anywhere=self._strip_emo_tags_anywhere,
-                        strip_model_catchphrase=self._strip_model_catchphrase,
-                    )
-                    if flushed.chunk:
-                        full_reply += flushed.chunk
-                        await self.event_bus.emit(
-                            "assistant.stream.feed",
-                            chunk=flushed.chunk,
-                            emotion=curr_emo,
-                            speak=output_profile.get("speak", True),
-                            show_bubble=output_profile.get("show_bubble", True),
-                        )
-                    buffer = flushed.buffer
-
-                # 处理剩余尾巴
-                flushed = reply_flow_service.flush_stream_buffer(
-                    buffer,
-                    final=True,
-                    clean_text_for_tts=self._clean_text_for_tts,
-                    strip_internal_tags=self._strip_internal_tags,
-                    strip_cmd_anywhere=self._strip_cmd_anywhere,
-                    strip_emo_tags_anywhere=self._strip_emo_tags_anywhere,
-                    strip_model_catchphrase=self._strip_model_catchphrase,
-                )
-                if flushed.chunk:
-                    full_reply += flushed.chunk
-                    await self.event_bus.emit(
-                        "assistant.stream.feed",
-                        chunk=flushed.chunk,
-                        emotion=curr_emo,
-                        speak=output_profile.get("speak", True),
-                        show_bubble=output_profile.get("show_bubble", True),
-                    )
-                buffer = flushed.buffer
-
-            except Exception as e:
-                self.logger.error(f"Stream error: {e}")
-
-            full_reply, stream_guard = await self._apply_forbidden_phrase_guard(
-                text=full_reply,
+            stream_turn = await run_stream_turn(
                 user_text=user_text,
                 ctx=ctx,
-            )
-            stream_finalized = reply_flow_service.finalize_stream_reply(
-                full_reply=full_reply,
-                ctx=ctx,
+                context_messages=context_messages,
+                chat_with_ai_stream=chat_with_ai_stream,
+                task_default=task_default,
+                preface_text=preface_text,
+                output_profile=output_profile,
+                live2d_enabled=live2d_enabled,
                 character_sharing_enabled=CHARACTER_SHARING_ENABLED,
-                try_share=self.personality.try_share,
-                apply_character_catchphrase=self._apply_character_catchphrase,
-                prepare_reply_for_output=self._prepare_reply_for_output,
+                effective_triggers=effective_triggers,
+                hooks=self._make_stream_turn_hooks(),
             )
-            full_reply = stream_finalized.text
-            try:
-                if stream_guard.get("forbidden_phrase_hit") or stream_guard.get(
-                    "forbidden_retries"
-                ):
-                    self._trace_process("forbidden_phrase_guard_stream", **stream_guard)
-            except Exception:
-                pass
-            for feed_chunk in stream_finalized.feed_chunks:
-                await self.event_bus.emit(
-                    "assistant.stream.feed",
-                    chunk=feed_chunk,
-                    emotion=curr_emo,
-                    speak=output_profile.get("speak", True),
-                    show_bubble=output_profile.get("show_bubble", True),
-                )
-
-            try:
-                if live2d_enabled and not model_emo_seen:
-                    defer_motion = self._presenter_output_controls_idle(
-                        output_profile,
-                        had_presenter_output=bool(full_reply),
-                    )
-                    await self.event_bus.emit(
-                        "live2d.emotion",
-                        emotion=curr_emo,
-                        intensity=start_intensity,
-                        prefer_motion=not defer_motion,
-                        reason="model_stream_keep_previous",
-                    )
-                await self.event_bus.emit(
-                    "assistant.stream.end",
-                    emotion=curr_emo,
-                    speak=output_profile.get("speak", True),
-                    show_bubble=output_profile.get("show_bubble", True),
-                )
-            except Exception as e:
-                self.logger.warning(f"assistant.stream.end failed: {e}")
-
             await output_coordinator.emit_stream_reply(
-                full_reply=full_reply,
-                emotion=curr_emo,
+                full_reply=stream_turn.reply,
+                emotion=stream_turn.emotion,
                 user_text=user_text,
                 stream_context=output_coordinator.StreamOutputContext(
                     ctx=ctx,
@@ -5446,221 +3587,57 @@ class ChatService:
     ) -> bool:
         from modules.llm import analyze_image, chat_with_ai
 
-        guard = sensor_event_guard.check_sensor_event_guard(
+        return await self.sensor_event_service.handle_window_event(
             window_title=window_title,
             category=category,
-            app_name=app_name,
-            last_reply_time=self._last_reply_time,
-            min_reply_interval_sec=self._sensor_min_reply_interval_sec,
-        )
-        clean_title = guard.clean_title
-        display_app = guard.display_app
-        if guard.reason == "system_window":
-            self.logger.info(f"🛑 [Sensor] 跳过系统/自身界面视觉吐槽 ({clean_title})")
-            return False
-        if not guard.allowed:
-            return False
-
-        print(
-            f"🤖 [Sensor] 观察: {clean_title} ({category}) | App: {display_app} | Count: {count} | Vision: {bool(use_vision)}"
-        )
-
-        def _sensor_active_title() -> str:
-            sensor_ref = getattr(self, "screen_sensor_ref", None)
-            rust_title = str(getattr(sensor_ref, "last_window_title", "") or "").strip()
-            try:
-                from modules.vision.capture import get_active_window_title
-
-                captured = str(get_active_window_title() or "").strip()
-            except Exception:
-                captured = ""
-            if captured:
-                return captured
-            return rust_title
-
-        generation = await self.sensor_event_service.run_event_generation(
-            clean_title=clean_title,
-            display_app=display_app,
-            category=category,
             count=count,
+            use_vision=use_vision,
+            app_name=app_name,
             reason=reason,
-            use_vision=bool(use_vision),
-            vision_mode=VISION_MODE,
             app_duration_sec=app_duration_sec,
             current_stay_sec=current_stay_sec,
+            last_reply_time=self._last_reply_time,
+            min_reply_interval_sec=self._sensor_min_reply_interval_sec,
+            vision_mode=VISION_MODE,
             chat_with_ai=chat_with_ai,
             analyze_image=analyze_image,
-            active_title_getter=_sensor_active_title,
-        )
-        if not generation.reply:
-            return False
-        reply_category = "self" if generation.branch == "self" else category
-        reply_title = clean_title if generation.branch == "self" else window_title
-        is_vision = generation.branch.startswith("vision")
-        return await self.sensor_reply_service.send_sensor_reply(
-            generation.reply,
-            reply_category,
-            count,
-            reply_title,
-            is_vision,
-            observation_event_id=str(generation.observation_event_id or ""),
-            ctx={"source": "desktop"},
+            send_sensor_reply=self.sensor_reply_service.send_sensor_reply,
         )
 
-    # Helper: reset sensor motion after sensor replies.
     async def _reset_sensor_motion_after(
         self, delay_s: float, *, reply_started_at: float
     ) -> None:
-        """Reset sensor motion back to idle to avoid think sticking."""
-        try:
-            await asyncio.sleep(max(0.2, float(delay_s)))
-            if self._last_reply_time > float(reply_started_at) + 1e-6:
-                return
-            await self.event_bus.emit("live2d.go_idle")
-        except Exception:
-            return
+        await self.sensor_reply_service.reset_motion_after(
+            delay_s, reply_started_at=reply_started_at
+        )
 
     async def _rescue_sensor_template_reply(
         self, text: str, *, title: str, category: str
     ) -> str:
-        clean = self._clean_text_for_tts(str(text or "")).strip()
-        if not clean:
-            return ""
-        try:
-            from modules.llm import chat_with_ai
-
-            prompt = (
-                "把下面这句屏幕感知回应改成一句自然的临场短话。\n"
-                "要求：直接对 Master 说；不要像观察报告；不要出现“用户正在、屏幕上、画面中、我看到、根据、当前窗口、"
-                "挺实用、步骤详尽、需要协助、这也要看”。\n"
-                "允许关心、疑问、陪一句或很轻的吐槽；最多 28 个字；只输出最终一句。\n"
-                f"窗口：{title} / {category}\n"
-                f"原句：{clean}"
-            )
-            reply = await asyncio.to_thread(
-                chat_with_ai,
-                [{"role": "user", "content": prompt}],
-                task_type="default",
-                caller="sensor_template_rescue",
-            )
-            rescued = self._clean_text_for_tts(
-                self._strip_wrapping_quotes(
-                    self._strip_internal_tags(
-                        self._strip_cmd_anywhere(
-                            self._strip_emo_tags_anywhere(reply or "")
-                        )
-                    )
-                )
-            ).strip()
-            if rescued and not sensor_utils.looks_like_sensor_template_reply(
-                rescued, clean_text_fn=self._clean_text_for_tts
-            ):
-                return rescued
-        except Exception:
-            pass
-        return ""
-
-    # ==================== 音乐感知事件处理 ====================
-    async def handle_music_event(self, title: str, artist: str):
-        """处理音乐播放事件（优化版）"""
-        # 防抖
-        if time.time() - self._last_reply_time < self._sensor_min_reply_interval_sec:
-            return
-
-        print(f"🎵 [Music] 正在聆听: {title} by {artist}")
-
-        # 1. 切换到听歌动作
-        asyncio.create_task(
-            self.event_bus.emit("live2d.emotion", emotion="music", intensity=1.0)
+        return await self.sensor_reply_service.rescue_template_reply(
+            text, title=title, category=category
         )
 
-        # 2. 使用当前激活角色设定
-        base_prompt = DEFAULT_PERSONA
-        try:
-            from modules.character_manager import character_manager
-
-            active_char = character_manager.get_active_character()
-            if active_char:
-                base_prompt = active_char.get("prompt", DEFAULT_PERSONA)
-        except Exception:
-            pass
-
-        system_prompt = f"""
-    {base_prompt}
-
-    【当前场景】
-    你正在陪用户一起听歌。歌曲信息：
-    - 歌名：{title}
-    - 歌手/作曲：{artist}
-
-    【任务】
-    请简短评价这首歌，或表达你的感受。
-
-    【要求】
-    - 用你自己的语气和方式评价，不要写成通用模板
-    - 一句话即可（不超过30字）
-    - 如果不熟悉这首歌，可以根据歌名/歌手风格推测
-    """
-
-        try:
-            messages = [{"role": "system", "content": system_prompt}]
-
-            # ✅ 使用 default 路由（更聪明的模型）
-            reply = await asyncio.to_thread(
-                chat_with_ai,
-                messages,
-                task_type="default",
-                caller="music_event",
-            )
-            reply = (reply or "").strip()
-
-            if not reply or len(reply) < 2:
-                return
-
-            # ✅ 提取情绪标签
-            extracted_emo, clean_text = self._extract_emo_tag(reply)
-            clean_text = self._apply_character_catchphrase(clean_text)
-            if not clean_text:
-                return
-            final_emo = extracted_emo or "neutral"
-
-            # ✅ 根据歌手/歌名推测情绪（如果没有标签）
-            if not extracted_emo:
-                # 梶浦由記的作品通常比较史诗/悲壮
-                if "kajiura" in artist.lower() or "梶浦" in artist:
-                    final_emo = "think"
-                # 可以添加更多规则...
-            self._observe_final_reply_emotion(final_emo)
-
-            await self.presenter.present(
-                clean_text, emotion=final_emo, interrupt=False, append_ui=True
-            )
-
-            self._update_active_time()
-            asyncio.create_task(
-                self._add_memory_safe(
-                    "assistant",
-                    f"我评价了歌曲《{title}》: {clean_text}",
-                    meta={"path": "music"},
-                )
-            )
-
-        except Exception as e:
-            self.logger.error(f"处理音乐事件失败: {e}")
+    async def handle_music_event(self, title: str, artist: str):
+        await sensor_event_service.run_music_event(
+            title=title,
+            artist=artist,
+            last_reply_time=self._last_reply_time,
+            min_reply_interval_sec=self._sensor_min_reply_interval_sec,
+            event_bus=self.event_bus,
+            presenter=self.presenter,
+            logger=self.logger,
+            extract_emo_tag=self._extract_emo_tag,
+            apply_character_catchphrase=self._apply_character_catchphrase,
+            observe_final_reply_emotion=self._observe_final_reply_emotion,
+            update_active_time=self._update_active_time,
+            add_memory_safe=self._add_memory_safe,
+            default_persona=DEFAULT_PERSONA,
+            chat_with_ai=chat_with_ai,
+        )
 
     def _get_runtime_owner_label(self) -> str:
-        app = self.app
-        if app is None:
-            return ""
-        try:
-            loader = getattr(app, "_load_runtime_settings", None)
-            normalizer = getattr(app, "_normalize_external_runtime_settings", None)
-            if not callable(loader) or not callable(normalizer):
-                return ""
-            runtime = normalizer(loader())
-            return str(runtime.get("napcat_owner_label") or "").strip()
-        except Exception:
-            return ""
+        return self.diary_service.get_runtime_owner_label()
 
     async def summarize_day(
         self,
@@ -5679,10 +3656,5 @@ class ChatService:
         )
 
     def _load_day_transcript_rows(self, date_str: str) -> list[Dict[str, Any]]:
-        store = getattr(self.brain, "sqlite_store", None)
-        return diary_utils.load_day_transcript_rows(
-            store,
-            date_str,
-            on_error=lambda exc: print(f"[ChatService] Load day transcript failed: {exc}"),
-        )
+        return self.diary_service.load_day_transcript_rows(date_str)
 

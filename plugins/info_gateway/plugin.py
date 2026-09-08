@@ -47,8 +47,8 @@ class Plugin:
                 trigger_mode="natural",
                 match=self._match_weather_now,
                 check_available=self._check_weather_available,
-                description="查询实时天气",
-                examples=["上海今天的天气怎么样", "今天上海天气怎么样"],
+                description="查询实时天气：气温、温度、几度、会不会下雨、要不要带伞",
+                examples=["上海今天的天气怎么样", "现在多少度", "外面温度怎么样"],
             ),
         ]
 
@@ -178,13 +178,113 @@ class Plugin:
                 return raw[len(alias) :].strip()
         return raw
 
+    def get_tool_schema(self):
+        return {
+            "name": "info_gateway",
+            "description": "查询实时或未来几天天气。气温、温度、几度、带伞、会不会下雨都用本工具，不要改用搜索。城市未知时不要编造。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "capability": {
+                        "type": "string",
+                        "enum": ["weather_now", "weather_7d"],
+                        "description": "weather_now=当前实况（气温/温度/几度/会不会下雨）；weather_7d=未来几天",
+                    },
+                    "city": {
+                        "type": "string",
+                        "description": "城市名，例如上海、北京",
+                    },
+                },
+                "required": ["capability", "city"],
+            },
+        }
+
+    def format_invocation(self, arguments):
+        args = dict(arguments or {})
+        capability = str(args.get("capability") or "weather_now").strip() or "weather_now"
+        city = str(args.get("city") or "").strip()
+        if city:
+            return f"{capability} city={city}"
+        return capability
+
+    def collect_invocation_args(
+        self,
+        user_text: str,
+        capability_id: str = "",
+        initial_args: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        args = dict(initial_args or {})
+        if not str(args.get("capability") or "").strip():
+            if str(capability_id or "").endswith("7d") or self._looks_like_forecast_weather(
+                user_text
+            ):
+                args["capability"] = "weather_7d"
+            else:
+                args["capability"] = "weather_now"
+        if not str(args.get("city") or "").strip():
+            city = self._extract_city(user_text)
+            if city:
+                args["city"] = city
+        return args
+
     def _looks_like_weather_query(self, text: str) -> bool:
         raw = str(text or "").strip()
         if not raw:
             return False
+        if any(word in raw for word in ("邮件", "日报", "接口", "配置", "图片")):
+            return False
+        weather_cues = (
+            "带伞",
+            "雨伞",
+            "下雨",
+            "降雨",
+            "气温",
+            "温度",
+            "几度",
+            "多少度",
+            "体感",
+            "高温",
+            "低温",
+            "会不会下雨",
+        )
+        if any(cue in raw for cue in weather_cues):
+            return True
+        if "伞" in raw and any(cue in raw for cue in ("出门", "带", "明天", "今天", "要不要")):
+            return True
         if "天气" not in raw:
             return False
-        if any(word in raw for word in ("邮件", "日报", "接口", "配置", "图片")):
+        mood_hints = (
+            "真好",
+            "好天气",
+            "不错",
+            "舒服",
+            "宜人",
+            "好差",
+            "真差",
+            "好热",
+            "好冷",
+            "太热",
+            "太冷",
+            "好想出去",
+        )
+        query_hints = (
+            "怎么样",
+            "如何",
+            "怎样",
+            "几度",
+            "多少度",
+            "查询",
+            "查一下",
+            "预报",
+            "实况",
+            "吗",
+            "呢",
+            "？",
+            "?",
+        )
+        if any(hint in raw for hint in mood_hints) and not any(
+            hint in raw for hint in query_hints
+        ):
             return False
         return True
 
@@ -260,7 +360,11 @@ class Plugin:
             "",
             raw,
         )
-        cleaned = re.sub(r"(?:未来|预报|天气|怎么样|如何|情况|实况|今天|明天|后天|这周|本周|下周|[0-9一二三四五六七八九十]+天|一周|七天)", " ", cleaned)
+        cleaned = re.sub(
+            r"(?:未来|预报|天气|怎么样|如何|情况|实况|今天|今日|明天|后天|现在|目前|实时|这周|本周|下周|[0-9一二三四五六七八九十]+天|一周|七天|出门|带伞|要不要|下雨|降雨|气温|温度|几度|多少度|体感|高温|低温|雨伞|伞)",
+            " ",
+            cleaned,
+        )
         cleaned = re.sub(r"^(?:一下|下|的)\s*", "", cleaned)
         cleaned = re.sub(r"[，,。？！?！\s]+", " ", cleaned).strip()
         if not cleaned:

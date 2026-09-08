@@ -66,7 +66,8 @@ class PluginManager:
         self.delegate_map: Dict[str, Any] = {}
         self.direct_map: Dict[str, Any] = {}
         self.observe_map: Dict[str, Any] = {}
-        self.disabled_plugins = set()  # 禁用的插件 trigger 列表
+        self.disabled_plugins = set()  # 禁用的插件 trigger 列表（持久化于 runtime_settings）
+        self._load_disabled_plugins()
         self.plugin_configs: Dict[str, dict] = {}  # 存储每个插件的配置
         self.plugin_dirs: Dict[str, str] = {}  # ✅ 新增：存储 trigger -> 文件夹名的映射
         self.llm_command_map: Dict[
@@ -535,6 +536,7 @@ class PluginManager:
                 self._map_plugin(trigger, inst)
 
             except json.JSONDecodeError as e:
+                self.load_errors.append({"plugin": item_name, "error": str(e)})
                 _safe_print(f"❌ 插件 {item_name} 的 config.json 格式错误: {e}")
             except Exception as e:
                 self.load_errors.append({"plugin": item_name, "error": str(e)})
@@ -543,7 +545,36 @@ class PluginManager:
 
                 traceback.print_exc()
 
+        self._report_load_health()
         self._log_plugin_security_summary()
+
+    def _report_load_health(self) -> None:
+        # 把本次扫描的插件加载失败聚合成一条健康状态，供健康中心与 GUI 展示。
+        try:
+            from services.runtime_health import report_runtime_health
+        except ImportError:
+            return
+        failures = [
+            item
+            for item in (self.load_errors or [])
+            if isinstance(item, dict) and item.get("error")
+        ]
+        try:
+            if failures:
+                details = {
+                    str(item.get("plugin") or "unknown"): str(item.get("error") or "")
+                    for item in failures[:20]
+                }
+                report_runtime_health(
+                    "plugin_manager",
+                    "degraded",
+                    f"{len(failures)} 个插件加载失败，可在设置中心查看详情",
+                    details=details,
+                )
+            else:
+                report_runtime_health("plugin_manager", "healthy", "插件全部加载成功")
+        except Exception:
+            pass
 
     async def start_all_plugins(self, context: Optional[dict] = None):
         for name, plugin in self.plugins.items():
@@ -770,8 +801,52 @@ class PluginManager:
     def _unique_delegate_plugins_by_keys(self, keys: Iterable[str]) -> List[Any]:
         return self._unique_plugins_by_keys(keys, allowed_types={"delegate"})
 
+    def _normalize_invocation_mode(self, invocation_mode: str = "") -> str:
+        from services.chat_support.tool_invocation import (
+            get_tool_invocation_mode,
+            normalize_invocation_mode,
+        )
+
+        raw = str(invocation_mode or "").strip()
+        if raw:
+            return normalize_invocation_mode(raw)
+        return get_tool_invocation_mode()
+
+    def _tool_call_format_footer(self, *, invocation_mode: str, compact: bool) -> str:
+        mode = self._normalize_invocation_mode(invocation_mode)
+        if mode == "function":
+            return (
+                "\n\n【调用方式】\n"
+                "通过系统提供的 tools 调用。不要在正文里写 [CMD:。\n"
+            )
+        if mode == "dual":
+            return (
+                "\n\n【调用方式】\n"
+                "优先使用 function calling。不要在正文夹带 [CMD:。\n"
+            )
+        if compact:
+            return (
+                "\n\n【调用格式】\n"
+                '只在需要工具时输出"工具调用行"，且必须独占一行：\n'
+                "[CMD: 命令 | 参数]\n"
+                "注意：必须使用上面列出的命令名称，格式为[CMD: 命令 | 参数]。\n"
+                "工具调用行之外，正常回复里不要出现 [CMD: 字样。\n"
+            )
+        return (
+            "\n\n【工具调用规则】\n"
+            "1) 只在确实需要工具时使用。\n"
+            "2) 工具调用必须单独成行，格式严格为：[CMD: 命令 | 参数]（参数多个用空格分隔）。\n"
+            "3) 重要：必须使用上面列出的命令名称（CMD:后面的第一个单词）。\n"
+            "4) 正常回复正文里不要出现 [CMD: 字样。\n"
+        )
+
     def get_tool_prompt_for_triggers(
-        self, triggers: List[str], *, compact: bool = True, max_tools: int = 12
+        self,
+        triggers: List[str],
+        *,
+        compact: bool = True,
+        max_tools: int = 12,
+        invocation_mode: str = "",
     ) -> str:
         plugins = self._unique_react_plugins_by_keys(triggers)
         if not plugins:
@@ -787,6 +862,8 @@ class PluginManager:
                 llm_cmd = getattr(p, "llm_command", "") or getattr(p, "trigger", "")
                 desc = (getattr(p, "description", "") or "").strip()
                 desc = desc.replace("\n", " ").strip()
+                desc = re.sub(r"\[CMD:[^\]]*\]", "", desc)
+                desc = re.sub(r"\s+", " ", desc).strip()
                 # 添加别名信息到描述中
                 aliases = getattr(p, "aliases", [])
                 if aliases and len(aliases) > 1:
@@ -803,11 +880,9 @@ class PluginManager:
             return (
                 "\n\n【工具】\n"
                 + "\n".join(lines)
-                + "\n\n【调用格式】\n"
-                + '只在需要工具时输出"工具调用行"，且必须独占一行：\n'
-                + "[CMD: 命令 | 参数]\n"
-                + "注意：必须使用上面列出的命令名称，格式为[CMD: 命令 | 参数]。\n"
-                + "工具调用行之外，正常回复里不要出现 [CMD: 字样。\n"
+                + self._tool_call_format_footer(
+                    invocation_mode=invocation_mode, compact=True
+                )
             )
 
         tools = []
@@ -824,22 +899,28 @@ class PluginManager:
                     [a for a in aliases if a != getattr(p, "trigger", "")]
                 )
                 alias_info = f" (别名: {alias_str})"
-            tools.append(
-                f"- {name}: [CMD: {llm_cmd} | {example_arg}] ({desc}){alias_info}"
-            )
+            mode = self._normalize_invocation_mode(invocation_mode)
+            if mode in {"dual", "function"}:
+                tools.append(f"- {name}: function `{llm_cmd}` ({desc}){alias_info}")
+            else:
+                tools.append(
+                    f"- {name}: [CMD: {llm_cmd} | {example_arg}] ({desc}){alias_info}"
+                )
 
         return (
-            "\n\n【可用工具能力】\n" + "\n".join(tools) + "\n\n【工具调用规则】\n"
-            "1) 只在确实需要工具时使用。\n"
-            "2) 工具调用必须单独成行，格式严格为：[CMD: 命令 | 参数]（参数多个用空格分隔）。\n"
-            "3) 重要：必须使用上面列出的命令名称（CMD:后面的第一个单词）。\n"
-            "4) 正常回复正文里不要出现 [CMD: 字样。\n"
+            "\n\n【可用工具能力】\n"
+            + "\n".join(tools)
+            + self._tool_call_format_footer(
+                invocation_mode=invocation_mode, compact=False
+            )
         )
 
-    def get_system_prompt_addition(self) -> str:
-        return self.get_deferred_tool_prompt()
+    def get_system_prompt_addition(self, invocation_mode: str = "") -> str:
+        return self.get_deferred_tool_prompt(invocation_mode=invocation_mode)
 
-    def get_deferred_tool_prompt(self, max_tools: int = 18) -> str:
+    def get_deferred_tool_prompt(
+        self, max_tools: int = 18, invocation_mode: str = ""
+    ) -> str:
         rows = []
         seen = set()
         for trigger, plugin in self.plugins.items():
@@ -852,6 +933,8 @@ class PluginManager:
             seen.add(pid)
             name = str(getattr(plugin, "name", trigger) or trigger).strip()
             desc = str(getattr(plugin, "description", "") or "").replace("\n", " ").strip()
+            desc = re.sub(r"\[CMD:[^\]]*\]", "", desc)
+            desc = re.sub(r"\s+", " ", desc).strip()
             if len(desc) > 42:
                 desc = desc[:42] + "…"
             rows.append(f"- {name}({trigger}): {desc or p_type}")
@@ -859,11 +942,21 @@ class PluginManager:
                 break
         if not rows:
             return ""
+        mode = self._normalize_invocation_mode(invocation_mode)
+        if mode in {"dual", "function"}:
+            discover = (
+                "当前不直接暴露完整工具参数。若必须用工具，先调用 tool_search。"
+                "不要在闲聊时使用。\n"
+            )
+        else:
+            discover = (
+                "当前不直接暴露完整工具参数。若你判断必须用工具，但本轮没有列出具体命令，先单独输出：\n"
+                "[CMD: tool_search | 你需要的能力或关键词]\n"
+                "系统会返回匹配工具，再继续执行真实工具。不要在闲聊时使用。\n"
+            )
         return (
             "\n\n【可延迟发现的工具】\n"
-            + "当前不直接暴露完整工具参数。若你判断必须用工具，但本轮没有列出具体命令，先单独输出：\n"
-            + "[CMD: tool_search | 你需要的能力或关键词]\n"
-            + "系统会返回匹配工具，再继续执行真实工具。不要在闲聊时使用。\n"
+            + discover
             + "可发现能力摘要：\n"
             + "\n".join(rows)
         )
@@ -876,7 +969,6 @@ class PluginManager:
             "查", "搜", "搜索", "联网", "新闻", "金价", "天气", "汇率",
             "生成", "画", "生图", "图生图", "点歌", "播放", "语音",
             "打开", "读取", "总结", "链接", "下载", "翻译", "计算", "wiki",
-            "邮件", "邮箱", "email", "mail",
         )
         return any(word in text for word in keywords)
 
@@ -952,7 +1044,12 @@ class PluginManager:
         return build_plugin_config_schema(key, config)
 
     def get_delegate_prompt_for_triggers(
-        self, triggers: List[str], *, compact: bool = True, max_tools: int = 8
+        self,
+        triggers: List[str],
+        *,
+        compact: bool = True,
+        max_tools: int = 8,
+        invocation_mode: str = "",
     ) -> str:
         plugins = self._unique_delegate_plugins_by_keys(triggers)
         if not plugins:
@@ -969,14 +1066,27 @@ class PluginManager:
                 desc = desc[:60] + "…"
             lines.append(f"- {llm_cmd}: {desc or '委托副脑处理的复杂任务'}")
 
-        return (
-            "\n\n【可委托任务】\n"
-            + "\n".join(lines)
-            + "\n\n【委托格式】\n"
-            + "当任务复杂、需要多步执行或需要调用外部工具时，可单独输出一行：\n"
-            + "[CMD: 命令 | 需求说明]\n"
-            + "这里的命令会交给副脑处理；只输出必要的任务要求，不要把思考过程写进去。\n"
-        )
+        mode = self._normalize_invocation_mode(invocation_mode)
+        if mode == "function":
+            footer = (
+                "\n\n【委托方式】\n"
+                "当任务复杂、需要多步或外部工具时，使用提供的 tools。"
+                "只输出必要的任务要求，不要把思考过程写进去。不要在正文写 [CMD:。\n"
+            )
+        elif mode == "dual":
+            footer = (
+                "\n\n【委托方式】\n"
+                "当任务复杂、需要多步或外部工具时，优先使用 function calling。"
+                "不要在正文夹带 [CMD:。\n"
+            )
+        else:
+            footer = (
+                "\n\n【委托格式】\n"
+                "当任务复杂、需要多步执行或需要调用外部工具时，可单独输出一行：\n"
+                "[CMD: 命令 | 需求说明]\n"
+                "这里的命令会交给副脑处理；只输出必要的任务要求，不要把思考过程写进去。\n"
+            )
+        return "\n\n【可委托任务】\n" + "\n".join(lines) + footer
 
     def get_delegate_trigger_set(self) -> set[str]:
         triggers = set(self.delegate_map.keys())
@@ -1239,6 +1349,188 @@ class PluginManager:
                 pass
             return f"⚠️ 工具超时（>{timeout}s）"
 
+    def _resolve_command_trigger(self, llm_cmd: str) -> str:
+        name = str(llm_cmd or "").strip()
+        if not name:
+            return ""
+        return str(self.llm_command_map.get(name, name) or name)
+
+    def _format_tool_search_output(
+        self,
+        query: str,
+        context: Optional[dict],
+        allowed_types: set,
+        *,
+        invocation_mode: str = "cmd",
+    ) -> str:
+        matches_rows = [
+            row
+            for row in self.search_tools(query, context=context)
+            if str(row.get("type") or "react") in allowed_types
+        ]
+        if not matches_rows:
+            self._record_deferred_tool_stat("tool_search", "empty")
+            return f"【tool_search 结果】没有找到和“{query}”匹配的工具。"
+        lines = []
+        function_mode = str(invocation_mode or "cmd").strip().lower() == "function"
+        for row in matches_rows:
+            example = row.get("example_arg") or "参数"
+            desc = str(row.get("description") or "").replace("\n", " ").strip()
+            if len(desc) > 80:
+                desc = desc[:80] + "…"
+            command = str(row.get("command") or row.get("trigger") or "")
+            if function_mode:
+                lines.append(
+                    f"- {row.get('name')}：function `{command}`；类型={row.get('type')}；{desc}"
+                )
+            else:
+                lines.append(
+                    f"- {row.get('name')}：命令 [CMD: {command} | {example}]；"
+                    f"function `{command}`；类型={row.get('type')}；{desc}"
+                )
+            self._record_deferred_tool_stat(str(row.get("trigger") or ""), "suggested")
+        self._record_deferred_tool_stat("tool_search", "matched")
+        suffix = (
+            "若需要执行，请下一步调用其中一个真实工具。"
+            if function_mode
+            else "若需要执行，请下一步只输出其中一个真实工具命令。"
+        )
+        return "【tool_search 结果】匹配到这些工具。" + suffix + "\n" + "\n".join(lines)
+
+    def _plugin_result_text(self, trigger: str, result: Any) -> Any:
+        if isinstance(result, dict) and str(result.get("__agent_result__") or "") == "confirmation_required":
+            summary = str(result.get("summary") or "需要确认这个操作。").strip()
+            return summary + "\n确认请回复“确认”，取消请回复“取消”。"
+        return result
+
+    async def _run_named_tool(
+        self,
+        llm_cmd: str,
+        args: str,
+        context: dict,
+        allowed_types: set,
+        *,
+        invocation_mode: str = "cmd",
+    ) -> tuple:
+        """Return (outputs, used_triggers, found_plugin)."""
+        outputs: List[str] = []
+        used: List[str] = []
+        name = str(llm_cmd or "").strip()
+        if not name:
+            return outputs, used, False
+        if name == "tool_search":
+            outputs.append(
+                self._format_tool_search_output(
+                    args,
+                    context,
+                    allowed_types,
+                    invocation_mode=invocation_mode,
+                )
+            )
+            used.append("tool_search")
+            return outputs, used, True
+
+        trigger = self._resolve_command_trigger(name)
+        plugin = (
+            self.react_map.get(trigger)
+            or self.delegate_map.get(trigger)
+            or self.plugins.get(trigger)
+        )
+        if not plugin:
+            outputs.append(f"【{trigger} 结果】未找到该工具（可能未安装/trigger 写错）")
+            return outputs, used, True
+
+        plugin_type = getattr(plugin, "type", "react")
+        if plugin_type not in allowed_types:
+            return outputs, used, False
+
+        plugin_name = getattr(plugin, "name", trigger)
+        allowed, reason = self._is_plugin_allowed(plugin, context)
+        if not allowed:
+            denied_message = self._get_access_denied_message(plugin, context, reason)
+            outputs.append(f"【{trigger} 不可用】{denied_message}")
+            return outputs, used, True
+
+        used.append(trigger)
+        self._record_deferred_tool_stat(trigger, "executed")
+        try:
+            runtime_context = context
+            if plugin_type == "delegate":
+                runtime_context = self._build_delegate_runtime_context(context)
+            result = await self._run_with_timeout(plugin, args, runtime_context)
+            rendered = self._plugin_result_text(trigger, result)
+            if rendered is not None:
+                outputs.append(rendered)
+        except Exception as e:
+            self._dbg(f"🔌 [ReAct] 插件执行异常: {e}")
+            import traceback
+
+            traceback.print_exc()
+            outputs.append(f"【{trigger} 错误】{e}")
+        return outputs, used, True
+
+    async def execute_invocations(
+        self,
+        calls,
+        context: dict,
+        allow_tools: bool = True,
+        allowed_types: Optional[set] = None,
+        *,
+        invocation_mode: str = "dual",
+    ) -> Tuple[bool, str, List[str], List[str]]:
+        from services.chat_support.tool_invocation import (
+            calls_from_iterable,
+            format_invocation,
+            missing_required_arguments,
+            missing_required_message,
+        )
+
+        if not allow_tools:
+            return False, "", [], []
+        allowed_types = set(allowed_types or {"react"})
+        tool_outputs: List[str] = []
+        used_triggers: List[str] = []
+        triggered = False
+        for call in calls_from_iterable(calls):
+            name = str(call.name or "").strip()
+            if not name:
+                continue
+            triggered = True
+            if name == "tool_search":
+                query = str((call.arguments or {}).get("query") or call.raw_arguments or "").strip()
+                outputs, used, _found = await self._run_named_tool(
+                    "tool_search",
+                    query,
+                    context,
+                    allowed_types,
+                    invocation_mode=invocation_mode,
+                )
+                tool_outputs.extend(outputs)
+                used_triggers.extend(used)
+                continue
+            trigger = self._resolve_command_trigger(name)
+            plugin = (
+                self.react_map.get(trigger)
+                or self.delegate_map.get(trigger)
+                or self.plugins.get(trigger)
+            )
+            missing = missing_required_arguments(plugin, call.arguments)
+            if missing:
+                tool_outputs.append(missing_required_message(name, missing))
+                used_triggers.append(trigger or name)
+                continue
+            args = format_invocation(plugin, call.arguments, call.raw_arguments)
+            outputs, used, _found = await self._run_named_tool(
+                name,
+                args,
+                context,
+                allowed_types,
+                invocation_mode=invocation_mode,
+            )
+            tool_outputs.extend(outputs)
+            used_triggers.extend(used)
+        return triggered, "", tool_outputs, used_triggers
+
     def _build_runtime_context(self, context: dict) -> dict:
         runtime = dict(context or {})
         runtime.setdefault("model_gateway", self.model_gateway)
@@ -1342,10 +1634,37 @@ class PluginManager:
 
     # -------------------- Enable/Disable Plugins --------------------
 
+    def _load_disabled_plugins(self) -> None:
+        """从 runtime_settings 回读禁用列表，重启后保持 GUI 里的禁用状态。"""
+        try:
+            from modules.runtime_settings import load_runtime_settings
+
+            settings = load_runtime_settings()
+            raw = settings.get("disabled_plugins")
+            if isinstance(raw, (list, tuple, set)):
+                self.disabled_plugins = {
+                    str(item).strip()
+                    for item in raw
+                    if str(item or "").strip()
+                }
+        except Exception as exc:
+            _safe_print(f"⚠️ 插件禁用状态读取失败，本次按全量启用处理: {exc}")
+
+    def _persist_disabled_plugins(self) -> None:
+        try:
+            from modules.runtime_settings import update_runtime_settings
+
+            update_runtime_settings(
+                {"disabled_plugins": sorted(self.disabled_plugins)}
+            )
+        except Exception as exc:
+            _safe_print(f"⚠️ 插件禁用状态保存失败: {exc}")
+
     def enable_plugin(self, trigger: str) -> bool:
         """启用插件"""
         if trigger in self.disabled_plugins:
             self.disabled_plugins.remove(trigger)
+            self._persist_disabled_plugins()
 
         plugin = self.plugins.get(trigger)
         if not plugin:
@@ -1362,6 +1681,7 @@ class PluginManager:
 
         if trigger not in self.disabled_plugins:
             self.disabled_plugins.add(trigger)
+            self._persist_disabled_plugins()
 
         plugin = self.plugins.get(trigger)
         if not plugin:
@@ -1492,104 +1812,16 @@ class PluginManager:
                 continue
 
             self._dbg(f"\n🔌 [ReAct] ----- 处理命令#{idx}: {llm_cmd} | {args} -----")
-
-            if llm_cmd == "tool_search":
-                triggered = True
-                matches_rows = [
-                    row
-                    for row in self.search_tools(args, context=context)
-                    if str(row.get("type") or "react") in allowed_types
-                ]
-                if not matches_rows:
-                    tool_outputs.append(f"【tool_search 结果】没有找到和“{args}”匹配的工具。")
-                    used_triggers.append("tool_search")
-                    self._record_deferred_tool_stat("tool_search", "empty")
-                    continue
-                lines = []
-                for row in matches_rows:
-                    example = row.get("example_arg") or "参数"
-                    desc = str(row.get("description") or "").replace("\n", " ").strip()
-                    if len(desc) > 80:
-                        desc = desc[:80] + "…"
-                    lines.append(
-                        f"- {row.get('name')}：命令 [CMD: {row.get('command')} | {example}]；类型={row.get('type')}；{desc}"
-                    )
-                tool_outputs.append(
-                    "【tool_search 结果】匹配到这些工具。若需要执行，请下一步只输出其中一个真实工具命令：\n"
-                    + "\n".join(lines)
-                )
-                used_triggers.append("tool_search")
-                self._record_deferred_tool_stat("tool_search", "matched")
-                for row in matches_rows:
-                    self._record_deferred_tool_stat(str(row.get("trigger") or ""), "suggested")
-                continue
-
-            # 首先尝试通过LLM命令映射找到实际的trigger
-            trigger = self.llm_command_map.get(llm_cmd, llm_cmd)
-            if trigger != llm_cmd:
-                self._dbg(f"🔌 [ReAct] LLM命令映射: {llm_cmd} -> {trigger}")
-
             triggered = True
-            plugin = (
-                self.react_map.get(trigger)
-                or self.delegate_map.get(trigger)
-                or self.plugins.get(trigger)
+            outputs, used, _found = await self._run_named_tool(
+                llm_cmd,
+                args,
+                context,
+                allowed_types,
+                invocation_mode="cmd",
             )
-
-            if not plugin:
-                self._dbg(f"🔌 [ReAct] 未找到插件: {trigger}")
-                self._dbg(f"🔌 [ReAct] 可用的triggers: {list(self.plugins.keys())}")
-                tool_outputs.append(
-                    f"【{trigger} 结果】未找到该工具（可能未安装/trigger 写错）"
-                )
-                continue
-
-            plugin_type = getattr(plugin, "type", "react")
-            self._dbg(f"🔌 [ReAct] 插件类型: {plugin_type}")
-
-            if plugin_type not in allowed_types:
-                self._dbg(f"🔌 [ReAct] 插件类型 {plugin_type} 不在允许集合中，跳过")
-                continue
-
-            plugin_name = getattr(plugin, "name", trigger)
-            allowed, reason = self._is_plugin_allowed(plugin, context)
-            if not allowed:
-                denied_message = self._get_access_denied_message(
-                    plugin, context, reason
-                )
-                self._dbg(f"🔌 [ReAct] 插件无权触发: {plugin_name} -> {reason}")
-                tool_outputs.append(f"【{trigger} 不可用】{denied_message}")
-                continue
-
-            used_triggers.append(trigger)
-            self._record_deferred_tool_stat(trigger, "executed")
-            self._dbg(f"🔌 [ReAct] 找到插件: {plugin_name}")
-            self._dbg(f"🔌 [ReAct] 开始执行插件: {plugin_name}")
-
-            try:
-                runtime_context = context
-                if plugin_type == "delegate":
-                    runtime_context = self._build_delegate_runtime_context(context)
-                    self._dbg(
-                        "🔌 [ReAct] delegate 插件自动注入 delegate_mode=True"
-                    )
-                result = await self._run_with_timeout(plugin, args, runtime_context)
-                self._dbg(f"🔌 [ReAct] 插件执行完成，结果: {result}")
-                if isinstance(result, dict) and str(
-                    result.get("__agent_result__") or ""
-                ) == "confirmation_required":
-                    summary = str(result.get("summary") or "需要确认这个操作。").strip()
-                    tool_outputs.append(
-                        summary + "\n确认请回复“确认”，取消请回复“取消”。"
-                    )
-                elif result is not None:
-                    tool_outputs.append(result)
-            except Exception as e:
-                self._dbg(f"🔌 [ReAct] 插件执行异常: {e}")
-                import traceback
-
-                traceback.print_exc()
-                tool_outputs.append(f"【{trigger} 错误】{e}")
+            tool_outputs.extend(outputs)
+            used_triggers.extend(used)
 
         self._dbg("\n🔌 [ReAct] ========== 工具执行总结 ==========")
         self._dbg(f"🔌 [ReAct] 触发状态: {triggered}")

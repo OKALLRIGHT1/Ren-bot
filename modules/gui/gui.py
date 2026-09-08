@@ -24,12 +24,7 @@ try:
 except Exception:
     THINK_MOTION_ENABLED = True
 
-# 可选：热键（可以放到 .env 里）
-# pynput GlobalHotKeys 格式示例："<ctrl>+<alt>+space"
-try:
-    from config import HOTKEY_TOGGLE_GUI
-except Exception:
-    HOTKEY_TOGGLE_GUI = "<ctrl>+<alt>+space"
+# 全局热键已迁移到 Qt GUI (modules/gui/app.py)，此处仅保留注释。
 
 # 可选：是否启用托盘
 try:
@@ -335,27 +330,8 @@ class ChatWindow:
 
     # ---------------- Global Hotkey ----------------
     def _start_global_hotkey(self):
-        if pynput_keyboard is None:
-            print("⚠️ [Hotkey] 未安装 pynput，全局热键不可用。")
-            return
-
-        combo = HOTKEY_TOGGLE_GUI or "<ctrl>+<alt>+space"
-
-        def _toggle():
-            # 注意：这是在 pynput 线程里触发，必须 root.after 回到 Tk 主线程
-            self.root.after(0, self.toggle_show_hide)
-
-        def _run():
-            try:
-                with pynput_keyboard.GlobalHotKeys({combo: _toggle}) as listener:
-                    self._hotkey_listener = listener
-                    listener.join()
-            except Exception as e:
-                print(f"⚠️ [Hotkey] 监听失败: {e}")
-
-        self._hotkey_thread = threading.Thread(target=_run, daemon=True)
-        self._hotkey_thread.start()
-        print(f"✅ [Hotkey] 全局热键已启用: {combo}")
+        # 全局热键已迁移到 Qt GUI (modules/gui/app.py)，此处不再注册避免冲突。
+        return
 
     # ---------------- Window show/hide ----------------
     def hide_to_tray(self):

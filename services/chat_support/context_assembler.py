@@ -497,7 +497,7 @@ class ContextAssembler:
                 and content in selected_texts
                 and any(
                     tag in content
-                    for tag in ("[视觉观察]", "[屏幕观察]", "【温馨提醒】")
+                    for tag in ("[视觉观察]", "[屏幕观察]", "【温馨提醒】", "【久坐提醒】")
                 )
             ):
                 continue

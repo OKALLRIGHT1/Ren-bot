@@ -35,17 +35,25 @@
 
 ## 角色自然聊 + 接线收敛（2026-08-18）
 
-已按 `docs/architecture/README.md` 落地 P0–P4a。
+已按 `docs/architecture/README.md` 落地 P0–P4b（插件窄口；`ctx["chat_service"]` 已撤）。
 
 - 桌面 / QQ 私聊：Character Thought → 词法表情（默认 1 条）→ 主回复 → 禁词守卫。Thought 超时走 `chat_with_ai(..., timeout_sec=)`，`max_tokens` 已接线。
 - 作用域内且要出声或出气泡时走非流式，守卫发生在 catchphrase / share 之前。
 - 闲聊不再二次 polish；`qq_polish_mode` 与未接线的 `modules/memory/prompt_builder.py` 已删。传感器观察报告改写、工具直出软化仍在。
 - `VISION_MODE` 默认 `separate`；一次视觉+说话用环境变量 `VISION_MODE=direct`。
 - 设置 → 记忆 / 知识走 `MemoryGuiService` / `KnowledgeGuiService`，与聊天共用进程内 Memory Core；导入走 `ingest_knowledge_paths`。
-- `ctx["knowledge"]` = `BrainKnowledgePort`。`ctx["brain"]`、`ctx["chat_service"]` 仍在。未做 P4b / P5。
+- `ctx["knowledge"]` = `BrainKnowledgePort`；另有 `gateway` / `tts` / `app`。`ctx["brain"]` 仍在。**已撤** `ctx["chat_service"]`。可选 `ctx["skills"]`（提示词，不是执行器）。架构 P5（拆闲聊编排）未做。
 
 ## 运行健康 + Rust 纯文本屏幕
 
 - 进程内 `RuntimeHealthCenter` 只观测；Qt 顶栏与详情窗读同一 `snapshot()`，不经 HTTP 回环。
 - 屏幕吐槽走 Tauri 文本事件，不在 Python 里截图/视觉升级。
-- 同页挂机不得说「打开了 N 次」：会话去抖（默认离开 ≥ 90s 再回才 +1），见 `docs/TROUBLESHOOTING.md` 4.x 对应节。
+- 同页挂机不得说「打开了 N 次」：会话去抖（默认离开 ≥ 90s 再回才 +1）。
+
+## 久坐弹窗：桌面端显示、模板在窗、LLM 在气泡
+
+- 活动仍只由 Tauri 采集并 `POST /gui/activity-ingest`（`source=live2d-tauri`）。
+- 连上声明 `live2d.protocol.v1` 的增强版后：Python 负责判定（免打扰、宽限、冷却、in-flight）、选表情包、套 `SEDENTARY_POPUP_*` 模板，经 GUI WS 下发 `sedentary_popup`；**不把服务器文件路径交给桌面**，图片用 data URL。
+- 增强版已连接时不再本地抢弹；稍后/关闭 `POST /gui/sedentary/ack`，与 Python `_sedentary_user_suppressed_until` 对齐。未连接时 Rust 仍可独立弹窗，Python 无前端则 Qt 兜底。
+- 弹窗正文只用模板，不用 LLM。角色口头提醒仍走 `send_active_alert` → 气泡 + TTS。
+- 顶部工作时长文案为「工作了多久」。控制中心连上后端后以 `GET/POST /gui/sedentary` 为准。

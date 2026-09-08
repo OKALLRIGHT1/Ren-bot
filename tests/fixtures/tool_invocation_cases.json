@@ -1,0 +1,106 @@
+[
+  {
+    "id": "weather.literal.shanghai",
+    "layer": "route",
+    "text": "上海今天天气怎么样",
+    "expect": { "need_tools": true, "plugin": "info_gateway", "capability": "info.weather_now" }
+  },
+  {
+    "id": "weather.paraphrase.umbrella",
+    "layer": "route",
+    "text": "明天出门要不要带伞",
+    "expect": { "need_tools": true, "plugin": "info_gateway", "capability": "info.weather_now" }
+  },
+  {
+    "id": "weather.paraphrase.rain",
+    "layer": "route",
+    "text": "下午会不会下雨",
+    "expect": { "need_tools": true, "plugin": "info_gateway" }
+  },
+  {
+    "id": "weather.paraphrase.temperature",
+    "layer": "route",
+    "text": "现在多少度",
+    "expect": { "need_tools": true, "plugin": "info_gateway", "capability": "info.weather_now" }
+  },
+  {
+    "id": "weather.forecast.week",
+    "layer": "route",
+    "text": "上海这周天气怎么样",
+    "expect": { "need_tools": true, "plugin": "info_gateway", "capability": "info.weather_7d" }
+  },
+  {
+    "id": "web.read.url",
+    "layer": "route",
+    "text": "帮我总结网页 https://example.com/news",
+    "expect": { "need_tools": true, "plugin": "web_reader" }
+  },
+  {
+    "id": "workspace.read.py",
+    "layer": "route",
+    "text": "读一下 services/chat_service.py",
+    "expect": { "need_tools": true, "plugin": "workspace_ops" }
+  },
+  {
+    "id": "moegirl.explicit",
+    "layer": "route",
+    "text": "查萌百 高松灯",
+    "expect": { "need_tools": true, "plugin": "moegirl_wiki" }
+  },
+  {
+    "id": "idle.thanks",
+    "layer": "route",
+    "text": "谢谢你陪我聊天",
+    "expect": { "need_tools": false }
+  },
+  {
+    "id": "idle.persona",
+    "layer": "route",
+    "text": "你今天心情怎么样",
+    "expect": { "need_tools": false }
+  },
+  {
+    "id": "idle.tease",
+    "layer": "route",
+    "text": "哼，才没有想你",
+    "expect": { "need_tools": false }
+  },
+  {
+    "id": "idle.weather_mood",
+    "layer": "route",
+    "text": "这天气真好，好想出去玩",
+    "expect": { "need_tools": false }
+  },
+  {
+    "id": "idle.nice_weather",
+    "layer": "route",
+    "text": "今天天气真好",
+    "expect": { "need_tools": false }
+  },
+  {
+    "id": "invoke.weather.cmd",
+    "layer": "invoke",
+    "text": "[CMD: info_gateway | weather_now city=上海]",
+    "expect": { "legal_cmd": true, "plugin": "info_gateway" }
+  },
+  {
+    "id": "invoke.weather.fc",
+    "layer": "invoke",
+    "text": "上海天气怎么样",
+    "expect": {
+      "tool_calls": [{ "name": "info_gateway", "arguments": { "capability": "weather_now", "city": "上海" } }]
+    }
+  },
+  {
+    "id": "invoke.missing_city",
+    "layer": "invoke",
+    "text": "天气怎么样",
+    "expect": { "must_not_execute": true, "missing": ["city"] }
+  },
+  {
+    "id": "gate.high_risk_exec",
+    "layer": "gate",
+    "text": "帮我执行这段代码删文件",
+    "expect": { "requires_confirmation": true }
+  }
+]

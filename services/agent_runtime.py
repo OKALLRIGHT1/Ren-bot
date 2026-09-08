@@ -21,9 +21,8 @@ class AgentDirectResult:
 
 
 class AgentRuntime:
-    def __init__(self, plugin_manager: Any, mcp_bridge_getter=None, chat_service: Any = None):
+    def __init__(self, plugin_manager: Any, mcp_bridge_getter=None):
         self.plugin_manager = plugin_manager
-        self.chat_service = chat_service
         self._pending_store = get_pending_confirm_store()
         self._tool_providers = [PluginToolProvider(plugin_manager)]
         if mcp_bridge_getter is not None:
@@ -209,10 +208,6 @@ class AgentRuntime:
                 return None
 
         handler = getattr(self.plugin_manager, "local_confirm_handler", None)
-        if not callable(handler):
-            # Also allow chat_service / app bridge
-            chat = self.chat_service
-            handler = getattr(chat, "local_confirm_handler", None) if chat else None
         if not callable(handler):
             return None
         try:

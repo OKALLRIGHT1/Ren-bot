@@ -82,6 +82,39 @@ class Plugin:
         self.session_backups: Dict[str, Dict[str, Any]] = {}
         self.session_changed_files: List[str] = []
 
+    def get_tool_schema(self):
+        return {
+            "name": "workspace_ops",
+            "description": "读取或操作当前项目工作区内的文件。写入和执行仍受权限与确认门限制。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "enum": [
+                            "read_file",
+                            "list_dir",
+                            "search",
+                            "pwd",
+                            "git_status",
+                            "git_diff",
+                        ],
+                    },
+                    "path": {"type": "string", "description": "工作区内相对路径"},
+                    "query": {"type": "string"},
+                },
+                "required": ["action"],
+            },
+        }
+
+    def format_invocation(self, arguments):
+        args = dict(arguments or {})
+        action = str(args.get("action") or "read_file").strip() or "read_file"
+        path = str(args.get("path") or args.get("query") or "").strip()
+        if path:
+            return f"{action} ||| {path}"
+        return action
+
     def get_capabilities(self):
         return [
             ToolCapability(

@@ -1,0 +1,88 @@
+import json
+import os
+from pathlib import Path
+
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+from PySide6 import QtWidgets
+
+from modules.gui.dialogs.plugin_manager import (
+    PluginEditorDialog,
+    is_plausible_url,
+    setting_ui_hidden,
+    webui_url_from_settings,
+)
+
+
+def _app():
+    app = QtWidgets.QApplication.instance()
+    if app is None:
+        app = QtWidgets.QApplication([])
+    return app
+
+
+def test_wss_url_is_accepted():
+    assert is_plausible_url("wss://ws-api.wolfx.jp/all_eew") is True
+    assert is_plausible_url("ws://example.local/all") is True
+    assert is_plausible_url("https://example.com") is True
+    assert is_plausible_url("not-a-url") is False
+
+
+def test_setting_ui_hidden_flag():
+    assert setting_ui_hidden({"ui": "hidden", "type": "text"}) is True
+    assert setting_ui_hidden({"type": "bool"}) is False
+
+
+def test_webui_url_from_settings_uses_port():
+    assert (
+        webui_url_from_settings(
+            {"status_ui_port": {"type": "number", "default": 8765}}
+        )
+        == "http://127.0.0.1:8765/"
+    )
+
+
+class _FakePluginManager:
+    def __init__(self, config):
+        self.config = config
+        self.saved = None
+
+    def get_plugin_config(self, trigger):
+        del trigger
+        return json.loads(json.dumps(self.config))
+
+    def get_plugin_config_schema(self, trigger):
+        del trigger
+        return {"fields": []}
+
+    def _normalize_access_control(self, access_control):
+        return access_control or {}
+
+    def save_plugin_config(self, trigger, config):
+        del trigger
+        self.saved = config
+        return True
+
+
+def test_disaster_plugin_editor_hides_json_and_keeps_it_on_save(monkeypatch):
+    _app()
+    monkeypatch.setattr(QtWidgets.QMessageBox, "information", lambda *a, **k: None)
+    monkeypatch.setattr(QtWidgets.QMessageBox, "warning", lambda *a, **k: None)
+    raw = json.loads(
+        Path("plugins/disaster_warning/config.json").read_text(encoding="utf-8-sig")
+    )
+    manager = _FakePluginManager(raw)
+    dialog = PluginEditorDialog(plugin_manager=manager, trigger="disaster_warning")
+    assert "watch_regions_json" not in dialog.config_fields
+    assert "wolfx_ws_url" not in dialog.config_fields
+    assert "enabled" in dialog.config_fields
+    assert "status_ui_url" in dialog.config_fields
+    field_type, widget = dialog.config_fields["status_ui_url"]
+    assert field_type == "link"
+    assert widget.text().startswith("http://127.0.0.1:")
+    dialog._save_config()
+    assert manager.saved is not None
+    saved_settings = manager.saved.get("settings") or {}
+    assert "watch_regions_json" in saved_settings
+    assert saved_settings["wolfx_ws_url"]["default"].startswith("wss://")
+    dialog.close()

@@ -219,9 +219,9 @@ class Live2DApplication:
         self._napcat_server_running = False
         self._silent_bubble_seq = 0
 
-        # [鏂板] 灞忓箷鎰熺煡涓庤闊崇粍浠?
+        # [新增] 屏幕感知与语音组件
         self.screen_sensor = None
-        self.voice_sensor = None  # 🎤 璇煶浼犳劅鍣?
+        self.voice_sensor = None  # 🎤 语音传感器
 
         # GUI鐩稿叧
         self.qt_ui = None
@@ -237,7 +237,7 @@ class Live2DApplication:
         # Restart must not kill NapCat/Ollama/etc.; only real exit stops managed ones.
         self._skip_external_stop_on_cleanup = False
 
-        # 鏃ヨ鐘舵€佹爣璁帮紝闃叉閲嶅璁板綍
+        # 日记状态标记，防止重复记录
         self.last_summary_date = None
 
         # 配置
@@ -918,6 +918,62 @@ class Live2DApplication:
             self.loop,
         )
 
+    def show_sedentary_popup(
+        self,
+        app_name: str,
+        active_minutes: int,
+        image_path: str = "",
+        on_result=None,
+    ):
+        from modules.gui.sedentary_popup import (
+            build_sedentary_popup_options,
+            route_sedentary_popup,
+        )
+
+        options = build_sedentary_popup_options(
+            config,
+            app_name=app_name,
+            active_minutes=active_minutes,
+            image_path_override=image_path,
+        )
+        gui_ws = getattr(self, "gui_ws_server", None)
+        has_client = bool(
+            gui_ws is not None
+            and hasattr(gui_ws, "has_capable_client")
+            and gui_ws.has_capable_client("live2d.protocol.v1")
+        )
+        qt_ui = getattr(self, "qt_ui", None)
+
+        def _emit_frontend(payload):
+            if gui_ws is not None and hasattr(gui_ws, "emit"):
+                gui_ws.emit(payload)
+
+        def _show_qt():
+            if qt_ui is not None and hasattr(qt_ui, "show_sedentary_popup"):
+                qt_ui.show_sedentary_popup(
+                    app_name, active_minutes, image_path, on_result
+                )
+            elif callable(on_result):
+                on_result("dismiss")
+
+        route_sedentary_popup(
+            options,
+            app_name=app_name,
+            active_minutes=active_minutes,
+            has_live2d_client=has_client,
+            emit_frontend=_emit_frontend,
+            show_qt=_show_qt,
+            on_result=on_result,
+        )
+
+    def acknowledge_sedentary_popup(self, result: str = "dismiss") -> Dict[str, Any]:
+        sensor = getattr(self, "screen_sensor", None)
+        if sensor is None or not hasattr(sensor, "acknowledge_sedentary_popup"):
+            return {"ok": False, "error": "screen_sensor_unavailable"}
+        sensor.acknowledge_sedentary_popup(result)
+        action = str(result or "dismiss").strip().lower() or "dismiss"
+        return {"ok": True, "data": {"result": action}}
+
 
     def get_activity_client_config(self) -> Dict[str, Any]:
         settings = self._load_runtime_settings()
@@ -1241,7 +1297,7 @@ class Live2DApplication:
         self.logger = setup_logging(log_dir="./logs", log_name="agent", level="INFO")
         set_logger(self.logger)
 
-        # 鍚姩鏃惰鍙?TTS 杩愯鏃跺紑鍏筹紙浼樺厛浜?config.py 榛樿鍊硷級
+        # 启动时读取 TTS 运行时开关（优先于 config.py 默认值）
         self.tts_enabled = self._load_runtime_tts_enabled()
         try:
             import config as runtime_config
@@ -1257,17 +1313,17 @@ class Live2DApplication:
         except Exception as e:
             self.logger.warning(f"External services autostart skipped: {e}")
 
-        # 2. 鍒濆鍖栦簨浠舵棩蹇?
+        # 2. 初始化事件日志
         self.event_logger = EventLogger("./data/events.sqlite")
         self.skill_manager = SkillManager(logger=self.logger)
 
-        # 3. 鍒濆鍖栨牳蹇冪粍浠?
+        # 3. 初始化核心组件
         self.brain = AdvancedMemorySystem()
         self.memory_store = get_memory_store()
         self.emotion_controller = EmotionController(mapping=EMO_TO_LIVE2D)
         self.logger.info("EmotionController 宸插垵濮嬪寲")
 
-        # 4. 鍒濆鍖栨彃浠剁郴缁?
+        # 4. 初始化插件系统
         self.plugin_manager = PluginManager(plugin_dir="./plugins")
         self.plugin_manager.load_plugins()
 
@@ -1361,7 +1417,7 @@ class Live2DApplication:
             event_bus=self.event_bus,
         )
 
-        # 7. 鍒濆鍖栬亰澶╂湇鍔?
+        # 7. 初始化聊天服务
         self.mcp_bridge = MCPToolBridge()
         self.chat_gateway = ChatGateway()
         self.chat_gateway.on_message(self._handle_external_chat_message)
@@ -1431,11 +1487,15 @@ class Live2DApplication:
         if MusicSensor:
             self.music_sensor = MusicSensor(self.chat_service)
 
-        # 8. 鍒濆鍖栧睆骞曟劅鐭?(蹇呴』鍦?chat_service 涔嬪悗)
+        # 8. 初始化屏幕感知（必须在 chat_service 之后）
         if ScreenSensor:
             try:
                 self.screen_sensor = ScreenSensor(self.chat_service)
                 self.chat_service.screen_sensor_ref = self.screen_sensor
+                self.screen_sensor.set_sedentary_popup_callback(self.show_sedentary_popup)
+                self.screen_sensor.set_sedentary_meme_selector(
+                    self.select_sedentary_meme_image_path
+                )
                 self.logger.info("ScreenSensor initialized")
             except Exception as e:
                 self.logger.error(f"❌ ScreenSensor 初始化失败: {e}")
@@ -1449,7 +1509,7 @@ class Live2DApplication:
         # 9. 娉ㄥ唽浜嬩欢澶勭悊鍣?
         self._wire_events()
 
-        # 10. 娉ㄥ唽鍒板鍣?
+        # 10. 注册到容器
         self._register_services()
 
         self.logger.info("Application initialized")
@@ -1458,19 +1518,17 @@ class Live2DApplication:
         if self.voice_sensor:
             return self.voice_sensor
         try:
-            from modules.voice_sensor import VoiceSensor
+            from modules.asr.adapter import build_voice_sensor
 
-            self.voice_sensor = VoiceSensor(
-                chat_service=self.chat_service,
-                event_bus=self.event_bus,
-                config_path=getattr(config, "SHERPA_MODEL_CONFIG", {}),
-            )
+            self.voice_sensor = build_voice_sensor(self.chat_service)
+            if self.voice_sensor is None:
+                raise RuntimeError("build_voice_sensor returned None")
             if self.logger:
                 self.logger.info("VoiceSensor loaded on demand")
             return self.voice_sensor
         except ImportError:
             if self.logger:
-                self.logger.warning("modules.voice_sensor not found; voice disabled")
+                self.logger.warning("modules.asr not found; voice disabled")
         except Exception as e:
             if self.logger:
                 self.logger.error(f"❌ VoiceSensor 初始化失败: {e}")
@@ -1577,7 +1635,7 @@ class Live2DApplication:
         self.event_bus.on(Events.UI_STATUS, self._on_ui_status)
         self.event_bus.on(Events.UI_APPEND, self._on_ui_append)
 
-        # 鐘舵€佷簨浠讹紙灏嗕簨浠舵€荤嚎鐨勭姸鎬佸彉鍖栬浆鎹负鐘舵€佹満鐘舵€侊級
+        # 状态事件（将事件总线的状态变化转换为状态机状态）
         self.event_bus.on("state.changed", self._on_state_changed_event)
 
         # Live2D浜嬩欢
@@ -1585,7 +1643,7 @@ class Live2DApplication:
         self.event_bus.on(Events.LIVE2D_MOTION, self._on_live2d_motion)
         self.event_bus.on(Events.LIVE2D_GO_IDLE, self._on_live2d_go_idle)
 
-        # 鐘舵€佹満鐩戝惉鍣紙鐩存帴澶勭悊鐘舵€侊紝涓嶉€氳繃浜嬩欢鎬荤嚎锛?
+        # 状态机监听器（直接处理状态，不通过事件总线）
         self.state_machine.add_listener(self._on_state_machine_change)
 
         # TTS浜嬩欢
@@ -1603,7 +1661,7 @@ class Live2DApplication:
             Events.MEMORY_ADD_FAIL, lambda p: print("[Memory] add failed")
         )
 
-        # [鍙€塢 鐩戝惉琚拷鐣ョ殑娑堟伅
+        # [可选] 监听被忽略的消息
         self.event_bus.on(
             "chat.ignored",
             lambda p: print(f"🚫 [Gatekeeper] 已忽略: {p.get('content', '')[:20]}..."),
@@ -2091,7 +2149,7 @@ class Live2DApplication:
                 f"🎭 [Emotion] 收到情绪请求: {emo} (prefer_motion={prefer_motion})"
             )
 
-            # 鏍囪娲诲姩锛堥€€鍑虹┖闂叉ā寮忥級
+            # 标记活动（退出空闲模式）
             self.emotion_controller.mark_activity(reason or "emotion_request")
 
             # 通过 EmotionController 处理情绪请求
@@ -2146,7 +2204,7 @@ class Live2DApplication:
 
         self.logger.debug(f"收到状态变化事件: {state_name} (原因: {reason})")
 
-        # 灏嗗瓧绗︿覆鐘舵€佽浆鎹负 AgentState 鏋氫妇
+        # 将字符串状态转换为 AgentState 枚举
         state_map = {
             "idle": AgentState.IDLE,
             "thinking": AgentState.THINKING,
@@ -2172,11 +2230,11 @@ class Live2DApplication:
             # 鏇存柊 EmotionController 鐨勭姸鎬?
             self.emotion_controller.set_agent_state(new_state)
 
-            # 鏍规嵁鐘舵€佽Е鍙戝搴旂殑鍔ㄤ綔
+            # 根据状态触发对应的动作
             if new_state == AgentState.THINKING:
                 self.logger.debug("[State] enter thinking")
 
-                # 寮傛瑙﹀彂 UI 鐘舵€佹洿鏂?
+                # 异步触发 UI 状态更新
                 asyncio.create_task(
                     self.event_bus.emit(Events.UI_STATUS, text="Thinking.")
                 )
@@ -2186,7 +2244,7 @@ class Live2DApplication:
                         f"🧠 [State] 瑙﹀彂鎬濊€冨姩浣? {self.think_motion_name}"
                     )
 
-                    # 鏍囪娲诲姩锛堥€€鍑虹┖闂诧級
+                    # 标记活动（退出空闲）
                     self.emotion_controller.mark_activity("thinking")
 
                     # 直接通过 EmotionController 触发动作
@@ -2346,7 +2404,7 @@ class Live2DApplication:
             return
         await self.tts.stop_stream(emotion=payload.get("emotion"))
 
-        # 纭繚鐘舵€佸垏鎹㈠埌 IDLE锛堝鏋?TTS 娌℃湁姝ｅ父瑙﹀彂锛?
+        # 确保状态切换到 IDLE（如果 TTS 没有正常触发）
         # async def ensure_idle():
         #     await asyncio.sleep(2)  # 等待 TTS 播放完成
         #     if self.state_machine.state == AgentState.SPEAKING:
@@ -2502,7 +2560,7 @@ class Live2DApplication:
         if self.screen_sensor:
             self.container.register("screen_sensor", lambda c: self.screen_sensor)
 
-    #  瀹氭椂浠诲姟璋冨害鍣?(澶勭悊鑷姩鏃ヨ + 琛ュ綍)
+    # 定时任务调度器（处理自动日记 + 补录）
     async def _scheduler_loop(self):
         # Background scheduler loop.
         try:
@@ -2513,7 +2571,7 @@ class Live2DApplication:
 
         self.logger.info("⏰定时任务调度器已启动")
 
-        # 鍐呭瓨鏍囪锛堥槻姝㈠崟娆¤繍琛屼腑姣?0绉掓煡涓€娆℃暟鎹簱锛屾氮璐规€ц兘锛?
+        # 内存标记（防止单次运行中每30秒查一次数据库，浪费性能）
         _last_makeup_check_date = None
 
         while True:
@@ -2547,9 +2605,9 @@ class Live2DApplication:
                                         f"⚠️ 今日日记生成失败，未写入归档标记: {current_date_str}"
                                     )
 
-                # ================= 鍦烘櫙 B: 琛ュ綍鏄ㄥぉ (鍏ㄥぉ鍊欐鏌? =================
-                # 🎤 [淇敼] 鍘绘帀浜?and now.hour < 12
-                # 鍙浠婂ぉ杩樻病妫€鏌ヨ繃琛ュ綍(鍐呭瓨鏍囪)锛屽氨鍘绘鏌ヤ竴娆?
+                # ================= 场景 B: 补录昨天 (全天待检查) =================
+                # 🎤 [修改] 去掉了 and now.hour < 12
+                # 只要今天还没检查过补录(内存标记)，就去检查一次
                 if AUTO_DIARY_ENABLED and _last_makeup_check_date != current_date_str:
                     _last_makeup_check_date = (
                         current_date_str  # 标记：今天已经检查过了，别再查了
@@ -2631,7 +2689,7 @@ class Live2DApplication:
                 except Exception as e:
                     print(f"关闭 NapCat webhook 出错: {e}")
             current_date = datetime.now().strftime("%Y-%m-%d")
-            # 濡傛灉閰嶇疆寮€鍚紝涓斾粖澶╄繕娌¤褰曪紝涓斾紶鎰熷櫒鏈夋暟鎹?
+            # 如果配置开启，且今天还没记录，且传感器有数据
             if self.last_summary_date != current_date and self.screen_sensor:
                 print("📔 检测到退出时今日尚未写日记，正在尝试保存数据...")
                 report = self.screen_sensor.get_formatted_report()
@@ -2697,7 +2755,7 @@ class Live2DApplication:
                 else:
                     self.logger.warning(f"Diary backfill failed: {target_str}")
 
-    # 鍔ㄦ€佸垏鎹㈣闊崇洃鍚殑鏂规硶
+    # 动态切换语音监听的方法
     def set_voice_sensor_enabled(self, enabled: bool):
         # Enable or disable voice sensor dynamically.
         if enabled:
@@ -2719,10 +2777,31 @@ class Live2DApplication:
                 self.logger.info("Voice sensor disabled")
                 self.voice_sensor.stop()
 
+
+    def start_push_to_talk(self):
+        """Push-to-talk: temporarily enable voice listening (bypass wake word)."""
+        if not self.voice_sensor:
+            self._ensure_voice_sensor_loaded()
+        if not self.voice_sensor:
+            self.logger.warning('⚠️ VoiceSensor 未就绪，无法 PTT')
+            return
+        try:
+            self.voice_sensor.start_ptt()
+        except Exception as exc:
+            self.logger.warning(f'PTT start failed: {exc}')
+
+    def stop_push_to_talk(self):
+        """Push-to-talk: release — restore prior listening mode."""
+        if self.voice_sensor:
+            try:
+                self.voice_sensor.stop_ptt()
+            except Exception as exc:
+                self.logger.warning(f'PTT stop failed: {exc}')
+
     def apply_asr_settings(self, settings: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """Persist-applied ASR policy hot-reload for VoiceSensor."""
         try:
-            from modules.asr_settings import load_asr_settings, resolve_wake_words
+            from modules.asr.settings import load_asr_settings, resolve_wake_words
 
             cfg = load_asr_settings(settings if isinstance(settings, dict) else None)
             words = resolve_wake_words(settings=cfg)
@@ -2752,7 +2831,7 @@ class Live2DApplication:
             self.loop = asyncio.new_event_loop()
             asyncio.set_event_loop(self.loop)
 
-            # 2. 鍚姩鎯呯华鎺у埗鍣?
+            # 2. 启动情绪控制器
             if self.emotion_controller:
                 try:
                     self.emotion_controller.start(self.loop)
@@ -2760,14 +2839,14 @@ class Live2DApplication:
                 except Exception as e:
                     self.logger.error(f"❌ 情绪控制器启动失败: {e}")
 
-            # 3. 鍚姩鎵€鏈夋彃浠?
+            # 3. 启动所有插件
             self.loop.create_task(
                 self.plugin_manager.start_all_plugins(
                     {"chat_service": self.chat_service}
                 )
             )
 
-            # 4. 鍚姩瀹氭椂璋冨害鍣?
+            # 4. 启动定时调度器
             self.loop.create_task(self._scheduler_loop())
 
             # 6. 启动音乐感知
@@ -2778,7 +2857,7 @@ class Live2DApplication:
                 except Exception as e:
                     self.logger.error(f"❌MusicSensor 启动失败: {e}")
 
-            # 🎤 7. 鍚姩璇煶鐩戝惉 (濡傛灉閰嶇疆涓哄紑鍚?
+            # 🎤 7. 启动语音监听 (如果配置为开启)
             import config
 
             if getattr(config, "VOICE_SENSOR_ENABLED", False):
@@ -2836,7 +2915,7 @@ class Live2DApplication:
             return
 
         async def _process():
-            # 榛樿鏉ヨ嚜鏂囨湰杈撳叆锛屽彲琚閮ㄧ獥鍙ｈ鐩栦负 codex_input 绛夋潵婧?
+            # 默认来自文本输入，可被外部窗口覆盖为 codex_input 等来源
             merged_ctx: Dict[str, Any] = {"source": "text_input"}
             if isinstance(ctx, dict):
                 merged_ctx.update(ctx)
@@ -3222,7 +3301,7 @@ class Live2DApplication:
         if getattr(self, "tts", None):
             self.tts.enabled = enabled
 
-        # 淇濇寔 config 杩愯鏃剁姸鎬佷笌 UI 鏄剧ず涓€鑷?
+        # 保持 config 运行时状态与 UI 显示一致
         try:
             import config as runtime_config
 
@@ -3245,7 +3324,7 @@ class Live2DApplication:
     def run(self):
         # Run application.
         try:
-            # 鍒濆鍖?
+            # 初始化
             self.initialize()
 
             self.logger.info("=== 五十铃怜 Live2D Agent 启动 ===")
@@ -3322,7 +3401,9 @@ class Live2DApplication:
         self.qt_ui = QtChatTrayApp(
             on_send_callback=self.on_gui_send,
             on_tts_toggle_callback=self.set_tts_enabled,
-            on_voice_toggle_callback=self.set_voice_sensor_enabled,  # 🎤 浼犻€掕闊虫帶鍒跺洖璋?
+            on_voice_toggle_callback=self.set_voice_sensor_enabled,  # 🎤 传递语音控制回调
+            on_ptt_start_callback=self.start_push_to_talk,
+            on_ptt_stop_callback=self.stop_push_to_talk,
             on_costume_callback=self.on_gui_change_costume,
             on_preview_motion_callback=self.on_gui_preview_motion,
             on_preview_expression_callback=self.on_gui_preview_expression,
@@ -3346,10 +3427,8 @@ class Live2DApplication:
         self.qt_ui.publish_display_state = self.publish_display_state
         if self.screen_sensor and hasattr(self.qt_ui, "set_screen_sensor"):
             self.qt_ui.set_screen_sensor(self.screen_sensor)
-        if self.screen_sensor and hasattr(self.qt_ui, "show_sedentary_popup"):
-            self.screen_sensor.set_sedentary_popup_callback(
-                self.qt_ui.show_sedentary_popup
-            )
+        if self.screen_sensor:
+            self.screen_sensor.set_sedentary_popup_callback(self.show_sedentary_popup)
             self.screen_sensor.set_sedentary_meme_selector(
                 self.select_sedentary_meme_image_path
             )
@@ -3489,7 +3568,7 @@ class EventPresenter:
         self.speak_direct_result = bool(speak_direct_result)
         self.verbose = bool(verbose)
         self.event_bus = event_bus
-        # 瀹归敊娓呯悊锛氶槻姝㈡ā鍨嬭緭鍑洪潪鏍囧噯鎯呯华鏍囩琚?TTS 璇诲嚭鏉?
+        # 容错清理：防止模型输出非标准情绪标签被 TTS 读出来
         self._emo_tag_any_re = re.compile(
             r"<\s*/?\s*(?:emo(?:tion)?|happy|sad|angry|shy|flustered|confused|neutral|think|idle)\b[^>]*>",
             flags=re.IGNORECASE,
@@ -3529,7 +3608,7 @@ class EventPresenter:
             Events.ASSISTANT_UTTER,
             text=text,
             emotion=emotion,
-            interrupt=interrupt,  # <--- 浣跨敤浼犲叆鐨勫弬鏁帮紝鑰屼笉鏄啓姝?True
+            interrupt=interrupt,  # <--- 使用传入的参数，而不是写死 True
             speak=want_speak,
             show_bubble=bool(show_bubble),
             append_ui=bool(append_ui),

@@ -46,6 +46,7 @@ LIVE2D_ACTIVITY_SOURCE = "live2d-tauri"
 LIVE2D_SEDENTARY_SOURCE = "live2d-sedentary"
 SEDENTARY_SESSION_APP_NAME = "电脑"
 SEDENTARY_SESSION_CATEGORY = "computer_active"
+SEDENTARY_POPUP_IN_FLIGHT_TIMEOUT_SEC = 180.0
 # 短暂失焦（通知/Alt-Tab 闪一下）再回来不算「又打开一次」
 # 优先读 config.SCREEN_APP_SESSION_REOPEN_GAP_SEC；模块常量仅作 fallback
 APP_SESSION_REOPEN_GAP_SEC = float(SCREEN_APP_SESSION_REOPEN_GAP_SEC or 90.0)
@@ -124,6 +125,7 @@ class ScreenSensor:
         self._sedentary_popup_callback = None
         self._sedentary_meme_selector = None
         self._sedentary_popup_in_flight = False
+        self._sedentary_popup_shown_at = 0.0
         self._sedentary_user_suppressed_until = 0.0
 
     def set_sedentary_popup_callback(self, callback):
@@ -132,6 +134,26 @@ class ScreenSensor:
     def set_sedentary_meme_selector(self, selector):
         self._sedentary_meme_selector = selector
 
+    def acknowledge_sedentary_popup(self, result: str = "dismiss") -> None:
+        now = time.time()
+        action = str(result or "dismiss").strip().lower()
+        if action == "snooze":
+            try:
+                snooze_minutes = int(
+                    getattr(config, "SEDENTARY_POPUP_SNOOZE_MINUTES", 10)
+                )
+            except Exception:
+                snooze_minutes = 10
+            delay_sec = max(1, snooze_minutes) * 60
+        else:
+            delay_sec = max(60.0, float(self.sedentary_cooldown_sec or 0))
+        self.next_sedentary_alert_time = now + delay_sec
+        self._sedentary_user_suppressed_until = now + delay_sec
+        self._last_alert_time = now
+        self._last_alert_app = SEDENTARY_SESSION_APP_NAME
+        self._sedentary_popup_in_flight = False
+        self._sedentary_popup_shown_at = 0.0
+
     def _show_sedentary_popup(self, app_name: str, active_minutes: int) -> None:
         callback = self._sedentary_popup_callback
         if not callable(callback):
@@ -139,24 +161,7 @@ class ScreenSensor:
         if self._sedentary_popup_in_flight:
             return
         self._sedentary_popup_in_flight = True
-
-        def _on_result(result: str) -> None:
-            now = time.time()
-            if result == "snooze":
-                try:
-                    snooze_minutes = int(
-                        getattr(config, "SEDENTARY_POPUP_SNOOZE_MINUTES", 10)
-                    )
-                except Exception:
-                    snooze_minutes = 10
-                delay_sec = max(1, snooze_minutes) * 60
-            else:
-                delay_sec = max(60.0, float(self.sedentary_cooldown_sec or 0))
-            self.next_sedentary_alert_time = now + delay_sec
-            self._sedentary_user_suppressed_until = now + delay_sec
-            self._last_alert_time = now
-            self._last_alert_app = SEDENTARY_SESSION_APP_NAME
-            self._sedentary_popup_in_flight = False
+        self._sedentary_popup_shown_at = time.time()
 
         try:
             image_path = ""
@@ -171,9 +176,15 @@ class ScreenSensor:
                     image_path = str(result or "")
                 except Exception as exc:
                     self.logger.warning(f"[Screen] 久坐表情包选择失败: {exc}")
-            callback(app_name, active_minutes, image_path, _on_result)
+            callback(
+                app_name,
+                active_minutes,
+                image_path,
+                self.acknowledge_sedentary_popup,
+            )
         except Exception as exc:
             self._sedentary_popup_in_flight = False
+            self._sedentary_popup_shown_at = 0.0
             self.logger.warning(f"[Screen] 久坐提醒弹窗触发失败: {exc}")
 
     def _trigger_sedentary_alert(
@@ -199,7 +210,11 @@ class ScreenSensor:
         ):
             return False
         if self._sedentary_popup_in_flight:
-            return False
+            shown_at = float(getattr(self, "_sedentary_popup_shown_at", 0.0) or 0.0)
+            if shown_at <= 0 or now_ts - shown_at < SEDENTARY_POPUP_IN_FLIGHT_TIMEOUT_SEC:
+                return False
+            self._sedentary_popup_in_flight = False
+            self._sedentary_popup_shown_at = 0.0
 
         is_dnd_active = getattr(config, "DND_MODE", False)
         self._last_alert_app = alert_app_name
@@ -251,6 +266,19 @@ class ScreenSensor:
         if not raw_ts:
             return 0.0
         normalized = raw_ts.replace("Z", "+00:00")
+        # Python 3.10 fromisoformat 只吃最多 6 位小数；Rust RFC3339 常带纳秒。
+        match = re.match(
+            r"^(?P<head>\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2})(?:\.(?P<frac>\d+))?(?P<tz>.*)$",
+            normalized,
+        )
+        if match:
+            frac = (match.group("frac") or "")[:6].ljust(6, "0") if match.group("frac") else ""
+            normalized = match.group("head")
+            if frac:
+                normalized += f".{frac}"
+            tz = str(match.group("tz") or "").strip()
+            if tz:
+                normalized += tz
         try:
             return datetime.fromisoformat(normalized).timestamp()
         except ValueError:
@@ -996,14 +1024,8 @@ class ScreenSensor:
 
         newest = live2d_events[0]
         newest_ts = self._parse_rust_event_ts(newest)
-        max_resume_gap_sec = max(60.0, float(SCREEN_SENSOR_INTERVAL) * 60.0)
-        if newest_ts <= 0 or now_ts - newest_ts > max_resume_gap_sec:
-            self._reset_sedentary_session(
-                reset_ts=now_ts,
-                source=LIVE2D_ACTIVITY_SOURCE,
-                app_name=SEDENTARY_SESSION_APP_NAME,
-                category=SEDENTARY_SESSION_CATEGORY,
-            )
+        # 短暂断流不清零：有有效久坐分钟就继续显示；只有明确休息才重置。
+        if newest_ts <= 0:
             return None
 
         app_name = SEDENTARY_SESSION_APP_NAME
@@ -1075,8 +1097,7 @@ class ScreenSensor:
         if str(latest.get("source") or "").strip() != LIVE2D_ACTIVITY_SOURCE:
             return None
         event_ts = self._parse_rust_event_ts(latest)
-        max_resume_gap_sec = max(60.0, float(SCREEN_SENSOR_INTERVAL) * 60.0)
-        if event_ts <= 0 or now_ts - event_ts > max_resume_gap_sec:
+        if event_ts <= 0:
             return None
         payload = latest.get("sedentary")
         if self._rust_payload_confirms_sedentary_break(payload):

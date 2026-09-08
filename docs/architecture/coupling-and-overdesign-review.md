@@ -4,7 +4,7 @@
 - **审查日期**：2026-08-18
 - **焦点**：上帝模块 / 插件、模块间高耦合、一轮对话里的重复劳动、多余抽象。
 - **结论先行**：知识门控（`knowledge_gate`）和「当前人设」读取是真正在减负。其余大多是在尚未拆开的 `ChatService` 前面又加了一层规划器。`plugins/local_knowledge` 本身不是上帝插件；真正的中枢是被整颗塞进插件 `ctx` 的 `ChatService` + `brain`。
-- **当前接线与批次状态**：见 [README.md](README.md)。下文是审查原文；P0–P4a 已落地，P4b / P5 未做。不要把已修条目当成仍待办。
+- **当前接线与批次状态**：见 [README.md](README.md)。下文是审查原文；P0–P5 已落地（`ctx["chat_service"]` 已撤）。不要把已修条目当成仍待办。
 
 ### 批次落地（对照第 7.9 节）
 
@@ -14,8 +14,9 @@
 | P1 减负 | 已做 | 闲聊 `select_expressions(use_llm=False)`；`process()` 取一次短期窗口下传；`caller=forbidden_phrase_retry` |
 | P2 GUI | 已做 | 设置注入 live `memory_core` + `MemoryGuiService` / `KnowledgeGuiService`；`ingest_knowledge_paths` |
 | P3 删双轨 | 已做 | 闲聊不再 polish；已删 `prompt_builder.py` 与 `qq_polish_mode` |
-| P4a 知识端口 | 已做 | `ctx["knowledge"]=BrainKnowledgePort`；`local_knowledge` 优先端口、回退 `brain`。**未删** `chat_service` / `brain` |
-| P4b / P5 | 未做 | 见 README |
+| P4a 知识端口 | 已做 | `ctx["knowledge"]=BrainKnowledgePort`；`local_knowledge` 优先端口、回退 `brain`。**未删** `brain` |
+| P4b | 已做 | 窄口 + 已撤 `ctx["chat_service"]`。Skill 可选，不为撤键开 skill 端口 |
+| P5 | 已做 | 见 README；计划 `docs/superpowers/plans/2026-09-07-chat-service-p5-natural-chat.md` |
 
 ---
 
@@ -54,7 +55,7 @@
 - `ChatService` 定义：`services/chat_service.py:160`
 - 真实流水线仍是 `process()`：`services/chat_service.py:3900`（约 1480 行）
 - 新自然语言层是加方法，不是替换：`_get_natural_chat_config` `:1020`、`_maybe_build_character_thought_block` `:1057`、`_build_expression_inject_block` `:1148`、`_retry_reply_without_forbidden` `:1163`、`_apply_forbidden_phrase_guard` `:1213`
-- 插件被喂整颗对象：`services/chat_service.py:3910-3911`（`ctx["chat_service"] = self`、`ctx["brain"] = self.brain`）
+- 插件被喂整颗对象：审查当时是 `ctx["chat_service"] = self`。**P4b 已撤该键**；`ctx["brain"]` 仍在，另注入端口。
 
 **建议**：把闲聊回合收成一个编排器（门控 → Thought → prompt 零件 → 回复 → 守卫 → 展示），`process()` 只调用它。工具 / 日记 / 传感器留在外面。插件 `ctx` 只传窄端口（知识导入、知识检索），不要传 `ChatService`。
 
@@ -411,7 +412,7 @@ Thought 还在 `character_thought.py:218` 把这些行再格式化一遍。
 - **5a（可跟知识 GUI 一起做）：** 只给 `local_knowledge` 一个 `KnowledgePort`（import / search / stats / rebuild）。
 - **5b（独立项目）：** `GatewayPort` / `PresenterPort` / `AppPort` 齐了，再从 ctx 拿掉 `chat_service`。
 
-未做 5b 之前，`ctx["chat_service"] = self` 必须留着。
+**落地（P4b）：** 窄口已齐，`process()` 不再写 `ctx["chat_service"]`。Skill 走可选 `ctx["skills"]`，**不开 skill 端口**。`brain` 仍在。审查原文「必须留着 chat_service」已过期。
 
 ### 7.6 第 6 步：删死代码 —— 步骤太靠后，且漏了更小的止血
 
@@ -475,10 +476,10 @@ Thought 还在 `character_thought.py:218` 把这些行再格式化一遍。
 1. 删默认关闭的 polish 路径，并改测试。
 2. 删 `prompt_builder.py`。
 
-**P4 插件端口（独立项目，禁止混进自然语言修复）**
+**P4 插件端口（独立项目，禁止混进自然语言修复）** — **已做**
 
 1. 先做 `KnowledgePort`。
-2. Gateway / Presenter / App 端口齐了再撤 `ctx["chat_service"]`。
+2. Gateway / TTS / App 端口齐了再撤 `ctx["chat_service"]`。Skill 可选，不开端口。
 
 **P5 拆闲聊编排（P0–P3 之后）**
 

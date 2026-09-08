@@ -1,7 +1,9 @@
 import pytest
 
+from modules.llm_types import ChatCompletionResult, ToolCallRequest
 from services.chat_support.tool_flow_service import (
     finalize_tool_reply,
+    project_messages_for_finalize,
     run_react_first_pass,
     run_tool_command_loop,
 )
@@ -23,6 +25,22 @@ class _LoopPluginManager:
         )
         if not self.results:
             return False, text, [], []
+        return self.results.pop(0)
+
+    async def execute_invocations(
+        self, calls, ctx, allow_tools=True, allowed_types=None, invocation_mode="dual"
+    ):
+        self.calls.append(
+            {
+                "calls": list(calls),
+                "ctx": dict(ctx or {}),
+                "allow_tools": allow_tools,
+                "allowed_types": set(allowed_types or set()),
+                "invocation_mode": invocation_mode,
+            }
+        )
+        if not self.results:
+            return False, "", [], []
         return self.results.pop(0)
 
 
@@ -240,6 +258,8 @@ async def test_finalize_tool_reply_tells_info_gateway_not_to_guess_empty_data():
     assert "不要猜测" in feedback_message
     assert "只基于工具结果" in feedback_message
     assert "不要说自己没有这个功能" in feedback_message
+    assert "观测时间" in feedback_message
+    assert "不要改成去年" in feedback_message
 
 
 @pytest.mark.asyncio
@@ -270,6 +290,35 @@ async def test_finalize_search_reply_falls_back_to_tool_result_on_model_error():
 
 
 @pytest.mark.asyncio
+async def test_finalize_search_reply_pins_today_to_system_date():
+    captured = {}
+
+    async def chat_with_ai(messages, *, task_type, caller):
+        captured["messages"] = messages
+        return "ok"
+
+    await finalize_tool_reply(
+        clean_thought="",
+        tool_results=["某条去年的搜索结果"],
+        used_triggers=["search"],
+        context_messages=[],
+        route_reason="",
+        task_default="default",
+        start_emo="neutral",
+        chat_with_ai=chat_with_ai,
+        extract_emo_tag=_extract_emo_tag,
+        character_sharing_enabled=False,
+        try_share=lambda: "",
+    )
+
+    feedback_message = captured["messages"][0]["content"]
+    assert "不要当成今天" in feedback_message
+    from datetime import datetime
+
+    assert datetime.now().strftime("%Y-%m-%d") in feedback_message
+
+
+@pytest.mark.asyncio
 async def test_finalize_tool_reply_drops_uncertain_first_thought():
     captured = {}
 
@@ -297,4 +346,48 @@ async def test_finalize_tool_reply_drops_uncertain_first_thought():
         "我不太确定" not in str(message.get("content") or "")
         for message in captured["messages"]
     )
-    assert result.final_reply == "台风示例昨天登陆了。"
+
+
+@pytest.mark.asyncio
+async def test_tool_command_loop_dual_prefers_tool_calls_over_cmd():
+    captured = []
+
+    async def chat_with_ai(messages, *, task_type, caller, tools=None, tool_choice=None):
+        captured.append({"messages": messages, "tools": tools})
+        if len(captured) == 1:
+            return ChatCompletionResult(
+                text="[CMD: sample | ignored]",
+                tool_calls=(
+                    ToolCallRequest(
+                        id="c1",
+                        name="info_gateway",
+                        arguments={"capability": "weather_now", "city": "上海"},
+                    ),
+                ),
+            )
+        return ChatCompletionResult(text="上海多云")
+
+    plugin_manager = _LoopPluginManager(
+        [(True, "", ["上海天气：多云"], ["info_gateway"])]
+    )
+    result = await run_tool_command_loop(
+        context_messages=[{"role": "user", "content": "上海天气"}],
+        ctx={"source": "text_input"},
+        task_type="tool_reasoning",
+        caller_prefix="test_loop",
+        plugin_manager=plugin_manager,
+        chat_with_ai=chat_with_ai,
+        allowed_types={"react"},
+        contains_cmd=_contains_cmd,
+        invocation_mode="dual",
+        tools=[{"type": "function", "function": {"name": "info_gateway"}}],
+    )
+    assert result.fc_used is True
+    assert result.cmd_used is False
+    assert result.clean_thought == "上海多云"
+    assert result.tool_results == ["上海天气：多云"]
+    assert "text" not in plugin_manager.calls[0]
+    assert plugin_manager.calls[0]["calls"][0].name == "info_gateway"
+    projected = project_messages_for_finalize(result.context_messages)
+    assert all(message.get("role") != "tool" for message in projected)
+    assert all(not message.get("tool_calls") for message in projected)

@@ -2,6 +2,7 @@ import asyncio
 import json
 import os
 import re
+from datetime import datetime
 from typing import Any, Dict, List, Optional
 from urllib import error, request
 from urllib.parse import urlparse
@@ -113,6 +114,22 @@ NUMERIC_UNITS = (
 
 class Plugin:
     type = "delegate"
+
+    def get_tool_schema(self):
+        return {
+            "name": "search",
+            "description": "联网搜索当前事实、新闻或需要出处的问题。不要用本工具查天气、气温、温度或几度，那些请走 info_gateway。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "搜索词"}
+                },
+                "required": ["query"],
+            },
+        }
+
+    def format_invocation(self, arguments):
+        return str((arguments or {}).get("query") or "").strip()
 
     async def gui_check_endpoints(self) -> str:
         settings = getattr(self, "settings", {}) or {}
@@ -784,18 +801,18 @@ class Plugin:
         return ""
 
     def _resolve_search_query(self, query: str, ctx: Optional[dict]) -> str:
+        from services.chat_support.text_utils import stamp_search_query_with_current_year
+
         raw = str(query or "").strip()
         if not raw:
             return ""
-        if not self._is_link_request(raw, ctx):
-            return raw
-        if not self._is_generic_link_only_request(raw):
-            return raw
-        inferred = self._infer_recent_topic_from_ctx(ctx, raw)
-        if inferred:
-            logger.info(f"链接追问自动继承上一主题: {inferred}")
-            return inferred
-        return raw
+        resolved = raw
+        if self._is_link_request(raw, ctx) and self._is_generic_link_only_request(raw):
+            inferred = self._infer_recent_topic_from_ctx(ctx, raw)
+            if inferred:
+                logger.info(f"链接追问自动继承上一主题: {inferred}")
+                resolved = inferred
+        return stamp_search_query_with_current_year(resolved)
 
     def _build_grok_system_prompt(
         self, settings: Dict[str, Any], query: str, show_links: bool = False
@@ -809,6 +826,7 @@ class Plugin:
             self._read_setting(settings, "grok_use_active_character", True)
         )
 
+        today = datetime.now().strftime("%Y-%m-%d")
         instructions = [
             "你是联网搜索助手，首要目标是基于当前可访问的网络信息给出准确答案。",
             "如果你具备联网或搜索能力，必须先检索再回答，不能只凭记忆作答。",
@@ -816,6 +834,7 @@ class Plugin:
             "如果没有查到可靠信息，就明确说没有查到，不要硬编。",
             "先给结论，再给简要依据。",
             "输出保持紧凑，避免多余空行和重复表述。",
+            f"当前系统日期是 {today}。查询里的「今天」「现在」「今年」指这个日期；不要把去年或过期网页当成今天。",
         ]
         if time_sensitive:
             instructions.append("这是时效性问题，请尽量给出具体日期；若能确认时间也请写出。")

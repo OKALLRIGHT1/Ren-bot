@@ -4,6 +4,34 @@ import asyncio
 
 
 class Plugin:
+    def get_tool_schema(self):
+        return {
+            "name": "knowledge_base",
+            "description": "本地知识库：learn 扫描目录导入，search 按词检索。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "enum": ["learn", "search"],
+                    },
+                    "query": {
+                        "type": "string",
+                        "description": "learn 时为目录路径，search 时为检索词",
+                    },
+                },
+                "required": ["action", "query"],
+            },
+        }
+
+    def format_invocation(self, arguments):
+        args = dict(arguments or {})
+        action = str(args.get("action") or args.get("cmd") or "").strip() or "search"
+        query = str(
+            args.get("query") or args.get("content") or args.get("path") or ""
+        ).strip()
+        return f"{action} ||| {query}"
+
     def _legacy_knowledge_dirs(self):
         candidates = []
         legacy_dir = os.path.abspath("./knowledge_docs")

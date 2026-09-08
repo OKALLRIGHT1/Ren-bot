@@ -4,10 +4,14 @@ from __future__ import annotations
 
 from PySide6 import QtCore, QtWidgets
 
-from modules.asr_settings import (
+from modules.asr.settings import (
     ASR_ACTIVE_WINDOW_SEC_KEY,
+    ASR_ENGINE_KEY,
+    ASR_ENGINE_QWEN3,
+    ASR_ENGINE_ZIPFORMER,
     ASR_EXTRA_WAKE_WORDS_KEY,
     ASR_GLOBAL_WAKE_WORDS_KEY,
+    ASR_HOTWORDS_FROM_WAKE_KEY,
     ASR_INCLUDE_GLOBAL_WAKE_WORDS_KEY,
     ASR_MIN_CHARS_KEY,
     ASR_REQUIRE_WAKE_WORD_KEY,
@@ -17,6 +21,17 @@ from modules.asr_settings import (
     resolve_wake_words,
     save_asr_settings,
 )
+
+
+def _resolve_corrector(main_app):
+    """Locate the live AsrCorrector on the running VoiceSensor, or build one."""
+    app = getattr(main_app, "app", None) or main_app
+    sensor = getattr(app, "voice_sensor", None)
+    if sensor is not None and getattr(sensor, "corrector", None) is not None:
+        return sensor.corrector
+    from modules.asr.adapter import build_corrector
+
+    return build_corrector()
 
 
 class AsrSettingsPage(QtWidgets.QWidget):
@@ -36,6 +51,22 @@ class AsrSettingsPage(QtWidgets.QWidget):
         mode_form.setLabelAlignment(QtCore.Qt.AlignmentFlag.AlignRight)
         mode_form.setHorizontalSpacing(12)
         mode_form.setVerticalSpacing(10)
+
+        self.engine = QtWidgets.QComboBox()
+        self.engine.addItem("Qwen3-ASR 0.6B（推荐，说完一句再出字）", ASR_ENGINE_QWEN3)
+        self.engine.addItem("Zipformer 流式（旧模型，边说边出字）", ASR_ENGINE_ZIPFORMER)
+        self.engine.setToolTip(
+            "Qwen3 更准，但需要单独下载模型并无边说边出字。"
+            "模型未就绪时会自动回退到 Zipformer。"
+        )
+        mode_form.addRow("识别引擎:", self.engine)
+
+        self.hotwords_from_wake = QtWidgets.QCheckBox("把唤醒词当作识别热词（压专名错字）")
+        self.hotwords_from_wake.setToolTip(
+            "开启后把当前生效唤醒词传给 Qwen3，减轻「五十铃→武士林」这类错误。"
+            "对旧 Zipformer 无效。"
+        )
+        mode_form.addRow("专名热词:", self.hotwords_from_wake)
 
         self.require_wake_word = QtWidgets.QCheckBox("需要唤醒词才进入对话")
         self.require_wake_word.setToolTip(
@@ -106,7 +137,10 @@ class AsrSettingsPage(QtWidgets.QWidget):
             "说明：\n"
             "1. 托盘/热键的“开语音”仍控制是否启动麦克风 ASR。\n"
             "2. 若开启“需要唤醒词”，请先叫角色名再说话；关闭后即可直接说。\n"
-            "3. 保存后立即应用到正在运行的 VoiceSensor。"
+            "3. Qwen3 默认说完一句再识别；模型或 sherpa-onnx 版本不够时会回退 Zipformer。\n"
+            "4. 保存后立即应用到正在运行的 VoiceSensor。\n"
+            "5. “识别纠错”在每句话交给模型前修正系统性识别错误；\n"
+            "   也可在对话里发送「修正：原词→改成词」让助手记住一次改字。"
         )
         hint.setWordWrap(True)
         hint.setStyleSheet("color:#6B7280;")
@@ -124,6 +158,85 @@ class AsrSettingsPage(QtWidgets.QWidget):
         layout.addWidget(mode_group)
         layout.addWidget(wake_group)
         layout.addWidget(preview_group)
+
+        # ── 识别纠错 ──────────────────────────────────────────────
+        correction_group = QtWidgets.QGroupBox("识别纠错")
+        correction_layout = QtWidgets.QVBoxLayout(correction_group)
+
+        correction_intro = QtWidgets.QLabel(
+            "识别到文字后、交给模型前，按下表替换系统性识别错误。\n"
+            "也可在对话里发送「修正：原词→改成词」自动学习（记两次后晋升为规则）。"
+        )
+        correction_intro.setWordWrap(True)
+        correction_intro.setStyleSheet("color:#6B7280;")
+        correction_layout.addWidget(correction_intro)
+
+        self.rules_table = QtWidgets.QTableWidget(0, 3)
+        self.rules_table.setHorizontalHeaderLabels(["原词", "改成", "启用"])
+        self.rules_table.horizontalHeader().setSectionResizeMode(
+            0, QtWidgets.QHeaderView.ResizeMode.Stretch
+        )
+        self.rules_table.horizontalHeader().setSectionResizeMode(
+            1, QtWidgets.QHeaderView.ResizeMode.Stretch
+        )
+        self.rules_table.horizontalHeader().setSectionResizeMode(
+            2, QtWidgets.QHeaderView.ResizeMode.ResizeToContents
+        )
+        self.rules_table.verticalHeader().setVisible(False)
+        self.rules_table.setMinimumHeight(120)
+        correction_layout.addWidget(self.rules_table)
+
+        rule_btn_row = QtWidgets.QHBoxLayout()
+        self.rule_pattern_input = QtWidgets.QLineEdit()
+        self.rule_pattern_input.setPlaceholderText("原词")
+        self.rule_replacement_input = QtWidgets.QLineEdit()
+        self.rule_replacement_input.setPlaceholderText("改成")
+        btn_add_rule = QtWidgets.QPushButton("添加规则")
+        btn_add_rule.clicked.connect(self._add_correction_rule)
+        btn_del_rule = QtWidgets.QPushButton("删除选中")
+        btn_del_rule.clicked.connect(self._del_correction_rule)
+        rule_btn_row.addWidget(self.rule_pattern_input)
+        rule_btn_row.addWidget(self.rule_replacement_input)
+        rule_btn_row.addWidget(btn_add_rule)
+        rule_btn_row.addWidget(btn_del_rule)
+        correction_layout.addLayout(rule_btn_row)
+
+        correction_layout.addWidget(
+            QtWidgets.QLabel("学习缓冲（手动改字记录，记两次后自动晋升为规则）:")
+        )
+        self.learned_table = QtWidgets.QTableWidget(0, 4)
+        self.learned_table.setHorizontalHeaderLabels(["原词", "改成", "次数", "已晋升"])
+        self.learned_table.horizontalHeader().setSectionResizeMode(
+            0, QtWidgets.QHeaderView.ResizeMode.Stretch
+        )
+        self.learned_table.horizontalHeader().setSectionResizeMode(
+            1, QtWidgets.QHeaderView.ResizeMode.Stretch
+        )
+        self.learned_table.horizontalHeader().setSectionResizeMode(
+            2, QtWidgets.QHeaderView.ResizeMode.ResizeToContents
+        )
+        self.learned_table.horizontalHeader().setSectionResizeMode(
+            3, QtWidgets.QHeaderView.ResizeMode.ResizeToContents
+        )
+        self.learned_table.verticalHeader().setVisible(False)
+        self.learned_table.setMinimumHeight(80)
+        correction_layout.addWidget(self.learned_table)
+
+        correction_btn_row = QtWidgets.QHBoxLayout()
+        btn_refresh_correction = QtWidgets.QPushButton("刷新纠错表")
+        btn_refresh_correction.clicked.connect(self.load_correction_state)
+        btn_promote = QtWidgets.QPushButton("学习一对（原词→改成）")
+        btn_promote.clicked.connect(self._learn_pair_dialog)
+        btn_clear_learned = QtWidgets.QPushButton("清空学习缓冲")
+        btn_clear_learned.clicked.connect(self._clear_learned)
+        correction_btn_row.addWidget(btn_refresh_correction)
+        correction_btn_row.addWidget(btn_promote)
+        correction_btn_row.addWidget(btn_clear_learned)
+        correction_btn_row.addStretch()
+        correction_layout.addLayout(correction_btn_row)
+
+        layout.addWidget(correction_group)
+
         layout.addWidget(hint)
         layout.addLayout(footer)
         layout.addStretch()
@@ -144,6 +257,10 @@ class AsrSettingsPage(QtWidgets.QWidget):
 
     def load_state(self) -> None:
         state = load_asr_settings()
+        engine_id = str(state.get(ASR_ENGINE_KEY) or ASR_ENGINE_QWEN3)
+        index = self.engine.findData(engine_id)
+        self.engine.setCurrentIndex(index if index >= 0 else 0)
+        self.hotwords_from_wake.setChecked(bool(state.get(ASR_HOTWORDS_FROM_WAKE_KEY, True)))
         self.require_wake_word.setChecked(bool(state[ASR_REQUIRE_WAKE_WORD_KEY]))
         self.use_character_wake_words.setChecked(
             bool(state[ASR_USE_CHARACTER_WAKE_WORDS_KEY])
@@ -160,6 +277,109 @@ class AsrSettingsPage(QtWidgets.QWidget):
         self.active_window_sec.setEnabled(self.require_wake_word.isChecked())
         self.global_wake_words.setEnabled(self.include_global_wake_words.isChecked())
         self.refresh_preview()
+        self.load_correction_state()
+
+    # ── 识别纠错管理 ───────────────────────────────────────────────
+
+    def load_correction_state(self) -> None:
+        """Refresh both the rules table and the learned-pairs table."""
+        corrector = _resolve_corrector(self.main_app)
+        try:
+            corrector.reload()
+        except Exception:
+            pass
+
+        rules = corrector.list_rules()
+        self.rules_table.setRowCount(0)
+        for rule in rules:
+            row = self.rules_table.rowCount()
+            self.rules_table.insertRow(row)
+            self.rules_table.setItem(row, 0, QtWidgets.QTableWidgetItem(str(rule.get("pattern", ""))))
+            self.rules_table.setItem(row, 1, QtWidgets.QTableWidgetItem(str(rule.get("replacement", ""))))
+            check = QtWidgets.QTableWidgetItem()
+            check.setFlags(check.flags() | QtCore.Qt.ItemFlag.ItemIsUserCheckable)
+            check.setCheckState(
+                QtCore.Qt.CheckState.Checked if rule.get("enabled", True)
+                else QtCore.Qt.CheckState.Unchecked
+            )
+            self.rules_table.setItem(row, 2, check)
+
+        learned = corrector.list_learned()
+        self.learned_table.setRowCount(0)
+        for entry in learned:
+            row = self.learned_table.rowCount()
+            self.learned_table.insertRow(row)
+            self.learned_table.setItem(row, 0, QtWidgets.QTableWidgetItem(str(entry.get("src", ""))))
+            self.learned_table.setItem(row, 1, QtWidgets.QTableWidgetItem(str(entry.get("dst", ""))))
+            self.learned_table.setItem(row, 2, QtWidgets.QTableWidgetItem(str(entry.get("count", 0))))
+            self.learned_table.setItem(
+                row, 3,
+                QtWidgets.QTableWidgetItem("是" if entry.get("promoted") else "否"),
+            )
+
+    def _add_correction_rule(self) -> None:
+        pattern = self.rule_pattern_input.text().strip()
+        replacement = self.rule_replacement_input.text().strip()
+        if not pattern or pattern == replacement:
+            QtWidgets.QMessageBox.warning(self, "识别纠错", "原词和改成不能为空或相同。")
+            return
+        corrector = _resolve_corrector(self.main_app)
+        try:
+            corrector.add_rule(pattern, replacement)
+        except ValueError as exc:
+            QtWidgets.QMessageBox.warning(self, "识别纠错", str(exc))
+            return
+        self.rule_pattern_input.clear()
+        self.rule_replacement_input.clear()
+        self.load_correction_state()
+
+    def _del_correction_rule(self) -> None:
+        row = self.rules_table.currentRow()
+        if row < 0:
+            return
+        pattern_item = self.rules_table.item(row, 0)
+        if pattern_item is None:
+            return
+        # Match by pattern to find the rule id.
+        corrector = _resolve_corrector(self.main_app)
+        pattern = pattern_item.text()
+        for rule in corrector.list_rules():
+            if rule.get("pattern") == pattern:
+                corrector.remove_rule(rule["id"])
+                break
+        self.load_correction_state()
+
+    def _learn_pair_dialog(self) -> None:
+        src, ok = QtWidgets.QInputDialog.getText(
+            self, "学习一对", "原词（识别错的）:", text=self.rule_pattern_input.text()
+        )
+        if not ok or not src.strip():
+            return
+        dst, ok = QtWidgets.QInputDialog.getText(self, "学习一对", "改成（正确的）:")
+        if not ok or not dst.strip() or src.strip() == dst.strip():
+            return
+        corrector = _resolve_corrector(self.main_app)
+        entry = corrector.learn(src.strip(), dst.strip())
+        self.load_correction_state()
+        promoted = entry.get("promoted")
+        count = entry.get("count", 0)
+        if promoted:
+            QtWidgets.QMessageBox.information(
+                self, "识别纠错", f"已晋升为规则：{src} → {dst}（第 {count} 次）"
+            )
+
+    def _clear_learned(self) -> None:
+        button = QtWidgets.QMessageBox.question(
+            self,
+            "识别纠错",
+            "确定清空全部学习缓冲？已晋升的规则不受影响。",
+        )
+        if button != QtWidgets.QMessageBox.StandardButton.Yes:
+            return
+        corrector = _resolve_corrector(self.main_app)
+        for entry in corrector.list_learned():
+            corrector.learned.remove(entry.get("src", ""))
+        self.load_correction_state()
 
     def collect_state(self) -> dict:
         return {
@@ -170,6 +390,8 @@ class AsrSettingsPage(QtWidgets.QWidget):
             ASR_EXTRA_WAKE_WORDS_KEY: self.extra_wake_words.toPlainText(),
             ASR_ACTIVE_WINDOW_SEC_KEY: int(self.active_window_sec.value()),
             ASR_MIN_CHARS_KEY: int(self.min_chars.value()),
+            ASR_ENGINE_KEY: str(self.engine.currentData() or ASR_ENGINE_QWEN3),
+            ASR_HOTWORDS_FROM_WAKE_KEY: self.hotwords_from_wake.isChecked(),
         }
 
     def refresh_preview(self) -> None:

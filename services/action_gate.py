@@ -88,7 +88,6 @@ class ActionGate:
         "backup_manager": "backup.create",
         "code": "system.exec_code",
         "execute_code": "system.exec_code",
-        "code_executor": "system.exec_code",
         "code_agent": "system.code_agent",
         "workspace_ops": "system.write_file",
     }

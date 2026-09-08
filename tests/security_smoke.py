@@ -16,7 +16,7 @@ from integrations.mcp.bridge import _build_stdio_env
 import modules.memory_sqlite as memory_sqlite
 from modules.plugin_manager import PluginManager
 from modules.security_redaction import redact_sensitive_text
-from plugins.code_executor.plugin import Plugin as CodeExecutorPlugin
+from plugins.code_agent.plugin import Plugin as CodeAgentPlugin
 from plugins.mcp_tools.plugin import Plugin as McpToolsPlugin
 from plugins.qq_file_browser.plugin import _validate_public_download_url
 from plugins.search.plugin import Plugin as SearchPlugin
@@ -129,6 +129,41 @@ def test_internal_prompt_instruction_leak_is_stripped() -> None:
     assert "动作/微表情" not in cleaned
     assert "正文不要引用标签" not in cleaned
 
+    tool_leak = (
+        "我帮你关提醒。\n"
+        "【工具】\n"
+        "- timer: 设定倒计时或番茄钟\n"
+        "【调用方式】\n"
+        "优先使用 function calling。不要在正文夹带 [CMD:。"
+    )
+    tool_cleaned = text_utils.strip_internal_tags(tool_leak)
+    assert "我帮你关提醒。" in tool_cleaned
+    assert "【工具】" not in tool_cleaned
+    assert "function calling" not in tool_cleaned
+    assert "[CMD:" not in tool_cleaned
+
+    rules_leak = (
+        "嗯。\n"
+        "【输出格式规范】\n"
+        "- 每次回复必须在正文最开头加一个情绪标签\n"
+        "【对话边界】\n"
+        "- 不要每轮结尾都反问。"
+    )
+    rules_cleaned = text_utils.strip_internal_tags(rules_leak)
+    assert rules_cleaned == "嗯。"
+    assert "输出格式规范" not in rules_cleaned
+    assert "对话边界" not in rules_cleaned
+
+    thought_leak = "先接住就好。\n【本轮内心·勿照念】\n档=light；意图=light_ack"
+    thought_cleaned = text_utils.strip_internal_tags(thought_leak)
+    assert thought_cleaned == "先接住就好。"
+    assert "勿照念" not in thought_cleaned
+
+    mcp_leak = "交给副脑吧。\n【远程MCP工具】\n[CMD: mcp_tools | list_tools]"
+    mcp_cleaned = text_utils.strip_internal_tags(mcp_leak)
+    assert mcp_cleaned == "交给副脑吧。"
+    assert "mcp_tools" not in mcp_cleaned
+
 
 def test_stream_flush_strips_internal_prompt_instruction_leak() -> None:
     leaked = (
@@ -219,16 +254,15 @@ def test_web_reader_blocks_private_urls() -> None:
         raise AssertionError(f"Should be blocked: {url}")
 
 
-def test_code_executor_uses_external_cli_and_redacts() -> None:
-    """code_executor no longer embeds a Python sandbox; it delegates to local CLI."""
-    executor = CodeExecutorPlugin(
+def test_code_agent_uses_external_cli_and_redacts() -> None:
+    """code_agent delegates to local CLI and redacts secrets from CLI output."""
+    agent = CodeAgentPlugin(
         runner=None,
         discoverer=lambda provider: "",
     )
-    assert getattr(executor, "gated_action", "") == "system.exec_code"
-    # Without confirm, structured confirmation is required (or gate handles it upstream)
+    assert getattr(agent, "gated_action", "") == "system.code_agent"
     # Format path still redacts secrets from CLI-like output objects
-    output = executor._format_result(
+    output = agent._format_result(
         type(
             "R",
             (),
@@ -241,7 +275,6 @@ def test_code_executor_uses_external_cli_and_redacts() -> None:
                 "command_preview": "codex exec",
             },
         )(),
-        "codex_cli",
     )
     assert "secret-token-value" not in output
     assert "sk-testvalue" not in output
@@ -259,8 +292,8 @@ def test_sensitive_text_redaction() -> None:
     assert "hunter2" not in redacted
     assert "[REDACTED]" in redacted or "[REDACTED_KEY]" in redacted
 
-    executor = CodeExecutorPlugin(discoverer=lambda provider: "")
-    output = executor._format_result(
+    agent = CodeAgentPlugin(discoverer=lambda provider: "")
+    output = agent._format_result(
         type(
             "R",
             (),
@@ -273,7 +306,6 @@ def test_sensitive_text_redaction() -> None:
                 "command_preview": "codex exec",
             },
         )(),
-        "codex_cli",
     )
     assert "secret-token-value" not in output
     assert "sk-testvalue" not in output
@@ -534,7 +566,7 @@ def main() -> None:
     test_mcp_tools_remote_allowlist_policy()
     test_mcp_tools_blocks_disallowed_remote_call_before_bridge()
     test_web_reader_blocks_private_urls()
-    test_code_executor_uses_external_cli_and_redacts()
+    test_code_agent_uses_external_cli_and_redacts()
     test_sensitive_text_redaction()
     test_config_safe_env_parsing()
     test_gui_http_rejects_query_token()

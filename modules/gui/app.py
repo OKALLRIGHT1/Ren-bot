@@ -21,6 +21,7 @@ from modules.gui.styles import (
 from modules.gui.utils import resolve_icon, set_dot_status, classify_status, elide_label_text
 from modules.gui.runtime_health_view import (
     RUNTIME_HEALTH_REFRESH_INTERVAL_MS,
+    component_rows,
     overall_presentation,
 )
 from modules.gui.widgets.ball import DraggableBall
@@ -42,7 +43,8 @@ except ImportError:
     BALL_CONFIG = DEFAULT_BALL_CONFIG
 
 
-WORK_SESSION_EMPTY_LABEL = "久坐时间 --"
+WORK_SESSION_EMPTY_LABEL = "工作了 --"
+WORK_SESSION_RESTING_LABEL = "休息中"
 WORK_SESSION_LABEL_MIN_WIDTH = 88
 WORK_SESSION_LABEL_MAX_WIDTH = 168
 PANEL_MIN_WIDTH = 360
@@ -64,9 +66,9 @@ def format_work_session_label(session: Optional[dict]) -> str:
         active_seconds = 0
     if active_minutes <= 0 and active_seconds <= 0:
         if str(session.get("state") or "").strip().lower() == "resting":
-            return "久坐时间 0 分钟"
-        if session.get("source"):
-            return "久坐时间 采集中"
+            return WORK_SESSION_RESTING_LABEL
+        # No countable sit time yet (first minute, missing payload, or disconnected).
+        # Top bar is a clock, not a sensor debug line.
         return ""
 
     if active_minutes >= 60:
@@ -78,7 +80,7 @@ def format_work_session_label(session: Optional[dict]) -> str:
     else:
         duration = f"{active_minutes} 分钟"
 
-    return f"久坐时间 {duration}"
+    return f"工作了 {duration}"
 
 
 class _Bridge(QtCore.QObject):
@@ -96,6 +98,8 @@ class _Bridge(QtCore.QObject):
     sig_sedentary_popup = QtCore.Signal(str, int, str, object)
     sig_action_confirm = QtCore.Signal(str, str, object)
     sig_refresh_work_session = QtCore.Signal()
+    sig_ptt_start = QtCore.Signal()
+    sig_ptt_stop = QtCore.Signal()
 
 
 class QtChatTrayApp(QtCore.QObject):
@@ -107,6 +111,8 @@ class QtChatTrayApp(QtCore.QObject):
         on_voice_toggle_callback: Optional[
             Callable[[bool], None]
         ] = None,  # 🟢 新增语音回调
+        on_ptt_start_callback: Optional[Callable[[], None]] = None,
+        on_ptt_stop_callback: Optional[Callable[[], None]] = None,
         on_costume_callback: Optional[Callable[[str, dict], None]] = None,
         on_preview_motion_callback: Optional[Callable[[str, int], None]] = None,
         on_preview_expression_callback: Optional[Callable[[int], None]] = None,
@@ -123,6 +129,8 @@ class QtChatTrayApp(QtCore.QObject):
         self.on_send_callback = on_send_callback
         self.on_tts_toggle_callback = on_tts_toggle_callback
         self.on_voice_toggle_callback = on_voice_toggle_callback  # 🟢 保存回调
+        self.on_ptt_start_callback = on_ptt_start_callback
+        self.on_ptt_stop_callback = on_ptt_stop_callback
         self._external_costume_callback = on_costume_callback
         self.on_costume_callback = self._apply_costume_change
         self.on_preview_motion_callback = on_preview_motion_callback
@@ -135,6 +143,7 @@ class QtChatTrayApp(QtCore.QObject):
         self.runtime_health = runtime_health
         self.screen_sensor = None
         self._runtime_health_dialog = None
+        self._last_health_rows = None  # 首次快照只记录基线，不补发历史故障
 
         # --- 内部状态 ---
         self._is_ball_mode = True
@@ -166,11 +175,13 @@ class QtChatTrayApp(QtCore.QObject):
             self._sync_active_character_visual
         )
         self._bridge.sig_trigger_costume_name.connect(self._on_costume_triggered)
-        self._bridge.sig_toggle_gui.connect(self.toggle_show_hide)
+        self._bridge.sig_toggle_gui.connect(self.toggle_hotkey)
         self._bridge.sig_send_text.connect(self._send_text_from_asr)
         self._bridge.sig_sedentary_popup.connect(self._show_sedentary_popup_ui)
         self._bridge.sig_action_confirm.connect(self._show_action_confirm_ui)
         self._bridge.sig_refresh_work_session.connect(self.refresh_work_session_status)
+        self._bridge.sig_ptt_start.connect(self._on_ptt_start)
+        self._bridge.sig_ptt_stop.connect(self._on_ptt_stop)
 
         # --- 构建 UI ---
         self._win = self._build_window()
@@ -183,6 +194,7 @@ class QtChatTrayApp(QtCore.QObject):
         self._runtime_health_timer.setInterval(RUNTIME_HEALTH_REFRESH_INTERVAL_MS)
         self._runtime_health_timer.timeout.connect(self.refresh_runtime_health_status)
         self._runtime_health_timer.start()
+        self._last_health_announce_at: dict[str, float] = {}
 
         self._settings_dialog = None
         self._knowledge_dialog = None
@@ -201,6 +213,11 @@ class QtChatTrayApp(QtCore.QObject):
             self._switch_to_ball()
             self._center_window()
             self._win.show()
+
+        # --- 全局热键 + Push-to-talk 监听 ---
+        self._hotkey_listener = None
+        self._ptt_active = False
+        self._start_global_listeners()
 
         self.set_status("Ready")
         self.refresh_work_session_status()
@@ -591,6 +608,7 @@ class QtChatTrayApp(QtCore.QObject):
     def refresh_runtime_health_status(self) -> None:
         if not hasattr(self, "_btn_runtime_health"):
             return
+        rows = []
         try:
             if self.runtime_health is None:
                 snapshot = {}
@@ -601,7 +619,20 @@ class QtChatTrayApp(QtCore.QObject):
             presentation = overall_presentation(snapshot)
             label = presentation["label"]
             color = presentation["color"]
+            rows = component_rows(snapshot)
             tooltip = f"{label}，点击查看组件详情"
+            # tooltip 里直接给出最严重的异常组件和原因，用户不点开也能看到。
+            issue = next(
+                (
+                    row
+                    for row in rows
+                    if row["state"] in {"offline", "degraded"}
+                ),
+                None,
+            )
+            if issue:
+                summary = issue["summary"] or issue["state_label"]
+                tooltip = f"{label} · {issue['component_label']}：{summary}\n点击查看组件详情"
         except Exception as exc:
             label = "状态读取失败"
             color = "#EF4444"
@@ -618,6 +649,59 @@ class QtChatTrayApp(QtCore.QObject):
             "background: rgba(148, 163, 184, 0.14);"
             "}"
         )
+        self._notify_health_transitions(rows)
+
+    def _notify_health_transitions(self, rows: list) -> None:
+        """对比上次快照，只在组件进入/脱离异常态时各提示一次。"""
+        fail_states = {"offline", "degraded"}
+        current = {row["component"]: row for row in rows if row["state"] != "disabled"}
+        last = self._last_health_rows
+        self._last_health_rows = current
+        if last is None:
+            return
+        if last == current:
+            return
+        now = time.time()
+        for key, row in current.items():
+            was_failing = last.get(key, {}).get("state") in fail_states
+            if row["state"] in fail_states and not was_failing:
+                self._announce_health(row, recovered=False, now=now)
+            elif row["state"] == "healthy" and was_failing:
+                self._announce_health(row, recovered=True, now=now)
+        # 上次异常、这次消失的组件视为已恢复（比如被 clear 掉）
+        for key, prev in last.items():
+            if prev.get("state") in fail_states and key not in current:
+                self._announce_health(prev, recovered=True, now=now)
+
+    def _announce_health(self, row: dict, *, recovered: bool, now: float | None = None) -> None:
+        component = str(row.get("component") or "")
+        component_label = row.get("component_label") or component or "组件"
+        now_ts = time.time() if now is None else float(now)
+        last_at = float((self._last_health_announce_at or {}).get(component) or 0.0)
+        # rust 活动抖动很常见：同一组件 15 分钟内最多弹一次；闪断恢复不弹。
+        min_gap = 15 * 60 if component == "rust_activity" else 3 * 60
+        if recovered and component == "rust_activity":
+            return
+        if last_at and now_ts - last_at < min_gap:
+            return
+        self._last_health_announce_at[component] = now_ts
+        if recovered:
+            text = f"{component_label}已恢复"
+            icon = QtWidgets.QSystemTrayIcon.MessageIcon.Information
+            prefix = "✅"
+        else:
+            summary = row.get("summary") or "状态异常"
+            text = f"{component_label}异常：{summary}"
+            icon = QtWidgets.QSystemTrayIcon.MessageIcon.Warning
+            prefix = "⚠️"
+        try:
+            self._tray.showMessage("Live2D-Suzu 运行提醒", text, icon, 6000)
+        except Exception:
+            pass
+        try:
+            self.append("system", f"{prefix} {text}")
+        except Exception:
+            pass
 
     def _on_runtime_health_clicked(self) -> None:
         if self._runtime_health_dialog is None:
@@ -642,16 +726,19 @@ class QtChatTrayApp(QtCore.QObject):
         try:
             sensor = getattr(self, "screen_sensor", None)
             if sensor and hasattr(sensor, "get_current_work_session"):
-                label = (
-                    format_work_session_label(sensor.get_current_work_session())
-                    or WORK_SESSION_EMPTY_LABEL
-                )
-                tooltip = label
+                session = sensor.get_current_work_session()
+                label = format_work_session_label(session) or WORK_SESSION_EMPTY_LABEL
+                if label == WORK_SESSION_RESTING_LABEL:
+                    tooltip = "当前在休息，工作计时已重置"
+                elif label == WORK_SESSION_EMPTY_LABEL and isinstance(session, dict) and session.get("source"):
+                    tooltip = "工作满 1 分钟后显示工作时长"
+                else:
+                    tooltip = label
             else:
-                tooltip = "ScreenSensor 未绑定，暂时没有久坐时间数据"
+                tooltip = "ScreenSensor 未绑定，暂时没有工作时长数据"
         except Exception as exc:
             label = WORK_SESSION_EMPTY_LABEL
-            tooltip = f"久坐时间数据读取失败: {exc}"
+            tooltip = f"工作时长数据读取失败: {exc}"
 
         if not hasattr(self, "_lbl_work_session"):
             return
@@ -741,6 +828,132 @@ class QtChatTrayApp(QtCore.QObject):
     # --- 逻辑方法 ---
     def run(self):
         return self._app.exec()
+
+    # --- 全局热键 + Push-to-talk ---
+
+    def _start_global_listeners(self):
+        """启动 pynput 监听线程：处理全局热键（Ctrl+Alt+Space 打开/收回面板）和右 Ctrl push-to-talk。"""
+        try:
+            from pynput import keyboard as pk
+        except Exception:
+            print("⚠️ [Hotkey] 未安装 pynput，全局热键和 PTT 不可用。")
+            return
+
+        import config as _cfg
+
+        combo = getattr(_cfg, "HOTKEY_TOGGLE_GUI", "") or "<ctrl>+<alt>+<space>"
+        ptt_enabled = bool(getattr(_cfg, "VOICE_PTT_ENABLED", True))
+        ptt_key_name = str(getattr(_cfg, "VOICE_PTT_KEY", "ctrl_r")).strip().lower()
+        combo_spec = self._normalize_hotkey_combo(combo)
+
+        try:
+            combo_keys = pk.HotKey.parse(combo_spec)
+        except Exception as exc:
+            print(f"⚠️ [Hotkey] 组合键解析失败 ({combo_spec}): {exc}")
+            combo_keys = []
+
+        state = {"listener": None}
+
+        def _emit_toggle():
+            print(f"✅ [Hotkey] 触发面板切换: {combo_spec}")
+            self._bridge.sig_toggle_gui.emit()
+
+        hotkey = pk.HotKey(combo_keys, _emit_toggle) if combo_keys else None
+
+        def _canonical(key):
+            listener = state["listener"]
+            if listener is None:
+                return key
+            try:
+                return listener.canonical(key)
+            except Exception:
+                return key
+
+        def _on_press(key):
+            try:
+                if hotkey is not None:
+                    hotkey.press(_canonical(key))
+                name = self._key_name(key)
+                if ptt_enabled and name == ptt_key_name:
+                    combo_active = bool(getattr(hotkey, "_state", set())) if hotkey else False
+                    if not combo_active and not self._ptt_active:
+                        self._ptt_active = True
+                        self._bridge.sig_ptt_start.emit()
+            except Exception as exc:
+                print(f"⚠️ [Hotkey] press 处理失败: {exc}")
+
+        def _on_release(key):
+            try:
+                if hotkey is not None:
+                    hotkey.release(_canonical(key))
+                name = self._key_name(key)
+                if ptt_enabled and name == ptt_key_name and self._ptt_active:
+                    self._ptt_active = False
+                    self._bridge.sig_ptt_stop.emit()
+            except Exception as exc:
+                print(f"⚠️ [Hotkey] release 处理失败: {exc}")
+
+        def _run():
+            try:
+                listener = pk.Listener(on_press=_on_press, on_release=_on_release)
+                state["listener"] = listener
+                self._hotkey_listener = listener
+                listener.start()
+                listener.join()
+            except Exception as e:
+                print(f"⚠️ [Hotkey] 监听线程异常: {e}")
+
+        t = threading.Thread(target=_run, daemon=True)
+        t.start()
+        print(
+            f"✅ [Hotkey] 全局热键已启用: {combo_spec}"
+            + (f" | PTT: 按住 {ptt_key_name} 说话" if ptt_enabled else "")
+        )
+
+    @staticmethod
+    def _normalize_hotkey_combo(combo: str) -> str:
+        """把 config 里的 <ctrl>+<alt>+space 转成 pynput HotKey 能解析的格式。"""
+        parts = []
+        for raw in str(combo or "").split("+"):
+            token = raw.strip().lower()
+            if not token:
+                continue
+            if token.startswith("<") and token.endswith(">"):
+                parts.append(token)
+            else:
+                parts.append(f"<{token}>")
+        return "+".join(parts) or "<ctrl>+<alt>+<space>"
+
+    @staticmethod
+    def _key_name(key) -> str:
+        """把 pynput key 转成可比较的小写字符串名（保留左右修饰键原始名）。"""
+        name = ""
+        try:
+            name = getattr(key, "name", "") or ""
+        except Exception:
+            name = ""
+        if not name:
+            try:
+                name = str(key.char).lower()
+            except Exception:
+                name = str(key).lower().strip("'")
+        return name.lower()
+
+    @QtCore.Slot()
+    def _on_ptt_start(self):
+        if callable(self.on_ptt_start_callback):
+            try:
+                self.on_ptt_start_callback()
+            except Exception as e:
+                print(f"❌ [PTT] start 回调失败: {e}")
+
+    @QtCore.Slot()
+    def _on_ptt_stop(self):
+        if callable(self.on_ptt_stop_callback):
+            try:
+                self.on_ptt_stop_callback()
+            except Exception as e:
+                print(f"❌ [PTT] stop 回调失败: {e}")
 
     def _center_window(self):
         try:
@@ -1381,6 +1594,28 @@ class QtChatTrayApp(QtCore.QObject):
             if "already deleted" not in str(exc):
                 raise
 
+    def toggle_hotkey(self):
+        """快捷键专用：球/隐藏状态 → 打开面板；面板可见 → 收回成球。"""
+        try:
+            win = getattr(self, "_win", None)
+            if win is None:
+                return
+            if win.isVisible() and not self._is_ball_mode:
+                # 面板开着 → 收回成球
+                self._switch_to_ball()
+            else:
+                # 球状态或隐藏状态 → 打开面板
+                if self._is_ball_mode:
+                    self._switch_to_panel()
+                win.show()
+                win.raise_()
+                win.activateWindow()
+                self.refresh_work_session_status()
+                self._ensure_on_screen()
+        except RuntimeError as exc:
+            if "already deleted" not in str(exc):
+                raise
+
     def _on_app_state_changed(self, state):
         if state == QtCore.Qt.ApplicationState.ApplicationActive:
             QtCore.QTimer.singleShot(200, self._ensure_on_screen)
@@ -1465,6 +1700,11 @@ class QtChatTrayApp(QtCore.QObject):
                 self.on_restart_callback()
 
     def _quit(self):
+        if self._hotkey_listener is not None:
+            try:
+                self._hotkey_listener.stop()
+            except Exception:
+                pass
         self._tray.hide()
         if self.on_quit_callback:
             self.on_quit_callback()

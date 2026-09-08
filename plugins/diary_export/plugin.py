@@ -16,6 +16,25 @@ class Plugin:
         self.output_dir = "./output"
         os.makedirs(self.output_dir, exist_ok=True)
 
+    def get_tool_schema(self):
+        return {
+            "name": "diary_manager",
+            "description": "查询某日日记，或导出全部日记为 Markdown。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "日期说法（昨天/前天/YYYY-MM-DD）或「导出」",
+                    }
+                },
+                "required": ["query"],
+            },
+        }
+
+    def format_invocation(self, arguments):
+        return str((arguments or {}).get("query") or "").strip()
+
     async def run(self, args: str, context: dict) -> str:
         del context
         text = str(args or "").strip().lower()

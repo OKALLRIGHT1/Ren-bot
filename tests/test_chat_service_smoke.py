@@ -1,10 +1,12 @@
 import asyncio
+import inspect
 from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
 
 import services.chat_service as chat_service_module
+from modules.llm_types import ChatCompletionResult
 from modules.conversation_events.models import (
     ConversationEvent,
     ConversationEventType,
@@ -27,7 +29,11 @@ class _Brain:
 
     def build_prompt(self, user_text, **kwargs):
         self.last_build_kwargs = dict(kwargs)
-        system = str(kwargs.get("system_persona", "") or "")
+        parts = kwargs.get("prompt_parts")
+        if parts is not None and hasattr(parts, "to_legacy_system_text"):
+            system = parts.to_legacy_system_text()
+        else:
+            system = str(kwargs.get("system_persona", "") or "")
         assembler = self.context_assembler
         scope = kwargs.get("conversation_scope")
         if assembler is not None and scope is not None:
@@ -92,13 +98,13 @@ class _PluginManager:
             return self.command_results.pop(0)
         return self.command_result
 
-    def get_tool_prompt_for_triggers(self, triggers, compact=False):
+    def get_tool_prompt_for_triggers(self, triggers, compact=False, invocation_mode=""):
         return ""
 
-    def get_delegate_prompt_for_triggers(self, triggers, compact=False):
+    def get_delegate_prompt_for_triggers(self, triggers, compact=False, invocation_mode=""):
         return ""
 
-    def get_system_prompt_addition(self):
+    def get_system_prompt_addition(self, invocation_mode=""):
         return ""
 
     def should_use_deferred_tool_flow(self, user_text):
@@ -218,6 +224,25 @@ def chat_env(monkeypatch):
     monkeypatch.setattr(chat_service_module, "CHARACTER_SHARING_ENABLED", False)
     monkeypatch.setattr(chat_service_module, "chat_with_ai_stream", None)
 
+    def _as_completion(value):
+        if isinstance(value, ChatCompletionResult):
+            return value
+        return ChatCompletionResult(text=str(value or ""))
+
+    async def fake_chat_complete(messages, *args, **kwargs):
+        kwargs.pop("tools", None)
+        kwargs.pop("tool_choice", None)
+        fn = chat_service_module.chat_with_ai
+        if inspect.iscoroutinefunction(fn):
+            value = await fn(messages, *args, **kwargs)
+        else:
+            value = fn(messages, *args, **kwargs)
+            if inspect.isawaitable(value):
+                value = await value
+        return _as_completion(value)
+
+    monkeypatch.setattr(chat_service_module, "chat_complete", fake_chat_complete)
+
     async def no_followup(*args, **kwargs):
         return None
 
@@ -254,9 +279,9 @@ def chat_env(monkeypatch):
     monkeypatch.setattr(ChatService, "_build_current_emotion_context", lambda self, ctx=None: "")
     monkeypatch.setattr(ChatService, "_build_reply_style_context", lambda self, text, ctx=None: "")
     monkeypatch.setattr(ChatService, "_build_live2d_self_awareness_hint", lambda self, ctx=None: "")
-    monkeypatch.setattr(ChatService, "_build_mcp_tool_prompt", lambda self: "")
+    monkeypatch.setattr(ChatService, "_build_mcp_tool_prompt", lambda self, *args, **kwargs: "")
 
-    async def no_character_thought(self, *args, **kwargs):
+    async def no_character_thought(*args, **kwargs):
         # Smoke 默认跳过 Thought，避免多一次 chat_with_ai 打乱 LLM 调用计数
         return "", {
             "character_thought_used": False,
@@ -267,8 +292,12 @@ def chat_env(monkeypatch):
     monkeypatch.setattr(
         ChatService, "_maybe_build_character_thought_block", no_character_thought
     )
+    monkeypatch.setattr(
+        "services.chat_support.natural_chat_pipeline.build_character_thought_block",
+        no_character_thought,
+    )
 
-    async def passthrough_forbidden(self, *, text, user_text, ctx, regenerate=None):
+    async def passthrough_forbidden(*args, text, user_text, ctx, regenerate=None, **kwargs):
         return text, {
             "forbidden_phrase_hit": False,
             "forbidden_phrases": [],
@@ -277,6 +306,10 @@ def chat_env(monkeypatch):
 
     monkeypatch.setattr(
         ChatService, "_apply_forbidden_phrase_guard", passthrough_forbidden
+    )
+    monkeypatch.setattr(
+        "services.chat_support.natural_chat_pipeline.apply_forbidden_phrase_guard",
+        passthrough_forbidden,
     )
     monkeypatch.setattr(ChatService, "_polish_natural_reply", passthrough_polish)
     monkeypatch.setattr(ChatService, "_apply_character_catchphrase", lambda self, text: text)
@@ -416,9 +449,17 @@ async def test_process_injects_knowledge_without_removing_brain(chat_env, monkey
     assert manager.direct_calls
     injected = manager.direct_calls[0][1]
     assert injected["brain"] is service.brain
-    assert injected["chat_service"] is service
+    assert "chat_service" not in injected
+    assert injected.get("skills") is getattr(service, "skill_manager", None)
     assert hasattr(injected["knowledge"], "search_knowledge")
     assert hasattr(injected["knowledge"], "import_knowledge_from_file")
+    assert hasattr(injected["gateway"], "send_text")
+    assert hasattr(injected["tts"], "set_enabled")
+    assert hasattr(injected["app"], "switch_character")
+    assert injected["plugin_manager"] is service.plugin_manager
+    assert injected["agent_runtime"] is service.agent_runtime
+    assert not hasattr(service.agent_runtime, "chat_service")
+    assert injected["mcp_bridge"] is service.mcp_bridge
 
 
 @pytest.mark.asyncio
@@ -678,6 +719,7 @@ async def test_search_flow_result_is_merged_without_duplicate_memory(chat_env, m
 
     await service.process("查一下猫", ctx={"source": "desktop"})
 
+    assert service.brain.last_build_kwargs["tool_intent"] == ["search"]
     assert len(plugin_manager.command_calls) == 1
     assert [m["role"] for m in service.brain.short_term_memory] == [
         "assistant",
@@ -915,6 +957,41 @@ async def test_info_gateway_route_executes_even_when_reasoning_omits_cmd(
     assert len(plugin_manager.command_calls) == 1
     assert plugin_manager.command_calls[0]["text"] == "[CMD: info_gateway | 上海今天天气怎么样]"
     assert service.brain.short_term_memory[-1]["content"] == "上海天气：多云"
+
+
+@pytest.mark.asyncio
+async def test_info_gateway_missing_city_does_not_force_execute(chat_env, monkeypatch):
+    from plugins.info_gateway.plugin import Plugin as InfoGateway
+
+    replies = iter(
+        [
+            "我先问问你在哪",
+            '{"approved":false,"capability_id":"info.weather_now","args":{},"confidence":0.2}',
+            "请告诉我城市",
+        ]
+    )
+    monkeypatch.setattr(
+        chat_service_module,
+        "chat_with_ai",
+        lambda *args, **kwargs: next(replies),
+    )
+    plugin_manager = _PluginManager()
+    plugin_manager.react_map = {"info_gateway": InfoGateway()}
+    plugin_manager.plugins = {"info_gateway": InfoGateway()}
+    service = chat_env(
+        plugin_manager=plugin_manager,
+        tool_router=_ToolRouter(
+            need_tools=True,
+            triggers=["info_gateway"],
+            reason="capability:info.weather_now",
+            capability_id="info.weather_now",
+        ),
+    )
+
+    await service.process("天气怎么样", ctx={"source": "desktop"})
+
+    assert plugin_manager.command_calls == []
+    assert service.brain.short_term_memory[-1]["content"] == "请告诉我城市"
 
 
 @pytest.mark.asyncio
@@ -1426,7 +1503,7 @@ async def test_qq_reply_merges_quoted_images_into_current_context(chat_env):
         },
     }
 
-    await service._enrich_qq_reply_context(ctx)
+    await service.qq_input_service.enrich_reply_context(ctx)
 
     meta = ctx["channel_meta"]
     assert meta["images"] == [{"url": "https://example.test/image.jpg"}]

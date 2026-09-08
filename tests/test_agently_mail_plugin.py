@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from modules.plugin_model_gateway import PluginModelCallResult
+from services.plugin_ports import ChatGatewayPort
 
 
 PLUGIN_DIR = Path("plugins/agently_mail")
@@ -112,6 +113,9 @@ def test_agently_mail_natural_language_requires_clear_mail_intent():
 
     assert plugin.should_handle_direct("我最近收到了哪些邮件？", {"source": "text_input"}, "邮件")
     assert plugin.should_handle_direct("查一下邮箱", {"source": "text_input"}, "邮箱")
+    assert plugin.should_handle_direct("有没有新邮件", {"source": "text_input"}, "邮件")
+    assert plugin.should_handle_direct("邮件呢", {"source": "text_input"}, "邮件")
+    assert plugin.should_handle_direct("帮我看看邮箱", {"source": "text_input"}, "邮箱")
     assert plugin.should_handle_direct("发一封上海本周天气邮件到1132824061@qq.com", {"source": "qq_gateway"}, "邮件")
     assert plugin.should_handle_direct("给foo@example.com邮箱发送问候", {"source": "qq_gateway"}, "邮件")
     assert not plugin.should_handle_direct("把这个文件邮寄给我", {"source": "text_input"}, "邮件")
@@ -986,7 +990,7 @@ async def test_notification_baseline_keeps_unread_for_push(tmp_path, monkeypatch
             return True
 
     chat = FakeChat()
-    plugin._chat_service = chat
+    plugin._gateway = ChatGatewayPort.from_chat_service(chat)
 
     async def fake_summary(mail, character_name):
         return f"【{character_name}】{mail.get('subject')}"
@@ -1079,7 +1083,7 @@ async def test_notification_pushes_summary_and_body_image(tmp_path, monkeypatch)
             return True
 
     chat = FakeChat()
-    plugin._chat_service = chat
+    plugin._gateway = ChatGatewayPort.from_chat_service(chat)
 
     async def fake_summary(mail, character_name):
         return f"【{character_name}】有新邮件：{mail.get('subject')}"

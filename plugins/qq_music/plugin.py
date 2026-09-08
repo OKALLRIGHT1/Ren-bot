@@ -564,8 +564,10 @@ class Plugin:
     ) -> None:
         import asyncio
 
-        chat_service = (ctx or {}).get("chat_service")
-        if chat_service is None or not hasattr(chat_service, "_send_gateway_reply"):
+        from services.plugin_ports import resolve_gateway
+
+        gateway = resolve_gateway(ctx)
+        if gateway is None:
             return
         delay_sec = float(
             self._setting_int(settings, "comment_dispatch_delay_sec", 2, 0, 15)
@@ -591,9 +593,7 @@ class Plugin:
                 comment = self._clean_comment_text(comment)
                 if not comment:
                     return
-                await chat_service._send_gateway_reply(
-                    comment, task_ctx, emotion="neutral"
-                )
+                await gateway.send_text(comment, task_ctx, emotion="neutral")
             except Exception as exc:
                 logger.info(f"QQ点歌延迟点评发送失败 song_id={song_id} error={exc}")
 

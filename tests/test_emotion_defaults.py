@@ -1,6 +1,15 @@
 import config
 from modules.character_manager import DEFAULT_EMOTION_KEYS, EMOTION_MOTION_PREFERENCES
-from services.chat_support.emotion_reply_service import EmotionReplyService
+from services.chat_support.emotion_reply_service import (
+    LIVE2D_REPLY_EMO_TAGS,
+    EmotionReplyService,
+    live2d_emo_label_choices,
+    live2d_emo_tag_choices,
+)
+from services.chat_support.sensor_event_service import (
+    SensorEventService,
+    SensorGenerationContext,
+)
 
 
 def test_default_emotion_keys_include_shy_and_are_unique():
@@ -24,15 +33,36 @@ def test_shy_is_available_in_emotion_prompts():
         normalize_emo=lambda value: str(value or "").strip().lower() or None,
     )
     context_prompt = service.build_current_emotion_context({})
-    assert "shy" in context_prompt
-
-    source = open("services/chat_support/emotion_reply_service.py", encoding="utf-8").read()
-    assert "happy/sad/angry/shy/flustered/confused/think/neutral" in source
+    # Current-state block describes Live2D now; the allowed catalog is separate.
+    assert "当前表情/情绪" in context_prompt
+    assert "shy" in LIVE2D_REPLY_EMO_TAGS
+    assert "shy" in live2d_emo_label_choices()
 
 
 def test_shy_is_available_in_sensor_generation_prompts():
-    source = open("services/chat_support/sensor_event_service.py", encoding="utf-8").read()
-    assert source.count("<emo=happy|sad|angry|shy|flustered|confused|think|neutral>") >= 3
+    assert "shy" in live2d_emo_tag_choices()
+    service = object.__new__(SensorEventService)
+    rules = service._talk_rules()
+    assert live2d_emo_tag_choices() in rules
+    ctx = SensorGenerationContext(
+        context_block="",
+        sensor_persona_prompt="persona",
+        recent_sensor_reply_block="",
+        text_style_block="style",
+        vision_style_block="vision-style",
+        record_observation=lambda *_args: "",
+    )
+    prompts = [
+        service.build_self_prompt(context=ctx, clean_title="窗口"),
+        service.build_vision_direct_prompt(context=ctx, clean_title="窗口"),
+        service.build_vision_talk_prompt(context=ctx, description="屏幕描述"),
+        service.build_text_prompt(
+            context=ctx, clean_title="窗口", category="web", count=2
+        ),
+    ]
+    for prompt in prompts:
+        assert live2d_emo_tag_choices() in prompt
+        assert "shy" in prompt
 
 
 def test_emotion_context_includes_compact_personality_state():

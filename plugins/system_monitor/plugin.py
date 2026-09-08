@@ -476,8 +476,19 @@ class Plugin:
         log = self._get_logger()
         if log:
             log.info("系统监控已停止")
-        
+
         return "已停止后台监控……对"
+
+    async def stop(self):
+        """生命周期钩子：宿主关闭/热重载时回收后台监控循环。
+
+        与 action map 里的 "stop"（用户可见的 _stop_monitoring）不同：
+        那是用户指令，这是宿主 stop_all_plugins / reload 调用的。
+        缺了它，用户 start 过监控后，旧循环会在热重载时残留累积。
+        """
+        if not self._running:
+            return
+        await self._stop_monitoring()
 
     async def _get_status(self) -> str:
         """获取监控状态"""

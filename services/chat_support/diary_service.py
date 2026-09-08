@@ -9,7 +9,7 @@ from __future__ import annotations
 import asyncio
 import json
 from datetime import date, datetime
-from typing import Any, Awaitable, Callable, Dict, Optional
+from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 from core.message_source import build_output_profile
 from services.chat_support import diary_utils
@@ -26,15 +26,17 @@ class DiaryService:
         add_memory_safe: Callable[..., Awaitable[None]],
         emit_idle_status_when_safe: Callable[..., Awaitable[None]],
         send_gateway_reply: Callable[..., Awaitable[None]],
-        backfill_napcat_history_for_day: Callable[[str], Awaitable[int]],
-        load_day_transcript_rows: Callable[[str], list[Dict[str, Any]]],
-        get_runtime_owner_label: Callable[[], str],
         owner_ids: list[str],
         owner_shared_session_id: str,
         legacy_owner_private_session_ids: set[str],
         owner_shared_local_sources: set[str],
         qq_remote_sources: set[str],
         get_active_character_context: Callable[[], tuple[str, str, str]],
+        backfill_napcat_history_for_day: Optional[Callable[[str], Awaitable[int]]] = None,
+        load_day_transcript_rows: Optional[Callable[[str], list[Dict[str, Any]]]] = None,
+        get_runtime_owner_label: Optional[Callable[[], str]] = None,
+        chat_gateway_getter: Optional[Callable[[], Any]] = None,
+        app_getter: Optional[Callable[[], Any]] = None,
     ) -> None:
         self.brain = brain
         self.event_bus = event_bus
@@ -43,9 +45,11 @@ class DiaryService:
         self.add_memory_safe = add_memory_safe
         self.emit_idle_status_when_safe = emit_idle_status_when_safe
         self.send_gateway_reply = send_gateway_reply
-        self.backfill_napcat_history_for_day = backfill_napcat_history_for_day
-        self.load_day_transcript_rows = load_day_transcript_rows
-        self.get_runtime_owner_label = get_runtime_owner_label
+        self._backfill_override = backfill_napcat_history_for_day
+        self._load_rows_override = load_day_transcript_rows
+        self._owner_label_override = get_runtime_owner_label
+        self._chat_gateway_getter = chat_gateway_getter
+        self._app_getter = app_getter
         self.owner_ids = [str(item).strip() for item in owner_ids if str(item).strip()]
         self.owner_shared_session_id = owner_shared_session_id
         self.legacy_owner_private_session_ids = legacy_owner_private_session_ids
@@ -110,13 +114,18 @@ class DiaryService:
             had_presenter_output=True,
         )
 
-    def _load_day_transcript_rows(self, date_str: str) -> list[Dict[str, Any]]:
+    def load_day_transcript_rows(self, date_str: str) -> list[Dict[str, Any]]:
+        if self._load_rows_override is not None:
+            return list(self._load_rows_override(date_str) or [])
         store = getattr(self.brain, "sqlite_store", None)
         return diary_utils.load_day_transcript_rows(
             store,
             date_str,
-            on_error=lambda exc: print(f"[ChatService] Load day transcript failed: {exc}"),
+            on_error=lambda exc: print(f"[Diary] Load day transcript failed: {exc}"),
         )
+
+    def _load_day_transcript_rows(self, date_str: str) -> list[Dict[str, Any]]:
+        return self.load_day_transcript_rows(date_str)
 
     def _fetch_day_chat_history(
         self,
@@ -154,8 +163,139 @@ class DiaryService:
             owner_label=owner_label,
         )
 
+    def get_runtime_owner_label(self) -> str:
+        if self._owner_label_override is not None:
+            try:
+                return str(self._owner_label_override() or "").strip()
+            except Exception:
+                return ""
+        app = self._app_getter() if callable(self._app_getter) else None
+        if app is None:
+            return ""
+        try:
+            loader = getattr(app, "_load_runtime_settings", None)
+            normalizer = getattr(app, "_normalize_external_runtime_settings", None)
+            if not callable(loader) or not callable(normalizer):
+                return ""
+            runtime = normalizer(loader())
+            return str(runtime.get("napcat_owner_label") or "").strip()
+        except Exception:
+            return ""
+
     def _get_runtime_owner_label(self) -> str:
         return self.get_runtime_owner_label()
+
+    @staticmethod
+    def _day_range_ts(date_str: str) -> tuple[int, int]:
+        try:
+            dt = datetime.strptime(date_str, "%Y-%m-%d")
+        except ValueError:
+            dt = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+        start_ts = int(dt.timestamp())
+        return start_ts, start_ts + 86400
+
+    def _existing_transcript_keys_for_day(self, date_str: str) -> set[tuple]:
+        keys: set[tuple] = set()
+        for row in self.load_day_transcript_rows(date_str):
+            meta = diary_utils.row_meta(row)
+            session_id = str(row.get("session_id") or "").strip()
+            role = str(row.get("role") or "").strip().lower()
+            content = str(row.get("content") or "").strip()
+            message_id = str(meta.get("message_id") or "").strip()
+            if message_id:
+                keys.add(("message_id", session_id, message_id))
+            if content:
+                keys.add(("content", session_id, role, int(row.get("ts") or 0), content))
+        return keys
+
+    async def backfill_napcat_history_for_day(self, date_str: str) -> int:
+        if self._backfill_override is not None:
+            result = self._backfill_override(date_str)
+            if hasattr(result, "__await__"):
+                result = await result
+            return int(result or 0)
+        gateway = self._chat_gateway_getter() if callable(self._chat_gateway_getter) else None
+        if gateway is None:
+            return 0
+        adapter = getattr(gateway, "adapters", {}).get("napcat_qq")
+        if adapter is None or not hasattr(adapter, "fetch_recent_history"):
+            return 0
+        store = getattr(self.brain, "sqlite_store", None)
+        if store is None:
+            return 0
+
+        sessions: List[str] = []
+        seen_sessions = set()
+        for owner_id in self.owner_ids:
+            owner_text = str(owner_id).strip()
+            if not owner_text:
+                continue
+            session_id = f"private:{owner_text}"
+            if session_id not in seen_sessions:
+                seen_sessions.add(session_id)
+                sessions.append(session_id)
+        for group_id in sorted(getattr(adapter, "group_whitelist", set()) or set()):
+            group_text = str(group_id).strip()
+            if not group_text:
+                continue
+            session_id = f"group:{group_text}"
+            if session_id not in seen_sessions:
+                seen_sessions.add(session_id)
+                sessions.append(session_id)
+        if not sessions:
+            return 0
+
+        start_ts, end_ts = self._day_range_ts(date_str)
+        existing_keys = self._existing_transcript_keys_for_day(date_str)
+        imported = 0
+        for session_id in sessions:
+            try:
+                result = await gateway.fetch_recent_history(
+                    "napcat_qq", session_id, limit=120, timeout=10
+                )
+            except Exception as exc:
+                if self.logger:
+                    self.logger.warning(
+                        f"NapCat history fetch failed for {session_id}: {exc}"
+                    )
+                continue
+            if not isinstance(result, dict) or not result.get("ok"):
+                continue
+            for item in result.get("items") or []:
+                if not isinstance(item, dict):
+                    continue
+                ts = int(item.get("ts") or 0)
+                if ts < start_ts or ts >= end_ts:
+                    continue
+                role = str(item.get("role") or "").strip().lower() or "user"
+                content = str(item.get("content") or "").strip()
+                if not content:
+                    continue
+                row_session_id = str(item.get("session_id") or session_id).strip()
+                meta = item.get("meta") if isinstance(item.get("meta"), dict) else {}
+                message_id = str(meta.get("message_id") or "").strip()
+                dedupe_key = (
+                    ("message_id", row_session_id, message_id)
+                    if message_id
+                    else ("content", row_session_id, role, ts, content)
+                )
+                if dedupe_key in existing_keys:
+                    continue
+                await asyncio.to_thread(
+                    store.add_transcript,
+                    role,
+                    content,
+                    meta,
+                    ts,
+                    row_session_id,
+                )
+                existing_keys.add(dedupe_key)
+                imported += 1
+        if imported and self.logger:
+            self.logger.info(
+                f"NapCat history backfill imported {imported} transcript rows for {date_str}"
+            )
+        return imported
 
     def _resolve_diary_subject_label(self) -> str:
         store = getattr(self.brain, "sqlite_store", None)

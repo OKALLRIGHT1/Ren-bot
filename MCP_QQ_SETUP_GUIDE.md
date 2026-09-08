@@ -5,7 +5,7 @@
 - 通过 `NapCat` 把 QQ 私聊 / 群聊消息接进桌面助手
 - 通过 `MCP` 接入外部工具服务器，并在聊天里调用这些工具
 
-如果你是在排查问题，优先看本文末尾的“常见问题”，也可以看 `docs/TROUBLESHOOTING.md`。
+如果你是在排查问题，优先看本文末尾的“常见问题”。启动失败先看 `logs/setup_env.log` 和 `logs/launcher.log`。
 
 ---
 

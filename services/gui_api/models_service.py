@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from modules.catalog_retarget import retarget_model_id, retarget_provider_name
 from modules.model_catalog import MODEL_PURPOSE_OPTIONS, get_model_purposes, normalize_purposes
 
 
@@ -117,8 +118,18 @@ def normalize_provider_row(provider_id: str, cfg: Dict[str, Any]) -> Dict[str, A
 
 
 class ModelsCatalogService:
-    def __init__(self, catalog_path: Path) -> None:
+    def __init__(
+        self,
+        catalog_path: Path,
+        *,
+        plugins_dir: Optional[Path] = None,
+        plugin_manager: Any = None,
+        update_runtime: bool = False,
+    ) -> None:
         self.path = Path(catalog_path)
+        self.plugins_dir = Path(plugins_dir) if plugins_dir else None
+        self.plugin_manager = plugin_manager
+        self.update_runtime = bool(update_runtime)
 
     def _empty(self) -> Dict[str, Any]:
         return {"models": {}, "router": {}, "providers": {}}
@@ -176,6 +187,21 @@ class ModelsCatalogService:
         if not model_id:
             return {"ok": False, "error": "invalid_model_id"}
         data = self._load()
+        original_id = str(
+            payload.get("original_id") or payload.get("from_id") or ""
+        ).strip()
+        if original_id and original_id != model_id:
+            renamed = retarget_model_id(
+                original_id,
+                model_id,
+                models=data["models"],
+                router=data["router"],
+                plugins_dir=self.plugins_dir,
+                update_runtime=self.update_runtime,
+                plugin_manager=self.plugin_manager,
+            )
+            if not renamed.get("ok"):
+                return renamed
         current = dict(data["models"].get(model_id) or {})
         secret = SecretUpdate.parse(payload.get("api_key"))
         current["model"] = str(payload.get("model") or current.get("model") or "").strip()
@@ -229,6 +255,18 @@ class ModelsCatalogService:
         if not provider_id:
             return {"ok": False, "error": "invalid_provider_id"}
         data = self._load()
+        original_id = str(
+            payload.get("original_id") or payload.get("from_id") or ""
+        ).strip()
+        if original_id and original_id != provider_id:
+            renamed = retarget_provider_name(
+                original_id,
+                provider_id,
+                models=data["models"],
+                providers=data["providers"],
+            )
+            if not renamed.get("ok"):
+                return renamed
         current = dict(data["providers"].get(provider_id) or {})
         secret = SecretUpdate.parse(payload.get("api_key"))
         if "base_url" in payload:

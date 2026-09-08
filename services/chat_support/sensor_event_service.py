@@ -2,10 +2,16 @@ from __future__ import annotations
 
 import asyncio
 import random
+import time
 from dataclasses import dataclass
-from typing import Any, Callable, Optional
+from typing import Any, Awaitable, Callable, Optional
 
-from services.chat_support.sensor_event_guard import revalidate_focus_for_sensor
+from modules.sensor_prompts import format_sensor_prompt, join_prompt_parts
+from services.chat_support.emotion_reply_service import live2d_emo_tag_choices
+from services.chat_support.sensor_event_guard import (
+    check_sensor_event_guard,
+    revalidate_focus_for_sensor,
+)
 
 
 @dataclass(frozen=True)
@@ -63,6 +69,82 @@ class SensorEventService:
         self.logger = logger
         self.conversation_event_service = conversation_event_service
 
+    def _active_window_title(self) -> str:
+        sensor_ref = self.screen_sensor_ref_getter()
+        rust_title = str(getattr(sensor_ref, "last_window_title", "") or "").strip()
+        try:
+            from modules.vision.capture import get_active_window_title
+
+            captured = str(get_active_window_title() or "").strip()
+        except Exception:
+            captured = ""
+        return captured or rust_title
+
+    async def handle_window_event(
+        self,
+        *,
+        window_title: str,
+        category: str,
+        count: int = 1,
+        use_vision: bool = False,
+        app_name: str = "",
+        reason: str = "",
+        app_duration_sec: float | int | None = None,
+        current_stay_sec: float | int | None = None,
+        last_reply_time: float = 0.0,
+        min_reply_interval_sec: float = 45.0,
+        vision_mode: str = "separate",
+        chat_with_ai: Callable[..., str],
+        analyze_image: Callable[..., Any],
+        send_sensor_reply: Callable[..., Awaitable[bool]],
+    ) -> bool:
+        guard = check_sensor_event_guard(
+            window_title=window_title,
+            category=category,
+            app_name=app_name,
+            last_reply_time=last_reply_time,
+            min_reply_interval_sec=min_reply_interval_sec,
+        )
+        clean_title = guard.clean_title
+        display_app = guard.display_app
+        if guard.reason == "system_window":
+            self._log_info(f"🛑 [Sensor] 跳过系统/自身界面视觉吐槽 ({clean_title})")
+            return False
+        if not guard.allowed:
+            return False
+
+        print(
+            f"🤖 [Sensor] 观察: {clean_title} ({category}) | App: {display_app} | Count: {count} | Vision: {bool(use_vision)}"
+        )
+        generation = await self.run_event_generation(
+            clean_title=clean_title,
+            display_app=display_app,
+            category=category,
+            count=count,
+            reason=reason,
+            use_vision=bool(use_vision),
+            vision_mode=vision_mode,
+            app_duration_sec=app_duration_sec,
+            current_stay_sec=current_stay_sec,
+            chat_with_ai=chat_with_ai,
+            analyze_image=analyze_image,
+            active_title_getter=self._active_window_title,
+        )
+        if not generation.reply:
+            return False
+        reply_category = "self" if generation.branch == "self" else category
+        reply_title = clean_title if generation.branch == "self" else window_title
+        is_vision = generation.branch.startswith("vision")
+        return await send_sensor_reply(
+            generation.reply,
+            reply_category,
+            count,
+            reply_title,
+            is_vision,
+            observation_event_id=str(generation.observation_event_id or ""),
+            ctx={"source": "desktop"},
+        )
+
     def build_generation_context(
         self,
         *,
@@ -99,7 +181,8 @@ class SensorEventService:
         return SensorGenerationContext(
             context_block=context_block,
             sensor_persona_prompt=self.build_sensor_persona_prompt(
-                ctx={"source": "desktop"}, extra_context=context_block
+                ctx={"source": "desktop", "sensor_category": category},
+                extra_context=context_block,
             ),
             recent_sensor_reply_block=self.format_recent_sensor_reply_block(),
             text_style_block=self.build_sensor_spontaneous_style_block(
@@ -197,11 +280,10 @@ class SensorEventService:
         return event_id
 
     def _talk_rules(self, *, max_chars: int = 36) -> str:
-        return (
-            "【说话】旁边低声接一句；关心、提醒、疑问、轻吐槽都可以，不写观察报告。\n"
-            f"- 只围绕当前窗口；最多 {max_chars} 字，1～2 短句；不要加引号。\n"
-            "- 不要评价页面实用/详尽，不要说「用户正在/屏幕上/画面中/我看到」。\n"
-            "- 开头加 <emo=happy|sad|angry|shy|flustered|confused|think|neutral>。"
+        return format_sensor_prompt(
+            "talk_rules",
+            max_chars=max_chars,
+            emo_tags=live2d_emo_tag_choices(),
         )
 
     def build_self_prompt(
@@ -210,11 +292,11 @@ class SensorEventService:
         context: SensorGenerationContext,
         clean_title: str,
     ) -> str:
-        return (
-            f"{context.sensor_persona_prompt}\n"
-            f"Master 的视线停在【你的】程序窗口({clean_title})。\n"
-            "打破第四面墙，对他简短说一句；不要复用最近的固定模板。\n"
-            f"{self._talk_rules(max_chars=15)}"
+        return join_prompt_parts(
+            context.sensor_persona_prompt,
+            format_sensor_prompt("self_scene", clean_title=clean_title),
+            self._talk_rules(max_chars=15),
+            context.recent_sensor_reply_block,
         )
 
     async def run_self_generation(
@@ -254,22 +336,13 @@ class SensorEventService:
         category: str,
         count: int,
     ) -> str:
-        return f"""
-{context.context_block}【场景】
-用户刚切换到窗口: [{clean_title}] (分类: {category})，今天独立会话约第 {count} 段（勿说成打开了 N 次）。
-
-【判断任务】
-	你是一个性格高冷、话少、克制的 AI 助手。你不需要对用户的每一次无聊操作做出反应。
-	只有出现以下情况才输出 YES：
-	1. 极度频繁的摸鱼/切屏，适合轻轻点一下。
-	2. 连续高强度工作或停留很久，适合关心、提醒或陪一句。
-	3. 软件名字极其特别，或者你今天第一次看到这个软件。
-
-如果是普通的网页浏览、正常的切回编辑器、毫无亮点的日常办公，请保持高冷，严格输出 NO。
-
-【输出格式】
-仅输出：YES 或 NO
-"""
+        return format_sensor_prompt(
+            "gatekeeper",
+            context_block=context.context_block,
+            clean_title=clean_title,
+            category=category,
+            count=count,
+        )
 
     async def run_gatekeeper(
         self,
@@ -350,14 +423,12 @@ class SensorEventService:
         context: SensorGenerationContext,
         clean_title: str,
     ) -> str:
-        return (
-            f"{context.sensor_persona_prompt}\n"
-            f"你正贴在旁边看他的屏幕（当前窗口: [{clean_title}]）。\n"
-            "先判断画面里有没有你的桌面形象或角色配置页；有则是在看你或改你。"
-            "不要把普通网页/群聊里的动漫角色当成自己。\n"
-            f"{self._talk_rules()}\n"
-            f"{context.vision_style_block}\n"
-            f"{context.recent_sensor_reply_block}"
+        return join_prompt_parts(
+            context.sensor_persona_prompt,
+            format_sensor_prompt("vision_direct_scene", clean_title=clean_title),
+            self._talk_rules(),
+            context.vision_style_block,
+            context.recent_sensor_reply_block,
         )
 
     async def run_vision_direct_generation(
@@ -390,11 +461,10 @@ class SensorEventService:
             return SensorReplyGenerationResult(reason="failed", branch="vision_direct")
 
     def build_vision_description_prompt(self, *, self_awareness_hint: str) -> str:
-        return f"""请客观、尽量详细地描述这张截图，供后续角色判断如何和用户搭话。
-重点描述：用户正在使用的软件、窗口标题/页面类型、主要文字、正在做的事情、可能值得关心、提醒、陪伴或轻轻吐槽的异常点。
-可以分条写，但不要编造看不清的内容；不确定就写“不确定”。
-{self_awareness_hint}
-【特殊指令】如果你识别到桌面边缘的Live2D形象、Live2D Agent窗口、设置中心、换装页、表情/动作配置页，请明确标记“这是你自己的桌面形象或配置界面”。如果只是网页/群聊/图片主体里的动漫角色，不要标成你。"""
+        return format_sensor_prompt(
+            "vision_describe",
+            self_awareness_hint=self_awareness_hint or "",
+        )
 
     def build_vision_talk_prompt(
         self,
@@ -402,14 +472,12 @@ class SensorEventService:
         context: SensorGenerationContext,
         description: str,
     ) -> str:
-        return (
-            f"{context.sensor_persona_prompt}\n"
-            f"【场景】当前屏幕内容：\n{description}\n"
-            "描述里若明确写了你的桌面形象/配置界面/模型，那是你自己或用户在改你；"
-            "网页/群聊图片里的角色不一定是你。\n"
-            f"{self._talk_rules()}\n"
-            f"{context.vision_style_block}\n"
-            f"{context.recent_sensor_reply_block}"
+        return join_prompt_parts(
+            context.sensor_persona_prompt,
+            format_sensor_prompt("vision_talk_scene", description=description),
+            self._talk_rules(),
+            context.vision_style_block,
+            context.recent_sensor_reply_block,
         )
 
     async def run_vision_separate_generation(
@@ -602,22 +670,22 @@ class SensorEventService:
         count: int,
         reason: str = "switch",
     ) -> str:
-        if str(reason or "").strip().lower() == "duration":
-            scene_line = (
-                f"用户已经在窗口 [{clean_title}] ({category}) 上停留了一段时间，"
-                f"今天独立会话约第 {count} 段（短失焦不算重新打开）。"
-            )
-        else:
-            scene_line = (
-                f"用户刚切换到窗口: [{clean_title}] ({category})，"
-                f"今天独立会话约第 {count} 段（短失焦不算重新打开）。"
-            )
-        return (
-            f"{context.sensor_persona_prompt}\n"
-            f"{scene_line}\n"
-            f"{self._talk_rules()}\n"
-            f"{context.text_style_block}\n"
-            f"{context.recent_sensor_reply_block}"
+        scene_key = (
+            "text_duration_scene"
+            if str(reason or "").strip().lower() == "duration"
+            else "text_switch_scene"
+        )
+        return join_prompt_parts(
+            context.sensor_persona_prompt,
+            format_sensor_prompt(
+                scene_key,
+                clean_title=clean_title,
+                category=category,
+                count=count,
+            ),
+            self._talk_rules(),
+            context.text_style_block,
+            context.recent_sensor_reply_block,
         )
 
     async def run_text_generation(
@@ -755,3 +823,88 @@ class SensorEventService:
             chat_with_ai=chat_with_ai,
             reason=reason,
         )
+
+
+async def run_music_event(
+    *,
+    title: str,
+    artist: str,
+    last_reply_time: float,
+    min_reply_interval_sec: float,
+    event_bus: Any,
+    presenter: Any,
+    logger: Any,
+    extract_emo_tag: Callable[[str], tuple[Optional[str], str]],
+    apply_character_catchphrase: Callable[[str], str],
+    observe_final_reply_emotion: Callable[[str], None],
+    update_active_time: Callable[[], None],
+    add_memory_safe: Callable[..., Awaitable[Any]],
+    default_persona: str,
+    chat_with_ai: Callable[..., str],
+) -> None:
+    if time.time() - float(last_reply_time or 0) < float(min_reply_interval_sec or 0):
+        return
+
+    print(f"🎵 [Music] 正在聆听: {title} by {artist}")
+    asyncio.create_task(
+        event_bus.emit("live2d.emotion", emotion="music", intensity=1.0)
+    )
+    base_prompt = default_persona
+    try:
+        from modules.character_manager import character_manager
+
+        active_char = character_manager.get_active_character()
+        if active_char:
+            base_prompt = active_char.get("prompt", default_persona)
+    except Exception:
+        pass
+
+    system_prompt = f"""
+    {base_prompt}
+
+    【当前场景】
+    你正在陪用户一起听歌。歌曲信息：
+    - 歌名：{title}
+    - 歌手/作曲：{artist}
+
+    【任务】
+    请简短评价这首歌，或表达你的感受。
+
+    【要求】
+    - 用你自己的语气和方式评价，不要写成通用模板
+    - 一句话即可（不超过30字）
+    - 如果不熟悉这首歌，可以根据歌名/歌手风格推测
+    """
+    try:
+        reply = await asyncio.to_thread(
+            chat_with_ai,
+            [{"role": "system", "content": system_prompt}],
+            task_type="default",
+            caller="music_event",
+        )
+        reply = (reply or "").strip()
+        if not reply or len(reply) < 2:
+            return
+        extracted_emo, clean_text = extract_emo_tag(reply)
+        clean_text = apply_character_catchphrase(clean_text)
+        if not clean_text:
+            return
+        final_emo = extracted_emo or "neutral"
+        if not extracted_emo:
+            if "kajiura" in artist.lower() or "梶浦" in artist:
+                final_emo = "think"
+        observe_final_reply_emotion(final_emo)
+        await presenter.present(
+            clean_text, emotion=final_emo, interrupt=False, append_ui=True
+        )
+        update_active_time()
+        asyncio.create_task(
+            add_memory_safe(
+                "assistant",
+                f"我评价了歌曲《{title}》: {clean_text}",
+                meta={"path": "music"},
+            )
+        )
+    except Exception as exc:
+        if logger:
+            logger.error(f"处理音乐事件失败: {exc}")

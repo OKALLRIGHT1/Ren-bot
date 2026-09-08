@@ -40,6 +40,11 @@ try:
 except ImportError:
     TTS_AUTO_TRANSLATE = False
 
+try:
+    from services.runtime_health import report_runtime_health
+except ImportError:
+    report_runtime_health = None
+
 
 @dataclass
 class SpeakItem:
@@ -121,6 +126,7 @@ class TTSRouter:
         self._last_probe_error = ""
         self._fallback_warned = False
         self._last_fallback_reason = ""
+        self._health_fail_streak = 0
 
         self._q: asyncio.Queue[SpeakItem] = asyncio.Queue()  # 文本队列
         self._audio_q: asyncio.Queue[AudioItem] = asyncio.Queue()  # 音频队列 (流水线)
@@ -138,6 +144,31 @@ class TTSRouter:
         )
         self._cmd_re = re.compile(r"\[CMD:.*?\]", flags=re.DOTALL)
         self.enabled = True
+
+    def _report_tts_health(self, *, ok: bool) -> None:
+        # 连续失败才标记故障，避免单次网络抖动就打扰；恢复时上报一次。
+        if report_runtime_health is None:
+            return
+        try:
+            if ok:
+                had_failure = self._health_fail_streak > 0
+                self._health_fail_streak = 0
+                if had_failure:
+                    report_runtime_health("tts", "healthy", "语音合成已恢复")
+                return
+            self._health_fail_streak += 1
+            if self._health_fail_streak == 2:
+                report_runtime_health(
+                    "tts",
+                    "offline",
+                    "语音合成失败，暂时发不出声音",
+                    details={
+                        "active_backend": self._active,
+                        "consecutive_failures": self._health_fail_streak,
+                    },
+                )
+        except Exception:
+            pass
 
     def _ensure_gpt_instance(self):
         if self.gpt is not None:
@@ -564,6 +595,12 @@ Output:
                             audio_path = path
                             duration = dur
                             backend = self.edge
+
+                    # 健康上报：合成成功或失败（用户主动打断不算失败）
+                    if audio_path:
+                        self._report_tts_health(ok=True)
+                    elif not self._interrupt_event.is_set():
+                        self._report_tts_health(ok=False)
 
                     # 3. 推入音频队列 (如果生成成功)
                     if audio_path:

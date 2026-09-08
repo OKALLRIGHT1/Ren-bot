@@ -131,7 +131,7 @@ class SedentarySettingsPage(QtWidgets.QWidget):
         self.sedentary_enabled = QtWidgets.QCheckBox("启用久坐弹窗")
         form.addRow("弹窗:", self.sedentary_enabled)
 
-        self.sedentary_status_visible = QtWidgets.QCheckBox("显示顶部久坐时间")
+        self.sedentary_status_visible = QtWidgets.QCheckBox("显示顶部工作时长")
         form.addRow("顶部显示:", self.sedentary_status_visible)
 
         self.sedentary_reminder_minutes = QtWidgets.QSpinBox()

@@ -28,6 +28,26 @@ class Plugin:
         self._settings: Dict[str, Any] = {}
         self.reload_config()
 
+    def get_tool_schema(self):
+        return {
+            "name": "qq_draw",
+            "description": "在 QQ 中按提示词生图。仅 QQ 斜杠命令路径会真正执行。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "prompt": {
+                        "type": "string",
+                        "description": "画面描述",
+                    }
+                },
+                "required": ["prompt"],
+            },
+        }
+
+    def format_invocation(self, arguments):
+        prompt = str((arguments or {}).get("prompt") or "").strip()
+        return f"/画图 {prompt}".strip() if prompt else "/画图"
+
     def get_capabilities(self):
         return [
             ToolCapability(
@@ -1197,20 +1217,15 @@ class Plugin:
         if not reply_message_id:
             return []
 
-        chat_service = (context or {}).get("chat_service")
-        gateway = getattr(chat_service, "chat_gateway", None)
-        if gateway is None:
-            return []
-        adapter = getattr(gateway, "adapters", {}).get("napcat_qq")
-        if adapter is None or not hasattr(adapter, "fetch_message_by_id"):
-            return []
+        from services.plugin_ports import resolve_gateway
 
+        port = resolve_gateway(context)
         session_id = str(channel_meta.get("session_id") or "").strip()
-        if not session_id:
+        if port is None or not session_id:
             return []
 
         try:
-            result = await adapter.fetch_message_by_id(
+            result = await port.fetch_qq_message(
                 session_id, reply_message_id, timeout=10
             )
         except Exception as exc:

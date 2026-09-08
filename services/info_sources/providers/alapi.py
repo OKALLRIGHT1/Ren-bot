@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, Iterable, Optional
 from urllib.parse import urljoin
@@ -223,7 +224,8 @@ class AlapiProvider:
             details.append(wind)
         if air:
             details.append(f"空气{air}")
-        return "，".join([main, *details])
+        observed = datetime.now().strftime("%Y-%m-%d %H:%M")
+        return "，".join([main, *details]) + f"（观测 {observed}）"
 
     def _forecast_summary(self, data: Any) -> str:
         items = self._find_forecast_items(data)

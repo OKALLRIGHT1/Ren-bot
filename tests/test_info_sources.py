@@ -124,6 +124,7 @@ async def test_alapi_provider_summarizes_nested_current_weather(tmp_path):
     assert "28" in result.summary
     assert "湿度61" in result.summary
     assert "东南风3级" in result.summary
+    assert "观测" in result.summary
 
 
 @pytest.mark.asyncio

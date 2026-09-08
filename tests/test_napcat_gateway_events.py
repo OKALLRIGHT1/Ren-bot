@@ -97,6 +97,79 @@ async def test_napcat_fetch_forward_message_uses_action_sender():
     ]
 
 
+@pytest.mark.asyncio
+async def test_napcat_ws_empty_reason_does_not_http_fallback():
+    calls = []
+
+    async def sender(action, params, timeout):
+        calls.append(action)
+        return {"ok": False, "reason": "", "transport": "websocket"}
+
+    adapter = NapCatOneBotAdapter(
+        ws_action_sender=sender,
+        api_base="http://127.0.0.1:9",
+        reply_enabled=True,
+    )
+    result = await adapter._send_action(
+        "group:499413574",
+        "send_group_msg",
+        {"group_id": 499413574, "message": []},
+    )
+
+    assert calls == ["send_group_msg"]
+    assert result["ok"] is True
+    assert result["assumed_success"] is True
+    assert result["transport"] == "websocket_assumed"
+
+
+@pytest.mark.asyncio
+async def test_napcat_ws_not_connected_still_allows_http_fallback(monkeypatch):
+    async def sender(action, params, timeout):
+        return {
+            "ok": False,
+            "reason": "ws_not_connected",
+            "transport": "websocket",
+            "action": action,
+        }
+
+    posted = []
+
+    def fake_urlopen(req, timeout=0):
+        posted.append(req.full_url)
+
+        class Resp:
+            status = 200
+
+            def read(self):
+                return b'{"status":"ok","retcode":0}'
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+        return Resp()
+
+    monkeypatch.setattr(
+        "integrations.chat_gateway.napcat.request.urlopen", fake_urlopen
+    )
+    adapter = NapCatOneBotAdapter(
+        ws_action_sender=sender,
+        api_base="http://127.0.0.1:3000",
+        reply_enabled=True,
+    )
+    result = await adapter._send_action(
+        "group:499413574",
+        "send_group_msg",
+        {"group_id": 499413574, "message": []},
+    )
+
+    assert posted
+    assert result["ok"] is True
+    assert result["transport"] == "http"
+
+
 def test_napcat_extracts_url_from_json_card_component():
     adapter = NapCatOneBotAdapter(owner_user_ids=["10001"])
     event = adapter.normalize_event(

@@ -42,7 +42,8 @@ def test_code_agent_handles_obvious_natural_language_only():
     assert plugin.should_handle_direct("调用 Codex 看看这个项目", {}, "codex")
     assert plugin.should_handle_direct("用 Codex 看看这个项目", {}, "codex")
     assert plugin.should_handle_direct("让 Codex 接手这个项目", {}, "codex")
-    assert plugin.should_handle_direct("让 Codex 帮我画一张丰川祥子的图", {}, "codex")
+    # 画图归 qq_draw，不再委托代码代理
+    assert not plugin.should_handle_direct("让 Codex 帮我画一张丰川祥子的图", {}, "codex")
     assert not plugin.should_handle_direct("我喜欢 codex 这个名字", {}, "codex")
     assert not plugin.should_handle_direct("普通聊天", {}, "code_agent")
 
@@ -59,7 +60,7 @@ def test_code_agent_declares_natural_capabilities():
     ]
 
 
-def test_code_agent_capability_matches_code_task_and_drawing():
+def test_code_agent_capability_matches_code_task_not_drawing():
     Plugin = load_plugin_class()
     plugin = Plugin()
     capabilities = plugin.get_capabilities()
@@ -71,8 +72,8 @@ def test_code_agent_capability_matches_code_task_and_drawing():
     assert codex_match is not None
     assert codex_match.plugin == "code_agent"
     assert codex_match.args == {"provider": "codex_cli", "action": "analyze"}
-    assert draw_match is not None
-    assert draw_match.args == {"provider": "codex_cli", "action": "analyze"}
+    # 画图归 qq_draw，代码代理能力不接画图请求
+    assert draw_match is None
     assert claude_match is not None
     assert claude_match.args == {"provider": "claude_code", "action": "modify"}
 

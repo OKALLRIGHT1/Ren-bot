@@ -211,19 +211,6 @@ RHUBARB_TIMEOUT_SEC = get_env_float(
     "RHUBARB_TIMEOUT_SEC", 25.0, 0.1
 )  # Rhubarb 口型分析超时
 
-# ==================== 代码执行器配置（外部 Codex/Claude CLI） ====================
-CODE_EXECUTOR_ENABLED = get_env_bool("CODE_EXECUTOR_ENABLED", "0")  # 是否启用（默认关）
-CODE_EXECUTOR_MAX_TIME = get_env_int(
-    "CODE_EXECUTOR_MAX_TIME", 300, 1
-)  # 外部 CLI 最大执行时间（秒）
-# 兼容旧 env；外部 CLI 路径下不再做进程内 AST 沙箱截断
-CODE_EXECUTOR_MAX_LENGTH = get_env_int(
-    "CODE_EXECUTOR_MAX_LENGTH", 5000, 1
-)
-CODE_EXECUTOR_MAX_OUTPUT = get_env_int(
-    "CODE_EXECUTOR_MAX_OUTPUT", 100, 1
-)
-
 # ==================== 硬件监控配置 ====================
 SYSTEM_MONITOR_ENABLED = get_env_bool(
     "SYSTEM_MONITOR_ENABLED", "0"
@@ -271,6 +258,14 @@ SHERPA_MODEL_CONFIG = {
     "decoder": os.path.join(BASE_DIR, "sherpa_model", "decoder-epoch-99-avg-1.onnx"),
     "joiner": os.path.join(BASE_DIR, "sherpa_model", "joiner-epoch-99-avg-1.onnx"),
 }
+
+# Qwen3-ASR-0.6B（默认）。文件需自行下载到 sherpa_model/qwen3-0.6b-int8/
+# 也接受解压后的官方目录名 sherpa-onnx-qwen3-asr-0.6B-int8-2026-03-25
+ASR_DEFAULT_ENGINE = "qwen3"
+ASR_PROVIDER = "cpu"
+ASR_NUM_THREADS = 2
+QWEN3_ASR_DIR = os.path.join(BASE_DIR, "sherpa_model", "qwen3-0.6b-int8")
+SILERO_VAD_MODEL = os.path.join(BASE_DIR, "sherpa_model", "silero_vad.onnx")
 
 # ==================== Gatekeeper (自主回复判断) 配置 ====================
 GATEKEEPER_ENABLED = True  # 总开关
@@ -479,6 +474,15 @@ CODEX_ROUTE_CHAIN += ["gemini-3-flash"]
 # 任务路由：根据不同场景选择模型
 TASK_MODEL_TTL_HOURS = 12  # 任务级成功模型粘性时长（小时）
 LLM_ROUTER_STRICT_ORDER = get_env_bool("LLM_ROUTER_STRICT_ORDER", "1")
+
+# Tool loop I/O: dual (default) | cmd | function. Runtime may override via
+# data/runtime_settings.json key tool_invocation_mode. Set cmd to roll back.
+_TOOL_INVOCATION_MODE = str(os.getenv("TOOL_INVOCATION_MODE", "dual")).strip().lower()
+TOOL_INVOCATION_MODE = (
+    _TOOL_INVOCATION_MODE
+    if _TOOL_INVOCATION_MODE in {"cmd", "dual", "function"}
+    else "dual"
+)
 
 LLM_ROUTER = {
     # 默认闲聊场景
@@ -704,7 +708,7 @@ _CHARACTER_NATURAL_CHAT_DEFAULT = {
     "character_thought_scope": "desktop_and_qq_private",
     # 群聊产品未开放测试时默认关；打开后与桌面/私聊同一 pipeline
     "group_chat_natural_enabled": False,
-    "character_thought_timeout_ms": 2500,
+    "character_thought_timeout_ms": 4000,
     "character_thought_max_tokens": 220,
     "expression_inject_in_main_reply": True,
     # 默认 1 条：多了会变成「背参考答案」
@@ -782,8 +786,12 @@ PROMPT_TEXT = os.getenv("PROMPT_TEXT", "")
 BUBBLE_SYNC_WITH_TTS = get_env_bool("BUBBLE_SYNC_WITH_TTS", "1")  # 气泡是否与TTS同步
 
 # 快捷键
-HOTKEY_TOGGLE_GUI = "<ctrl>+<alt>+space"
-HOTKEY_TOGGLE_WAKE = "<ctrl>+<alt>+w"
+HOTKEY_TOGGLE_GUI = "<ctrl>+<alt>+<space>"
+HOTKEY_TOGGLE_WAKE = "<ctrl>+<alt>+<w>"
+
+# Push-to-talk：按住右 Ctrl 免唤醒说话，松开停止（与常驻监听/唤醒模式并存）
+VOICE_PTT_ENABLED = get_env_bool("VOICE_PTT_ENABLED", "1")
+VOICE_PTT_KEY = os.environ.get("VOICE_PTT_KEY", "ctrl_r")  # pynput Key 名，默认右 Ctrl
 
 # ASR 过滤（VoiceSensor 黑名单仍主要用 GATEKEEPER_BLACKLIST；此列表供后续统一）
 ASR_BLACKLIST = ["嗯", "啊", "哈", "哦", "好的", "好", "对", "是", "不是", "行", "可以"]

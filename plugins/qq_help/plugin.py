@@ -100,9 +100,6 @@ class Plugin:
         plugin_manager = None
         if isinstance(ctx, dict):
             plugin_manager = ctx.get("plugin_manager")
-            if plugin_manager is None:
-                chat_service = ctx.get("chat_service")
-                plugin_manager = getattr(chat_service, "plugin_manager", None)
         if plugin_manager is None:
             return "帮助系统未就绪。"
 

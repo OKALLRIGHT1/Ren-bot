@@ -559,16 +559,19 @@ class CharacterEditorWidget(QtWidgets.QWidget):
         self.lbl_costume_summary.setWordWrap(True)
         left_layout.addWidget(self.lbl_costume_summary)
 
-        self.costume_badge_editor = AssistantBadgeEditor(
-            "服装独立徽章（可选）", on_changed=self._reload_badge_data
-        )
-        left_layout.addWidget(self.costume_badge_editor)
-
-        # Right Panel: Emotion mapping table and edit details form
-        right_group = QtWidgets.QGroupBox("情绪与动作映射")
+        # Right Panel: Badge editor + Emotion mapping table and edit details form
+        right_group = QtWidgets.QGroupBox("服装属性")
         right_layout = QtWidgets.QVBoxLayout(right_group)
         right_layout.setContentsMargins(10, 10, 10, 10)
         right_layout.setSpacing(8)
+
+        # 服装独立徽章 — 独立区域，不再挤在左侧栏
+        self.costume_badge_editor = AssistantBadgeEditor(
+            "服装独立徽章（可选）", on_changed=self._reload_badge_data
+        )
+        right_layout.addWidget(self.costume_badge_editor, 0)
+
+        right_layout.addWidget(QtWidgets.QLabel("情绪与动作映射:"))
 
         self.emo_table = QtWidgets.QTableWidget()
         self.emo_table.setColumnCount(4)

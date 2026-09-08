@@ -121,7 +121,7 @@ class ReplyStyleService:
         return text_utils.strip_internal_tags(text)
 
     def extract_emo_tag(self, text: str) -> tuple[Optional[str], str]:
-        raw = text or ""
+        raw = text_utils.strip_think_tags(text or "")
         match = self.emo_tag_re.search(raw)
         if match:
             emo = self.normalize_emo(match.group(1))

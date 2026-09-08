@@ -15,6 +15,31 @@ class Plugin:
     description = "查询长期记忆、人物画像和本地活动统计。"
     example_arg = "query ||| 我上次开会开了多久"
 
+    def get_tool_schema(self):
+        return {
+            "name": "memory_tools",
+            "description": "查询长期记忆、人物画像或本地活动统计。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "enum": ["query", "profile", "activity"],
+                    },
+                    "query": {"type": "string"},
+                },
+                "required": ["query"],
+            },
+        }
+
+    def format_invocation(self, arguments):
+        args = dict(arguments or {})
+        action = str(args.get("action") or "query").strip() or "query"
+        query = str(args.get("query") or "").strip()
+        if action in {"query", "profile", "activity"} and query:
+            return f"{action} ||| {query}"
+        return query
+
     def get_capabilities(self):
         return [
             ToolCapability(

@@ -102,3 +102,45 @@ async def test_diary_prompt_keeps_current_character_self_identity(monkeypatch):
     assert "高松灯（对 Master）" in prompt
     assert "AI(to Owner)" not in prompt
     assert "不要把自己称为“AI”" in prompt
+
+
+@pytest.mark.asyncio
+async def test_backfill_without_gateway_returns_zero():
+    async def noop_async(*args, **kwargs):
+        return None
+
+    class Brain:
+        sqlite_store = None
+
+    class EventBus:
+        async def emit(self, *args, **kwargs):
+            return None
+
+    class Presenter:
+        async def present(self, *args, **kwargs):
+            return None
+
+    class Logger:
+        def warning(self, *args, **kwargs):
+            return None
+
+        def info(self, *args, **kwargs):
+            return None
+
+    service = DiaryService(
+        brain=Brain(),
+        event_bus=EventBus(),
+        presenter=Presenter(),
+        logger=Logger(),
+        add_memory_safe=noop_async,
+        emit_idle_status_when_safe=noop_async,
+        send_gateway_reply=noop_async,
+        owner_ids=["10001"],
+        owner_shared_session_id="owner_shared",
+        legacy_owner_private_session_ids=set(),
+        owner_shared_local_sources={"desktop"},
+        qq_remote_sources={"qq_gateway"},
+        get_active_character_context=lambda: ("角色", "id", ""),
+        chat_gateway_getter=lambda: None,
+    )
+    assert await service.backfill_napcat_history_for_day("2026-07-17") == 0

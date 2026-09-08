@@ -503,7 +503,18 @@ class NapCatOneBotAdapter(BaseChatAdapter):
                 ws_result.setdefault("transport", "websocket")
             if isinstance(ws_result, dict) and ws_result.get("ok"):
                 return ws_result
+            # 帧已送出但回执空/超时：可能已经发出去了，不要再用 HTTP 补发。
+            if isinstance(ws_result, dict) and self._is_probable_ws_delivery(ws_result):
+                assumed = dict(ws_result)
+                assumed["ok"] = True
+                assumed["transport"] = "websocket_assumed"
+                assumed["assumed_success"] = True
+                assumed["reason"] = str(ws_result.get("reason") or "timeout")
+                return assumed
             if skip_http_fallback and isinstance(ws_result, dict):
+                return ws_result
+            # 没连上 / 服务未启动：帧没发出去，这时才允许 HTTP 兜底。
+            if isinstance(ws_result, dict) and not self._ws_send_never_dispatched(ws_result):
                 return ws_result
 
         if skip_http_fallback:
@@ -1031,7 +1042,7 @@ class NapCatOneBotAdapter(BaseChatAdapter):
                 result.setdefault("voice_variant", variant_name)
             if isinstance(result, dict) and result.get("ok"):
                 return result
-            if self._is_probable_ws_voice_delivery(result):
+            if self._is_probable_ws_delivery(result):
                 return {
                     "ok": True,
                     "transport": "websocket_assumed",
@@ -1057,7 +1068,7 @@ class NapCatOneBotAdapter(BaseChatAdapter):
             result.setdefault("voice_variant", primary_name)
             if last_result is not None:
                 result.setdefault("voice_ws_attempt", last_result)
-            if self._is_probable_ws_voice_delivery(last_result):
+            if self._is_probable_ws_delivery(last_result):
                 return {
                     "ok": True,
                     "transport": "websocket_assumed",
@@ -1095,16 +1106,38 @@ class NapCatOneBotAdapter(BaseChatAdapter):
             ("cq_record_posix_path", cq_posix),
         ]
 
-    def _is_probable_ws_voice_delivery(self, result: Any) -> bool:
+    def _ws_send_never_dispatched(self, result: Any) -> bool:
+        """True when the WS frame was never written, so HTTP fallback is safe."""
+        if not isinstance(result, dict):
+            return True
+        reason = str(result.get("reason") or "").strip().lower()
+        return any(
+            token in reason
+            for token in (
+                "ws_not_connected",
+                "ws_unavailable",
+                "ws_server_not_started",
+                "not_connected",
+            )
+        )
+
+    def _is_probable_ws_delivery(self, result: Any) -> bool:
         if not isinstance(result, dict):
             return False
         if result.get("ok"):
             return False
+        if self._ws_send_never_dispatched(result):
+            return False
         transport = str(result.get("transport") or "").strip().lower()
-        if transport != "websocket":
+        if transport not in {"websocket", "websocket_assumed"}:
             return False
         reason = str(result.get("reason") or "").strip().lower()
-        return reason in {"", "timeout"}
+        if "timeout" in reason or reason in {"", "cancelled", "canceled"}:
+            return True
+        return False
+
+    def _is_probable_ws_voice_delivery(self, result: Any) -> bool:
+        return self._is_probable_ws_delivery(result)
 
     async def send_image(self, session_id: str, image_path: str, **kwargs: Any) -> Any:
         path_text = str(image_path or "").strip()
@@ -1160,6 +1193,10 @@ class NapCatOneBotAdapter(BaseChatAdapter):
         result = await self._send_action(
             session_id, action_info["action"], action_info["payload"], **kwargs
         )
+        if isinstance(result, dict) and result.get("assumed_success"):
+            result.setdefault("image_path", str(image_file))
+            result.setdefault("caption", caption)
+            return result
         if isinstance(result, dict) and not result.get("ok"):
             data_uri = self._image_file_to_data_uri(image_file)
             if data_uri:

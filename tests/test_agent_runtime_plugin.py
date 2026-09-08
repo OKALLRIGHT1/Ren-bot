@@ -76,6 +76,18 @@ class ChatService:
     app_root = "D:/Desktop/live2d-suzu/live2d-llm"
 
 
+def runtime_ctx(**extra):
+    host = ChatService()
+    ctx = {
+        "agent_runtime": host.agent_runtime,
+        "mcp_bridge": host.mcp_bridge,
+        "app_root": host.app_root,
+        "cwd": host.app_root,
+    }
+    ctx.update(extra)
+    return ctx
+
+
 def test_agent_runtime_config_allows_qq_owner_direct_tool():
     config = json.loads((PLUGIN_DIR / "config.json").read_text(encoding="utf-8-sig"))
 
@@ -115,13 +127,13 @@ async def test_agent_runtime_direct_requires_command_prefix_through_manager():
     manager.direct_map = {"agent 自检": plugin}
 
     handled, result = await manager.execute_direct_commands(
-        "agent 自检", {"source": "text_input", "chat_service": ChatService()}
+        "agent 自检", runtime_ctx(source="text_input")
     )
     assert handled is False
     assert result is None
 
     handled, result = await manager.execute_direct_commands(
-        "/agent 自检", {"source": "text_input", "chat_service": ChatService()}
+        "/agent 自检", runtime_ctx(source="text_input")
     )
     assert handled is True
     assert "Agent 自检" in result
@@ -132,7 +144,7 @@ async def test_agent_runtime_health_check_formats_runtime_status():
     Plugin = load_plugin_class()
     plugin = Plugin()
 
-    result = await plugin.run("agent 自检", {"chat_service": ChatService()})
+    result = await plugin.run("agent 自检", runtime_ctx())
 
     assert "Agent 自检" in result
     assert "工具数量: 2" in result
@@ -146,7 +158,7 @@ async def test_agent_runtime_tools_lists_catalog():
     Plugin = load_plugin_class()
     plugin = Plugin()
 
-    result = await plugin.run("agent 工具列表", {"chat_service": ChatService()})
+    result = await plugin.run("agent 工具列表", runtime_ctx())
 
     assert "Agent 工具目录" in result
     assert "agently_mail" in result
@@ -161,7 +173,6 @@ async def test_agent_runtime_reports_code_location():
     result = await plugin.run(
         "agent 位置",
         {
-            "chat_service": ChatService(),
             "app_root": "D:/Desktop/live2d-suzu/live2d-llm",
             "cwd": "D:/Desktop/live2d-suzu/live2d-llm",
             "code_path": "D:/Desktop/other-project",
@@ -178,7 +189,7 @@ async def test_agent_runtime_install_plan_does_not_execute():
     Plugin = load_plugin_class()
     plugin = Plugin()
 
-    result = await plugin.run("agent 安装计划 weather", {"chat_service": ChatService()})
+    result = await plugin.run("agent 安装计划 weather", runtime_ctx())
 
     assert "安装计划" in result
     assert "weather" in result

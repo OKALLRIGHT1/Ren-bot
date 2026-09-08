@@ -13,6 +13,24 @@ from .query_service import MoegirlQueryService
 class Plugin:
     type = "delegate"
 
+    def get_tool_schema(self):
+        return {
+            "name": "moegirl_lookup",
+            "description": "查询萌娘百科词条。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "词条或问题"},
+                    "title": {"type": "string", "description": "精确标题，可选"},
+                },
+                "required": ["query"],
+            },
+        }
+
+    def format_invocation(self, arguments):
+        args = dict(arguments or {})
+        return str(args.get("query") or args.get("title") or "").strip()
+
     def get_capabilities(self):
         return [
             ToolCapability(

@@ -311,13 +311,42 @@ SCREEN_APP_SESSION_REOPEN_GAP_SEC=90   # 默认 90；更钝可 180–300，更�
 
 ## 14. 久坐提醒没有弹出或重复弹出
 
-1. live2d-only 的 Rust 会上报 `source=live2d-tauri`，并在 `activity_sample` / `sedentary_alert` 里携带 `sedentary.active_minutes`。先查 `modules.memory_sqlite.list_activity_events(date_str=当天, source="live2d-tauri")`。
-2. 顶栏久坐时间只显示 live2d Rust payload。没有可信 `sedentary.active_minutes` 时会显示采集中，不再从 Python 窗口轮询、旧 `rust-agent`、或本地 `current_window_start_time` 推导。
-3. 如果只有 `activity_sample` 没有 `sedentary_alert`，检查 live2d-only 的右键菜单久坐设置、Rust tracker 参数，以及 `/gui/activity-ingest` 是否持续成功。
-4. `sedentary_alert` 到达后仍不弹，先查是否开启 `DND_MODE`；再查 Qt GUI 是否已启动并通过 `ScreenSensor.set_sedentary_popup_callback()` 接入 `QtChatTrayApp.show_sedentary_popup()`。
-5. 中央确认弹窗由 `modules/gui/sedentary_popup.py` 读取 `SEDENTARY_POPUP_*` 配置；图片优先调用本地 QQ 表情包库 `plugins/meme_pack/data/memes.sqlite` 的只选不发送接口，只接受本地图片路径或 `file://` 本地 URI，不走 QQ 发送。
-6. 如果本地 QQ 表情包库未选到本地图片或选择失败，会回退到 `SEDENTARY_POPUP_IMAGE_PATH`；该路径可以填表情包图片/GIF，路径不存在时会退回文字占位。
-7. 弹窗默认 `SEDENTARY_POPUP_AUTO_CLOSE_SECONDS = 20` 秒后自动关闭，设为 `0` 可禁用自动关闭；自动关闭按普通关闭处理，不会触发“稍后提醒”。
-8. Live2D 气泡/TTS 仍走 `services/chat_support/active_alert_service.py` 和 `presenter.present()`；当前弹窗不是 Windows 系统 Toast，live2d Rust 只负责采集和上报事件。
-9. 主程序重启后不再自己桥接事件时间轴；只要 live2d-only 仍在运行，下一次 `live2d-tauri` payload 会恢复顶栏计时。
-10. 离开电脑后是否归零由 live2d Rust 的 `rest_streak` / `break_minutes` 决定。若离开很久仍累计，优先查 live2d-only Rust 是否持续上报 `presence=active`，或 Windows `GetLastInputInfo` 是否被远程控制/播放器/外设持续刷新。
+当前分工：Rust/Tauri 只采集并上报；连上增强版后，**弹窗由桌面端渲染后端模板**，**角色口头提醒走 Live2D 气泡**。没连增强版时才走 Qt 弹窗兜底。
+
+1. 增强版 Rust 上报 `source=live2d-tauri`，并在 `activity_sample` / `sedentary_alert` 里携带 `sedentary.active_minutes`。先查 `modules.memory_sqlite.list_activity_events(date_str=当天, source="live2d-tauri")`。
+2. 顶栏显示「工作了多久」，只认 live2d Rust payload。没有可信 `sedentary.active_minutes` 时不显示时长，不再从 Python 窗口轮询、旧 `rust-agent`、或本地 `current_window_start_time` 推导。
+3. 如果只有 `activity_sample` 没有提醒，检查控制中心久坐开关、Rust tracker 参数，以及 `/gui/activity-ingest` 是否持续成功。
+4. 已连接增强版（GUI WS 声明 `live2d.protocol.v1`）时：Python 判定后下发 `type=sedentary_popup`（模板正文 + 表情包 data URL），桌面端打开 `sedentary-popup` 窗口。此时 **不要**再等 Qt 弹窗，也不要让 Rust 本地 `sedentary-popup-request` 再弹一次。
+5. 未连接增强版时，才走 Qt：`ScreenSensor` → `Live2DApplication.show_sedentary_popup` → `QtChatTrayApp.show_sedentary_popup`。先查 `DND_MODE`、启动 120 秒宽限、冷却和弹窗 in-flight。
+6. 弹窗正文来自 `SEDENTARY_POPUP_*` 模板（`{app_name}` / `{active_minutes}`），**不是** LLM。图片优先本地 QQ 表情包库只选不发送，再回退 `SEDENTARY_POPUP_IMAGE_PATH`；下发给桌面端时转成 data URL，不传服务器文件路径。
+7. 弹窗默认 `SEDENTARY_POPUP_AUTO_CLOSE_SECONDS = 20` 秒后关闭，设为 `0` 可禁用。稍后/关闭会 `POST /gui/sedentary/ack`，写入 Python 冷却；只关窗口不回告会导致主程序再次提醒。
+8. Live2D 气泡/TTS 仍走 `services/chat_support/active_alert_service.py`（「已经工作了多久」），与弹窗模板分开。
+9. 主程序重启后不再自己桥接事件时间轴；只要增强版仍在运行，下一次 `live2d-tauri` payload 会恢复顶栏计时。
+10. 离开电脑后是否归零由 live2d Rust 的 `rest_streak` / `break_minutes` 决定。若离开很久仍累计，优先查 Rust 是否持续上报 `presence=active`，或 Windows `GetLastInputInfo` 是否被远程控制/播放器/外设持续刷新。
+11. 控制中心保存久坐设置时应把完整开关同步给 `/gui/sedentary`，不要为了「避免 Qt 再弹」而把后端 `sedentary_popup_enabled` 强行写成 false。
+
+## 15. 语音识别仍是旧 Zipformer / Qwen3 没生效
+
+默认引擎是 Qwen3-ASR-0.6B。模型或 `sherpa-onnx` 版本不够时会自动回退 Zipformer，日志会写原因。
+
+需要同时满足：
+
+1. conda 环境 `live2d-llm` 里 `sherpa-onnx>=1.12.34`（有 `OfflineRecognizer.from_qwen3_asr`）。当前若是 1.12.25 必须升级。
+2. `sherpa_model/silero_vad.onnx`
+3. `sherpa_model/qwen3-0.6b-int8/`（或官方解压名 `sherpa-onnx-qwen3-asr-0.6B-int8-2026-03-25/`）里有 `conv_frontend.onnx`、`encoder.int8.onnx`、`decoder.int8.onnx`、`tokenizer/`
+
+下载地址见 `docs/superpowers/plans/2026-08-27-qwen3-asr.md`。不要把 900MB 模型推进 git。设置 → 语音输入可以手动切回 Zipformer。
+
+## 16. 一键启动 / 环境安装失败
+
+先看 `logs/setup_env.log`，再看 `logs/launcher.log`。不要先删 `.venv`。
+
+常见原因：
+
+- 没有 Python 3.10+，且本机没有 winget。从 https://www.python.org/downloads/ 安装，勾选 **Add python.exe to PATH**，然后重新双击 `安装环境.bat`。
+- 刚用 winget 装完 Python，当前窗口还读不到 PATH。关掉脚本窗口再双击一次。
+- `pip` 访问官方源超时。安装脚本会依次改走清华源和阿里云源；仍失败时检查网络或代理。
+- 依赖装完后探测失败（日志里有 `missing: ...`）。再跑一次 `安装环境.bat`，或执行 `python setup_env.py --force --console`。
+- 双击 `启动-无窗口.vbs` 却没有任何窗口：环境还没装好。先跑 `安装环境.bat` 或 `启动.bat`。
+
+环境就绪的标志是项目根目录存在 `.suzu-ready`，并且其中记录的 Python 能 `import PySide6`。这个文件不要提交到 git。

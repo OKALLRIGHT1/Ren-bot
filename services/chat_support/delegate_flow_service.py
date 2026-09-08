@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, Optional, Sequence
+from typing import Any, Awaitable, Callable, Dict, Optional, Sequence
 
 from services.chat_support.tool_flow_service import run_tool_command_loop
 
@@ -143,13 +143,17 @@ async def run_delegate_round(
     plugin_manager: Any,
     chat_with_ai: Callable[..., Any],
     logger: Any = None,
+    invocation_mode: str = "cmd",
+    tools: list | None = None,
 ) -> DelegateFlowResult:
     triggers = _non_empty_triggers(delegate_triggers)
     if not triggers:
         return DelegateFlowResult(mode=DELEGATE_MODE_ROUND)
 
     delegate_prompt = plugin_manager.get_delegate_prompt_for_triggers(
-        list(triggers), compact=True
+        list(triggers),
+        compact=True,
+        invocation_mode=invocation_mode,
     )
     if not delegate_prompt:
         return DelegateFlowResult(mode=DELEGATE_MODE_ROUND)
@@ -171,12 +175,19 @@ async def run_delegate_round(
             ),
         }
     )
+    mode = str(invocation_mode or "cmd").strip().lower()
+    if mode == "function":
+        tool_instruction = "如果需要，调用提供的 tools。不要在正文写 [CMD:。"
+    elif mode == "dual":
+        tool_instruction = "如果需要，优先使用 function calling。不要在正文夹带 [CMD:。"
+    else:
+        tool_instruction = "如果需要，严格输出对应的 [CMD: 命令 | 需求说明]。"
     delegate_messages.append(
         {
             "role": "user",
             "content": (
                 "请判断这条请求是否需要委托型工具。"
-                "如果需要，严格输出对应的 [CMD: 命令 | 需求说明]。"
+                f"{tool_instruction}"
                 "如果不需要，输出一句不超过20字的结论。\n\n"
                 f"原始请求：{user_text}"
             ),
@@ -193,6 +204,9 @@ async def run_delegate_round(
             chat_with_ai=chat_with_ai,
             allowed_types={"delegate"},
             contains_cmd=_delegate_contains_cmd(plugin_manager),
+            invocation_mode=invocation_mode,
+            tools=tools,
+            tool_triggers=list(triggers),
         )
         if logger:
             logger.info(
@@ -238,6 +252,8 @@ async def run_delegate_flow(
     run_search_delegate_query: Optional[Callable[..., Any]],
     followup_search_query: str,
     logger: Any = None,
+    invocation_mode: str = "cmd",
+    tools: list | None = None,
 ) -> DelegateFlowResult:
     if decision.mode == DELEGATE_MODE_SEARCH:
         if run_search_delegate_query is None:
@@ -282,5 +298,173 @@ async def run_delegate_flow(
             plugin_manager=plugin_manager,
             chat_with_ai=chat_with_ai,
             logger=logger,
+            invocation_mode=invocation_mode,
+            tools=tools,
         )
     return DelegateFlowResult(mode=DELEGATE_MODE_NONE)
+
+
+async def run_background_delegate_task(
+    *,
+    user_text: str,
+    ctx: Dict[str, Any],
+    context_messages: list,
+    delegate_triggers: Sequence[str],
+    task_reasoning: str,
+    transcript_meta: Dict[str, Any],
+    chat_log_source: str,
+    output_profile: Dict[str, Any],
+    plugin_manager: Any,
+    chat_with_ai: Callable[..., Any],
+    set_delegate_task_state: Callable[..., None],
+    add_delegate_session_event: Callable[..., None],
+    should_fallback_from_moegirl: Callable[..., bool],
+    polish_background_delegate_reply: Callable[..., Awaitable[Any]],
+    emit_assistant_text: Callable[..., Awaitable[Any]],
+    logger: Any = None,
+    invocation_mode: str = "cmd",
+) -> None:
+    from services.chat_support import output_coordinator, search_flow_service
+
+    triggers = list(delegate_triggers or [])
+    try:
+        set_delegate_task_state(
+            ctx,
+            "running",
+            summary=user_text[:200],
+            triggers=triggers,
+            meta={"background": True},
+        )
+        add_delegate_session_event(
+            "background_running",
+            ctx=ctx,
+            user_text=user_text,
+            triggers=triggers,
+            text=user_text,
+            meta={"background": True},
+        )
+        delegate_flow_result = await run_delegate_round(
+            user_text=user_text,
+            ctx=ctx,
+            context_messages=context_messages,
+            delegate_triggers=triggers,
+            task_reasoning=task_reasoning,
+            plugin_manager=plugin_manager,
+            chat_with_ai=chat_with_ai,
+            logger=logger,
+            invocation_mode=invocation_mode,
+        )
+        delegate_triggered = delegate_flow_result.triggered
+        delegate_clean = delegate_flow_result.clean
+        delegate_results = list(delegate_flow_result.results or [])
+        delegate_used = list(delegate_flow_result.used or [])
+        if "moegirl_wiki" in set(delegate_used or triggers):
+            if should_fallback_from_moegirl(delegate_results):
+                fallback_results, fallback_used = (
+                    await search_flow_service.run_search_fallback_for_moegirl(
+                        user_text=user_text,
+                        ctx=ctx,
+                        plugin_manager=plugin_manager,
+                    )
+                )
+                if fallback_results:
+                    merged_results = list(delegate_results or [])
+                    merged_results.append("\n【萌百未给出明确主词条，以下是联网补充】")
+                    merged_results.extend(fallback_results)
+                    delegate_results = merged_results
+                if fallback_used:
+                    delegate_used = list(
+                        dict.fromkeys(list(delegate_used or []) + list(fallback_used))
+                    )
+        summary = (
+            "\n".join(delegate_results)[:200]
+            if delegate_results
+            else (delegate_clean or user_text[:200])
+        )
+        set_delegate_task_state(
+            ctx,
+            "done" if delegate_results or delegate_used else "skipped",
+            summary=summary,
+            triggers=triggers,
+            meta={
+                "background": True,
+                "delegate_triggered": bool(delegate_triggered),
+                "delegate_used": list(delegate_used or []),
+            },
+        )
+        add_delegate_session_event(
+            "background_completed"
+            if (delegate_results or delegate_used)
+            else "background_skipped",
+            ctx=ctx,
+            user_text=user_text,
+            triggers=triggers,
+            text=(
+                "\n".join(delegate_results)[:600]
+                if delegate_results
+                else (delegate_clean or "")
+            ),
+            meta={
+                "background": True,
+                "delegate_used": list(delegate_used or []),
+            },
+        )
+        final_text = ""
+        if delegate_results:
+            final_text = "\n".join(
+                str(item) for item in delegate_results if str(item).strip()
+            )
+        elif delegate_clean:
+            final_text = delegate_clean
+        if not final_text:
+            final_text = "后台任务已处理完成。"
+        final_text, final_emo = await polish_background_delegate_reply(
+            user_text=user_text,
+            delegate_triggers=triggers,
+            delegate_results=delegate_results,
+            delegate_clean=delegate_clean,
+        )
+        await output_coordinator.emit_background_delegate_reply(
+            text=final_text,
+            emotion=final_emo,
+            ctx=ctx,
+            transcript_meta=transcript_meta,
+            chat_log_source=chat_log_source,
+            output_profile=output_profile,
+            emit_assistant_text=emit_assistant_text,
+        )
+        add_delegate_session_event(
+            "background_reply",
+            ctx=ctx,
+            user_text=user_text,
+            triggers=triggers,
+            text=final_text,
+            meta={"emotion": final_emo, "background": True},
+        )
+    except Exception as exc:
+        set_delegate_task_state(
+            ctx,
+            "failed",
+            summary=str(exc)[:200],
+            triggers=triggers,
+            meta={"background": True},
+        )
+        add_delegate_session_event(
+            "background_failed",
+            ctx=ctx,
+            user_text=user_text,
+            triggers=triggers,
+            text=str(exc),
+            meta={"background": True},
+        )
+        from services.chat_support import output_coordinator
+
+        await output_coordinator.emit_background_delegate_reply(
+            text=f"刚才委托的后台任务失败了：{exc}",
+            emotion="neutral",
+            ctx=ctx,
+            transcript_meta=transcript_meta,
+            chat_log_source=chat_log_source,
+            output_profile=output_profile,
+            emit_assistant_text=emit_assistant_text,
+        )

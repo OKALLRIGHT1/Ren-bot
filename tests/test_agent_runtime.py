@@ -53,6 +53,11 @@ def test_chat_service_can_import_agent_runtime():
     assert AgentRuntime is not None
 
 
+def test_agent_runtime_does_not_hold_chat_service():
+    runtime = AgentRuntime(plugin_manager=FakePluginManager())
+    assert not hasattr(runtime, "chat_service")
+
+
 def test_runtime_lists_tool_catalog():
     class CatalogManager(FakePluginManager):
         def __init__(self):

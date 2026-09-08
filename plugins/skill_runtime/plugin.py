@@ -26,12 +26,14 @@ class Plugin:
         "skills",
     ]
 
-    def _get_app_ref(self, chat_service):
-        if chat_service is None:
-            return None
-        app_ref = getattr(chat_service, "app", None)
-        if app_ref is not None:
-            return app_ref
+    def _get_app_ref(self, ctx: Optional[Dict] = None):
+        from services.plugin_ports import resolve_app
+
+        app = resolve_app(ctx)
+        if app is not None and hasattr(app, "get_app"):
+            app_ref = app.get_app()
+            if app_ref is not None:
+                return app_ref
         try:
             import __main__
 
@@ -40,13 +42,10 @@ class Plugin:
             return None
 
     def _get_manager(self, ctx: Dict):
-        chat_service = (ctx or {}).get("chat_service")
-        if chat_service is None:
-            return None
-        manager = getattr(chat_service, "skill_manager", None)
+        manager = (ctx or {}).get("skills")
         if manager is not None:
             return manager
-        app_ref = self._get_app_ref(chat_service)
+        app_ref = self._get_app_ref(ctx)
         return getattr(app_ref, "skill_manager", None) if app_ref is not None else None
 
     def should_handle_direct(self, text: str, context: Dict, matched_alias: str) -> bool:
@@ -119,8 +118,7 @@ class Plugin:
         return self._render_help()
 
     def _persist(self, ctx: Dict, manager) -> None:
-        chat_service = (ctx or {}).get("chat_service")
-        app_ref = self._get_app_ref(chat_service)
+        app_ref = self._get_app_ref(ctx)
         if app_ref is None:
             return
         try:

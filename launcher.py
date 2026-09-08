@@ -8,8 +8,9 @@ import time
 from contextlib import contextmanager
 from pathlib import Path
 
+import setup_env
 
-CONDA_ENV = os.environ.get("LIVE2D_CONDA_ENV", "live2d-llm")
+CONDA_ENV = setup_env.CONDA_ENV
 
 
 def _resolve_root() -> Path:
@@ -101,18 +102,30 @@ def _external_process_dll_search():
 
 def _candidate_commands() -> list[list[str]]:
     commands: list[list[str]] = []
+    seen: set[str] = set()
 
-    local_venv = ROOT / ".venv" / "Scripts" / "python.exe"
+    def add(cmd: list[str]) -> None:
+        key = os.path.normcase(" ".join(cmd))
+        if key in seen:
+            return
+        seen.add(key)
+        commands.append(cmd)
+
+    ready = setup_env.ready_python(ROOT)
+    if ready:
+        add([ready, str(APP_ENTRY)])
+
+    local_venv = setup_env.venv_python(ROOT)
     if local_venv.exists():
-        commands.append([str(local_venv), str(APP_ENTRY)])
+        add([str(local_venv), str(APP_ENTRY)])
 
     conda_exe = shutil.which("conda")
     if conda_exe:
-        commands.append([conda_exe, "run", "-n", CONDA_ENV, "python", str(APP_ENTRY)])
+        add([conda_exe, "run", "-n", CONDA_ENV, "python", str(APP_ENTRY)])
 
     py_exe = shutil.which("pythonw") or shutil.which("python")
     if py_exe:
-        commands.append([py_exe, str(APP_ENTRY)])
+        add([py_exe, str(APP_ENTRY)])
 
     return commands
 
@@ -132,8 +145,6 @@ def _start_process() -> tuple[subprocess.Popen | None, str]:
     env = os.environ.copy()
     env.setdefault("PYTHONUNBUFFERED", "1")
     env.setdefault("PYTHONIOENCODING", "utf-8")
-    env.setdefault("FLASK_ENV", "development")
-    env.setdefault("FLASK_DEBUG", "1")
 
     last_error = ""
     for cmd in _candidate_commands():
@@ -195,7 +206,10 @@ def _run_splash(proc: subprocess.Popen) -> None:
         if code is not None and code != 0:
             root.destroy()
             _show_error(
-                f"Live2D-Suzu 启动失败，退出码：{code}\n\n日志：{LOG_PATH}"
+                f"Live2D-Suzu 启动失败，退出码：{code}\n\n"
+                f"可双击「安装环境.bat」修复依赖。\n"
+                f"启动日志：{LOG_PATH}\n"
+                f"安装日志：{setup_env.log_path(ROOT)}"
             )
             return
         if elapsed >= 8.0:
@@ -210,6 +224,28 @@ def _run_splash(proc: subprocess.Popen) -> None:
     root.mainloop()
 
 
+def _ensure_runtime() -> bool:
+    if setup_env.is_environment_ready(ROOT):
+        setup_env.maybe_copy_env_file(ROOT)
+        return True
+    _log("runtime not ready, installing environment")
+    setup_script = ROOT / "setup_env.py"
+    if getattr(sys, "frozen", False) and setup_script.exists():
+        host = setup_env.find_host_python()
+        if host:
+            _log(f"frozen launcher running {setup_script} with {host}")
+            flags = 0
+            if os.name == "nt":
+                flags = int(getattr(subprocess, "CREATE_NEW_CONSOLE", 0))
+            code = subprocess.call(
+                [host, str(setup_script), "--ensure", "--console"],
+                cwd=str(ROOT),
+                creationflags=flags,
+            )
+            return code == 0 and setup_env.is_environment_ready(ROOT)
+    return setup_env.ensure_environment(ROOT)
+
+
 def main() -> int:
     os.chdir(ROOT)
     if not APP_ENTRY.exists():
@@ -218,9 +254,23 @@ def main() -> int:
         _show_error(msg)
         return 1
 
+    if not _ensure_runtime():
+        msg = (
+            "运行环境未就绪，无法启动。\n\n"
+            "请双击「安装环境.bat」，或先安装 Python 3.10+ 并勾选 Add python.exe to PATH。\n\n"
+            f"安装日志：{setup_env.log_path(ROOT)}"
+        )
+        _log(msg)
+        _show_error(msg)
+        return 1
+
     proc, error = _start_process()
     if proc is None:
-        _show_error(f"无法启动 Live2D-Suzu。\n\n{error}")
+        _show_error(
+            f"无法启动 Live2D-Suzu。\n\n{error}\n\n"
+            f"可双击「安装环境.bat」修复依赖。\n"
+            f"安装日志：{setup_env.log_path(ROOT)}"
+        )
         return 1
 
     _run_splash(proc)

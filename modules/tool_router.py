@@ -60,11 +60,6 @@ class ToolRouter:
         "处理",
         "接手",
         "帮我",
-        "画",
-        "画图",
-        "绘图",
-        "生图",
-        "生成图片",
     ]
     _USER_FILE_PLACES = [
         "下载目录",
@@ -145,6 +140,7 @@ class ToolRouter:
         ),
         "计划": ("任务", "日程", "待办", "今天"),
         "生活": ("记账", "账单", "提醒", "支出", "消费"),
+        "提醒": ("倒计时", "番茄", "分钟", "闹钟", "定时", "计时", "提醒我"),
         "昨天": ("日记", "干了什么", "做了什么"),
         "前天": ("日记", "干了什么", "做了什么"),
         "总结": ("日记", "回顾"),
@@ -322,19 +318,16 @@ class ToolRouter:
     def _should_route_to_code_agent(self, text: str) -> bool:
         if "code_agent" not in self.direct_map:
             return False
+        if re.search(
+            r"(画图|画画|画一张|绘图|生图|生成图|生成图片|图片生成|发图)",
+            str(text or ""),
+            flags=re.IGNORECASE,
+        ):
+            return False  # 画图归 qq_draw，不委托代码代理
         has_provider = bool(
             re.search(r"codex|claude\s*code|(^|[^\w])cc([^\w]|$)", text, re.IGNORECASE)
         )
         return has_provider and any(hint in text for hint in self._CODE_AGENT_ACTION_HINTS)
-
-    def _looks_like_image_generation(self, text: str) -> bool:
-        return bool(
-            re.search(
-                r"(画图|画画|画一张|绘图|生图|生成图|生成图片|图片生成|发图)",
-                str(text or ""),
-                flags=re.IGNORECASE,
-            )
-        )
 
     def _should_route_to_user_files(self, text: str) -> bool:
         if "user_files" not in self.direct_map:
@@ -410,7 +403,7 @@ class ToolRouter:
 
     def _keyword_matches_intent(self, keyword: str, text: str) -> bool:
         kw = str(keyword or "").strip().lower()
-        if not kw or kw not in text:
+        if not kw or len(kw) <= 1 or kw not in text:
             return False
         extra = self._CONTEXT_REQUIRED_KEYWORDS.get(kw)
         if not extra:
@@ -517,7 +510,7 @@ class ToolRouter:
             )
 
         for trigger in combined_map:
-            if trigger.lower() in text:
+            if self._keyword_matches_intent(str(trigger or "").strip().lower(), text):
                 matched.add(trigger)
         if matched:
             return ToolRouteResult(True, sorted(matched), "react_trigger_matched")

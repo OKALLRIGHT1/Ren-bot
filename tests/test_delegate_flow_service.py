@@ -2,7 +2,9 @@ import pytest
 
 from services.chat_support.delegate_flow_service import (
     DELEGATE_MODE_WORKSPACE_READ,
+    DelegateFlowResult,
     choose_delegate_execution,
+    run_background_delegate_task,
     run_delegate_flow,
     run_delegate_round,
     should_use_background_delegate,
@@ -20,7 +22,9 @@ class _DelegatePluginManager:
         self.direct_fallback_calls = []
         self.delegate_map = {"sample": _DelegatePlugin()}
 
-    def get_delegate_prompt_for_triggers(self, triggers, compact=True):
+    def get_delegate_prompt_for_triggers(self, triggers, compact=True, invocation_mode="cmd"):
+        if str(invocation_mode or "cmd") in {"dual", "function"}:
+            return "\nuse tools"
         return "\n[CMD: sample | args]"
 
     async def execute_commands(self, text, ctx, allow_tools=True, allowed_types=None):
@@ -102,6 +106,31 @@ async def test_delegate_round_no_cmd_does_not_direct_fallback():
     assert result.used == []
     assert plugin_manager.command_calls == []
     assert plugin_manager.direct_fallback_calls == []
+
+
+@pytest.mark.asyncio
+async def test_delegate_round_function_mode_does_not_ask_for_cmd():
+    captured = []
+
+    async def chat_with_ai(messages, *, task_type, caller):
+        captured.extend(messages)
+        return "no tool needed"
+
+    plugin_manager = _DelegatePluginManager([])
+    result = await run_delegate_round(
+        user_text="do simple task",
+        ctx={"source": "text_input"},
+        context_messages=[],
+        delegate_triggers=["sample"],
+        task_reasoning="reasoning",
+        plugin_manager=plugin_manager,
+        chat_with_ai=chat_with_ai,
+        invocation_mode="function",
+    )
+    blob = "\n".join(str(message.get("content") or "") for message in captured)
+    assert "[CMD: 命令" not in blob
+    assert "严格输出对应的 [CMD:" not in blob
+    assert result.clean == "no tool needed"
 
 
 def test_workspace_read_capability_uses_workspace_shortcut():
@@ -214,3 +243,51 @@ async def test_direct_search_mode_returns_explicit_failure_when_tool_does_not_st
     assert result.triggered is True
     assert result.results == ["联网搜索未能启动，请检查搜索插件是否启用及当前来源权限。"]
     assert result.used == ["search_web"]
+
+
+@pytest.mark.asyncio
+async def test_run_background_delegate_task_emits_polished_reply(monkeypatch):
+    emitted = []
+    states = []
+
+    async def fake_round(**kwargs):
+        del kwargs
+        return DelegateFlowResult(
+            mode="round",
+            triggered=True,
+            clean="",
+            results=["后台结果"],
+            used=["sample"],
+        )
+
+    async def polish(**kwargs):
+        del kwargs
+        return "说完了", "happy"
+
+    async def emit_assistant_text(text, **kwargs):
+        emitted.append((text, kwargs.get("emotion")))
+
+    monkeypatch.setattr(
+        "services.chat_support.delegate_flow_service.run_delegate_round",
+        fake_round,
+    )
+    await run_background_delegate_task(
+        user_text="去处理",
+        ctx={"source": "text_input"},
+        context_messages=[],
+        delegate_triggers=["sample"],
+        task_reasoning="tool_reasoning",
+        transcript_meta={},
+        chat_log_source="chat",
+        output_profile={"speak": False, "show_bubble": False},
+        plugin_manager=_DelegatePluginManager([]),
+        chat_with_ai=lambda *args, **kwargs: "",
+        set_delegate_task_state=lambda ctx, state, **kwargs: states.append(state),
+        add_delegate_session_event=lambda *args, **kwargs: None,
+        should_fallback_from_moegirl=lambda results: False,
+        polish_background_delegate_reply=polish,
+        emit_assistant_text=emit_assistant_text,
+    )
+    assert states[0] == "running"
+    assert "done" in states
+    assert emitted == [("说完了", "happy")]

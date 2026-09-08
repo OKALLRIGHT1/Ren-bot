@@ -140,3 +140,80 @@ def test_preview_renders_template_placeholders():
     assert preview["data"]["title"] == "起来"
     assert "Chrome" in preview["data"]["message"]
     assert "50" in preview["data"]["message"]
+
+
+def test_application_ack_forwards_to_screen_sensor():
+    from core.application import Live2DApplication
+
+    class Sensor:
+        def __init__(self):
+            self.results = []
+
+        def acknowledge_sedentary_popup(self, result):
+            self.results.append(result)
+
+    app = Live2DApplication.__new__(Live2DApplication)
+    app.screen_sensor = Sensor()
+    outcome = app.acknowledge_sedentary_popup("snooze")
+    assert outcome["ok"] is True
+    assert outcome["data"]["result"] == "snooze"
+    assert app.screen_sensor.results == ["snooze"]
+
+
+def test_application_ack_without_sensor_is_unavailable():
+    from core.application import Live2DApplication
+
+    app = Live2DApplication.__new__(Live2DApplication)
+    app.screen_sensor = None
+    outcome = app.acknowledge_sedentary_popup("dismiss")
+    assert outcome["ok"] is False
+    assert outcome["error"] == "screen_sensor_unavailable"
+
+
+def test_show_sedentary_popup_emits_ws_when_live2d_client():
+    from core.application import Live2DApplication
+
+    emitted = []
+
+    class Ws:
+        def has_capable_client(self, capability):
+            return capability == "live2d.protocol.v1"
+
+        def emit(self, payload):
+            emitted.append(payload)
+
+    class Qt:
+        def show_sedentary_popup(self, *args, **kwargs):
+            emitted.append("qt")
+
+    app = Live2DApplication.__new__(Live2DApplication)
+    app.gui_ws_server = Ws()
+    app.qt_ui = Qt()
+    app.show_sedentary_popup("电脑", 60, "", None)
+    assert emitted
+    assert emitted[0]["type"] == "sedentary_popup"
+    assert emitted[0]["image_path"] == ""
+    assert "qt" not in emitted
+
+
+def test_show_sedentary_popup_uses_qt_without_live2d_client():
+    from core.application import Live2DApplication
+
+    calls = []
+
+    class Ws:
+        def has_capable_client(self, capability):
+            return False
+
+        def emit(self, payload):
+            calls.append(("ws", payload))
+
+    class Qt:
+        def show_sedentary_popup(self, app_name, minutes, image_path="", on_result=None):
+            calls.append(("qt", app_name, minutes))
+
+    app = Live2DApplication.__new__(Live2DApplication)
+    app.gui_ws_server = Ws()
+    app.qt_ui = Qt()
+    app.show_sedentary_popup("电脑", 60, "", None)
+    assert calls == [("qt", "电脑", 60)]

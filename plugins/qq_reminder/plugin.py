@@ -1,4 +1,3 @@
-import asyncio
 import json
 import re
 import uuid
@@ -6,8 +5,12 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+from modules.plugin_scheduler import PeriodicTask
+
 
 COMMAND_PREFIXES = ("/提醒列表", "/提醒删除", "/提醒测试", "/提醒")
+DISABLE_HINTS = ("关闭", "关掉", "取消", "删除", "停掉", "停止", "不要", "别再")
+LIST_HINTS = ("提醒列表", "我的提醒", "有哪些提醒", "查看提醒")
 WEEKDAY_MAP = {
     "1": 0,
     "一": 0,
@@ -42,12 +45,29 @@ CN_NUM_MAP = {
 
 
 class Plugin:
+    allow_natural_language_direct = True
+    aliases = [
+        "/提醒",
+        "/提醒列表",
+        "/提醒删除",
+        "/提醒测试",
+        "提醒我",
+        "打卡提醒",
+        "定时提醒",
+        "提醒",
+    ]
+
     def __init__(self):
         self._config_path = Path(__file__).with_name("config.json")
         self._settings: Dict[str, Any] = {}
-        self._chat_service = None
-        self._task: Optional[asyncio.Task] = None
+        self._gateway = None
         self._reminders: List[Dict[str, Any]] = []
+        self._loop = PeriodicTask(
+            self._tick_once,
+            interval=lambda: max(5, int(self._settings.get("scan_interval_sec") or 20)),
+            error_backoff=30.0,
+            name="qq_reminder",
+        )
         self.reload_config()
 
     def reload_config(self):
@@ -74,12 +94,7 @@ class Plugin:
         await self._ensure_scheduler()
 
     async def stop(self):
-        if self._task and not self._task.done():
-            self._task.cancel()
-            try:
-                await self._task
-            except Exception:
-                pass
+        await self._loop.stop()
 
     def _read_setting(self, settings: dict, key: str, default):
         value = settings.get(key, default)
@@ -114,31 +129,18 @@ class Plugin:
     def _capture_context(self, ctx: Optional[Dict[str, Any]]):
         if not isinstance(ctx, dict):
             return
-        chat_service = ctx.get("chat_service")
-        if chat_service is not None:
-            self._chat_service = chat_service
+        from services.plugin_ports import resolve_gateway
+
+        gateway = resolve_gateway(ctx)
+        if gateway is not None:
+            self._gateway = gateway
 
     async def _ensure_scheduler(self):
-        if self._task and not self._task.done():
-            return
-        self._task = asyncio.create_task(self._scheduler_loop())
-
-    async def _scheduler_loop(self):
-        while True:
-            try:
-                await self._tick_once()
-                await asyncio.sleep(
-                    max(5, int(self._settings.get("scan_interval_sec") or 20))
-                )
-            except asyncio.CancelledError:
-                break
-            except Exception:
-                await asyncio.sleep(30)
+        await self._loop.start()
 
     async def _tick_once(self):
-        if self._chat_service is None or not getattr(
-            self._chat_service, "chat_gateway", None
-        ):
+        gateway = self._gateway
+        if gateway is None or not gateway.available():
             return
         now = datetime.now()
         today = now.date().isoformat()
@@ -167,26 +169,54 @@ class Plugin:
 
     async def _send_reminder(self, item: Dict[str, Any]):
         session_id = str(item.get("target_session") or "").strip()
-        if not session_id or self._chat_service is None:
+        if not session_id:
+            return
+        gateway = self._gateway
+        if gateway is None:
             return
         text = f"{self._settings.get('default_reminder_prefix', '⏰ 提醒时间到：')}{item.get('content', '')}".strip()
         ctx = {
             "source": "qq_gateway",
             "channel_meta": {"session_id": session_id, "adapter": "napcat_qq"},
         }
-        await self._chat_service._send_gateway_reply(text, ctx, emotion="neutral")
+        await gateway.send_text(text, ctx, emotion="neutral")
 
     def should_handle_direct(
         self, user_text: str, context: dict, matched_alias: str
     ) -> bool:
-        if not self._is_qq_context(context):
-            return False
+        del context, matched_alias
         text = str(user_text or "").strip()
+        if not text:
+            return False
         if any(text.startswith(prefix) for prefix in COMMAND_PREFIXES):
+            return True
+        if text.startswith(("/", "!", "！")):
+            return False
+        if self._is_list_request(text) or self._is_disable_request(text):
             return True
         return "提醒我" in text and (
             "每周" in text or "周" in text or "工作日" in text or "每天" in text
         )
+
+    def _is_list_request(self, text: str) -> bool:
+        raw = str(text or "").strip()
+        return any(hint in raw for hint in LIST_HINTS)
+
+    def _is_disable_request(self, text: str) -> bool:
+        raw = str(text or "").strip()
+        if not raw:
+            return False
+        if re.search(r"(关闭|关掉|取消|删除|停掉|停止|不要|别再|关上).{0,16}(提醒|打卡)", raw):
+            return True
+        if re.search(r"(提醒|打卡).{0,12}(关掉|关闭|取消|删除|停掉|停止|关上|关了)", raw):
+            return True
+        return False
+
+    def _disable_query(self, text: str) -> str:
+        raw = str(text or "")
+        raw = re.sub("|".join(map(re.escape, DISABLE_HINTS)), " ", raw)
+        raw = re.sub(r"(定时)?提醒", " ", raw)
+        return re.sub(r"\s+", " ", raw).strip()
 
     def _is_qq_context(self, context: dict) -> bool:
         source = str((context or {}).get("source") or "").strip().lower()
@@ -337,6 +367,45 @@ class Plugin:
         self._save_reminders()
         return f"✅ 已删除第 {index} 条提醒。"
 
+    def _disable_user_reminders(self, user_id: str, text: str) -> str:
+        items = [
+            item
+            for item in self._reminders
+            if str(item.get("owner_user_id")) == str(user_id)
+        ]
+        if not items:
+            return "你现在还没有 QQ 定时提醒。"
+        query = self._disable_query(text)
+        if query.isdigit():
+            return self._delete_user_reminder(user_id, query)
+        hits = items
+        if query:
+            hits = [
+                item
+                for item in items
+                if query in str(item.get("content") or "")
+            ]
+        if not hits:
+            return (
+                self._list_user_reminders(user_id)
+                + "\n没有匹配到要关闭的提醒。可以说 /提醒删除 序号。"
+            )
+        if not query and len(items) > 1:
+            return self._list_user_reminders(user_id) + "\n要关哪一条？回复 /提醒删除 序号"
+        remove_ids = {item.get("id") for item in hits}
+        self._reminders = [
+            item for item in self._reminders if item.get("id") not in remove_ids
+        ]
+        self._save_reminders()
+        if len(hits) == 1:
+            item = hits[0]
+            return (
+                f"✅ 已关闭提醒：{self._format_days(item.get('weekdays') or [])} "
+                f"{int(item.get('hour', 0)):02d}:{int(item.get('minute', 0)):02d} "
+                f"- {item.get('content', '')}"
+            )
+        return f"✅ 已关闭 {len(hits)} 条匹配的提醒。"
+
     async def _test_user_reminder(self, user_id: str, index_text: str) -> str:
         if not str(index_text or "").strip().isdigit():
             return "请使用 /提醒测试 序号，例如 /提醒测试 1"
@@ -371,10 +440,12 @@ class Plugin:
         if not user_id:
             return "未识别到当前 QQ 用户，建议在 QQ 私聊里使用该提醒功能。"
 
-        if text.startswith("/提醒列表"):
+        if text.startswith("/提醒列表") or self._is_list_request(text):
             return self._list_user_reminders(user_id)
         if text.startswith("/提醒删除"):
             return self._delete_user_reminder(user_id, self._strip_command_prefix(text))
+        if self._is_disable_request(text):
+            return self._disable_user_reminders(user_id, text)
         if text.startswith("/提醒测试"):
             return await self._test_user_reminder(
                 user_id, self._strip_command_prefix(text)

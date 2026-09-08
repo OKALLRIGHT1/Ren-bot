@@ -4,8 +4,9 @@ from datetime import datetime
 import modules.screen_sensor as screen_sensor_module
 from modules.gui.app import (
     WORK_SESSION_EMPTY_LABEL,
-    WORK_SESSION_LABEL_WIDTH,
+    WORK_SESSION_LABEL_MAX_WIDTH,
     WORK_SESSION_REFRESH_INTERVAL_MS,
+    WORK_SESSION_RESTING_LABEL,
     format_work_session_label,
 )
 from modules.screen_sensor import ScreenSensor
@@ -18,32 +19,35 @@ class DummyChatService:
 
 def test_format_work_session_label_uses_minutes():
     assert format_work_session_label({"active_minutes": 42, "app_name": "Code"}) == (
-        "久坐时间 42 分钟"
+        "工作了 42 分钟"
     )
 
 
 def test_format_work_session_label_shows_sub_minute_session():
     assert format_work_session_label({"active_seconds": 20, "app_name": "Code"}) == (
-        "久坐时间 <1 分钟"
+        "工作了 <1 分钟"
     )
 
 
 def test_work_session_empty_label_is_visible_placeholder():
-    assert WORK_SESSION_EMPTY_LABEL == "久坐时间 --"
+    assert WORK_SESSION_EMPTY_LABEL == "工作了 --"
 
 
 def test_work_session_label_width_is_stable_for_top_bar():
-    assert WORK_SESSION_LABEL_WIDTH >= 150
+    assert WORK_SESSION_LABEL_MAX_WIDTH >= 150
 
 
 def test_work_session_refresh_interval_is_responsive():
     assert WORK_SESSION_REFRESH_INTERVAL_MS <= 10_000
 
 
-def test_format_work_session_label_shows_collecting_for_empty_sensor_session():
-    assert format_work_session_label(
-        {"active_seconds": 0, "active_minutes": 0, "source": "unknown"}
-    ) == "久坐时间 采集中"
+def test_format_work_session_label_hides_collecting_placeholder():
+    assert (
+        format_work_session_label(
+            {"active_seconds": 0, "active_minutes": 0, "source": "unknown"}
+        )
+        == ""
+    )
 
 
 def test_format_work_session_label_shows_zero_for_resting_session():
@@ -54,12 +58,12 @@ def test_format_work_session_label_shows_zero_for_resting_session():
             "source": "live2d-tauri",
             "state": "resting",
         }
-    ) == "久坐时间 0 分钟"
+    ) == WORK_SESSION_RESTING_LABEL
 
 
 def test_format_work_session_label_uses_hours_when_long():
     assert format_work_session_label({"active_minutes": 135, "app_name": "PyCharm"}) == (
-        "久坐时间 2 小时 15 分钟"
+        "工作了 2 小时 15 分钟"
     )
 
 
@@ -150,6 +154,34 @@ def test_screen_sensor_current_work_session_falls_back_to_latest_payload(monkeyp
 
     assert session["active_minutes"] == 5
     assert session["active_seconds"] == 300
+    assert session["source"] == "live2d-sedentary"
+
+
+def test_screen_sensor_keeps_sedentary_minutes_when_events_are_stale():
+    sensor = ScreenSensor(DummyChatService())
+    now = time.time()
+    sensor.use_rust_events_only = True
+    sensor._recent_rust_events = lambda limit=120: [
+        {
+            "event_id": "stale-but-valid",
+            "ts": _iso(now - 30 * 60),
+            "kind": "activity_sample",
+            "presence": "active",
+            "source": "live2d-tauri",
+            "sedentary": {
+                "active_minutes": 26,
+                "window_minutes": 60,
+                "break_minutes": 5,
+                "cooldown_minutes": 60,
+                "rest_streak": 0,
+                "boundary_minute": int((now - 30 * 60) // 60),
+            },
+        }
+    ]
+
+    session = sensor.get_current_work_session(now_ts=now)
+
+    assert session["active_minutes"] == 26
     assert session["source"] == "live2d-sedentary"
 
 
@@ -710,7 +742,7 @@ def test_screen_sensor_keeps_single_sedentary_popup_in_flight(monkeypatch):
     calls = []
     result_callbacks = []
     sensor._sedentary_startup_grace_until = now - 1
-    sensor.sedentary_cooldown_sec = 60 * 60
+    sensor.sedentary_cooldown_sec = 1
     sensor._loop = None
 
     def popup_callback(app_name, minutes, image_path="", on_result=None):
@@ -731,7 +763,7 @@ def test_screen_sensor_keeps_single_sedentary_popup_in_flight(monkeypatch):
         log_label="test",
     )
     sensor._trigger_sedentary_alert(
-        now_ts=now + 2 * 60 * 60,
+        now_ts=now + 10,
         alert_app_name="电脑",
         active_minutes=120,
         app_name="Code.exe",
@@ -743,6 +775,7 @@ def test_screen_sensor_keeps_single_sedentary_popup_in_flight(monkeypatch):
 
     assert calls == [("电脑", 60)]
     assert len(result_callbacks) == 1
+    assert result_callbacks[0] == sensor.acknowledge_sedentary_popup
 
 
 def test_screen_sensor_dismiss_sedentary_popup_starts_cooldown(monkeypatch):
@@ -774,6 +807,46 @@ def test_screen_sensor_dismiss_sedentary_popup_starts_cooldown(monkeypatch):
     result_callbacks[0]("dismiss")
 
     assert sensor.next_sedentary_alert_time == dismissed_at + sensor.sedentary_cooldown_sec
+    assert sensor._sedentary_popup_in_flight is False
+
+
+def test_screen_sensor_stale_popup_in_flight_allows_retry(monkeypatch):
+    sensor = ScreenSensor(DummyChatService())
+    now = time.time()
+    calls = []
+    sensor._sedentary_startup_grace_until = now - 1
+    sensor.sedentary_cooldown_sec = 1
+    sensor._loop = None
+
+    def popup_callback(app_name, minutes, image_path="", on_result=None):
+        calls.append((app_name, minutes))
+
+    sensor.set_sedentary_popup_callback(popup_callback)
+    monkeypatch.setattr(screen_sensor_module.config, "DND_MODE", False)
+
+    sensor._trigger_sedentary_alert(
+        now_ts=now,
+        alert_app_name="电脑",
+        active_minutes=60,
+        app_name="Code.exe",
+        category="coding",
+        full_title="main.py",
+        source="live2d-tauri",
+        log_label="test",
+    )
+    sensor._sedentary_popup_shown_at = now - 200
+    sensor._trigger_sedentary_alert(
+        now_ts=now + 10,
+        alert_app_name="电脑",
+        active_minutes=120,
+        app_name="Code.exe",
+        category="coding",
+        full_title="main.py",
+        source="live2d-tauri",
+        log_label="test",
+    )
+
+    assert calls == [("电脑", 60), ("电脑", 120)]
 
 
 def test_screen_sensor_rust_activity_sample_does_not_catch_up_after_main_restart(monkeypatch):

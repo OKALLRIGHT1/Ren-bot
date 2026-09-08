@@ -64,9 +64,8 @@ class Plugin:
         return self._format_health(report)
 
     def _manager(self, ctx: Dict[str, Any]) -> CapabilityManager:
-        chat_service = (ctx or {}).get("chat_service")
-        runtime = getattr(chat_service, "agent_runtime", None)
-        bridge = getattr(chat_service, "mcp_bridge", None)
+        runtime = (ctx or {}).get("agent_runtime")
+        bridge = (ctx or {}).get("mcp_bridge")
         return CapabilityManager(
             runtime_getter=lambda: runtime,
             mcp_bridge_getter=lambda: bridge,
@@ -136,12 +135,12 @@ class Plugin:
         return "\n".join(lines)
 
     def _format_location(self, ctx: Dict[str, Any]) -> str:
-        chat_service = (ctx or {}).get("chat_service")
-        app_root = str(
-            (ctx or {}).get("app_root")
-            or getattr(chat_service, "app_root", "")
-            or ""
-        ).strip()
+        app_root = str((ctx or {}).get("app_root") or "").strip()
+        if not app_root:
+            app = (ctx or {}).get("app")
+            getter = getattr(app, "app_root", None)
+            if callable(getter):
+                app_root = str(getter() or "").strip()
         cwd = str((ctx or {}).get("cwd") or "").strip()
         code_path = str((ctx or {}).get("code_path") or "").strip()
         lines = ["Agent 位置"]

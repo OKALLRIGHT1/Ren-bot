@@ -125,11 +125,9 @@ class Plugin:
         return f"不支持的 action: {action}\n\n{self._help_text()}"
 
     def _get_bridge(self, ctx: Dict[str, Any]):
-        bridge = ctx.get("mcp_bridge") if isinstance(ctx, dict) else None
-        if bridge is not None:
-            return bridge
-        chat_service = ctx.get("chat_service") if isinstance(ctx, dict) else None
-        return getattr(chat_service, "mcp_bridge", None)
+        if not isinstance(ctx, dict):
+            return None
+        return ctx.get("mcp_bridge")
 
     def _parse_args(self, raw: str):
         parts = [p.strip() for p in str(raw or "").split("|||")]

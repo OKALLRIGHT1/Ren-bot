@@ -34,6 +34,31 @@ class Plugin:
         r"<svg[\s\S]*?</svg>",
     ]
 
+    def get_tool_schema(self):
+        return {
+            "name": "web_reader",
+            "description": "读取并摘要一个公开网页 URL。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "url": {"type": "string", "description": "https URL"},
+                    "instruction": {
+                        "type": "string",
+                        "description": "可选：希望关注的内容",
+                    },
+                },
+                "required": ["url"],
+            },
+        }
+
+    def format_invocation(self, arguments):
+        args = dict(arguments or {})
+        url = str(args.get("url") or "").strip()
+        instruction = str(args.get("instruction") or "").strip()
+        if instruction:
+            return f"{instruction} {url}".strip()
+        return url
+
     def get_capabilities(self):
         return [
             ToolCapability(

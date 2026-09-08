@@ -5,12 +5,13 @@
 ## 当前结构
 
 - Python 推荐入口：`main.py` 守护进程 → `boot.py` → `core/application.py`；`boot.py` 仅用于临时调试核心进程。
+- Windows 一键安装/启动：`setup_env.py`（`安装环境.bat` / `启动.bat` / `启动-无窗口.vbs`）；就绪标记 `.suzu-ready`。
 - 对话主链路：`services/chat_service.py`，辅助服务在 `services/chat_support/`。
-- 插件系统：`modules/plugin_manager.py` 和 `plugins/`。知识插件窄口：`ctx["knowledge"]`（`BrainKnowledgePort`）；`ctx["brain"]` / `ctx["chat_service"]` 仍在。
+- 插件系统：`modules/plugin_manager.py` 和 `plugins/`。窄口：`knowledge` / `gateway` / `tts` / `app`；`brain` 仍在。**不再**注入 `ctx["chat_service"]`。Skill 是可选提示词层（`ctx["skills"]`），不是插件。
 - Qt 桌面设置中心：`modules/gui/`；记忆/知识页走 `services/gui_api/`。
 - GUI HTTP/WS：`integrations/gui_http.py` / `integrations/gui_ws.py`，领域逻辑优先 `services/gui_api/`。
 - Live2D 前端：独立仓库；本仓通过认证 GUI 通道通信。
-- 桌面活动与久坐：Tauri 上报 `/gui/activity-ingest`；主程序只消费 `source=live2d-tauri`。
+- 桌面活动与久坐：Tauri 上报 `/gui/activity-ingest`；主程序只消费 `source=live2d-tauri`。连上增强版后，弹窗由桌面端渲染后端模板（话术/表情包），LLM 口头提醒只走气泡；顶部文案为「工作了多久」。未连接时增强版可独立弹窗。稍后/关闭经 `POST /gui/sedentary/ack` 回告冷却。
 - 记忆：SQLite 为写入真相源；见 `docs/architecture/memory.md`。
 
 ## 当前重点
@@ -20,6 +21,7 @@
 - Agent 工具经插件 + `ActionGate`；见 `docs/agent-runtime.md` 与安全文档。
 - 知识/人设未做部分（A5/A6、B1–B4）：`docs/superpowers/plans/2026-08-13-knowledge-and-persona-timeline.md`。
 - 近史 Task 12 Planner 未做：`docs/superpowers/plans/2026-08-05-conversation-continuity.md`。
+- 工具轮部分 function call（默认 dual；P4b 已撤 `ctx["chat_service"]`；第三波 schema 见计划 P7）：`docs/superpowers/plans/2026-08-21-tool-calling-function-call.md`。
 - 减重规则：`docs/architecture/project_slimdown.md`。体量请现测，不要信旧表。
 
 ## 文档树
@@ -37,7 +39,7 @@
 - `docs/architecture/memory.md`：记忆/知识契约
 - `docs/architecture/shipped-features.md`：已落地行为
 - `docs/architecture/project_slimdown.md`：瘦身门槛
-- `docs/architecture/coupling-and-overdesign-review.md`：审查原文（P0–P4a 已标落地）
+- `docs/architecture/coupling-and-overdesign-review.md`：审查原文（P0–P4b 已标落地）
 - `PLUGINS_GUIDE.md` / `docs/agent-runtime.md` / `docs/SECURITY_REMEDIATION_PLAN.md`
 - `skills/README.md`
 
@@ -47,6 +49,8 @@
 - `docs/superpowers/plans/2026-07-16-frontend-backend-connection-profiles.md`
 - `docs/superpowers/plans/2026-08-05-conversation-continuity.md`（Task 12 未做）
 - `docs/superpowers/plans/2026-08-13-knowledge-and-persona-timeline.md`（A5/A6、B1–B4 未做）
+- `docs/superpowers/plans/2026-08-21-tool-calling-function-call.md`（工具轮 FC，默认 dual）
+- `docs/superpowers/plans/2026-08-27-qwen3-asr.md`（本机 ASR：代码已接 Qwen3-0.6B；待升 sherpa-onnx 并下载模型）
 - `docs/superpowers/specs/2026-08-03-runtime-health-and-rust-screen-design.md`（已落地设计说明）
 
 已做完并删掉的勾选表：08-03 运行健康/Rust 屏实施计划、08-04 健康 GUI 计划与设计、08-11 自然聊计划、08-12 屏幕会话次数计划；另删同日重复审查 `docs/CODE_REVIEW_COUPLING.md`。

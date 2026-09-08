@@ -8,6 +8,22 @@ from typing import Any, Callable, Dict, Optional, Sequence
 from services.chat_support.text_utils import is_direct_fact_search_question
 
 
+class SearchTopicStore:
+    """Per-session last search topic. One instance, owned by search flow."""
+
+    def __init__(self) -> None:
+        self.by_session: Dict[str, str] = {}
+
+    def get(self, session_key: str) -> str:
+        return str(self.by_session.get(str(session_key or "").strip()) or "").strip()
+
+    def remember(self, session_key: str, text: str) -> None:
+        key = str(session_key or "").strip()
+        value = str(text or "").strip()
+        if key and value:
+            self.by_session[key] = value
+
+
 @dataclass(frozen=True)
 class SearchFlowDecision:
     followup_query: str = ""

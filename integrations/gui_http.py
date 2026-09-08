@@ -503,7 +503,7 @@ class GuiHttpServer:
 
     def _sedentary_result_status(self, result: Dict[str, Any]) -> int:
         error = str(result.get("error") or "")
-        if error in {"runtime_store_unavailable"}:
+        if error in {"runtime_store_unavailable", "screen_sensor_unavailable"}:
             return 503
         if error.startswith("apply_failed"):
             return 500
@@ -1531,7 +1531,12 @@ class GuiHttpServer:
         from services.gui_api.models_service import ModelsCatalogService
 
         paths = self._build_paths(root)
-        return ModelsCatalogService(Path(paths["customModels"]))
+        return ModelsCatalogService(
+            Path(paths["customModels"]),
+            plugins_dir=Path(root) / "plugins",
+            plugin_manager=self._get_plugin_manager(),
+            update_runtime=True,
+        )
 
     async def _handle_models_get(self, _request: web.Request) -> web.Response:
         root = self._find_backend_root(os.getcwd())
@@ -1554,6 +1559,10 @@ class GuiHttpServer:
             code = 400 if result.get("error") != "write_failed" else 500
             return self._json_response(result, status=code)
         self._reload_custom_models()
+        original_id = str(payload.get("original_id") or payload.get("from_id") or "").strip()
+        new_id = str(payload.get("id") or payload.get("model_id") or "").strip()
+        if original_id and new_id and original_id != new_id:
+            self._forget_live_model_id(original_id)
         return self._json_response(result)
 
     async def _handle_models_delete(self, request: web.Request) -> web.Response:
@@ -1571,6 +1580,7 @@ class GuiHttpServer:
                 code = 500
             return self._json_response(result, status=code)
         self._reload_custom_models()
+        self._forget_live_model_id(model_id)
         return self._json_response(result)
 
     async def _handle_providers_upsert(self, request: web.Request) -> web.Response:
@@ -1585,6 +1595,10 @@ class GuiHttpServer:
             code = 400 if result.get("error") != "write_failed" else 500
             return self._json_response(result, status=code)
         self._reload_custom_models()
+        original_id = str(payload.get("original_id") or payload.get("from_id") or "").strip()
+        new_id = str(payload.get("id") or payload.get("provider_id") or "").strip()
+        if original_id and new_id and original_id != new_id:
+            self._forget_live_provider_id(original_id)
         return self._json_response(result)
 
     async def _handle_providers_delete(self, request: web.Request) -> web.Response:
@@ -1602,6 +1616,7 @@ class GuiHttpServer:
                 code = 500
             return self._json_response(result, status=code)
         self._reload_custom_models()
+        self._forget_live_provider_id(provider_id)
         return self._json_response(result)
 
     async def _handle_models_router_save(self, request: web.Request) -> web.Response:
@@ -1629,6 +1644,28 @@ class GuiHttpServer:
         import config as runtime_config
 
         return runtime_config
+
+    def _forget_live_model_id(self, model_id: str) -> None:
+        model_id = str(model_id or "").strip()
+        if not model_id:
+            return
+        try:
+            models = getattr(self._runtime_config_module(), "MODELS", None)
+            if isinstance(models, dict):
+                models.pop(model_id, None)
+        except Exception:
+            pass
+
+    def _forget_live_provider_id(self, provider_id: str) -> None:
+        provider_id = str(provider_id or "").strip()
+        if not provider_id:
+            return
+        try:
+            providers = getattr(self._runtime_config_module(), "PROVIDERS", None)
+            if isinstance(providers, dict):
+                providers.pop(provider_id, None)
+        except Exception:
+            pass
 
     def _reload_custom_models(self) -> None:
         try:
@@ -2697,6 +2734,33 @@ class GuiHttpServer:
             return self._json_response(result, status=self._sedentary_result_status(result))
         return self._json_response(result)
 
+    async def _handle_sedentary_ack(self, request: web.Request) -> web.Response:
+        payload = await self._read_payload(request)
+        result = str(payload.get("result") or "dismiss").strip().lower()
+        if result not in {"snooze", "dismiss", "disabled"}:
+            result = "dismiss"
+        app = self.app_ref
+        ack = getattr(app, "acknowledge_sedentary_popup", None) if app is not None else None
+        if callable(ack):
+            outcome = ack(result)
+            if isinstance(outcome, dict) and not outcome.get("ok", True):
+                return self._json_response(
+                    outcome, status=self._sedentary_result_status(outcome)
+                )
+            return self._json_response(
+                outcome
+                if isinstance(outcome, dict)
+                else {"ok": True, "data": {"result": result}}
+            )
+        sensor = getattr(app, "screen_sensor", None) if app is not None else None
+        if sensor is None or not hasattr(sensor, "acknowledge_sedentary_popup"):
+            return self._json_response(
+                {"ok": False, "error": "screen_sensor_unavailable"},
+                status=503,
+            )
+        sensor.acknowledge_sedentary_popup(result)
+        return self._json_response({"ok": True, "data": {"result": result}})
+
     async def _handle_info_sources_list(self, request: web.Request) -> web.Response:
         provider_id = str(request.query.get("provider_id") or request.query.get("provider") or "").strip()
         result = self._info_sources_gui_service().list_overview(provider_id=provider_id)
@@ -3266,6 +3330,7 @@ class GuiHttpServer:
         app.router.add_post(
             self._api_path("/sedentary/preview"), self._handle_sedentary_preview
         )
+        app.router.add_post(self._api_path("/sedentary/ack"), self._handle_sedentary_ack)
         app.router.add_get(self._api_path("/info-sources"), self._handle_info_sources_list)
         app.router.add_get(
             self._api_path("/info-sources/endpoint"),

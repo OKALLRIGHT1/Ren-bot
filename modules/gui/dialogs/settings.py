@@ -10,16 +10,16 @@ import config
 from PySide6 import QtCore, QtGui, QtWidgets
 
 
-from modules.gui.styles import (
-    THEMES,
-    get_settings_styles,
-    get_ui_palette,
-    get_current_theme_name,
-)
+from modules.gui.styles import get_settings_styles
 from modules.gui.utils import apply_embedded_mode, wrap_in_scroll_area
 from modules.gui.settings_pages.sedentary_page import SedentarySettingsPage
 from modules.gui.settings_pages.info_sources_page import InfoSourcesSettingsPage
 from modules.gui.settings_pages.asr_page import AsrSettingsPage
+from modules.gui.settings_pages.color_page import ColorSettingsPage
+from modules.gui.settings_pages.dependency_page import DependencySettingsPage
+from modules.gui.settings_pages.provider_page import ProviderSettingsPage
+from modules.gui.settings_pages.llm_page import LlmSettingsPage
+from modules.gui.settings_pages.sensor_prompts_page import SensorPromptsSettingsPage
 
 
 try:
@@ -32,25 +32,6 @@ except Exception:
 
     def update_runtime_settings(patch):
         return patch or {}
-
-
-try:
-    from modules.dependency_check import (
-        build_install_command,
-        install_missing,
-        scan_missing_dependencies,
-    )
-
-except Exception:
-
-    def scan_missing_dependencies(*args, **kwargs):
-        return []
-
-    def build_install_command(rows):
-        return ""
-
-    def install_missing(rows, timeout=600):
-        return {"ok": "0", "message": "dependency_check unavailable"}
 
 
 try:
@@ -184,11 +165,6 @@ class ProviderEditDialog(QtWidgets.QDialog):
 
         self.inp_name.setPlaceholderText("例如: SiliconFlow, DeepSeek-Official")
 
-        if provider_name:
-            self.inp_name.setReadOnly(True)
-
-            self.inp_name.setStyleSheet("background: #F3F4F6; color: #666;")
-
         form.addRow("提供商名称:", self.inp_name)
 
         self.inp_url = QtWidgets.QLineEdit(str(data.get("base_url", "")))
@@ -280,6 +256,8 @@ class ModelEditDialog(QtWidgets.QDialog):
 
         self._original = dict(model_data or {})
 
+        self._original_id = str(model_id or "")
+
         self._on_provider_saved = on_provider_saved
 
         layout = QtWidgets.QVBoxLayout(self)
@@ -287,8 +265,13 @@ class ModelEditDialog(QtWidgets.QDialog):
         form = QtWidgets.QFormLayout()
 
         self.combo_provider = QtWidgets.QComboBox()
+        self.combo_provider.setToolTip(
+            "选择提供商会套用它的 URL/Key；模型自己填的地址在调用时优先。"
+        )
 
-        self._reload_provider_combo()
+        self._reload_provider_combo(
+            select_name=str(self._original.get("provider") or "")
+        )
 
         self.combo_provider.currentIndexChanged.connect(self._on_provider_select)
 
@@ -306,16 +289,15 @@ class ModelEditDialog(QtWidgets.QDialog):
 
         provider_layout.addWidget(btn_add_provider)
 
-        form.addRow("快速套用提供商:", provider_row)
+        form.addRow("提供商:", provider_row)
 
         self.inp_id = QtWidgets.QLineEdit(model_id)
 
         self.inp_id.setPlaceholderText("my-gpt-4")
 
-        if model_id:
-            self.inp_id.setReadOnly(True)
-
-            self.inp_id.setStyleSheet("background: #F3F4F6; color: #666;")
+        self.inp_id.setToolTip(
+            "任务路由、插件模型队列和向量选择都引用这个 ID；改名会一并更新。"
+        )
 
         form.addRow("模型 ID:", self.inp_id)
 
@@ -566,13 +548,27 @@ class ModelEditDialog(QtWidgets.QDialog):
         self._refresh_image_fields_visibility()
         self._refresh_request_preview()
 
-    def _reload_provider_combo(self):
+    def _reload_provider_combo(self, select_name=None):
+        if select_name is None:
+            select_name = self.combo_provider.currentData()
+        select_name = str(select_name or "").strip()
+
+        self.combo_provider.blockSignals(True)
         self.combo_provider.clear()
+        self.combo_provider.addItem("手动输入（不套用提供商）", "")
+        known = set()
+        for name in PROVIDERS:
+            label = str(name or "").strip()
+            if not label or label in known:
+                continue
+            known.add(label)
+            self.combo_provider.addItem(label, label)
+        if select_name and select_name not in known:
+            self.combo_provider.addItem(f"{select_name}（未登记）", select_name)
 
-        self.combo_provider.addItem("手动输入（不套用提供商）", None)
-
-        for name, p_data in PROVIDERS.items():
-            self.combo_provider.addItem(name, p_data)
+        idx = self.combo_provider.findData(select_name) if select_name else 0
+        self.combo_provider.setCurrentIndex(idx if idx >= 0 else 0)
+        self.combo_provider.blockSignals(False)
 
     def _on_add_provider_inline(self):
         dlg = ProviderEditDialog(self)
@@ -594,25 +590,20 @@ class ModelEditDialog(QtWidgets.QDialog):
         if callable(self._on_provider_saved):
             self._on_provider_saved()
 
-        self._reload_provider_combo()
+        self._reload_provider_combo(select_name=name)
 
-        idx = self.combo_provider.findText(name)
-
-        if idx >= 0:
-            self.combo_provider.setCurrentIndex(idx)
-
-            self._on_provider_select()
+        self._on_provider_select()
 
     def _on_provider_select(self):
-        data = self.combo_provider.currentData()
-
+        name = str(self.combo_provider.currentData() or "").strip()
+        if not name:
+            return
+        data = PROVIDERS.get(name)
         if not isinstance(data, dict):
             return
 
         self.inp_url.setText(str(data.get("base_url", "")))
-
         self.inp_key.setText(str(data.get("api_key", "")))
-
         self._refresh_request_preview()
 
     def _refresh_image_fields_visibility(self):
@@ -729,6 +720,12 @@ class ModelEditDialog(QtWidgets.QDialog):
 
         merged["api_key"] = self.inp_key.text().strip()
 
+        provider_name = str(self.combo_provider.currentData() or "").strip()
+        if provider_name:
+            merged["provider"] = provider_name
+        else:
+            merged.pop("provider", None)
+
         api_key_env = self.inp_api_key_env.text().strip()
         if api_key_env:
             merged["api_key_env"] = api_key_env
@@ -809,7 +806,11 @@ class ModelEditDialog(QtWidgets.QDialog):
                 if key in merged and key not in self._original:
                     merged.pop(key, None)
 
-        self.result_data = {"id": mid, "config": merged}
+        self.result_data = {
+            "id": mid,
+            "original_id": self._original_id,
+            "config": merged,
+        }
 
         self.accept()
 
@@ -1714,6 +1715,11 @@ class SettingsDialog(QtWidgets.QDialog):
                 "desc": "维护屏幕传感器的本地应用分类规则，优先于 AI 分类生效。",
             },
             {
+                "nav": "📝 高级 · 屏幕吐槽提示词",
+                "title": "屏幕吐槽提示词",
+                "desc": "查看和修改屏幕感知、看自己窗口、截图描述用的提示词模板。",
+            },
+            {
                 "nav": "⏰ 高级 · 久坐提醒",
                 "title": "久坐提醒",
                 "desc": "调整连续工作判定、休息重置、提醒冷却、弹窗文案和表情包预览。",
@@ -1859,6 +1865,8 @@ class SettingsDialog(QtWidgets.QDialog):
 
         self._safe_init_page(self._init_screen_app_rules_page, "应用识别")
 
+        self._safe_init_page(self._init_sensor_prompts_page, "屏幕吐槽提示词")
+
         self._safe_init_page(self._init_sedentary_page, "久坐提醒")
 
         self._safe_init_page(self._init_asr_page, "语音输入")
@@ -1908,26 +1916,17 @@ class SettingsDialog(QtWidgets.QDialog):
         QtCore.QTimer.singleShot(240, self.ensure_on_screen)
 
     def _reload_catalog_from_disk(self) -> None:
-        try:
-            import config as runtime_config
+        from modules.gui.settings_pages.catalog_io import reload_model_catalog
 
-            if hasattr(runtime_config, "load_custom_models"):
-                runtime_config.load_custom_models(force=True)
-        except Exception:
-            pass
-        if hasattr(self, "prov_table"):
+        reload_model_catalog()
+        if getattr(self, "_provider_page", None) is not None:
             try:
-                self._refresh_prov_table()
+                self._provider_page.reload_from_disk()
             except Exception:
                 pass
-        if hasattr(self, "_refresh_llm_table"):
+        if getattr(self, "_llm_page", None) is not None:
             try:
-                self._refresh_llm_table()
-            except Exception:
-                pass
-        if hasattr(self, "_refresh_router"):
-            try:
-                self._refresh_router()
+                self._llm_page.reload_from_disk()
             except Exception:
                 pass
 
@@ -2055,6 +2054,15 @@ class SettingsDialog(QtWidgets.QDialog):
 
     # ---------- Sedentary ----------
 
+    def _init_sensor_prompts_page(self):
+        page = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout(page)
+        layout.setContentsMargins(0, 0, 0, 0)
+        widget = SensorPromptsSettingsPage(main_app=self.main_app)
+        apply_embedded_mode(widget)
+        layout.addWidget(widget, 1)
+        self.stack.addWidget(page)
+
     def _init_sedentary_page(self):
         page = QtWidgets.QWidget()
         layout = QtWidgets.QVBoxLayout(page)
@@ -2084,1030 +2092,67 @@ class SettingsDialog(QtWidgets.QDialog):
         layout.addWidget(self._wrap_in_scroll_area(widget), 1)
         self.stack.addWidget(page)
 
-    # ---------- Provider ----------
-
     def _init_provider_page(self):
         page = QtWidgets.QWidget()
-
         layout = QtWidgets.QVBoxLayout(page)
-
-        top = QtWidgets.QHBoxLayout()
-
-        top.addWidget(QtWidgets.QLabel("提供商配置 (Providers)", objectName="header"))
-
-        btn_add = QtWidgets.QPushButton("+ 添加提供商")
-
-        btn_add.clicked.connect(self._on_add_provider)
-
-        top.addWidget(btn_add)
-
-        layout.addLayout(top)
-
-        self.prov_table = QtWidgets.QTableWidget()
-
-        self.prov_table.setColumnCount(3)
-
-        self.prov_table.setHorizontalHeaderLabels(["名称", "Base URL", "操作"])
-
-        self.prov_table.horizontalHeader().setSectionResizeMode(
-            1, QtWidgets.QHeaderView.ResizeMode.Stretch
-        )
-
-        self.prov_table.horizontalHeader().setSectionResizeMode(
-            2, QtWidgets.QHeaderView.ResizeMode.ResizeToContents
-        )
-
-        self.prov_table.verticalHeader().setVisible(False)
-
-        self.prov_table.verticalHeader().setDefaultSectionSize(44)
-
-        layout.addWidget(self.prov_table, 1)
-
-        self.stack.addWidget(self._wrap_in_scroll_area(page))
-
-        self._refresh_prov_table()
-
-    def _refresh_prov_table(self):
-        self.prov_table.setRowCount(0)
-
-        for name, data in PROVIDERS.items():
-            row = self.prov_table.rowCount()
-
-            self.prov_table.insertRow(row)
-
-            self.prov_table.setItem(row, 0, QtWidgets.QTableWidgetItem(name))
-
-            self.prov_table.setItem(
-                row,
-                1,
-                QtWidgets.QTableWidgetItem(str((data or {}).get("base_url", ""))),
-            )
-
-            action_widget = QtWidgets.QWidget()
-
-            h = QtWidgets.QHBoxLayout(action_widget)
-
-            h.setContentsMargins(4, 4, 4, 4)
-
-            h.setSpacing(8)
-
-            btn_edit = QtWidgets.QPushButton("编辑")
-
-            btn_edit.clicked.connect(lambda c=False, n=name: self._on_edit_provider(n))
-
-            btn_del = QtWidgets.QPushButton("删除")
-
-            btn_edit.setObjectName("tableActionBtn")
-
-            btn_del.setObjectName("tableDangerBtn")
-
-            btn_del.clicked.connect(lambda c=False, n=name: self._on_del_provider(n))
-
-            h.addWidget(btn_edit)
-
-            h.addWidget(btn_del)
-
-            h.addStretch()
-
-            self.prov_table.setCellWidget(row, 2, action_widget)
-
-    def _on_add_provider(self):
-        dlg = ProviderEditDialog(self)
-
-        if dlg.exec() == QtWidgets.QDialog.DialogCode.Accepted:
-            d = dlg.result_data
-
-            PROVIDERS[d["name"]] = d["config"]
-
-            self._save_to_json()
-
-            self._refresh_prov_table()
-
-    def _on_edit_provider(self, name):
-        dlg = ProviderEditDialog(self, name, PROVIDERS.get(name, {}))
-
-        if dlg.exec() == QtWidgets.QDialog.DialogCode.Accepted:
-            PROVIDERS[name] = dlg.result_data["config"]
-
-            self._save_to_json()
-
-            self._refresh_prov_table()
-
-    def _on_del_provider(self, name):
-        reply = QtWidgets.QMessageBox.question(
-            self,
-            "删除",
-            f"确定删除提供商 {name} 吗？",
-            QtWidgets.QMessageBox.StandardButton.Yes
-            | QtWidgets.QMessageBox.StandardButton.No,
-        )
-
-        if reply == QtWidgets.QMessageBox.StandardButton.Yes:
-            PROVIDERS.pop(name, None)
-
-            self._save_to_json()
-
-            self._refresh_prov_table()
-
-    # ---------- LLM ----------
+        layout.setContentsMargins(0, 0, 0, 0)
+        widget = ProviderSettingsPage(on_changed=self._refresh_llm_table)
+        apply_embedded_mode(widget)
+        layout.addWidget(self._wrap_in_scroll_area(widget), 1)
+        self._provider_page = widget
+        self.stack.addWidget(page)
 
     def _init_llm_page(self):
         page = QtWidgets.QWidget()
-
         layout = QtWidgets.QVBoxLayout(page)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(10)
-
-        body = QtWidgets.QWidget()
-
-        body_layout = QtWidgets.QVBoxLayout(body)
-
-        body_layout.setContentsMargins(0, 0, 0, 0)
-
-        body_layout.setSpacing(10)
-
-        top_card = QtWidgets.QFrame()
-
-        top_card.setObjectName("settingsHeaderCard")
-
-        top_layout = QtWidgets.QVBoxLayout(top_card)
-
-        top_layout.setContentsMargins(14, 10, 14, 10)
-
-        top_layout.setSpacing(8)
-
-        title_wrap = QtWidgets.QVBoxLayout()
-
-        title_wrap.setSpacing(2)
-
-        title_wrap.addWidget(QtWidgets.QLabel("模型与路由", objectName="header"))
-
-        page_hint = QtWidgets.QLabel("维护模型清单，并给不同任务指定调用链。")
-
-        page_hint.setStyleSheet("color:#6B7280;")
-
-        page_hint.setWordWrap(True)
-
-        title_wrap.addWidget(page_hint)
-
-        top_layout.addLayout(title_wrap)
-
-        top_actions = QtWidgets.QHBoxLayout()
-
-        top_actions.setContentsMargins(0, 0, 0, 0)
-
-        top_actions.setSpacing(8)
-
-        top_actions.addStretch()
-
-        btn_routing_overview = QtWidgets.QPushButton("打开路由总览")
-        btn_routing_overview.clicked.connect(self._open_routing_overview)
-
-        top_actions.addWidget(btn_routing_overview)
-
-        btn_provider = QtWidgets.QPushButton("管理提供商")
-
-        btn_provider.clicked.connect(lambda: self.open_page(1))
-
-        btn_add = QtWidgets.QPushButton("+ 添加模型")
-
-        btn_add.clicked.connect(self._on_add_model)
-
-        top_actions.addWidget(btn_provider)
-
-        top_actions.addWidget(btn_add)
-
-        top_layout.addLayout(top_actions)
-
-        body_layout.addWidget(top_card)
-
-        model_card = QtWidgets.QFrame()
-
-        model_card.setObjectName("settingsHeaderCard")
-
-        model_layout = QtWidgets.QVBoxLayout(model_card)
-
-        model_layout.setContentsMargins(14, 10, 14, 10)
-
-        model_layout.setSpacing(6)
-
-        model_head = QtWidgets.QHBoxLayout()
-
-        model_head.addWidget(QtWidgets.QLabel("模型清单", objectName="header"))
-
-        model_head.addStretch()
-
-        model_tip = QtWidgets.QLabel("维护模型清单，路由区只引用模型 ID。")
-
-        model_tip.setStyleSheet("color:#6B7280;")
-
-        model_tip.setWordWrap(True)
-
-        model_layout.addLayout(model_head)
-
-        model_layout.addWidget(model_tip)
-
-        self.llm_table = QtWidgets.QTableWidget()
-
-        self.llm_table.setColumnCount(5)
-
-        self.llm_table.setHorizontalHeaderLabels(
-            ["ID", "模型名", "用途", "API 地址", "操作"]
+        widget = LlmSettingsPage(
+            on_open_providers=lambda: self.open_page(1),
+            plugin_manager=(
+                getattr(self.main_app, "plugin_manager", None)
+                if self.main_app
+                else None
+            ),
         )
-
-        header = self.llm_table.horizontalHeader()
-        # 只让“模型名”吃剩余宽度；用途/API 固定可读宽；操作列必须装下两个按钮。
-        header.setStretchLastSection(False)
-        header.setMinimumSectionSize(48)
-        header.setSectionResizeMode(0, QtWidgets.QHeaderView.ResizeMode.Interactive)
-        header.setSectionResizeMode(1, QtWidgets.QHeaderView.ResizeMode.Stretch)
-        header.setSectionResizeMode(2, QtWidgets.QHeaderView.ResizeMode.Fixed)
-        header.setSectionResizeMode(3, QtWidgets.QHeaderView.ResizeMode.Interactive)
-        header.setSectionResizeMode(4, QtWidgets.QHeaderView.ResizeMode.Fixed)
-        self.llm_table.setColumnWidth(0, 140)
-        self.llm_table.setColumnWidth(2, 72)
-        self.llm_table.setColumnWidth(3, 160)
-        self.llm_table.setColumnWidth(4, 176)
-        self.llm_table.setTextElideMode(QtCore.Qt.TextElideMode.ElideMiddle)
-        self.llm_table.setWordWrap(False)
-        self.llm_table.setHorizontalScrollBarPolicy(
-            QtCore.Qt.ScrollBarPolicy.ScrollBarAsNeeded
-        )
-        self.llm_table.setHorizontalScrollMode(
-            QtWidgets.QAbstractItemView.ScrollMode.ScrollPerPixel
-        )
-        self.llm_table.setShowGrid(False)
-        self.llm_table.setAlternatingRowColors(True)
-
-        self.llm_table.verticalHeader().setVisible(False)
-
-        self.llm_table.setMinimumHeight(0)
-
-        self.llm_table.setMaximumHeight(320)
-
-        self.llm_table.verticalHeader().setDefaultSectionSize(40)
-
-        model_layout.addWidget(self.llm_table)
-
-        body_layout.addWidget(model_card)
-
-        route_card = QtWidgets.QFrame()
-
-        route_card.setObjectName("settingsHeaderCard")
-
-        route_layout = QtWidgets.QVBoxLayout(route_card)
-
-        route_layout.setContentsMargins(14, 10, 14, 10)
-
-        route_layout.setSpacing(6)
-
-        route_layout.addWidget(QtWidgets.QLabel("任务路由", objectName="header"))
-
-        route_hint = QtWidgets.QLabel("日常优先关注闲聊、推理、总结、代码助手。")
-
-        route_hint.setStyleSheet("color:#6B7280;")
-
-        route_hint.setWordWrap(True)
-
-        route_layout.addWidget(route_hint)
-
-        self.router_ui = {}
-
-        self.router_desc_ui = {}
-
-        route_grid = QtWidgets.QGridLayout()
-
-        route_grid.setContentsMargins(0, 0, 0, 0)
-
-        route_grid.setHorizontalSpacing(10)
-
-        route_grid.setVerticalSpacing(10)
-
-        route_grid.setColumnStretch(0, 1)
-
-        route_grid.setColumnStretch(1, 1)
-
-        route_items = [
-            ("default", "闲聊", "主回复"),
-            ("reply_polish", "润色", "回复润色/情绪兜底"),
-            ("tool_reasoning", "推理", "工具规划"),
-            ("summary", "总结", "摘要压缩"),
-            ("gatekeeper", "看门人", "是否触发"),
-            ("translation", "翻译", "语言转换"),
-            ("screen_classify", "屏幕分类", "画面分类"),
-            ("codex", "代码助手", "工作区链路"),
-            ("image_gen", "画图", "点编辑自选顺序，不会自动全选"),
-            ("image_edit", "图生图", "点编辑自选顺序，空则回退画图链"),
-        ]
-
-        for index, (task, label, desc) in enumerate(route_items):
-            row_card = QtWidgets.QFrame()
-
-            row_card.setObjectName("launchCard")
-
-            row_layout = QtWidgets.QVBoxLayout(row_card)
-
-            row_layout.setContentsMargins(10, 8, 10, 8)
-
-            row_layout.setSpacing(4)
-
-            head = QtWidgets.QHBoxLayout()
-
-            title = QtWidgets.QLabel(label)
-
-            title.setObjectName("launchTitle")
-
-            desc_label = QtWidgets.QLabel(desc)
-
-            desc_label.setObjectName("launchDesc")
-
-            desc_label.setWordWrap(True)
-            desc_label.setMaximumHeight(18)
-
-            self.router_desc_ui[task] = desc_label
-
-            line_wrap = QtWidgets.QHBoxLayout()
-
-            line_wrap.setContentsMargins(0, 0, 0, 0)
-
-            line = QtWidgets.QLineEdit()
-
-            line.setReadOnly(True)
-
-            line.setPlaceholderText("未配置")
-
-            line.setStyleSheet("background:#f3f4f6;")
-
-            self.router_ui[task] = line
-
-            btn = QtWidgets.QPushButton("编辑")
-
-            btn.setObjectName("routerConfigBtn")
-
-            btn.clicked.connect(lambda c=False, t=task: self._on_conf_router(t))
-
-            line_wrap.addWidget(line, 1)
-
-            line_wrap.addWidget(btn)
-
-            head.addWidget(title)
-
-            head.addStretch()
-
-            row_layout.addLayout(head)
-
-            row_layout.addWidget(desc_label)
-
-            row_layout.addLayout(line_wrap)
-
-            route_grid.addWidget(row_card, index // 2, index % 2)
-
-        route_layout.addLayout(route_grid)
-
-        body_layout.addWidget(route_card)
-
-        body_layout.addStretch(1)
-
-        layout.addWidget(self._wrap_in_scroll_area(body), 1)
-
-        llm_action_bar = QtWidgets.QFrame()
-
-        llm_action_bar.setObjectName("settingsActionBar")
-
-        llm_action_shadow = QtWidgets.QGraphicsDropShadowEffect(llm_action_bar)
-
-        llm_action_shadow.setBlurRadius(18)
-
-        llm_action_shadow.setOffset(0, 4)
-
-        llm_action_shadow.setColor(QtGui.QColor(15, 23, 42, 28))
-
-        llm_action_bar.setGraphicsEffect(llm_action_shadow)
-
-        llm_action_layout = QtWidgets.QHBoxLayout(llm_action_bar)
-
-        llm_action_layout.setContentsMargins(14, 10, 14, 10)
-
-        llm_action_layout.setSpacing(10)
-
-        action_hint = QtWidgets.QLabel(f"保存到 {CUSTOM_MODELS_PATH}。")
-
-        action_hint.setObjectName("settingsPageDesc")
-
-        action_hint.setWordWrap(True)
-
-        llm_action_layout.addWidget(action_hint, 1)
-
-        btn_reload = QtWidgets.QPushButton("刷新路由")
-
-        btn_reload.clicked.connect(self._refresh_router)
-
-        btn_reload_models = QtWidgets.QPushButton("刷新模型")
-
-        btn_reload_models.clicked.connect(self._refresh_llm_table)
-
-        btn_save_models = QtWidgets.QPushButton("保存当前配置")
-
-        btn_save_models.setObjectName("primaryAction")
-
-        btn_save_models.clicked.connect(self._save_llm_page_state)
-
-        llm_action_layout.addWidget(btn_reload)
-
-        llm_action_layout.addWidget(btn_reload_models)
-
-        llm_action_layout.addWidget(btn_save_models)
-
-        layout.addWidget(llm_action_bar, 0)
-
+        apply_embedded_mode(widget)
+        layout.addWidget(widget, 1)
+        self._llm_page = widget
         self.stack.addWidget(page)
 
-        self._refresh_llm_table()
-
-        self._refresh_router()
+    def _refresh_prov_table(self):
+        if getattr(self, "_provider_page", None) is not None:
+            self._provider_page.refresh()
 
     def _refresh_llm_table(self):
-        self.llm_table.setRowCount(0)
-
-        for mid, cfg in MODELS.items():
-            row = self.llm_table.rowCount()
-
-            self.llm_table.insertRow(row)
-
-            self.llm_table.setItem(row, 0, QtWidgets.QTableWidgetItem(str(mid)))
-
-            self.llm_table.setItem(
-                row, 1, QtWidgets.QTableWidgetItem(str((cfg or {}).get("model", "")))
-            )
-
-            purpose_text = format_purposes_label(get_model_purposes(cfg or {}))
-            self.llm_table.setItem(row, 2, QtWidgets.QTableWidgetItem(purpose_text))
-
-            self.llm_table.setItem(
-                row, 3, QtWidgets.QTableWidgetItem(str((cfg or {}).get("base_url", "")))
-            )
-
-            action_widget = QtWidgets.QWidget()
-
-            h = QtWidgets.QHBoxLayout(action_widget)
-
-            h.setContentsMargins(2, 1, 2, 1)
-
-            h.setSpacing(4)
-
-            h.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
-
-            btn_edit = QtWidgets.QPushButton("编辑")
-            btn_edit.setFixedHeight(28)
-            btn_edit.setMinimumWidth(56)
-            btn_edit.setMaximumWidth(72)
-            btn_edit.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
-            btn_edit.clicked.connect(lambda c=False, m=mid: self._on_edit_model(m))
-
-            btn_del = QtWidgets.QPushButton("删除")
-            btn_del.setFixedHeight(28)
-            btn_del.setMinimumWidth(56)
-            btn_del.setMaximumWidth(72)
-            btn_del.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
-
-            btn_edit.setObjectName("tableActionBtn")
-
-            btn_del.setObjectName("tableDangerBtn")
-
-            btn_del.clicked.connect(lambda c=False, m=mid: self._on_del_model(m))
-
-            h.addWidget(btn_edit)
-
-            h.addWidget(btn_del)
-
-            for col in (0, 1, 3):
-                item = self.llm_table.item(row, col)
-                if item is not None and item.text():
-                    item.setToolTip(item.text())
-
-            self.llm_table.setCellWidget(row, 4, action_widget)
+        if getattr(self, "_llm_page", None) is not None:
+            self._llm_page.refresh_models()
 
     def _refresh_router(self):
-        for task, line in self.router_ui.items():
-            chain = LLM_ROUTER.get(task, [])
-
-            if isinstance(chain, str):
-                chain = [chain]
-
-            line.setText(" -> ".join(chain) if chain else "(未配置)")
-
-    def _save_llm_page_state(self):
-        self._save_to_json()
-        QtWidgets.QMessageBox.information(
-            self, "模型与路由", "当前模型与路由配置已保存。"
-        )
-
-    def _on_add_model(self):
-        dlg = ModelEditDialog(self, on_provider_saved=self._save_to_json)
-
-        if dlg.exec() == QtWidgets.QDialog.DialogCode.Accepted:
-            data = dlg.result_data
-
-            mid = data["id"]
-
-            if mid in MODELS:
-                QtWidgets.QMessageBox.warning(self, "错误", "ID 已存在")
-
-                return
-
-            MODELS[mid] = data["config"]
-
-            self._save_to_json()
-
-            self._refresh_llm_table()
-
-    def _on_edit_model(self, mid):
-        dlg = ModelEditDialog(
-            self, mid, MODELS.get(mid, {}), on_provider_saved=self._save_to_json
-        )
-
-        if dlg.exec() == QtWidgets.QDialog.DialogCode.Accepted:
-            MODELS[mid] = dlg.result_data["config"]
-
-            self._save_to_json()
-
-            self._refresh_llm_table()
-
-    def _on_del_model(self, mid):
-        reply = QtWidgets.QMessageBox.question(
-            self,
-            "删除",
-            f"删除模型 {mid} 吗？",
-            QtWidgets.QMessageBox.StandardButton.Yes
-            | QtWidgets.QMessageBox.StandardButton.No,
-        )
-
-        if reply == QtWidgets.QMessageBox.StandardButton.Yes:
-            MODELS.pop(mid, None)
-
-            self._save_to_json()
-
-            self._refresh_llm_table()
-
-    def _on_conf_router(self, task):
-        chain = LLM_ROUTER.get(task, [])
-
-        if isinstance(chain, str):
-            chain = [chain]
-
-        dlg = RouterConfigDialog(self, task, list(chain))
-
-        if dlg.exec() == QtWidgets.QDialog.DialogCode.Accepted:
-            LLM_ROUTER[task] = dlg.result_chain
-
-            self._save_to_json()
-
-            self._refresh_router()
-
-    def _open_routing_overview(self):
-        from modules.gui.dialogs.model_routing_overview import ModelRoutingOverviewDialog
-
-        if not hasattr(self, "_routing_overview_dlg") or self._routing_overview_dlg is None:
-            self._routing_overview_dlg = ModelRoutingOverviewDialog(self)
-        else:
-            self._routing_overview_dlg._refresh()
-        self._routing_overview_dlg.show()
-        self._routing_overview_dlg.raise_()
-        self._routing_overview_dlg.activateWindow()
+        if getattr(self, "_llm_page", None) is not None:
+            self._llm_page.refresh_router()
 
     def _save_to_json(self):
-        data = {"models": MODELS, "router": LLM_ROUTER, "providers": PROVIDERS}
+        from modules.gui.settings_pages.catalog_io import save_model_catalog
 
-        try:
-            directory = os.path.dirname(CUSTOM_MODELS_PATH)
-
-            if directory:
-                os.makedirs(directory, exist_ok=True)
-
-            with open(CUSTOM_MODELS_PATH, "w", encoding="utf-8") as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
-
-        except Exception as e:
-            QtWidgets.QMessageBox.critical(self, "保存失败", str(e))
-
-    # ---------- Dependency ----------
+        save_model_catalog(parent=self)
 
     def _init_dependency_page(self):
         page = QtWidgets.QWidget()
-
         layout = QtWidgets.QVBoxLayout(page)
+        layout.setContentsMargins(0, 0, 0, 0)
+        widget = DependencySettingsPage()
+        apply_embedded_mode(widget)
+        layout.addWidget(self._wrap_in_scroll_area(widget), 1)
+        self.stack.addWidget(page)
 
-        top = QtWidgets.QHBoxLayout()
-
-        self.dep_title = QtWidgets.QLabel("依赖体检", objectName="header")
-
-        top.addWidget(self.dep_title)
-
-        top.addStretch()
-
-        btn_refresh = QtWidgets.QPushButton("刷新")
-
-        btn_refresh.clicked.connect(self._refresh_dependency_rows)
-
-        top.addWidget(btn_refresh)
-
-        btn_copy = QtWidgets.QPushButton("复制安装命令")
-
-        btn_copy.clicked.connect(self._copy_dependency_install_cmd)
-
-        top.addWidget(btn_copy)
-
-        btn_install = QtWidgets.QPushButton("一键安装")
-
-        btn_install.clicked.connect(self._install_missing_dependencies)
-
-        top.addWidget(btn_install)
-
-        layout.addLayout(top)
-
-        tip = QtWidgets.QLabel("扫描 plugins 目录中缺失的第三方依赖。")
-
-        tip.setStyleSheet("color:#6B7280;")
-
-        layout.addWidget(tip)
-
-        self.dep_table = QtWidgets.QTableWidget()
-
-        self.dep_table.setColumnCount(4)
-
-        self.dep_table.setHorizontalHeaderLabels(["模块", "pip 包", "来源插件", "状态"])
-
-        self.dep_table.horizontalHeader().setSectionResizeMode(
-            2, QtWidgets.QHeaderView.ResizeMode.Stretch
-        )
-
-        self.dep_table.verticalHeader().setVisible(False)
-
-        layout.addWidget(self.dep_table, 1)
-
-        self.dep_result = QtWidgets.QPlainTextEdit()
-
-        self.dep_result.setReadOnly(True)
-
-        self.dep_result.setPlaceholderText("安装结果会显示在这里")
-
-        self.dep_result.setMaximumHeight(180)
-
-        layout.addWidget(self.dep_result)
-
-        self.dep_rows = []
-
-        self.stack.addWidget(self._wrap_in_scroll_area(page))
-
-        self._refresh_dependency_rows()
-
-    def _refresh_dependency_rows(self):
-        self.dep_rows = scan_missing_dependencies("./plugins")
-
-        rows = self.dep_rows or []
-
-        self.dep_table.setRowCount(0)
-
-        if not rows:
-            self.dep_title.setText("依赖体检（无缺失）")
-
-            self.dep_table.setRowCount(1)
-
-            self.dep_table.setItem(0, 0, QtWidgets.QTableWidgetItem("无"))
-
-            self.dep_table.setItem(0, 1, QtWidgets.QTableWidgetItem("-"))
-
-            self.dep_table.setItem(0, 2, QtWidgets.QTableWidgetItem("-"))
-
-            self.dep_table.setItem(0, 3, QtWidgets.QTableWidgetItem("OK"))
-
-            return
-
-        self.dep_title.setText(f"依赖体检（缺失 {len(rows)} 项）")
-
-        for row in rows:
-            r = self.dep_table.rowCount()
-
-            self.dep_table.insertRow(r)
-
-            self.dep_table.setItem(
-                r, 0, QtWidgets.QTableWidgetItem(str(row.get("module", "")))
-            )
-
-            self.dep_table.setItem(
-                r, 1, QtWidgets.QTableWidgetItem(str(row.get("package", "")))
-            )
-
-            self.dep_table.setItem(
-                r, 2, QtWidgets.QTableWidgetItem(str(row.get("plugins", "")))
-            )
-
-            self.dep_table.setItem(r, 3, QtWidgets.QTableWidgetItem("缺失"))
-
-    def _copy_dependency_install_cmd(self):
-        cmd = build_install_command(self.dep_rows)
-
-        if not cmd:
-            QtWidgets.QMessageBox.information(
-                self, "依赖体检", "当前没有需要安装的依赖。"
-            )
-
-            return
-
-        QtWidgets.QApplication.clipboard().setText(cmd)
-
-        self.dep_result.setPlainText(cmd)
-
-        QtWidgets.QMessageBox.information(self, "依赖体检", "安装命令已复制到剪贴板。")
-
-    def _install_missing_dependencies(self):
-        if not self.dep_rows:
-            QtWidgets.QMessageBox.information(
-                self, "依赖体检", "当前没有需要安装的依赖。"
-            )
-
-            return
-
-        reply = QtWidgets.QMessageBox.question(
-            self,
-            "依赖体检",
-            "将执行 pip 安装缺失依赖，是否继续？",
-            QtWidgets.QMessageBox.StandardButton.Yes
-            | QtWidgets.QMessageBox.StandardButton.No,
-        )
-
-        if reply != QtWidgets.QMessageBox.StandardButton.Yes:
-            return
-
-        QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.CursorShape.WaitCursor)
-
-        try:
-            result = install_missing(self.dep_rows, timeout=900)
-
-        finally:
-            QtWidgets.QApplication.restoreOverrideCursor()
-
-        ok = str(result.get("ok", "0")) == "1"
-
-        msg = str(result.get("message", ""))
-
-        self.dep_result.setPlainText(msg)
-
-        if ok:
-            QtWidgets.QMessageBox.information(self, "依赖体检", "依赖安装完成。")
-
-        else:
-            QtWidgets.QMessageBox.warning(
-                self, "依赖体检", "依赖安装失败，请查看输出日志。"
-            )
-
-        self._refresh_dependency_rows()
-
-    # ---------- Colors ----------
     def _init_color_page(self):
         page = QtWidgets.QWidget()
         layout = QtWidgets.QVBoxLayout(page)
-
-        tip = QtWidgets.QLabel(
-            "支持输入十六进制颜色（如 #1F2937）。保存后会自动应用到主界面与对话窗口。"
-        )
-        tip.setStyleSheet("color:#6B7280;")
-        tip.setWordWrap(True)
-        layout.addWidget(tip)
-
-        self._ui_color_inputs = {}
-        self._ui_color_labels = {}
-        self._ui_color_previews = {}
-
-        body = QtWidgets.QWidget()
-        body_layout = QtWidgets.QVBoxLayout(body)
-        body_layout.setContentsMargins(0, 0, 0, 0)
-        body_layout.setSpacing(12)
-
-        def add_group(title: str):
-            group = QtWidgets.QGroupBox(title)
-            form = QtWidgets.QFormLayout(group)
-            form.setLabelAlignment(QtCore.Qt.AlignmentFlag.AlignRight)
-            form.setFormAlignment(QtCore.Qt.AlignmentFlag.AlignTop)
-            form.setHorizontalSpacing(12)
-            form.setVerticalSpacing(10)
-            body_layout.addWidget(group)
-            return form
-
-        def add_color_row(form: QtWidgets.QFormLayout, label: str, key: str):
-            row = QtWidgets.QWidget()
-            h = QtWidgets.QHBoxLayout(row)
-            h.setContentsMargins(0, 0, 0, 0)
-            h.setSpacing(8)
-
-            inp = QtWidgets.QLineEdit()
-            inp.setPlaceholderText("#RRGGBB")
-            preview = QtWidgets.QLabel()
-            preview.setFixedSize(22, 22)
-            preview.setStyleSheet("border: 1px solid #D1D5DB; border-radius: 4px;")
-
-            btn = QtWidgets.QPushButton("选色")
-            btn.setFixedWidth(64)
-            btn.clicked.connect(
-                lambda checked=False, w=inp, p=preview: self._pick_color(w, p)
-            )
-            inp.textChanged.connect(
-                lambda text, p=preview: self._refresh_color_preview(p, text)
-            )
-
-            h.addWidget(inp, 1)
-            h.addWidget(preview)
-            h.addWidget(btn)
-            form.addRow(label + ":", row)
-
-            self._ui_color_inputs[key] = inp
-            self._ui_color_labels[key] = label
-            self._ui_color_previews[key] = preview
-
-        base_form = add_group("基础配色")
-        add_color_row(base_form, "主色", "accent")
-        add_color_row(base_form, "主色悬停", "accent_hover")
-        add_color_row(base_form, "主色浅背景", "accent_soft")
-        add_color_row(base_form, "应用背景", "bg_app")
-        add_color_row(base_form, "卡片背景", "bg_card")
-        add_color_row(base_form, "柔和背景", "bg_soft")
-        add_color_row(base_form, "边框", "border")
-        add_color_row(base_form, "强边框", "border_strong")
-        add_color_row(base_form, "主文本", "text_primary")
-        add_color_row(base_form, "次文本", "text_secondary")
-        add_color_row(base_form, "弱文本", "text_muted")
-        add_color_row(base_form, "成功", "success")
-        add_color_row(base_form, "成功浅色", "success_soft")
-        add_color_row(base_form, "警告", "warning")
-        add_color_row(base_form, "危险", "danger")
-
-        main_console_form = add_group("主控制台")
-        add_color_row(main_console_form, "背景", "console_main.bg")
-        add_color_row(main_console_form, "文字", "console_main.fg")
-        add_color_row(main_console_form, "边框", "console_main.border")
-        add_color_row(main_console_form, "选中背景", "console_main.selection_bg")
-        add_color_row(main_console_form, "选中文字", "console_main.selection_fg")
-        add_color_row(main_console_form, "弱文本", "console_main.muted")
-        add_color_row(main_console_form, "标签", "console_main.label")
-
-        codex_console_form = add_group("代码助手控制台")
-        add_color_row(codex_console_form, "背景", "console_codex.bg")
-        add_color_row(codex_console_form, "文字", "console_codex.fg")
-        add_color_row(codex_console_form, "边框", "console_codex.border")
-        add_color_row(codex_console_form, "选中背景", "console_codex.selection_bg")
-        add_color_row(codex_console_form, "选中文字", "console_codex.selection_fg")
-        add_color_row(codex_console_form, "弱文本", "console_codex.muted")
-        add_color_row(codex_console_form, "标签", "console_codex.label")
-
-        body_layout.addStretch()
-        layout.addWidget(body, 1)
-
-        theme_action_card = QtWidgets.QGroupBox("快速主题选择")
-        theme_action_layout = QtWidgets.QHBoxLayout(theme_action_card)
-        self.combo_theme = QtWidgets.QComboBox()
-        try:
-            from modules.gui.styles import THEMES, get_current_theme_name
-            for t in THEMES.keys():
-                self.combo_theme.addItem(t)
-            self.combo_theme.setCurrentText(get_current_theme_name())
-        except Exception:
-            pass
-        btn_apply_theme = QtWidgets.QPushButton("使用此主题覆盖所有自定义配色")
-        btn_apply_theme.setObjectName("primaryAction")
-        btn_apply_theme.clicked.connect(self._on_theme_apply_clicked)
-        theme_action_layout.addWidget(QtWidgets.QLabel("预设风格:"))
-        theme_action_layout.addWidget(self.combo_theme, 1)
-        theme_action_layout.addWidget(btn_apply_theme)
-        layout.addWidget(theme_action_card)
-        layout.addSpacing(8)
-
-        footer = QtWidgets.QHBoxLayout()
-        footer.addStretch()
-        btn_reset = QtWidgets.QPushButton("恢复默认")
-        btn_reset.clicked.connect(self._reset_color_settings)
-        btn_save = QtWidgets.QPushButton("保存并应用")
-        btn_save.setObjectName("primaryAction")
-        btn_save.clicked.connect(self._save_color_settings)
-        footer.addWidget(btn_reset)
-        footer.addWidget(btn_save)
-        layout.addLayout(footer)
-
-        self.stack.addWidget(self._wrap_in_scroll_area(page))
-        self._refresh_color_inputs()
-
-    def _on_theme_apply_clicked(self):
-        theme_name = self.combo_theme.currentText()
-        update_runtime_settings({
-            "theme_name": theme_name,
-            "ui_palette": None  # clear custom overrides to use pure theme dict
-        })
-        self._refresh_color_inputs()
-        self._apply_palette_now()
-
-    def _default_ui_palette(self):
-        try:
-            from modules.gui.styles import THEMES, get_current_theme_name
-            theme_name = get_current_theme_name()
-            if theme_name not in THEMES:
-                theme_name = list(THEMES.keys())[0]
-            base = dict(THEMES[theme_name])
-            palette = dict(base)
-            palette["console_main"] = {
-                "bg": base.get("console_bg", ""),
-                "fg": base.get("console_fg", ""),
-                "border": base.get("console_border", ""),
-                "selection_bg": base.get("console_selection_bg", ""),
-                "selection_fg": base.get("console_selection_fg", ""),
-            }
-            palette["console_codex"] = dict(palette["console_main"])
-            return palette
-        except Exception:
-            return {}
-
-    def _refresh_color_inputs(self):
-        palette = get_ui_palette()
-        for key, inp in self._ui_color_inputs.items():
-            value = self._get_palette_value(palette, key)
-            if value:
-                inp.setText(str(value))
-
-    @staticmethod
-    def _get_palette_value(palette: dict, key: str) -> str:
-        if "." not in key:
-            return str(palette.get(key, ""))
-        group, sub = key.split(".", 1)
-        group_map = palette.get(group, {})
-        if isinstance(group_map, dict):
-            return str(group_map.get(sub, ""))
-        return ""
-
-    @staticmethod
-    def _is_valid_color(value: str) -> bool:
-        return bool(re.match(r"^#[0-9a-fA-F]{6}([0-9a-fA-F]{2})?$", value or ""))
-
-    def _refresh_color_preview(self, preview: QtWidgets.QLabel, value: str):
-        color = value.strip()
-        if self._is_valid_color(color):
-            preview.setStyleSheet(
-                f"background: {color}; border: 1px solid #D1D5DB; border-radius: 4px;"
-            )
-        else:
-            preview.setStyleSheet("border: 1px solid #D1D5DB; border-radius: 4px;")
-
-    def _pick_color(self, inp: QtWidgets.QLineEdit, preview: QtWidgets.QLabel):
-        current = inp.text().strip()
-        if not self._is_valid_color(current):
-            current = "#FFFFFF"
-        color = QtGui.QColor(current)
-        chosen = QtWidgets.QColorDialog.getColor(color, self, "选择颜色")
-        if chosen.isValid():
-            inp.setText(chosen.name())
-            self._refresh_color_preview(preview, chosen.name())
-
-    def _collect_color_settings(self):
-        palette = {}
-        console_main = {}
-        console_codex = {}
-        for key, inp in self._ui_color_inputs.items():
-            value = inp.text().strip()
-            label = self._ui_color_labels.get(key, key)
-            if not self._is_valid_color(value):
-                QtWidgets.QMessageBox.warning(
-                    self, "颜色设置", f"{label} 的颜色值无效：{value}"
-                )
-                return None
-            if "." in key:
-                group, sub = key.split(".", 1)
-                if group == "console_main":
-                    console_main[sub] = value
-                elif group == "console_codex":
-                    console_codex[sub] = value
-            else:
-                palette[key] = value
-        if console_main:
-            palette["console_main"] = console_main
-        if console_codex:
-            palette["console_codex"] = console_codex
-        return palette
-
-    def _apply_palette_now(self):
-        if self.main_app is not None and hasattr(self.main_app, "apply_ui_palette"):
-            self.main_app.apply_ui_palette()
-        else:
-            self.setStyleSheet(get_settings_styles())
-
-    def _save_color_settings(self):
-        palette = self._collect_color_settings()
-        if not palette:
-            return
-        update_runtime_settings({"ui_palette": palette})
-        self._apply_palette_now()
-
-    def _reset_color_settings(self):
-        # Clear custom overrides to use theme's default settings
-        update_runtime_settings({"ui_palette": None})
-        self._refresh_color_inputs()
-        self._apply_palette_now()
+        layout.setContentsMargins(0, 0, 0, 0)
+        widget = ColorSettingsPage(main_app=self.main_app)
+        apply_embedded_mode(widget)
+        layout.addWidget(self._wrap_in_scroll_area(widget), 1)
+        self.stack.addWidget(page)
 
     # ---------- MCP / QQ ----------
 

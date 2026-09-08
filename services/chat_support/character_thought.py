@@ -310,7 +310,7 @@ def generate_character_thought(
     recent: Sequence[Any],
     user_text: str,
     just_switched_character: bool = False,
-    timeout_ms: int = 2500,
+    timeout_ms: int = 4000,
     max_tokens: int = 220,
     on_error: str = "skip_thought",
 ) -> tuple[Optional[CharacterThought], str, float]:
@@ -323,7 +323,7 @@ def generate_character_thought(
         user_text=user_text,
         just_switched_character=just_switched_character,
     )
-    timeout_s = max(0.2, float(timeout_ms or 2500) / 1000.0)
+    timeout_s = max(0.2, float(timeout_ms or 4000) / 1000.0)
     token_budget = max(1, int(max_tokens or 220))
 
     try:

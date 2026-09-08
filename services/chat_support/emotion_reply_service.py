@@ -3,6 +3,26 @@ from __future__ import annotations
 import asyncio
 from typing import Any, Callable, Optional
 
+# Labels the model may emit for Live2D / <emo=...> tags.
+LIVE2D_REPLY_EMO_TAGS = (
+    "happy",
+    "sad",
+    "angry",
+    "shy",
+    "flustered",
+    "confused",
+    "think",
+    "neutral",
+)
+
+
+def live2d_emo_tag_choices() -> str:
+    return "<emo=" + "|".join(LIVE2D_REPLY_EMO_TAGS) + ">"
+
+
+def live2d_emo_label_choices() -> str:
+    return "/".join(LIVE2D_REPLY_EMO_TAGS)
+
 
 class EmotionReplyService:
     def __init__(
@@ -109,7 +129,7 @@ class EmotionReplyService:
                         "content": (
                             "只判断下面这句适合哪个Live2D情绪标签。\n"
                             "只能输出一个英文标签，不要解释："
-                            "happy/sad/angry/shy/flustered/confused/think/neutral\n"
+                            f"{live2d_emo_label_choices()}\n"
                             f"场景：{scene}\n"
                             f"句子：{clean[:300]}"
                         ),

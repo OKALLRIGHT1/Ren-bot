@@ -47,6 +47,35 @@ class Plugin:
     name = "mode_preset"
     type = "react"
 
+    def get_tool_schema(self):
+        return {
+            "name": "mode_preset",
+            "description": "列出、查看或切换助手工作模式（companion/codex/quiet/eco）。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "enum": ["list", "status", "apply"],
+                    },
+                    "name": {
+                        "type": "string",
+                        "enum": ["companion", "codex", "quiet", "eco"],
+                        "description": "apply 时必填",
+                    },
+                },
+                "required": ["action"],
+            },
+        }
+
+    def format_invocation(self, arguments):
+        args = dict(arguments or {})
+        action = str(args.get("action") or "list").strip() or "list"
+        name = str(args.get("name") or "").strip()
+        if name:
+            return f"{action} ||| {name}"
+        return action
+
     async def run(self, args: str, ctx: Dict[str, Any]) -> str:
         parts = [x.strip() for x in (args or "").split("|||")]
         action = (parts[0].lower() if parts and parts[0] else "list")
@@ -105,10 +134,12 @@ class Plugin:
         except Exception:
             pass
 
-        chat_service = (ctx or {}).get("chat_service")
-        if chat_service and getattr(chat_service, "presenter", None):
+        from services.plugin_ports import resolve_tts
+
+        tts = resolve_tts(ctx)
+        if tts is not None:
             try:
-                chat_service.presenter.set_tts_enabled(bool(p["tts_enabled"]))
+                tts.set_enabled(bool(p["tts_enabled"]))
             except Exception:
                 pass
 

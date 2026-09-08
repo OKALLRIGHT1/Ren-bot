@@ -93,3 +93,96 @@ def test_gateway_event_scope_parts_reuse_session_key():
     }
     assert service.event_scope_parts(ctx) == ("qq", "group:100")
     assert service.conversation_session_key(ctx) == "group:100"
+
+
+def test_external_sender_context_empty_for_desktop():
+    service = _service()
+    assert service.build_external_sender_context({"source": "desktop"}) == ""
+
+
+def test_non_owner_qq_has_no_user_address():
+    service = _service()
+    ctx = {
+        "source": "napcat_qq",
+        "channel_meta": {
+            "is_owner": False,
+            "sender_name": "Other",
+            "user_id": "9",
+            "message_type": "private",
+        },
+    }
+    assert service.get_active_user_address(ctx) == ""
+    assert service.build_user_address_context(ctx) == ""
+    external = service.build_external_sender_context(ctx)
+    assert "The current sender is not" in external
+    assert "sender: Other" in external
+
+
+def test_owner_sender_context_uses_character_user_address():
+    service = _service()
+    ctx = {
+        "source": "napcat_qq",
+        "channel_meta": {
+            "is_owner": True,
+            "owner_label": "主人",
+            "sender_name": "ExampleUser",
+            "user_id": "10001",
+            "message_type": "private",
+        },
+    }
+    address = service.get_active_user_address(ctx)
+    assert address
+    assert f"当前角色称呼用户为「{address}」" in service.build_user_address_context(ctx)
+    external = service.build_external_sender_context(ctx)
+    assert f"The current sender is {address}." in external
+    assert "The current sender is 主人." not in external
+
+
+@pytest.mark.asyncio
+async def test_sync_qq_user_profile_writes_owner_payload():
+    written = []
+
+    class Store:
+        def upsert_qq_user_profile(self, payload):
+            written.append(payload)
+
+    service = GatewayContextService(
+        qq_remote_sources={"qq_gateway", "napcat_qq"},
+        owner_shared_session_id="owner_shared",
+        owner_shared_local_sources={"desktop"},
+        memory_store_getter=lambda: Store(),
+    )
+    await service.sync_qq_user_profile(
+        {
+            "source": "napcat_qq",
+            "channel_meta": {
+                "user_id": "10001",
+                "sender_name": "ExampleUser",
+                "is_owner": True,
+                "message_type": "private",
+                "sender": {"nickname": "ExampleUser", "remark": "主"},
+            },
+        }
+    )
+    assert written
+    assert written[0]["user_id"] == "10001"
+    assert written[0]["relationship_to_owner"] == "owner"
+    assert written[0]["memory_scope"] == "owner_shared"
+
+
+@pytest.mark.asyncio
+async def test_sync_qq_user_profile_skips_desktop():
+    written = []
+
+    class Store:
+        def upsert_qq_user_profile(self, payload):
+            written.append(payload)
+
+    service = GatewayContextService(
+        qq_remote_sources={"napcat_qq"},
+        owner_shared_session_id="owner_shared",
+        owner_shared_local_sources={"desktop"},
+        memory_store_getter=lambda: Store(),
+    )
+    await service.sync_qq_user_profile({"source": "desktop"})
+    assert written == []

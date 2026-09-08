@@ -1,13 +1,15 @@
 ﻿# Live2D-LLM 插件指南
 
-> 更新时间：2026-07-03  
+> 更新时间：2026-08-21  
 > 这份文档只保留当前仍有效的插件结构、权限规则和使用方式。
 
 ## 0. 维护说明
 
 - 当前插件以 `plugins/<plugin_name>/config.json + plugin.py` 为标准结构。
 - 插件配置优先在 GUI 的 `设置 -> 插件管理` 中编辑；敏感字段会按 `secret/api_key/token/password` 等字段名遮挡。
-- 新增插件时，先写清楚 `name/trigger/llm_command/aliases/description/type/access_control/settings`；需要自然语言触发时，优先补 `get_capabilities()`。
+- 新增插件时，先写清楚 `name/trigger/llm_command/aliases/description/type/access_control/settings`；需要自然语言触发时，优先补 `get_capabilities()`。希望进工具推理轮时再补 `get_tool_schema()`。
+- 插件禁止读 `ctx["chat_service"]`（主路径已不注入）。发 QQ 用 `ctx["gateway"]`（或 `resolve_gateway(ctx)`），TTS 用 `ctx["tts"]`，换角/点歌事件用 `ctx["app"]`，知识用 `ctx["knowledge"]`。运行时键：`plugin_manager` / `agent_runtime` / `mcp_bridge`。`brain` 仍在。
+- Skill（`skills/SKILL.md`）只是可选提示词注入，不是插件，也没有独立端口。不放 Skill 时插件工具仍然完整。需要执行能力时写 `plugins/`。
 - QQ 侧插件必须认真设置权限，默认不要允许非主人触发截图、文件、系统控制、代码执行等能力。
 
 ## 1. 当前结构
@@ -109,7 +111,6 @@ def _match_weather_now(self, text, ctx):
 - `open_app`：快速启动，本地直接打开应用
 - `system_monitor`：系统运维，查状态和部分系统控制
 - `workspace_ops`：工作区与文件助手
-- `code_executor`：代码执行器
 - `backup_manager`：备份恢复
 - `music_player`：音乐播放器
 
@@ -266,6 +267,7 @@ def _match_weather_now(self, text, ctx):
 ### 示例
 
 - `/提醒 每周1到周5 17:20 提醒我打卡`
+- `关闭打卡提醒` / `提醒列表`（QQ 私聊，不必先打 `/`）
 - `/提醒 工作日 五点二十 提醒我打卡`
 - `/提醒列表`
 - `/提醒删除 1`
@@ -406,8 +408,6 @@ def _match_weather_now(self, text, ctx):
 
 - `MCP_QQ_SETUP_GUIDE.md`：NapCat / QQ / MCP 的接入与使用
 - `PROJECT_STATUS.md`：当前主干状态、近期改动和下一步边界
-- `docs/TROUBLESHOOTING.md`：常见问题排查
-- `docs/SECURITY_REMEDIATION_PLAN.md`：当前安全边界和验证方式
 
 ## 17. mcp_tools 路由配置（2026-03-08）
 

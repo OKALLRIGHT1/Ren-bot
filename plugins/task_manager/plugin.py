@@ -18,19 +18,67 @@ from datetime import datetime as dt, timezone, timedelta
 import dateparser  # 确保安装: pip install dateparser
 
 from core.logger import get_logger
+from modules.plugin_scheduler import PeriodicTask
 from plugins.plugin_utils import handle_plugin_errors
 
 logger = get_logger()
 
 
 class Plugin:
+    def get_tool_schema(self):
+        return {
+            "name": "task_manager",
+            "description": "任务与待办：添加、列表、完成、删除、今日日程、逾期/紧急检查。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "enum": [
+                            "add_task",
+                            "list_tasks",
+                            "complete_task",
+                            "delete_task",
+                            "today_schedule",
+                            "check_tasks",
+                            "check_overdue",
+                            "check_urgent",
+                            "daily_summary",
+                            "suggest",
+                        ],
+                    },
+                    "query": {
+                        "type": "string",
+                        "description": "任务内容、筛选或任务 id",
+                    },
+                },
+                "required": ["action"],
+            },
+        }
+
+    def format_invocation(self, arguments):
+        args = dict(arguments or {})
+        action = str(args.get("action") or "list_tasks").strip() or "list_tasks"
+        query = str(args.get("query") or args.get("content") or "").strip()
+        if query:
+            return f"{action} {query}"
+        return action
+
     def __init__(self):
         self.db_path = os.path.join(os.path.dirname(__file__), "../../userdata.db")
         self._running = False
         self._check_interval = 300
-        self._check_task = None
         self._last_urgent_signature = ""
         self._last_urgent_present = False
+        # tick_first=False：保留原行为「先睡一个间隔再首次巡检」
+        self._loop = PeriodicTask(
+            self._check_urgent_once,
+            interval=lambda: self._check_interval,
+            error_backoff=60.0,
+            tick_first=False,
+            should_continue=lambda: self._running,
+            name="task_manager",
+        )
         self._suggestions = [
             "记得多喝水哦 💧",
             "站起来活动一下身体吧 🏃",
@@ -126,7 +174,7 @@ class Plugin:
         if self._running:
             return "✅ 任务后台检查已在运行中"
         self._running = True
-        self._check_task = asyncio.create_task(self._background_check_loop())
+        await self._loop.start()
         logger.info("📋 任务后台检查已启动")
         return f"✅ 已启动任务后台检查\n每{self._check_interval}秒巡检一次任务状态"
 
@@ -134,12 +182,7 @@ class Plugin:
         if not self._running:
             return "任务后台检查未运行"
         self._running = False
-        if self._check_task and not self._check_task.done():
-            self._check_task.cancel()
-            try:
-                await self._check_task
-            except asyncio.CancelledError:
-                pass
+        await self._loop.stop()
         logger.info("📋 任务后台检查已停止")
         return "已停止任务后台检查"
 
@@ -147,26 +190,17 @@ class Plugin:
         status = "运行中" if self._running else "未运行"
         return f"任务后台检查状态：{status}\n检查间隔：{self._check_interval}秒"
 
-    async def _background_check_loop(self):
-        while self._running:
-            try:
-                await asyncio.sleep(self._check_interval)
-                if not self._running:
-                    break
-                result = await self._check_urgent()
-                is_urgent = self._is_urgent_result(result)
-                signature = result.strip() if is_urgent else ""
-                if is_urgent and (not self._last_urgent_present or signature != self._last_urgent_signature):
-                    logger.info("🔔 检测到紧急任务")
-                elif self._last_urgent_present and not is_urgent:
-                    logger.info("✅ 紧急任务已清空")
-                self._last_urgent_present = is_urgent
-                self._last_urgent_signature = signature
-            except asyncio.CancelledError:
-                break
-            except Exception as e:
-                logger.error(f"任务后台检查失败: {e}")
-                await asyncio.sleep(60)
+    async def _check_urgent_once(self):
+        """巡检一次紧急任务并记录状态变化。循环/睡眠/退避由 PeriodicTask 负责。"""
+        result = await self._check_urgent()
+        is_urgent = self._is_urgent_result(result)
+        signature = result.strip() if is_urgent else ""
+        if is_urgent and (not self._last_urgent_present or signature != self._last_urgent_signature):
+            logger.info("🔔 检测到紧急任务")
+        elif self._last_urgent_present and not is_urgent:
+            logger.info("✅ 紧急任务已清空")
+        self._last_urgent_present = is_urgent
+        self._last_urgent_signature = signature
 
     def _is_urgent_result(self, result: str) -> bool:
         text = str(result or "").strip()
@@ -603,6 +637,11 @@ class Plugin:
             return f"检查逾期任务失败: {e}"
 
     async def _check_urgent(self) -> str:
+        # 后台循环每 _check_interval 秒调用一次；sqlite 是阻塞调用，
+        # 必须放线程池，否则会卡住事件循环（GUI 与对话一起卡）。
+        return await asyncio.to_thread(self._check_urgent_sync)
+
+    def _check_urgent_sync(self) -> str:
         try:
             with sqlite3.connect(self.db_path) as conn:
                 conn.row_factory = sqlite3.Row

@@ -4,11 +4,9 @@ from typing import Any, Callable, Dict, Iterable, List
 
 
 RISK_FLAGS_BY_TRIGGER: Dict[str, List[str]] = {
-    "_claw_email": ["mail"],
     "agently_mail": ["mail"],
     "app_control": ["process_control"],
     "code_agent": ["process_control", "code_or_skill"],
-    "code_executor": ["process_control"],
     "info_gateway": ["paid_api"],
     "mcp_tools": ["code_or_skill"],
     "qq_draw": ["paid_api"],

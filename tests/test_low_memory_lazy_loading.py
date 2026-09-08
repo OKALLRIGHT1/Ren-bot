@@ -14,7 +14,7 @@ class _Logger:
 def test_voice_sensor_disabled_does_not_import_voice_module(monkeypatch):
     import core.application as app_module
 
-    sys.modules.pop("modules.voice_sensor", None)
+    sys.modules.pop("modules.asr.adapter", None)
     monkeypatch.setattr(app_module.config, "VOICE_SENSOR_ENABLED", False, raising=False)
 
     app = app_module.Live2DApplication()
@@ -23,24 +23,30 @@ def test_voice_sensor_disabled_does_not_import_voice_module(monkeypatch):
     app._init_voice_sensor_if_configured()
 
     assert app.voice_sensor is None
-    assert "modules.voice_sensor" not in sys.modules
+    assert "modules.asr.adapter" not in sys.modules
 
 
 def test_voice_sensor_enabled_imports_and_creates_sensor(monkeypatch):
     import core.application as app_module
 
     created = {}
-    fake_module = types.ModuleType("modules.voice_sensor")
+    fake_sensor = types.ModuleType("modules.asr.adapter")
 
     class FakeVoiceSensor:
-        def __init__(self, chat_service, event_bus, config_path):
-            created["args"] = (chat_service, event_bus, config_path)
+        def __init__(self, *args, **kwargs):
+            created["args"] = args
+            created["kwargs"] = kwargs
             self.running = False
 
-    fake_module.VoiceSensor = FakeVoiceSensor
-    monkeypatch.setitem(sys.modules, "modules.voice_sensor", fake_module)
+    def _fake_build_voice_sensor(chat_service):
+        created["chat_service"] = chat_service
+        sensor = FakeVoiceSensor()
+        created["sensor"] = sensor
+        return sensor
+
+    fake_sensor.build_voice_sensor = _fake_build_voice_sensor
+    monkeypatch.setitem(sys.modules, "modules.asr.adapter", fake_sensor)
     monkeypatch.setattr(app_module.config, "VOICE_SENSOR_ENABLED", True, raising=False)
-    monkeypatch.setattr(app_module.config, "SHERPA_MODEL_CONFIG", {"tokens": "fake"}, raising=False)
 
     app = app_module.Live2DApplication()
     app.logger = _Logger()
@@ -49,9 +55,7 @@ def test_voice_sensor_enabled_imports_and_creates_sensor(monkeypatch):
     app._init_voice_sensor_if_configured()
 
     assert isinstance(app.voice_sensor, FakeVoiceSensor)
-    assert created["args"][0] is app.chat_service
-    assert created["args"][1] is app.event_bus
-    assert created["args"][2] == {"tokens": "fake"}
+    assert created["chat_service"] is app.chat_service
 
 
 def test_vision_capture_import_does_not_import_cv2(monkeypatch):

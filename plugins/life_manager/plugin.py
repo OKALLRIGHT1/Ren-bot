@@ -5,6 +5,7 @@ import asyncio
 import shutil
 import dateparser  # 确保安装: pip install dateparser
 from core.logger import get_logger
+from modules.plugin_scheduler import PeriodicTask
 from plugins.plugin_utils import handle_plugin_errors, async_io_operation, safe_get_context
 
 logger = get_logger()
@@ -19,8 +20,14 @@ class Plugin:
         self._init_db()
         # 存储 send_bubble 的引用，供后台任务使用
         self._send_bubble = None
-        self._check_task = None
         self._stopping = False
+        # 错误退避留空 = 回退到 interval，与原实现「记日志后照常睡 10 秒」等价
+        self._loop = PeriodicTask(
+            self._check_due_reminders_once,
+            interval=10,
+            should_continue=lambda: not self._stopping,
+            name="life_manager",
+        )
 
     def _migrate_legacy_db_if_needed(self):
         """兼容旧版本数据库路径，避免提醒/账单历史丢失。"""
@@ -61,79 +68,60 @@ class Plugin:
 
     async def start(self):
         """插件加载时启动后台轮询"""
-        if self._check_task and not self._check_task.done():
+        if self._loop.running:
             return
         self._stopping = False
         logger.info("生活管家后台提醒服务已启动")
-        self._check_task = asyncio.create_task(self._check_reminders_loop())
+        await self._loop.start()
 
     async def stop(self):
         """停止后台提醒轮询，避免程序关闭后继续提交线程池任务。"""
         self._stopping = True
-        task = self._check_task
-        self._check_task = None
-        if task and not task.done():
-            task.cancel()
+        await self._loop.stop()
+
+    async def _check_due_reminders_once(self):
+        """扫一遍到期提醒并推送。循环/睡眠/退避由 PeriodicTask 负责。"""
+        now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+
+        # 数据库查询放到线程池，防止卡顿
+        def _query_due():
             try:
-                await task
-            except asyncio.CancelledError:
-                pass
-
-    async def _check_reminders_loop(self):
-        """后台检查提醒的循环"""
-        while not self._stopping:
-            try:
-                now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
-
-                # 数据库查询放到线程池，防止卡顿
-                def _query_due():
-                    try:
-                        with sqlite3.connect(self.db_path) as conn:
-                            cur = conn.cursor()
-                            cur.execute("SELECT id, content FROM reminders WHERE trigger_time <= ? AND status = 0",
-                                        (now_str,))
-                            return cur.fetchall()
-                    except Exception as e:
-                        logger.error(f"查询提醒失败: {e}")
-                        return []
-
-                rows = await asyncio.to_thread(_query_due)
-
-                if rows:
-                    def _mark_done(ids):
-                        try:
-                            with sqlite3.connect(self.db_path) as conn:
-                                for rid in ids:
-                                    conn.execute("UPDATE reminders SET status = 1 WHERE id = ?", (rid,))
-                        except Exception as e:
-                            logger.error(f"标记提醒失败: {e}")
-
-                    # 标记为已读
-                    await asyncio.to_thread(_mark_done, [r[0] for r in rows])
-
-                    for _, content in rows:
-                        logger.info(f"提醒触发: {content}")
-                        
-                        # 如果有 send_bubble 引用则发送气泡
-                        if self._send_bubble:
-                            try:
-                                await self._send_bubble(f"🔔 提醒时间到！\n{content}")
-                            except Exception as e:
-                                logger.error(f"发送提醒气泡失败: {e}")
-                        else:
-                            # 降级到 print
-                            print(f"🔔 提醒时间到！\n{content}")
-
+                with sqlite3.connect(self.db_path) as conn:
+                    cur = conn.cursor()
+                    cur.execute("SELECT id, content FROM reminders WHERE trigger_time <= ? AND status = 0",
+                                (now_str,))
+                    return cur.fetchall()
             except Exception as e:
-                if isinstance(e, RuntimeError) and "after shutdown" in str(e):
-                    logger.info("生活管家后台提醒服务随主程序关闭退出")
-                    break
-                logger.error(f"生活管家循环错误: {e}")
+                logger.error(f"查询提醒失败: {e}")
+                return []
 
+        rows = await asyncio.to_thread(_query_due)
+        if not rows:
+            return
+
+        def _mark_done(ids):
             try:
-                await asyncio.sleep(10)  # 每10秒检查一次
-            except asyncio.CancelledError:
-                break
+                with sqlite3.connect(self.db_path) as conn:
+                    for rid in ids:
+                        conn.execute("UPDATE reminders SET status = 1 WHERE id = ?", (rid,))
+            except Exception as e:
+                logger.error(f"标记提醒失败: {e}")
+
+        # 标记为已读
+        await asyncio.to_thread(_mark_done, [r[0] for r in rows])
+
+        for _, content in rows:
+            logger.info(f"提醒触发: {content}")
+
+            # 如果有 send_bubble 引用则发送气泡
+            if self._send_bubble:
+                try:
+                    await self._send_bubble(f"🔔 提醒时间到！\n{content}")
+                except Exception as e:
+                    logger.error(f"发送提醒气泡失败: {e}")
+            else:
+                # 降级到 print
+                print(f"🔔 提醒时间到！\n{content}")
 
     @handle_plugin_errors("生活管家")
     async def run(self, args, ctx):

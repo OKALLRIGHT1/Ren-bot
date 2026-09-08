@@ -278,7 +278,6 @@ class Plugin:
     async def maybe_send_auto_meme(
         self,
         *,
-        chat_service: Any,
         user_text: str,
         reply_text: str,
         emotion: str = "neutral",
@@ -301,7 +300,12 @@ class Plugin:
         session_id = selection["session_id"]
         now = selection["now"]
         reason = selection["reason"]
-        ok = await chat_service._send_gateway_image_reply(asset.file_path, ctx, caption="")
+        from services.plugin_ports import resolve_gateway
+
+        gateway = resolve_gateway(ctx)
+        if gateway is None:
+            return False
+        ok = await gateway.send_image(asset.file_path, ctx, caption="")
         if ok:
             self._last_auto_sent[session_id] = now
             self._store_obj().mark_used(

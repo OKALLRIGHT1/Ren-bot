@@ -15,6 +15,7 @@ __pycache__/
 .venv/
 venv/
 env/
+.suzu-ready
 
 # =========================
 # Node.js

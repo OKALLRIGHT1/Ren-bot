@@ -13,11 +13,14 @@ opencv-python
 paho-mqtt
 Pillow
 psutil
+pypinyin
+pynput
 pyautogui
 PySide6
 python-dotenv
 requests
 sounddevice
+sherpa-onnx>=1.12.34
 websockets
 
 # Optional plugins / Windows integrations

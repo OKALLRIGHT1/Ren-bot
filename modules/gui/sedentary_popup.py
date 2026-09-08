@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
@@ -8,6 +9,14 @@ from typing import Any, Optional
 DEFAULT_SEDENTARY_POPUP_MESSAGE = (
     "已经连续使用 {app_name} {active_minutes} 分钟了，起来活动一下吧。"
 )
+MAX_POPUP_IMAGE_BYTES = 1_500_000
+SEDENTARY_POPUP_IMAGE_MIMES = {
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".gif": "image/gif",
+    ".webp": "image/webp",
+}
 
 
 @dataclass(frozen=True)
@@ -44,6 +53,94 @@ def _safe_int(value: Any, default: int, minimum: int) -> int:
     except Exception:
         parsed = default
     return max(minimum, parsed)
+
+
+def _guess_image_mime(path: Path, payload: bytes) -> Optional[str]:
+    mime = SEDENTARY_POPUP_IMAGE_MIMES.get(path.suffix.lower())
+    if mime:
+        return mime
+    if payload.startswith(b"\x89PNG"):
+        return "image/png"
+    if payload.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if payload.startswith((b"GIF87a", b"GIF89a")):
+        return "image/gif"
+    if payload.startswith(b"RIFF") and payload[8:12] == b"WEBP":
+        return "image/webp"
+    return None
+
+
+def image_to_data_url(
+    path_value: Any, *, max_bytes: int = MAX_POPUP_IMAGE_BYTES
+) -> str:
+    resolved = _resolve_existing_image(path_value)
+    if not resolved:
+        return ""
+    path = Path(resolved)
+    try:
+        payload = path.read_bytes()
+    except OSError:
+        return ""
+    if not payload or len(payload) > max(1, int(max_bytes)):
+        return ""
+    mime = _guess_image_mime(path, payload)
+    if not mime:
+        return ""
+    encoded = base64.b64encode(payload).decode("ascii")
+    return f"data:{mime};base64,{encoded}"
+
+
+def build_frontend_show_payload(
+    options: SedentaryPopupOptions,
+    *,
+    app_name: str,
+    active_minutes: int,
+) -> dict[str, Any]:
+    image_data_url = image_to_data_url(options.image_path) if options.image_path else ""
+    return {
+        "type": "sedentary_popup",
+        "action": "show",
+        "title": str(options.title or "久坐提醒"),
+        "message": str(options.message or ""),
+        # Never hand a server filesystem path to the desktop client.
+        "image_path": "",
+        "image_data_url": image_data_url,
+        "snooze_minutes": int(options.snooze_minutes),
+        "auto_close_seconds": int(options.auto_close_seconds),
+        "app_name": str(app_name or "电脑"),
+        "active_minutes": max(0, int(active_minutes or 0)),
+    }
+
+
+def route_sedentary_popup(
+    options: SedentaryPopupOptions,
+    *,
+    app_name: str,
+    active_minutes: int,
+    has_live2d_client: bool,
+    emit_frontend: Any = None,
+    show_qt: Any = None,
+    on_result: Any = None,
+) -> str:
+    if not options.enabled:
+        if callable(on_result):
+            on_result("disabled")
+        return "disabled"
+    if has_live2d_client and callable(emit_frontend):
+        emit_frontend(
+            build_frontend_show_payload(
+                options,
+                app_name=app_name,
+                active_minutes=active_minutes,
+            )
+        )
+        return "frontend"
+    if callable(show_qt):
+        show_qt()
+        return "qt"
+    if callable(on_result):
+        on_result("dismiss")
+    return "dismiss"
 
 
 def build_sedentary_popup_options(

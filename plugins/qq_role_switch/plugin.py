@@ -2,19 +2,6 @@ from modules.character_manager import character_manager
 
 
 class Plugin:
-    def _get_app_ref(self, chat_service):
-        if chat_service is None:
-            return None
-        app_ref = getattr(chat_service, "app", None)
-        if app_ref is not None:
-            return app_ref
-        try:
-            import __main__
-
-            return getattr(__main__, "app_instance", None)
-        except Exception:
-            return None
-
     def should_handle_direct(
         self, user_text: str, context: dict, matched_alias: str
     ) -> bool:
@@ -61,30 +48,20 @@ class Plugin:
         if not target_id:
             return f"未找到角色：{role_name}\n\n{self._list_roles()}"
 
-        chat_service = (ctx or {}).get("chat_service")
-        if chat_service is not None:
-            app_ref = self._get_app_ref(chat_service)
+        from services.plugin_ports import resolve_app
+
+        app = resolve_app(ctx)
+        if app is not None:
             try:
+                app_ref = app.get_app() if hasattr(app, "get_app") else None
                 print(
                     f"[QQRoleSwitch] app_ref={type(app_ref).__name__ if app_ref else 'None'} target_id={target_id}"
                 )
-                if app_ref and hasattr(app_ref, "switch_character_runtime"):
-                    app_ref.switch_character_runtime(target_id)
-                else:
+                if not app.switch_character(target_id):
                     character_manager.set_active_character(target_id)
-                if app_ref and hasattr(app_ref, "event_bus") and app_ref.event_bus:
-                    try:
-                        import asyncio
-
-                        asyncio.run_coroutine_threadsafe(
-                            app_ref.event_bus.emit(
-                                "ui.status",
-                                text=f"角色已切换：{str((target_data or {}).get('name') or role_name)}",
-                            ),
-                            app_ref.loop,
-                        )
-                    except Exception:
-                        pass
+                app.emit_status(
+                    f"角色已切换：{str((target_data or {}).get('name') or role_name)}"
+                )
             except Exception:
                 pass
         else:

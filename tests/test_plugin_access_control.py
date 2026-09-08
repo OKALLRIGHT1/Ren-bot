@@ -302,3 +302,79 @@ async def test_group_qq_plugin_can_opt_into_no_mention_trigger():
     assert handled is True
     assert result == "tool-ok"
     assert len(plugin.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_execute_invocations_uses_same_access_denial_as_commands():
+    plugin = _Plugin(
+        {
+            "allow_local": False,
+            "allow_remote_qq": True,
+            "allow_qq_owner": True,
+            "allow_qq_others": False,
+        }
+    )
+    manager = _manager_with(plugin)
+
+    triggered, clean, outputs, used = await manager.execute_invocations(
+        [{"id": "c1", "name": "access_tool", "arguments": {"query": "now"}}],
+        _qq_ctx(owner=False),
+        allowed_types={"react"},
+    )
+
+    assert triggered is True
+    assert used == []
+    assert plugin.calls == []
+    assert "不允许" in outputs[0]
+
+
+@pytest.mark.asyncio
+async def test_execute_invocations_runs_allowed_plugin():
+    plugin = _Plugin(
+        {
+            "allow_local": True,
+            "allow_remote_qq": False,
+            "allow_qq_owner": False,
+            "allow_qq_others": False,
+        }
+    )
+    manager = _manager_with(plugin)
+    triggered, clean, outputs, used = await manager.execute_invocations(
+        [{"id": "c1", "name": "access_tool", "arguments": {"query": "now"}}],
+        _local_ctx(),
+        allowed_types={"react"},
+    )
+    assert triggered is True
+    assert used == ["access_tool"]
+    assert outputs == ["tool-ok"]
+    assert plugin.calls[0][0] == "now"
+
+
+@pytest.mark.asyncio
+async def test_execute_invocations_skips_missing_required_schema_fields():
+    plugin = _Plugin(
+        {
+            "allow_local": True,
+            "allow_remote_qq": False,
+            "allow_qq_owner": False,
+            "allow_qq_others": False,
+        }
+    )
+    plugin.get_tool_schema = lambda: {
+        "name": "access_tool",
+        "parameters": {
+            "type": "object",
+            "properties": {"city": {"type": "string"}},
+            "required": ["city"],
+        },
+    }
+    manager = _manager_with(plugin)
+    triggered, clean, outputs, used = await manager.execute_invocations(
+        [{"id": "c1", "name": "access_tool", "arguments": {"query": "now"}}],
+        _local_ctx(),
+        allowed_types={"react"},
+    )
+    assert triggered is True
+    assert plugin.calls == []
+    assert "缺少必填参数" in outputs[0]
+    assert "city" in outputs[0]

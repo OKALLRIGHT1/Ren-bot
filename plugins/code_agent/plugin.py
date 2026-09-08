@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Optional, Tuple
 
 from modules.code_agent import CodeAgentRequest, discover_agent_command, run_code_agent
+from modules.security_redaction import redact_sensitive_text
 from services.capability_manager import ToolCapability, ToolCapabilityMatch
 
 
@@ -68,12 +69,18 @@ class Plugin:
             return False
         if raw.lower().startswith(("code_agent ", "code_agent\n")):
             return True
+        if re.search(
+            r"(画图|画画|画一张|绘图|生图|生成图|生成图片|图片生成|发图)",
+            raw,
+            flags=re.IGNORECASE,
+        ):
+            return False  # 画图归 qq_draw，不委托代码代理
         provider, _ = self._detect_provider(raw)
         if not provider:
             return False
         return bool(
             re.search(
-                r"(分析|检查|查看|看一下|看看|读一下|审查|排查|修复|修改|重构|改一下|处理|接手|帮我|画|画图|绘图|生图|生成图片)",
+                r"(分析|检查|查看|看一下|看看|读一下|审查|排查|修复|修改|重构|改一下|处理|接手|帮我)",
                 raw,
                 flags=re.IGNORECASE,
             )
@@ -229,15 +236,6 @@ class Plugin:
             )
         )
 
-    def _looks_like_image_generation(self, text: str) -> bool:
-        return bool(
-            re.search(
-                r"(画图|画画|画一张|绘图|生图|生成图|生成图片|图片生成|发图)",
-                str(text or ""),
-                flags=re.IGNORECASE,
-            )
-        )
-
     def _extract_cwd(self, text: str) -> str:
         match = re.search(r"([A-Za-z]:\\[^\s，。]+|[./][^\s，。]+)", str(text or ""))
         return match.group(1).strip() if match else ""
@@ -289,9 +287,9 @@ class Plugin:
         if command_preview:
             lines.append(f"命令: {command_preview}")
         if stdout:
-            lines.append(stdout)
+            lines.append(redact_sensitive_text(stdout))
         if stderr:
-            lines.append("stderr:\n" + stderr)
+            lines.append("stderr:\n" + redact_sensitive_text(stderr))
         return "\n".join(lines)
 
     def _status_text(self) -> str:

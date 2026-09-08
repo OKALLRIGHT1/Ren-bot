@@ -72,7 +72,7 @@ class Plugin:
         self._cli_runner = cli_runner or self._run_cli
         self._intent_resolver = intent_resolver or self._resolve_intent_with_llm
         self._persona_resolver = persona_resolver
-        self._chat_service = None
+        self._gateway = None
         self._notify_task: Optional[asyncio.Task] = None
         self._seen_ids: set[str] = set()
         self._seen_loaded = False
@@ -108,9 +108,11 @@ class Plugin:
     def _capture_context(self, ctx: Optional[Dict[str, Any]]):
         if not isinstance(ctx, dict):
             return
-        chat_service = ctx.get("chat_service")
-        if chat_service is not None:
-            self._chat_service = chat_service
+        from services.plugin_ports import resolve_gateway
+
+        gateway = resolve_gateway(ctx)
+        if gateway is not None:
+            self._gateway = gateway
 
     async def _ensure_notifier(self):
         if self._notify_task and not self._notify_task.done():
@@ -304,8 +306,9 @@ class Plugin:
         if not targets:
             logger.warning("Agent Mail 新邮件通知已启用，但未配置 notification_target_sessions")
             return
-        if self._chat_service is None or not getattr(self._chat_service, "chat_gateway", None):
-            logger.warning("Agent Mail 通知缺少 chat_service/chat_gateway，跳过本次推送")
+        gateway = self._gateway
+        if gateway is None or not gateway.available():
+            logger.warning("Agent Mail 通知缺少 gateway，跳过本次推送")
             return
 
         message_id = str(list_item.get("message_id") or "").strip()
@@ -334,24 +337,22 @@ class Plugin:
                 },
             }
             try:
-                await self._chat_service._send_gateway_reply(
-                    summary, ctx, emotion="happy"
-                )
+                await gateway.send_text(summary, ctx, emotion="happy")
             except Exception as exc:
                 logger.warning("推送邮件摘要到 %s 失败: %s", session_id, exc)
                 continue
             try:
-                send_image = getattr(self._chat_service, "_send_gateway_image_reply", None)
-                if callable(send_image):
-                    await send_image(image_path, ctx, caption="")
-                else:
-                    await self._chat_service._send_gateway_reply(
+                await gateway.send_image(image_path, ctx, caption="")
+            except Exception as exc:
+                logger.warning("推送邮件正文图片到 %s 失败: %s", session_id, exc)
+                try:
+                    await gateway.send_text(
                         self._format_read({"ok": True, "data": mail}),
                         ctx,
                         emotion="neutral",
                     )
-            except Exception as exc:
-                logger.warning("推送邮件正文图片到 %s 失败: %s", session_id, exc)
+                except Exception:
+                    pass
 
         try:
             if image_path and Path(image_path).exists():
@@ -588,9 +589,10 @@ class Plugin:
             return True
         mail_intent_patterns = (
             r"最近.*(?:邮件|邮箱|收件箱)",
-            r"(?:收到了哪些|有哪些).*邮件",
-            r"(?:查|看|打开|读|搜索|搜|查找).*(?:邮件|邮箱|收件箱)",
-            r"(?:邮件|邮箱|收件箱).*(?:列表|账号|授权|状态)",
+            r"(?:收到了哪些|有哪些|有没有|有无|有么|有吗).*(?:邮件|邮箱|收件箱|未读)",
+            r"(?:查|看|打开|读|搜索|搜|查找|帮我|给我|替我).*(?:邮件|邮箱|收件箱)",
+            r"(?:邮件|邮箱|收件箱).*(?:列表|账号|授权|状态|吗|呢|呀|怎么样|怎样|如何)",
+            r"(?:新邮件|未读邮件)",
             r"(?:发|发送|回|回复|转发|删除)邮件",
             r"发一封.*邮件.*(?:到|给)[A-Za-z0-9_.+\-]+@[A-Za-z0-9\-]+(?:\.[A-Za-z0-9\-]+)+",
             r"(?:给|到)?[A-Za-z0-9_.+\-]+@[A-Za-z0-9\-]+(?:\.[A-Za-z0-9\-]+)+.*(?:邮箱|邮件).*(?:发|发送)",
@@ -1062,7 +1064,19 @@ class Plugin:
                     "limit": self._extract_limit(raw),
                 },
             )
-        if any(word in raw for word in ("最近", "收到了哪些", "收件箱", "查邮件", "邮件列表")):
+        if any(
+            word in raw
+            for word in (
+                "最近",
+                "收到了哪些",
+                "收件箱",
+                "查邮件",
+                "邮件列表",
+                "有没有",
+                "未读",
+                "新邮件",
+            )
+        ):
             return MailIntent("list", {"limit": self._extract_limit(raw)})
         if any(word in lowered for word in ("list", "inbox")):
             return MailIntent("list", {"limit": self._extract_limit(raw)})

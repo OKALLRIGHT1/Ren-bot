@@ -56,7 +56,7 @@ def test_sync_skips_cooled_model_and_uses_backup(monkeypatch, clear_cooldowns):
             return FakeResponse()
 
     class FakeOpenAI:
-        def __init__(self, *, api_key, base_url):
+        def __init__(self, *, api_key, base_url, **_kwargs):
             self.chat = type(
                 "Chat",
                 (),
@@ -123,7 +123,7 @@ def test_sync_forwards_max_tokens(monkeypatch):
             return FakeResponse()
 
     class FakeOpenAI:
-        def __init__(self, *, api_key, base_url):
+        def __init__(self, *, api_key, base_url, **_kwargs):
             self.chat = type("Chat", (), {"completions": FakeCompletions()})()
 
     monkeypatch.setattr(llm, "OpenAI", FakeOpenAI)
@@ -197,6 +197,43 @@ def test_blocked_error_starts_model_cooldown():
     remaining = llm._model_cooldown_remaining("grok", now=1000.0)
     assert remaining == llm._BLOCKED_MODEL_COOLDOWN_SECONDS
     assert llm._MODEL_COOLDOWNS["grok"]["reason"] == "blocked"
+
+
+def test_blocked_single_transport_does_not_cool_model():
+    delay = llm._start_model_cooldown(
+        "grok",
+        RuntimeError("Your request was blocked."),
+        now=1000.0,
+        all_transports_failed=False,
+    )
+    assert delay is None
+    assert "grok" not in llm._MODEL_COOLDOWNS
+
+
+def test_drop_sdk_fingerprint_headers_strips_stainless():
+    class Headers(dict):
+        def keys(self):
+            return list(super().keys())
+
+    request = type(
+        "Req",
+        (),
+        {
+            "headers": Headers(
+                {
+                    "Authorization": "Bearer x",
+                    "X-Stainless-Lang": "python",
+                    "x-stainless-runtime": "CPython",
+                    "User-Agent": "OpenAI/Python",
+                }
+            )
+        },
+    )()
+    llm._drop_sdk_fingerprint_headers(request)
+    names = {str(key).lower() for key in request.headers}
+    assert "x-stainless-lang" not in names
+    assert "x-stainless-runtime" not in names
+    assert "authorization" in names
 
 
 def test_single_transport_timeout_does_not_cool_model():

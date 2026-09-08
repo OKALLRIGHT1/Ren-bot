@@ -35,3 +35,16 @@ def test_extract_emo_tag_removes_matching_open_and_close_tags() -> None:
 
     assert emotion == "think"
     assert text == "我查一下……"
+
+
+def test_extract_emo_tag_strips_think_blocks() -> None:
+    service = _make_service()
+
+    emotion, text = service.extract_emo_tag(
+        "<think>去年这时候好像更热</think>\n<emo=think>今天大概二十度"
+    )
+
+    assert emotion == "think"
+    assert text == "今天大概二十度"
+    assert "<think>" not in text
+    assert "去年" not in text

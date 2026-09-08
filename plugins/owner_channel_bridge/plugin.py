@@ -116,10 +116,7 @@ class Plugin:
         store = getattr(assembler, "store", None)
         if store is not None:
             return store
-        # Lazy attach if ChatService put service on brain/app later.
-        chat = (ctx or {}).get("chat_service")
-        service = getattr(chat, "conversation_event_service", None)
-        return getattr(service, "store", None)
+        return None
 
     def _owner_ids(self, ctx: Dict[str, Any]) -> tuple[str, str]:
         persona = str(

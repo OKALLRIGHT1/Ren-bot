@@ -20,6 +20,34 @@ logger = get_logger()
 
 
 class Plugin:
+    def get_tool_schema(self):
+        return {
+            "name": "play_music",
+            "description": (
+                "播放本地音乐。明确歌名或歌手填 query；"
+                "用户要推荐/红心时填「推荐」；随便听填「随机」。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "歌名、歌手、专辑，「推荐」或「随机」",
+                    }
+                },
+                "required": ["query"],
+            },
+        }
+
+    def format_invocation(self, arguments):
+        args = dict(arguments or {})
+        query = str(
+            args.get("query") or args.get("keyword") or args.get("title") or ""
+        ).strip()
+        if query in {"随机", "random"}:
+            return ""
+        return query
+
     def __init__(self):
         self.config_file = os.path.join(os.path.dirname(__file__), "config.json")
         self.music_directories = []
@@ -243,12 +271,12 @@ class Plugin:
                     await trigger_motion("happy")
 
                 # 触发音乐评价
-                chat_service = ctx.get("chat_service")
-                if chat_service and hasattr(chat_service, "handle_music_event"):
+                from services.plugin_ports import resolve_app
+
+                app = resolve_app(ctx)
+                if app is not None:
                     artist_hint = "五十铃推荐" if is_requesting_fav else artist
-                    asyncio.create_task(
-                        chat_service.handle_music_event(title=title, artist=artist_hint)
-                    )
+                    app.handle_music_event(title=title, artist=artist_hint)
 
                 prefix = "✨ " if is_requesting_fav else "🎵 "
                 info_str = f"{title}"

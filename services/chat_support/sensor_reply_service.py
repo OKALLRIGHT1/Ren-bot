@@ -5,7 +5,7 @@ import re
 from typing import Any, Awaitable, Callable, Optional
 
 from modules.live2d import estimate_bubble_display_ms
-from services.chat_support import sensor_utils
+from services.chat_support import sensor_utils, text_utils
 
 
 class SensorReplyService:
@@ -21,15 +21,16 @@ class SensorReplyService:
         apply_character_catchphrase: Callable[[str], str],
         prepare_reply_for_output: Callable[..., str],
         looks_like_sensor_template_reply: Callable[[str], bool],
-        rescue_sensor_template_reply: Callable[..., Awaitable[str]],
         remember_sensor_reply: Callable[[str], None],
         update_active_time: Callable[[], None],
         infer_reply_emotion_with_llm: Callable[..., Awaitable[Optional[str]]],
         get_current_live2d_emotion: Callable[[], tuple[str, float]],
-        reset_sensor_motion_after: Callable[..., Awaitable[None]],
         add_memory_safe: Callable[..., Awaitable[None]],
         last_reply_time_getter: Callable[[], float],
         conversation_event_service: Any = None,
+        rescue_sensor_template_reply: Optional[Callable[..., Awaitable[str]]] = None,
+        reset_sensor_motion_after: Optional[Callable[..., Awaitable[None]]] = None,
+        clean_text_for_tts: Optional[Callable[[str], str]] = None,
     ) -> None:
         self.event_bus = event_bus
         self.presenter = presenter
@@ -40,15 +41,70 @@ class SensorReplyService:
         self.apply_character_catchphrase = apply_character_catchphrase
         self.prepare_reply_for_output = prepare_reply_for_output
         self.looks_like_sensor_template_reply = looks_like_sensor_template_reply
-        self.rescue_sensor_template_reply = rescue_sensor_template_reply
         self.remember_sensor_reply = remember_sensor_reply
         self.update_active_time = update_active_time
         self.infer_reply_emotion_with_llm = infer_reply_emotion_with_llm
         self.get_current_live2d_emotion = get_current_live2d_emotion
-        self.reset_sensor_motion_after = reset_sensor_motion_after
         self.add_memory_safe = add_memory_safe
         self.last_reply_time_getter = last_reply_time_getter
         self.conversation_event_service = conversation_event_service
+        self.clean_text_for_tts = clean_text_for_tts or text_utils.clean_text_for_tts
+        self.rescue_sensor_template_reply = (
+            rescue_sensor_template_reply or self.rescue_template_reply
+        )
+        self.reset_sensor_motion_after = (
+            reset_sensor_motion_after or self.reset_motion_after
+        )
+
+    async def reset_motion_after(
+        self, delay_s: float, *, reply_started_at: float
+    ) -> None:
+        try:
+            await asyncio.sleep(max(0.2, float(delay_s)))
+            if float(self.last_reply_time_getter() or 0) > float(reply_started_at) + 1e-6:
+                return
+            await self.event_bus.emit("live2d.go_idle")
+        except Exception:
+            return
+
+    async def rescue_template_reply(
+        self, text: str, *, title: str, category: str
+    ) -> str:
+        clean = str(self.clean_text_for_tts(str(text or "")) or "").strip()
+        if not clean:
+            return ""
+        try:
+            from modules.llm import chat_with_ai
+
+            prompt = (
+                "把下面这句屏幕感知回应改成一句自然的临场短话。\n"
+                "要求：直接对 Master 说；不要像观察报告；不要出现“用户正在、屏幕上、画面中、我看到、根据、当前窗口、"
+                "挺实用、步骤详尽、需要协助、这也要看”。\n"
+                "允许关心、疑问、陪一句或很轻的吐槽；最多 28 个字；只输出最终一句。\n"
+                f"窗口：{title} / {category}\n"
+                f"原句：{clean}"
+            )
+            reply = await asyncio.to_thread(
+                chat_with_ai,
+                [{"role": "user", "content": prompt}],
+                task_type="default",
+                caller="sensor_template_rescue",
+            )
+            rescued = str(
+                self.clean_text_for_tts(
+                    self.strip_wrapping_quotes(
+                        text_utils.strip_internal_tags(str(reply or ""))
+                    )
+                )
+                or ""
+            ).strip()
+            if rescued and not sensor_utils.looks_like_sensor_template_reply(
+                rescued, clean_text_fn=self.clean_text_for_tts
+            ):
+                return rescued
+        except Exception:
+            pass
+        return ""
 
     async def send_sensor_reply(
         self,

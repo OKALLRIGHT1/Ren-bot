@@ -19,6 +19,8 @@ import itertools
 import threading
 from datetime import datetime, timezone
 from typing import Optional
+
+from modules.prompt_parts import PromptParts, join_prompt_sections
 from modules.memory_sqlite import get_memory_store
 from concurrent.futures import ThreadPoolExecutor
 import jieba
@@ -1659,18 +1661,15 @@ Output ONLY "YES" or "NO".
     def build_prompt(
         self,
         current_user_text,
-        system_persona,
+        system_persona="",
         tool_intent=None,
         session_id: str = None,
         memory_session_id: str = None,
         person_id: str = "owner",
         conversation_scope=None,
+        prompt_parts: Optional[PromptParts] = None,
     ):
         print("🔍 [系统] 正在构建统一记忆上下文.")
-
-        time_header = ""
-        if "【当前时间】" in system_persona:
-            time_header = system_persona.split("\n")[0]
 
         active_char = character_manager.get_active_character()
         active_character_id = str(
@@ -1680,26 +1679,41 @@ Output ONLY "YES" or "NO".
             core_persona = active_char["prompt"]
         else:
             core_persona = DEFAULT_PERSONA
-        final_system = f"{time_header}\n\n{core_persona}\n\n{SYSTEM_RULES_PROMPT}"
 
-        runtime_additions = self._extract_runtime_system_additions(
-            system_persona, time_header, core_persona
+        if prompt_parts is not None:
+            time_header = str(prompt_parts.time_header or "").strip()
+            time_rule = str(prompt_parts.time_rule or "").strip()
+            runtime_additions = str(prompt_parts.runtime_context or "").strip()
+            tool_desc = str(prompt_parts.tool_prompt or "").strip()
+            rules = str(prompt_parts.system_rules or "").strip() or SYSTEM_RULES_PROMPT
+        else:
+            time_header = ""
+            time_rule = ""
+            persona_text = str(system_persona or "")
+            if "【当前时间】" in persona_text:
+                time_header = persona_text.split("\n")[0]
+            runtime_additions = self._extract_runtime_system_additions(
+                persona_text, time_header, core_persona
+            )
+            tool_desc = ""
+            if "【可用工具能力】" in persona_text:
+                parts = persona_text.split("【可用工具能力】")
+                if len(parts) > 1:
+                    tool_desc = "【可用工具能力】" + parts[1]
+            elif "【工具】" in persona_text:
+                parts = persona_text.split("【工具】")
+                if len(parts) > 1:
+                    tool_desc = "【工具】" + parts[1]
+            rules = SYSTEM_RULES_PROMPT
+
+        final_system = join_prompt_sections(
+            time_header,
+            time_rule,
+            core_persona,
+            rules,
+            runtime_additions,
+            tool_desc,
         )
-        if runtime_additions:
-            final_system += "\n\n" + runtime_additions
-
-        tool_desc = ""
-        if "【可用工具能力】" in system_persona:
-            parts = system_persona.split("【可用工具能力】")
-            if len(parts) > 1:
-                tool_desc = "【可用工具能力】" + parts[1]
-        elif "【工具】" in system_persona:
-            parts = system_persona.split("【工具】")
-            if len(parts) > 1:
-                tool_desc = "【工具】" + parts[1]
-
-        if tool_desc:
-            final_system += "\n\n" + tool_desc
 
         raw_user = (current_user_text or "").strip()
         tool_mode = bool(tool_intent)

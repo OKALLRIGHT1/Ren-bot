@@ -9,6 +9,48 @@ from PySide6 import QtWidgets, QtCore, QtGui
 from modules.gui.styles import get_tool_dialog_styles
 
 
+def setting_ui_hidden(setting_info) -> bool:
+    if not isinstance(setting_info, dict):
+        return False
+    ui = str(setting_info.get("ui") or "").strip().lower()
+    if ui in {"hidden", "advanced", "internal"}:
+        return True
+    return bool(setting_info.get("hidden"))
+
+
+def is_plausible_url(text: str) -> bool:
+    raw = str(text or "").strip()
+    if not raw:
+        return True
+    return raw.startswith(("http://", "https://", "ws://", "wss://", "/"))
+
+
+def _setting_default(raw):
+    if isinstance(raw, dict):
+        if "default" in raw:
+            return raw.get("default")
+        return raw.get("value")
+    return raw
+
+
+def webui_url_from_settings(settings) -> str:
+    data = settings if isinstance(settings, dict) else {}
+    explicit = str(_setting_default(data.get("status_ui_url")) or "").strip()
+    port_raw = _setting_default(data.get("status_ui_port"))
+    try:
+        port = int(port_raw)
+    except (TypeError, ValueError):
+        port = 8765
+    if port < 1024 or port > 65535:
+        port = 8765
+    host_raw = str(_setting_default(data.get("status_ui_host")) or "127.0.0.1").strip()
+    host = host_raw or "127.0.0.1"
+    composed = f"http://{host}:{port}/"
+    if explicit.startswith(("http://", "https://")) and "status_ui_port" not in data:
+        return explicit
+    return composed
+
+
 class PluginManagerDialog(QtWidgets.QDialog):
     def __init__(
         self, parent=None, plugin_manager=None, main_app=None, embedded: bool = False
@@ -846,11 +888,15 @@ class PluginEditorDialog(QtWidgets.QDialog):
             self.settings_layout.insertWidget(0, no_settings)
             return
 
+        hidden_count = 0
         for key, setting_info in settings.items():
             # 支持两种格式：
             # 1. 简单格式: {"key": value}
             # 2. 增强格式: {"key": {"type": "...", "default": ..., "label": "...", "description": "..."}}
             schema_field = self.config_schema_fields.get(str(key), {})
+            if setting_ui_hidden(setting_info) or setting_ui_hidden(schema_field):
+                hidden_count += 1
+                continue
 
             if isinstance(setting_info, dict) and "type" in setting_info:
                 # 增强格式
@@ -877,6 +923,9 @@ class PluginEditorDialog(QtWidgets.QDialog):
                 choices = choices or schema_field.get("choices") or []
                 if not isinstance(setting_info, dict):
                     value = schema_field.get("default", value)
+
+            if str(setting_type).strip().lower() in {"link", "url"}:
+                value = webui_url_from_settings(settings)
 
             # 动态下拉：从角色库填充，避免手输角色名
             choices_source = ""
@@ -945,6 +994,14 @@ class PluginEditorDialog(QtWidgets.QDialog):
 
             self.settings_layout.insertWidget(self.settings_layout.count() - 1, group)
 
+        if hidden_count:
+            hint = QtWidgets.QLabel(
+                "关注地区和数据源地址等内部项已收起，请用插件本机页修改，避免在这里改一堆 JSON。"
+            )
+            hint.setWordWrap(True)
+            hint.setStyleSheet("color: #6B7280; font-size: 11px; padding: 4px 0 8px;")
+            self.settings_layout.insertWidget(0, hint)
+
     def _validate_setting_default(self, key, setting_type, value, choices):
         key_lower = str(key or "").strip().lower()
         text_value = str(value or "").strip() if value is not None else ""
@@ -958,12 +1015,8 @@ class PluginEditorDialog(QtWidgets.QDialog):
             return f"默认值 `{text_value}` 不在可选项中"
 
         if any(token in key_lower for token in ("base_url", "endpoint", "url")):
-            if text_value and not (
-                text_value.startswith("http://")
-                or text_value.startswith("https://")
-                or text_value.startswith("/")
-            ):
-                return "URL/路径建议以 http://、https:// 或 / 开头"
+            if text_value and not is_plausible_url(text_value):
+                return "URL/路径建议以 http://、https://、ws://、wss:// 或 / 开头"
 
         if any(token in key_lower for token in ("time", "schedule")):
             if text_value and key_lower.endswith("time"):
@@ -1005,6 +1058,8 @@ class PluginEditorDialog(QtWidgets.QDialog):
             return "secret"
         if ui_type in {"switch", "checkbox"} or value_type in {"bool", "boolean"}:
             return "boolean"
+        if ui_type in {"link", "url", "open_url"} or value_type in {"link", "url"}:
+            return "link"
         if ui_type == "select" or schema_field.get("choices"):
             return "choice"
         if ui_type == "json" or value_type in {"object", "dict"}:
@@ -1221,6 +1276,19 @@ class PluginEditorDialog(QtWidgets.QDialog):
         # 删除UI组件
         item_widget.deleteLater()
 
+    def _open_webui(self, url: str):
+        target = str(url or "").strip()
+        if not target:
+            target = webui_url_from_settings(
+                (self.original_config or {}).get("settings") or {}
+            )
+        if not target.startswith(("http://", "https://")):
+            QtWidgets.QMessageBox.warning(self, "无法打开", "本机 WebUI 地址无效。")
+            return
+        opened = QtGui.QDesktopServices.openUrl(QtCore.QUrl(target))
+        if not opened:
+            QtWidgets.QMessageBox.information(self, "本机 WebUI", target)
+
     def _create_setting_widget(
         self, key, setting_info, setting_type, value, min_val, max_val, choices
     ):
@@ -1232,7 +1300,31 @@ class PluginEditorDialog(QtWidgets.QDialog):
             for token in ("api_key", "token", "secret", "password", "access_key")
         )
 
-        if setting_type in {"string", "text", "secret", "password"}:
+        if setting_type in {"link", "url"}:
+            url = str(value or "").strip()
+            if not url:
+                url = webui_url_from_settings(
+                    (self.original_config or {}).get("settings") or {}
+                )
+            row = QtWidgets.QWidget()
+            row_layout = QtWidgets.QHBoxLayout(row)
+            row_layout.setContentsMargins(0, 0, 0, 0)
+            row_layout.setSpacing(8)
+            line_edit = QtWidgets.QLineEdit()
+            line_edit.setText(url)
+            line_edit.setReadOnly(True)
+            open_btn = QtWidgets.QPushButton("打开 WebUI")
+            open_btn.setObjectName("path_btn")
+            open_btn.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
+            open_btn.clicked.connect(
+                lambda checked=False, le=line_edit: self._open_webui(le.text())
+            )
+            row_layout.addWidget(line_edit, 1)
+            row_layout.addWidget(open_btn)
+            self.config_fields[key] = ("link", line_edit)
+            widget = row
+
+        elif setting_type in {"string", "text", "secret", "password"}:
             # 文本类型
             if isinstance(value, list):
                 text = "\n".join(str(v) for v in value)
@@ -1707,8 +1799,11 @@ class PluginEditorDialog(QtWidgets.QDialog):
                 "allow_group_without_at": self.allow_group_without_at_checkbox.isChecked(),
             }
 
-            # 保存自定义配置
-            settings = {}
+            # 保存自定义配置：先保留原 settings，避免隐藏项被整表覆盖丢掉。
+            original_settings = original_config.get("settings")
+            settings = (
+                dict(original_settings) if isinstance(original_settings, dict) else {}
+            )
             secret_values = {}
 
             def _validate_before_store(setting_key, field_type, raw_value):
@@ -1749,13 +1844,9 @@ class PluginEditorDialog(QtWidgets.QDialog):
                 if (
                     any(token in key_lower for token in ("base_url", "endpoint", "url"))
                     and raw_text
+                    and not is_plausible_url(raw_text)
                 ):
-                    if not (
-                        raw_text.startswith("http://")
-                        or raw_text.startswith("https://")
-                        or raw_text.startswith("/")
-                    ):
-                        return f"{setting_key} 应以 http://、https:// 或 / 开头"
+                    return f"{setting_key} 应以 http://、https://、ws://、wss:// 或 / 开头"
 
                 if key_lower.endswith("time") and raw_text:
                     if not re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", raw_text):
@@ -1787,6 +1878,8 @@ class PluginEditorDialog(QtWidgets.QDialog):
                         QtWidgets.QMessageBox.warning(self, "验证失败", error)
                         return
                     _store_setting_value(key, value)
+                elif field_type == "link":
+                    continue
                 elif field_type in {"bool", "boolean"}:
                     value = widget.isChecked()
                     _store_setting_value(key, value)

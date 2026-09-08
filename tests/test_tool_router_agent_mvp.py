@@ -1,4 +1,6 @@
 from modules.tool_router import ToolRouter
+from plugins.timer.plugin import Plugin as TimerPlugin
+from services.capability_manager import ToolCapabilityManager
 from plugins.app_control.plugin import Plugin as AppControlPlugin
 from plugins.code_agent.plugin import Plugin as CodeAgentPlugin
 from plugins.mcp_tools.plugin import Plugin as McpToolsPlugin
@@ -72,12 +74,11 @@ def test_router_handles_codex_call_phrasing():
     assert route.reason == "code_agent_preferred"
 
 
-def test_router_routes_explicit_codex_drawing_to_code_agent():
+def test_router_does_not_route_drawing_to_code_agent():
+    # 画图由 qq_draw 负责：不再以"代码代理"身份强制路由（关键词候选仍可交给 LLM 判断）
     route = _router_with_direct_aliases().route("让 Codex 帮我画一张丰川祥子的图")
 
-    assert route.need_tools is True
-    assert route.tool_triggers == ["code_agent"]
-    assert route.reason == "code_agent_preferred"
+    assert route.reason != "code_agent_preferred"
 
 
 def test_router_prefers_user_files_when_codex_reads_user_file():
@@ -114,16 +115,15 @@ def test_router_uses_code_agent_capability_when_available():
     assert route.reason == "capability:code_agent.codex_task"
 
 
-def test_router_uses_code_agent_capability_for_explicit_drawing_request():
+def test_router_does_not_match_code_agent_capability_for_drawing_request():
     route = ToolRouter(
         react_map={},
         direct_map={"code_agent": CodeAgentPlugin()},
         delegate_map={},
     ).route("让 Codex 画一张丰川祥子的图")
 
-    assert route.need_tools is True
-    assert route.tool_triggers == ["code_agent"]
-    assert route.reason == "capability:code_agent.codex_task"
+    assert route.need_tools is False
+    assert route.tool_triggers == []
 
 
 def test_router_uses_user_files_capability_when_available():
@@ -296,3 +296,34 @@ def test_router_routes_explicit_task_list_request():
     assert route.need_tools is True
     assert route.tool_triggers == ["task"]
     assert route.reason == "intent_keyword_matched"
+
+
+def _timer_router():
+    timer = TimerPlugin()
+    react_map = {
+        "timer": timer,
+        "倒计时": timer,
+        "提醒": timer,
+        "提醒我": timer,
+    }
+    return ToolRouter(
+        react_map=react_map,
+        direct_map={},
+        delegate_map={},
+        capability_manager=ToolCapabilityManager.from_plugin_maps(react_map={"timer": timer}),
+    )
+
+
+def test_router_does_not_route_disable_clock_in_to_timer():
+    route = _timer_router().route("关闭打卡提醒")
+
+    assert route.need_tools is False
+    assert route.reason == "no_tool_intent"
+
+
+def test_router_routes_countdown_minutes_to_timer():
+    route = _timer_router().route("倒计时 25 分钟")
+
+    assert route.need_tools is True
+    assert route.tool_triggers == ["timer"]
+    assert route.reason == "capability:timer.countdown"

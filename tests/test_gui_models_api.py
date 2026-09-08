@@ -163,6 +163,92 @@ def test_upsert_provider_and_router(tmp_path: Path):
     assert raw["router"]["default"] == ["chat-a"]
 
 
+def test_upsert_model_renames_and_retargets_router(tmp_path: Path):
+    path = tmp_path / "custom_models.json"
+    path.write_text(json.dumps(_catalog(), ensure_ascii=False), encoding="utf-8")
+    plugin_dir = tmp_path / "plugins" / "demo"
+    plugin_dir.mkdir(parents=True)
+    (plugin_dir / "config.json").write_text(
+        json.dumps(
+            {
+                "settings": {
+                    "model_queue": {
+                        "type": "model_queue",
+                        "default": ["chat-a", "embed-a"],
+                    }
+                }
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    service = ModelsCatalogService(
+        path,
+        plugins_dir=tmp_path / "plugins",
+        update_runtime=False,
+    )
+    result = service.upsert_model(
+        {
+            "id": "chat-b",
+            "original_id": "chat-a",
+            "model": "gpt-test-2",
+            "base_url": "https://example.com/v1",
+            "provider": "demo",
+            "purposes": ["chat"],
+            "api_key": {"action": "keep"},
+        }
+    )
+    assert result["ok"] is True
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    assert "chat-a" not in raw["models"]
+    assert raw["models"]["chat-b"]["model"] == "gpt-test-2"
+    assert raw["models"]["chat-b"]["api_key"] == "secret-model-key"
+    assert raw["router"]["default"] == ["chat-b"]
+    assert raw["router"]["tool_reasoning"] == ["chat-b"]
+    plugin = json.loads((plugin_dir / "config.json").read_text(encoding="utf-8"))
+    assert plugin["settings"]["model_queue"]["default"] == ["chat-b", "embed-a"]
+
+
+def test_upsert_model_rename_rejects_collision(tmp_path: Path):
+    path = tmp_path / "custom_models.json"
+    path.write_text(json.dumps(_catalog(), ensure_ascii=False), encoding="utf-8")
+    service = ModelsCatalogService(path)
+    result = service.upsert_model(
+        {
+            "id": "embed-a",
+            "original_id": "chat-a",
+            "model": "gpt-test",
+            "base_url": "https://example.com/v1",
+            "provider": "demo",
+            "purposes": ["chat"],
+        }
+    )
+    assert result["ok"] is False
+    assert result["error"] == "id_exists"
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    assert "chat-a" in raw["models"]
+
+
+def test_upsert_provider_renames_and_retargets_models(tmp_path: Path):
+    path = tmp_path / "custom_models.json"
+    path.write_text(json.dumps(_catalog(), ensure_ascii=False), encoding="utf-8")
+    service = ModelsCatalogService(path)
+    result = service.upsert_provider(
+        {
+            "id": "demo-renamed",
+            "original_id": "demo",
+            "base_url": "https://example.com/v2",
+            "api_key": {"action": "keep"},
+        }
+    )
+    assert result["ok"] is True
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    assert "demo" not in raw["providers"]
+    assert raw["providers"]["demo-renamed"]["base_url"] == "https://example.com/v2"
+    assert raw["providers"]["demo-renamed"]["api_key"] == "secret-provider-key"
+    assert raw["models"]["chat-a"]["provider"] == "demo-renamed"
+
+
 def test_normalize_provider_row_masks_secret():
     row = normalize_provider_row(
         "p1", {"base_url": "https://x", "api_key": "abc"}

@@ -1,7 +1,10 @@
-from modules.asr_settings import (
+from modules.asr.settings import (
+    ASR_ENGINE_QWEN3,
+    ASR_ENGINE_ZIPFORMER,
     collect_character_wake_words,
     default_global_wake_words,
     load_asr_settings,
+    resolve_asr_hotwords,
     resolve_wake_words,
     should_accept_voice_utterance,
     text_contains_wake_word,
@@ -131,3 +134,26 @@ def test_load_asr_settings_defaults():
     assert cfg["asr_use_character_wake_words"] is True
     assert cfg["asr_include_global_wake_words"] is True
     assert cfg["asr_global_wake_words"] == default_global_wake_words()
+    assert cfg["asr_engine"] == ASR_ENGINE_QWEN3
+    assert cfg["asr_hotwords_from_wake"] is True
+
+
+def test_load_asr_settings_engine_choices():
+    assert load_asr_settings({"asr_engine": "zipformer"})["asr_engine"] == ASR_ENGINE_ZIPFORMER
+    assert load_asr_settings({"asr_engine": "nope"})["asr_engine"] == ASR_ENGINE_QWEN3
+
+
+def test_resolve_asr_hotwords_from_wake_words():
+    hot = resolve_asr_hotwords(
+        settings={"asr_hotwords_from_wake": True},
+        wake_words=["五十铃", "怜", "Suzu", "五十铃"],
+    )
+    assert hot == "五十铃/怜/Suzu"
+
+
+def test_resolve_asr_hotwords_can_disable():
+    hot = resolve_asr_hotwords(
+        settings={"asr_hotwords_from_wake": False},
+        wake_words=["五十铃"],
+    )
+    assert hot == ""

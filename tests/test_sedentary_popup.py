@@ -1,6 +1,12 @@
 from types import SimpleNamespace
 
-from modules.gui.sedentary_popup import build_sedentary_popup_options
+from modules.gui.sedentary_popup import (
+    SedentaryPopupOptions,
+    build_frontend_show_payload,
+    build_sedentary_popup_options,
+    image_to_data_url,
+    route_sedentary_popup,
+)
 from modules.gui.settings_pages.sedentary_page import select_sedentary_preview_image_path
 
 
@@ -79,3 +85,87 @@ def test_select_sedentary_preview_image_path_uses_application_selector():
 
     assert selected == "D:/memes/rest.png"
     assert calls == [("电脑", 25), ("timeout", 8)]
+
+
+def test_frontend_payload_uses_data_url_not_filesystem_path(tmp_path):
+    image = tmp_path / "rest.png"
+    image.write_bytes(b"\x89PNG\r\n\x1a\n" + b"x" * 16)
+    options = SedentaryPopupOptions(
+        enabled=True,
+        title="起来",
+        message="已经连续工作 60 分钟了",
+        image_path=str(image),
+        snooze_minutes=10,
+        auto_close_seconds=20,
+    )
+
+    payload = build_frontend_show_payload(
+        options, app_name="电脑", active_minutes=60
+    )
+
+    assert payload["type"] == "sedentary_popup"
+    assert payload["image_path"] == ""
+    assert payload["image_data_url"].startswith("data:image/png;base64,")
+    assert str(image) not in payload["image_data_url"]
+    assert "LLM" not in payload["message"]
+
+
+def test_image_to_data_url_rejects_oversized_file(tmp_path):
+    image = tmp_path / "huge.png"
+    image.write_bytes(b"\x89PNG" + b"x" * 2_000_000)
+    assert image_to_data_url(str(image), max_bytes=1024) == ""
+
+
+def test_route_sedentary_popup_prefers_frontend_when_live2d_client():
+    emitted = []
+    qt_calls = []
+    results = []
+    options = SedentaryPopupOptions(
+        enabled=True,
+        title="起来",
+        message="模板正文",
+        image_path=None,
+        snooze_minutes=8,
+        auto_close_seconds=12,
+    )
+
+    routed = route_sedentary_popup(
+        options,
+        app_name="电脑",
+        active_minutes=45,
+        has_live2d_client=True,
+        emit_frontend=emitted.append,
+        show_qt=lambda: qt_calls.append("qt"),
+        on_result=results.append,
+    )
+
+    assert routed == "frontend"
+    assert qt_calls == []
+    assert results == []
+    assert emitted[0]["message"] == "模板正文"
+    assert emitted[0]["active_minutes"] == 45
+
+
+def test_route_sedentary_popup_falls_back_to_qt_without_frontend():
+    qt_calls = []
+    options = SedentaryPopupOptions(
+        enabled=True,
+        title="起来",
+        message="模板正文",
+        image_path=None,
+        snooze_minutes=8,
+        auto_close_seconds=12,
+    )
+
+    routed = route_sedentary_popup(
+        options,
+        app_name="电脑",
+        active_minutes=45,
+        has_live2d_client=False,
+        emit_frontend=lambda payload: None,
+        show_qt=lambda: qt_calls.append("qt"),
+        on_result=None,
+    )
+
+    assert routed == "qt"
+    assert qt_calls == ["qt"]

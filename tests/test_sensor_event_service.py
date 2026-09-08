@@ -10,9 +10,11 @@ from modules.memory_sqlite import MemorySQLite
 from services.chat_support.conversation_event_service import ConversationEventService
 from services.chat_support.gateway_context_service import GatewayContextService
 from services.chat_support.sensor_event_guard import titles_soft_match
+from services.chat_service import ChatService
 from services.chat_support.sensor_event_service import (
     SensorEventService,
     SensorGenerationContext,
+    run_music_event,
 )
 from services.chat_support.sensor_reply_service import SensorReplyService
 
@@ -57,6 +59,66 @@ def _assert_conversation_ends_with_user(messages):
     assert messages
     assert messages[-1].get("role") == "user"
     assert str(messages[-1].get("content") or "").strip()
+
+
+@pytest.mark.asyncio
+async def test_self_window_awareness_hint_omits_screenshot_projection():
+    service = object.__new__(ChatService)
+    self_hint = ChatService._build_live2d_self_awareness_hint(
+        service, {"source": "desktop", "sensor_category": "self"}
+    )
+    other_hint = ChatService._build_live2d_self_awareness_hint(
+        service, {"source": "desktop", "sensor_category": "work"}
+    )
+    assert "实体投影" not in self_hint
+    assert "画面边缘" not in self_hint
+    assert "Live2D 角色" in self_hint
+    assert "画面边缘" in other_hint
+    assert "实体投影" not in other_hint
+
+
+def test_generation_context_passes_self_category_into_persona():
+    captured = {}
+
+    def capture_persona(*, ctx=None, extra_context=""):
+        captured["ctx"] = dict(ctx or {})
+        return "persona"
+
+    service = SensorEventService(
+        screen_sensor_ref_getter=lambda: None,
+        format_sensor_observations=lambda *args, **kwargs: "",
+        build_sensor_usage_context=lambda *args, **kwargs: "",
+        build_sensor_interaction_context=lambda: "",
+        build_sensor_persona_prompt=capture_persona,
+        format_recent_sensor_reply_block=lambda: "",
+        build_sensor_spontaneous_style_block=lambda *args, **kwargs: "",
+        build_live2d_self_awareness_hint=lambda *args, **kwargs: "",
+        compress_sensor_text=lambda text, max_len=None: str(text)[:max_len],
+    )
+    service.build_generation_context(
+        clean_title="Live2D Enhanced",
+        display_app="live2d-enhanced.exe",
+        category="self",
+        count=1,
+        reason="switch",
+    )
+    assert captured["ctx"]["sensor_category"] == "self"
+
+
+def test_self_prompt_uses_own_window_wording_and_recent_replies():
+    ctx = SensorGenerationContext(
+        context_block="",
+        sensor_persona_prompt="persona",
+        recent_sensor_reply_block="【最近几次屏幕回应，避免复读】\n- 我的程序在发光呢。",
+        text_style_block="",
+        vision_style_block="",
+        record_observation=lambda content, source: None,
+    )
+    prompt = _service().build_self_prompt(context=ctx, clean_title="Live2D Enhanced")
+    assert "你自己的窗口（Live2D Enhanced）" in prompt
+    assert "程序窗口" not in prompt
+    assert "发光" not in prompt.split("最近几次屏幕回应")[0]
+    assert "我的程序在发光呢。" in prompt
 
 
 @pytest.mark.asyncio
@@ -563,3 +625,49 @@ async def test_focus_revalidate_accepts_rust_alternate_title():
     )
     assert result.branch == "text"
     assert result.reply == "还在抠这里？"
+
+
+@pytest.mark.asyncio
+async def test_handle_window_event_skips_system_window():
+    service = _service()
+    sent = []
+
+    async def send_reply(*args, **kwargs):
+        sent.append((args, kwargs))
+        return True
+
+    ok = await service.handle_window_event(
+        window_title="Live2D Agent",
+        category="self",
+        last_reply_time=0,
+        min_reply_interval_sec=0,
+        chat_with_ai=lambda *args, **kwargs: "不该生成",
+        analyze_image=lambda *args, **kwargs: "",
+        send_sensor_reply=send_reply,
+    )
+    assert ok is False
+    assert sent == []
+
+
+@pytest.mark.asyncio
+async def test_run_music_event_respects_cooldown():
+    class _Bus:
+        async def emit(self, *args, **kwargs):
+            raise AssertionError("cooldown should skip music")
+
+    await run_music_event(
+        title="Song",
+        artist="Artist",
+        last_reply_time=10_000_000_000,
+        min_reply_interval_sec=45,
+        event_bus=_Bus(),
+        presenter=None,
+        logger=None,
+        extract_emo_tag=lambda text: (None, text),
+        apply_character_catchphrase=lambda text: text,
+        observe_final_reply_emotion=lambda emo: None,
+        update_active_time=lambda: None,
+        add_memory_safe=lambda *args, **kwargs: None,
+        default_persona="persona",
+        chat_with_ai=lambda *args, **kwargs: "不该调用",
+    )

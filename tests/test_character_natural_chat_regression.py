@@ -10,6 +10,7 @@ def test_config_defaults_unified_scope():
     cfg = NaturalChatConfig.from_mapping(CHARACTER_NATURAL_CHAT)
     assert cfg.character_thought_enabled is True
     assert cfg.character_thought_scope == "desktop_and_qq_private"
+    assert cfg.character_thought_timeout_ms == 4000
     assert cfg.group_chat_natural_enabled is False
     assert cfg.expression_inject_max_items == 1
     assert not hasattr(cfg, "qq_polish_mode")

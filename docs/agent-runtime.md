@@ -30,16 +30,16 @@
 C:\Users\Gengar\AppData\Roaming\npm\agently-cli.cmd
 ```
 
-可用说法：
+可用说法（不必先打 `/`，也不必说固定关键词）：
 
 ```text
+有没有新邮件
+邮件呢
+查一下邮箱
 我最近收到了哪些邮件？
 搜索邮件 账单
 读邮件 msg_xxx
 发邮件 to=a@example.com subject=主题 body=正文
-回邮件 id=msg_xxx body=回复正文
-转发邮件 id=msg_xxx to=a@example.com body=供参考
-删除邮件 id=msg_xxx
 ```
 
 读操作可以直接执行。发、回、转、删必须先返回确认摘要，再由用户回复 `确认` 执行，回复 `取消` 放弃。
@@ -80,3 +80,7 @@ python -m pytest tests/test_agent_runtime.py tests/test_agently_mail_plugin.py t
 ## 未来外部框架
 
 如果以后接 OpenAI Agents SDK 或其他外部 agent 框架，只新增 `AgentAdapter` 实现，输入为 `AgentRuntime.list_tools()`，输出为 `{handled, reply, meta}`。不要让外部框架直接控制 Live2D、TTS、QQ 网关或久坐提醒。
+
+工具轮 I/O：默认 `TOOL_INVOCATION_MODE=dual`。工具推理轮发 openai `tools`，优先执行 `tool_calls`，否则回退 `[CMD:]`。执行仍走 `PluginManager` + ActionGate。闲聊 finalize 不带 tools。回退：环境变量或 `data/runtime_settings.json` 的 `tool_invocation_mode=cmd`。计划：`docs/superpowers/plans/2026-08-21-tool-calling-function-call.md`。
+
+插件 ctx 窄口：`gateway`、`tts`、`app`、`knowledge`、`plugin_manager`、`agent_runtime`、`mcp_bridge`。`process()` **不注入** `chat_service`。可选 `skills`（`SKILL.md` 提示词，不是执行器）；不用 Skill 可忽略，也不为此开端口。第三波 function schema：`play_music` / `mode_preset` / `knowledge_base` / `diary_manager`。

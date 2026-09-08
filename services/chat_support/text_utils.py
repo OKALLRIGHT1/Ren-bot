@@ -6,6 +6,7 @@ Keep this module free of ChatService state so helpers can be moved safely.
 from __future__ import annotations
 
 import re
+from datetime import datetime
 from typing import Any, Callable, Dict, Optional
 
 _INTERNAL_PROMPT_INSTRUCTION_LINE_RE = re.compile(
@@ -14,8 +15,32 @@ _INTERNAL_PROMPT_INSTRUCTION_LINE_RE = re.compile(
     r"|正文不要引用标签和动作.*"
     r"|回复只要[「\"]?正文[」\"]?本身.*"
     r"|不含任何额外说明.*"
+    r"|优先使用 function calling.*"
+    r"|不要在正文(?:里写|夹带) \[CMD:.*"
+    r"|只有当系统消息里出现【本轮可用工具】.*"
+    r"|只有系统提供了 tools.*"
+    r"|当前不直接暴露完整工具参数.*"
+    r"|可发现能力摘要.*"
+    r"|这些工具需要通过副脑委托.*"
+    r"|你不是在对用户说话.*"
+    r"|只输出(?:一个 JSON|修正后的回复正文).*"
+    r"|每次回复必须在正文最开头加一个情绪标签.*"
+    r"|严禁提及自己是 AI.*"
     r")\s*$",
     re.IGNORECASE,
+)
+
+_LEAKED_TOOL_PROMPT_SECTION_RE = re.compile(
+    r"(?:"
+    r"【(?:"
+    r"工具调用规则|调用方式|调用格式|可延迟发现的工具|本轮可用工具|可用工具能力|工具|"
+    r"可委托任务|委托方式|委托格式|远程MCP工具|工具状态|工具使用记录|"
+    r"输出格式规范|输出格式(?:（非常重要）)?|对话边界|回复风格|性格设定|"
+    r"代码助手模式|系统反馈|副脑模式|本轮内心·勿照念|表达习惯参考|"
+    r"重要：工具调用规则|Live2D自我识别"
+    r")】"
+    r"|\[Tool Observation\])"
+    r"[\s\S]*"
 )
 
 _EMO_TAG_ANY_RE = re.compile(
@@ -187,6 +212,31 @@ _LOCAL_OR_CODE_HINTS = (
     "文件",
 )
 
+_WEATHER_PLUGIN_HINTS = (
+    "天气",
+    "气温",
+    "温度",
+    "几度",
+    "多少度",
+    "体感",
+    "下雨",
+    "降雨",
+    "带伞",
+    "雨伞",
+    "天气预报",
+    "高温",
+    "低温",
+)
+_TYPHOON_HINTS = ("台风", "热带风暴", "热带气旋")
+_THINK_BLOCK_RE = re.compile(
+    r"<(think|thinking|thought|redacted_thinking)\b[^>]*>.*?</\1>",
+    re.IGNORECASE | re.DOTALL,
+)
+_THINK_TAG_RE = re.compile(
+    r"</?(think|thinking|thought|redacted_thinking)\b[^>]*>",
+    re.IGNORECASE,
+)
+
 _SEARCHWORTHY_HINTS = (
     "最新",
     "今天",
@@ -196,7 +246,6 @@ _SEARCHWORTHY_HINTS = (
     "行情",
     "股价",
     "汇率",
-    "天气",
     "日期",
     "时间",
     "是什么",
@@ -239,6 +288,39 @@ _PERSONAL_OR_PLAN_QUESTION = re.compile(
 _PREFERENCE_OBJECT = re.compile(r"什么(?:好玩|好看|好吃|有趣)的")
 
 
+def is_weather_plugin_question(text: str) -> bool:
+    raw = str(text or "").strip()
+    if not raw:
+        return False
+    if any(token in raw for token in _TYPHOON_HINTS):
+        return False
+    return any(token in raw for token in _WEATHER_PLUGIN_HINTS)
+
+
+def strip_think_tags(text: str) -> str:
+    raw = str(text or "")
+    if not raw:
+        return ""
+    raw = _THINK_BLOCK_RE.sub("", raw)
+    raw = _THINK_TAG_RE.sub("", raw)
+    return raw.strip()
+
+
+def stamp_search_query_with_current_year(
+    query: str, *, now: Optional[datetime] = None
+) -> str:
+    raw = str(query or "").strip()
+    if not raw:
+        return ""
+    current = now or datetime.now()
+    year = str(current.year)
+    if re.search(r"20\d{2}", raw):
+        return raw
+    if any(token in raw for token in ("今天", "今日", "现在", "目前", "实时", "今年")):
+        return f"{year}年 {raw}"
+    return raw
+
+
 def _looks_like_local_or_code_request(text: str) -> bool:
     lower = str(text or "").strip().lower()
     return any(token in lower for token in _LOCAL_OR_CODE_HINTS)
@@ -277,6 +359,8 @@ def is_searchworthy_question(text: str) -> bool:
         return False
     if _looks_like_local_or_code_request(raw):
         return False
+    if is_weather_plugin_question(raw):
+        return False
     if any(token in raw for token in _SEARCHWORTHY_HINTS):
         return True
     if raw.endswith(("?", "？", "吗", "么", "呢")):
@@ -294,6 +378,8 @@ def is_direct_fact_search_question(text: str) -> bool:
     if not _looks_like_question(raw):
         return False
     if _looks_like_personal_or_casual_question(raw):
+        return False
+    if is_weather_plugin_question(raw):
         return False
 
     has_time = bool(_FACT_TIME_FRAME.search(raw))
@@ -392,7 +478,7 @@ def strip_cmd_anywhere(text: str, cmd_re: re.Pattern[str]) -> str:
 
 
 def strip_internal_tags(text: str) -> str:
-    raw = str(text or "")
+    raw = strip_think_tags(str(text or ""))
     raw = re.sub(r"\[tool_use\]\s*\[[^\]]*\]\s*", "", raw, flags=re.IGNORECASE)
     raw = re.sub(r"\[tool_use\]\s*", "", raw, flags=re.IGNORECASE)
     raw = re.sub(r"\[search_meta\][^\n]*\n?", "", raw, flags=re.IGNORECASE)
@@ -401,6 +487,7 @@ def strip_internal_tags(text: str) -> str:
     raw = "\n".join(
         line for line in raw.splitlines() if not _INTERNAL_PROMPT_INSTRUCTION_LINE_RE.match(line)
     )
+    raw = _LEAKED_TOOL_PROMPT_SECTION_RE.sub("", raw)
     return raw.strip()
 
 
