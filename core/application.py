@@ -1456,6 +1456,10 @@ class Live2DApplication:
             access_token=gui_access_token,
         )
         self.gui_ws_server.set_message_handler(self._on_gui_ws_message)
+        self.gui_ws_server.set_disconnect_handler(self._on_gui_ws_disconnect)
+        from modules.asr.pcm import PcmRateLimiter
+
+        self._audio_pcm_limiter = PcmRateLimiter()
         configure_live2d_transport(
             Live2DTransportBus(
                 [
@@ -1552,7 +1556,12 @@ class Live2DApplication:
         )
 
         records = (
-            ("live2d_ws", "offline", "等待 Live2D WebSocket 首次连接", {}),
+            (
+                "live2d_ws",
+                "offline",
+                "等待增强版 Live2D 事件通道",
+                {"transport": "gui_ws"},
+            ),
             (
                 "rust_activity",
                 "offline",
@@ -1697,6 +1706,37 @@ class Live2DApplication:
             }
         )
 
+    def _record_recent_chat_log(self, role: str, text: str) -> None:
+        if not text or not str(text).strip():
+            return
+        from pathlib import Path
+        history_path = Path("data/recent_chat_history.json")
+        try:
+            items = []
+            if history_path.exists():
+                items = json.loads(history_path.read_text(encoding="utf-8"))
+            if not isinstance(items, list):
+                items = []
+            items.append({"role": role, "text": str(text).strip()})
+            items = items[-100:]
+            history_path.parent.mkdir(parents=True, exist_ok=True)
+            history_path.write_text(json.dumps(items, ensure_ascii=False, indent=2), encoding="utf-8")
+        except Exception as exc:
+            if self.logger:
+                self.logger.debug(f"record chat history error: {exc}")
+
+    def _load_recent_chat_history(self) -> list:
+        from pathlib import Path
+        history_path = Path("data/recent_chat_history.json")
+        try:
+            if history_path.exists():
+                items = json.loads(history_path.read_text(encoding="utf-8"))
+                if isinstance(items, list):
+                    return items[-30:]
+        except Exception:
+            pass
+        return []
+
     def _on_ui_append(self, payload: Dict[str, Any]):
         # Handle UI append event.
         if self.qt_ui:
@@ -1707,11 +1747,14 @@ class Live2DApplication:
             except Exception as e:
                 self.logger.warning(f"追加UI内容失败: {e}")
 
+        role = payload.get("role", "assistant")
+        text = payload.get("text", "")
+        self._record_recent_chat_log(role, text)
         self._emit_gui_ws(
             {
                 "type": "log",
-                "role": payload.get("role", "assistant"),
-                "text": payload.get("text", ""),
+                "role": role,
+                "text": text,
             }
         )
 
@@ -1794,6 +1837,13 @@ class Live2DApplication:
                 await self.gui_ws_server.broadcast(payload)
             else:
                 await self.gui_ws_server.send(ws, payload)
+        recent_logs = self._load_recent_chat_history()
+        for log in recent_logs:
+            log_payload = {"type": "log", **log}
+            if ws is None:
+                await self.gui_ws_server.broadcast(log_payload)
+            else:
+                await self.gui_ws_server.send(ws, log_payload)
 
     def _apply_mode_preset(self, preset: str) -> str:
         name = str(preset or "").strip().lower()
@@ -1830,16 +1880,55 @@ class Live2DApplication:
             except Exception as exc:
                 if self.logger:
                     self.logger.warning(f"hello costume resync failed: {exc}")
+            self._sync_voice_capture_mode()
+            self._sync_qt_gui_visibility()
+            self._sync_live2d_frontend_health()
+            return
+        if msg_type == "audio_pcm":
+            await self._on_gui_audio_pcm(payload, ws)
             return
         if msg_type != "command":
             return
         name = str(payload.get("name") or "").strip().lower()
         if not name:
             return
+        if name in {"show_hud", "toggle_hud", "hud_hotkey"}:
+            action = {"show_hud": "show", "toggle_hud": "toggle", "hud_hotkey": "hotkey"}[name]
+            ui = getattr(self, "qt_ui", None)
+            if ui is not None:
+                if name == "show_hud" and hasattr(ui, "request_show_hud"):
+                    ui.request_show_hud()
+                elif name == "toggle_hud" and hasattr(ui, "request_toggle_show_hide"):
+                    ui.request_toggle_show_hide()
+                elif name == "hud_hotkey" and hasattr(ui, "request_hud_hotkey"):
+                    ui.request_hud_hotkey()
+            self._emit_gui_ws({"type": "hud_control", "action": action})
+            return
         if name == "send_text":
             text = str(payload.get("text") or "").strip()
             if text:
+                self._record_recent_chat_log("user", text)
+                self._emit_gui_ws({"type": "log", "role": "user", "text": text})
                 self.on_gui_send(text, {"source": "tauri_gui"})
+            return
+        if name == "cancel":
+            self.cancel_gui_chat()
+            return
+        if name == "ptt_start":
+            self.start_push_to_talk()
+            return
+        if name == "ptt_stop":
+            self.stop_push_to_talk()
+            return
+        if name == "new_topic":
+            self.start_gui_new_topic()
+            try:
+                await self.gui_ws_server.send(
+                    ws,
+                    {"type": "log", "role": "system", "text": "— 新话题 —"},
+                )
+            except Exception:
+                pass
             return
         if name == "toggle_tts":
             desired = payload.get("value")
@@ -1877,6 +1966,23 @@ class Live2DApplication:
             return
         if name == "mode_status":
             await self._send_gui_snapshot(ws)
+            return
+        if name == "work_session_status":
+            # 遥控窗没有本地 ScreenSensor，工作时长按需拉取。
+            session = None
+            sensor = getattr(self, "screen_sensor", None)
+            if sensor is not None and hasattr(sensor, "get_current_work_session"):
+                try:
+                    session = sensor.get_current_work_session()
+                except Exception as exc:
+                    if self.logger:
+                        self.logger.warning(f"work_session_status failed: {exc}")
+            try:
+                await self.gui_ws_server.send(
+                    ws, {"type": "work_session", "session": session or {}}
+                )
+            except Exception:
+                pass
             return
         if name == "mode_preset":
             preset = payload.get("value") or payload.get("preset")
@@ -2756,6 +2862,99 @@ class Live2DApplication:
                     self.logger.warning(f"Diary backfill failed: {target_str}")
 
     # 动态切换语音监听的方法
+    def _has_enhanced_gui_client(self) -> bool:
+        server = getattr(self, "gui_ws_server", None)
+        return bool(server and server.has_client("live2d-enhanced"))
+
+    def _keep_qt_gui_visible(self) -> bool:
+        try:
+            import config as runtime_config
+
+            return bool(getattr(runtime_config, "KEEP_QT_GUI", False))
+        except Exception:
+            return False
+
+    def _has_live2d_protocol_client(self) -> bool:
+        server = getattr(self, "gui_ws_server", None)
+        return bool(server and server.has_capable_client("live2d.protocol.v1"))
+
+    def _sync_live2d_frontend_health(self) -> None:
+        health = getattr(self, "runtime_health", None)
+        if health is None or not hasattr(health, "report"):
+            return
+        if self._has_live2d_protocol_client():
+            health.report(
+                "live2d_ws",
+                "healthy",
+                "增强版 Live2D 事件通道已连接",
+                details={"transport": "gui_ws", "capability": "live2d.protocol.v1"},
+            )
+            return
+        health.report(
+            "live2d_ws",
+            "offline",
+            "等待增强版 Live2D 事件通道",
+            details={"transport": "gui_ws", "capability": "live2d.protocol.v1"},
+        )
+
+    def _sync_qt_gui_visibility(self) -> None:
+        ui = getattr(self, "qt_ui", None)
+        if ui is None or not hasattr(ui, "set_frontend_suppressed"):
+            return
+        if self._keep_qt_gui_visible():
+            return
+        ui.set_frontend_suppressed(self._has_enhanced_gui_client())
+
+    def _has_frontend_pcm_client(self) -> bool:
+        server = getattr(self, "gui_ws_server", None)
+        return bool(server and server.has_capable_client("audio.pcm.v1"))
+
+    def _sync_voice_capture_mode(self) -> None:
+        sensor = getattr(self, "voice_sensor", None)
+        if sensor is None:
+            return
+        want_capture = not self._has_frontend_pcm_client()
+        if sensor.use_local_capture == want_capture:
+            return
+        was_running = bool(sensor.running)
+        if was_running:
+            sensor.stop()
+        if was_running and self.loop:
+            sensor.start(self.loop, capture=want_capture)
+
+    async def _on_gui_audio_pcm(self, payload: Dict[str, Any], ws) -> None:
+        server = getattr(self, "gui_ws_server", None)
+        if server is None or not server.client_has_capability(ws, "audio.pcm.v1"):
+            return
+        limiter = getattr(self, "_audio_pcm_limiter", None)
+        if limiter is not None and not limiter.allow(id(ws)):
+            return
+        from modules.asr.pcm import AudioPcmError, decode_audio_pcm
+
+        try:
+            samples = decode_audio_pcm(payload)
+        except AudioPcmError as exc:
+            if self.logger:
+                self.logger.debug(f"audio_pcm rejected: {exc}")
+            return
+        if not self.voice_sensor:
+            self._ensure_voice_sensor_loaded()
+        sensor = self.voice_sensor
+        if sensor is None:
+            return
+        if not sensor.running:
+            return
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(None, sensor.feed_audio, samples)
+
+    def _on_gui_ws_disconnect(self, ws) -> None:
+        limiter = getattr(self, "_audio_pcm_limiter", None)
+        if limiter is not None:
+            limiter.forget(id(ws))
+        self._sync_voice_capture_mode()
+        self._sync_qt_gui_visibility()
+        self._sync_live2d_frontend_health()
+
     def set_voice_sensor_enabled(self, enabled: bool):
         # Enable or disable voice sensor dynamically.
         if enabled:
@@ -2770,8 +2969,12 @@ class Live2DApplication:
                 if self.logger:
                     self.logger.warning(f"VoiceSensor reload_settings failed: {exc}")
             if not self.voice_sensor.running and self.loop:
-                self.logger.info("Voice sensor enabled")
-                self.voice_sensor.start(self.loop)
+                capture = not self._has_frontend_pcm_client()
+                self.logger.info(
+                    "Voice sensor enabled (%s)",
+                    "local mic" if capture else "remote pcm",
+                )
+                self.voice_sensor.start(self.loop, capture=capture)
         else:
             if self.voice_sensor and self.voice_sensor.running:
                 self.logger.info("Voice sensor disabled")
@@ -2786,6 +2989,9 @@ class Live2DApplication:
             self.logger.warning('⚠️ VoiceSensor 未就绪，无法 PTT')
             return
         try:
+            self.voice_sensor.use_local_capture = not self._has_frontend_pcm_client()
+            if self.voice_sensor._loop is None:
+                self.voice_sensor._loop = self.loop
             self.voice_sensor.start_ptt()
         except Exception as exc:
             self.logger.warning(f'PTT start failed: {exc}')
@@ -2922,6 +3128,9 @@ class Live2DApplication:
                 merged_ctx.setdefault("source", "text_input")
             try:
                 await self.chat_service.process(text, ctx=merged_ctx)
+            except asyncio.CancelledError:
+                await self._cleanup_cancelled_gui_chat()
+                raise
             except Exception:
                 try:
                     output_profile = build_output_profile(
@@ -2937,15 +3146,61 @@ class Live2DApplication:
                     pass
                 raise
 
-        fut = asyncio.run_coroutine_threadsafe(_process(), self.loop)
+        def _start():
+            prev = getattr(self, "_gui_chat_task", None)
+            if prev is not None and not prev.done():
+                prev.cancel()
+            task = self.loop.create_task(_process())
+            self._gui_chat_task = task
 
-        def _done(f):
+            def _done(t):
+                try:
+                    t.result()
+                except asyncio.CancelledError:
+                    pass
+                except Exception as e:
+                    self.logger.error(f"协程异常: {repr(e)}")
+
+            task.add_done_callback(_done)
+
+        self.loop.call_soon_threadsafe(_start)
+
+    def cancel_gui_chat(self) -> None:
+        if self.loop is None:
+            return
+
+        def _cancel():
+            task = getattr(self, "_gui_chat_task", None)
+            if task is not None and not task.done():
+                task.cancel()
+
+        self.loop.call_soon_threadsafe(_cancel)
+
+    async def _cleanup_cancelled_gui_chat(self) -> None:
+        try:
+            if self.tts is not None and hasattr(self.tts, "stop_stream"):
+                await self.tts.stop_stream()
+        except Exception:
+            pass
+        try:
+            await self.event_bus.emit(
+                "state.changed", state="idle", reason="gui_cancel"
+            )
+            await self.event_bus.emit(Events.LIVE2D_GO_IDLE)
+            await self.event_bus.emit(Events.UI_STATUS, text="Idle")
+        except Exception:
+            pass
+
+    def start_gui_new_topic(self) -> None:
+        brain = getattr(self, "brain", None)
+        if brain is None:
+            return
+        clearer = getattr(brain, "clear_short_term", None)
+        if callable(clearer):
             try:
-                f.result()
-            except Exception as e:
-                self.logger.error(f"协程异常: {repr(e)}")
-
-        fut.add_done_callback(_done)
+                clearer()
+            except Exception as exc:
+                self.logger.warning(f"clear short-term failed: {exc}")
 
     def on_external_message(
         self,
@@ -3413,9 +3668,11 @@ class Live2DApplication:
             on_display_state_callback=self.publish_display_state,
             runtime_health=self.runtime_health,
             cfg=QtGuiConfig(
-                title="Live2D Agent",
+                title="Live2D-Suzu",
                 start_minimized_to_tray=bool(getattr(config, 'START_MINIMIZED_TO_TRAY', True)),
             ),
+            on_cancel_callback=self.cancel_gui_chat,
+            on_new_topic_callback=self.start_gui_new_topic,
         )
         self.qt_ui.brain = self.brain
         self.qt_ui.tts = self.tts
@@ -3440,6 +3697,11 @@ class Live2DApplication:
                 self.qt_ui.request_action_confirm
             )
         self.qt_ui.set_status("Idle")
+        try:
+            self._sync_qt_gui_visibility()
+            self._sync_live2d_frontend_health()
+        except Exception:
+            pass
         try:
             self.logger.info("[RoleSync] syncing active character visual on startup")
             if hasattr(self.qt_ui, "sync_active_character_visual"):
