@@ -510,6 +510,7 @@ async def test_gatekeeper_skips_only_first_non_work_session():
     first = await service.run_gatekeeper(
         context=_context(),
         clean_title="Docs - Chrome",
+        display_app="chrome.exe",
         category="browser",
         count=1,
         chat_with_ai=lambda *args, **kwargs: "YES",
@@ -517,6 +518,7 @@ async def test_gatekeeper_skips_only_first_non_work_session():
     second = await service.run_gatekeeper(
         context=_context(),
         clean_title="Docs - Chrome",
+        display_app="chrome.exe",
         category="browser",
         count=2,
         chat_with_ai=lambda *args, **kwargs: "YES",
@@ -524,6 +526,7 @@ async def test_gatekeeper_skips_only_first_non_work_session():
     coding = await service.run_gatekeeper(
         context=_context(),
         clean_title="main.py - Code",
+        display_app="Code.exe",
         category="coding",
         count=1,
         chat_with_ai=lambda *args, **kwargs: "YES",
@@ -532,6 +535,59 @@ async def test_gatekeeper_skips_only_first_non_work_session():
     assert first.reason == "low_intensity"
     assert second.allowed is True
     assert coding.allowed is True
+
+
+@pytest.mark.asyncio
+async def test_gatekeeper_cooldown_reuses_rejection_without_llm_call():
+    service = _service()
+    calls = []
+
+    def chat_with_ai(*args, **kwargs):
+        calls.append(1)
+        return "NO"
+
+    first = await service.run_gatekeeper(
+        context=_context(),
+        clean_title="bilibili - Chrome",
+        display_app="chrome.exe",
+        category="browser",
+        count=2,
+        chat_with_ai=chat_with_ai,
+    )
+    soon = await service.run_gatekeeper(
+        context=_context(),
+        clean_title="bilibili - Chrome",
+        display_app="chrome.exe",
+        category="browser",
+        count=3,
+        chat_with_ai=chat_with_ai,
+    )
+    assert first.allowed is False
+    assert first.reason == "gatekeeper_rejected"
+    assert soon.allowed is False
+    assert soon.reason == "gatekeeper_cooldown"
+    assert len(calls) == 1  # 冷却期内不再烧 gatekeeper LLM 调用
+
+
+@pytest.mark.asyncio
+async def test_gatekeeper_cooldown_expires_and_yes_clears_cache():
+    import time as _time
+
+    service = _service()
+    service._gatekeeper_cache["chrome.exe"] = (
+        _time.monotonic() - service._gatekeeper_cooldown_sec - 1,
+        True,
+    )
+    allowed = await service.run_gatekeeper(
+        context=_context(),
+        clean_title="bilibili - Chrome",
+        display_app="chrome.exe",
+        category="browser",
+        count=2,
+        chat_with_ai=lambda *args, **kwargs: "YES",
+    )
+    assert allowed.allowed is True
+    assert service._gatekeeper_cache.get("chrome.exe") is None  # YES 清缓存
 
 
 def test_text_prompt_distinguishes_duration_from_switch():

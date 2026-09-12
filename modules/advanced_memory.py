@@ -23,8 +23,9 @@ from typing import Optional
 from modules.prompt_parts import PromptParts, join_prompt_sections
 from modules.memory_sqlite import get_memory_store
 from concurrent.futures import ThreadPoolExecutor
-import jieba
-import jieba.analyse
+# jieba（含 finalseg 词典，~80MB）延迟到首次分词再加载：本模块被
+# core.application 启动即 import，顶层 import jieba 会把它塞进启动链。
+# chromadb 在 __init__ 就要建 PersistentClient，必须留在顶层。
 import chromadb
 from config import SYSTEM_RULES_PROMPT, DEFAULT_PERSONA
 from modules.character_manager import character_manager
@@ -504,7 +505,9 @@ class AdvancedMemorySystem:
         if not text:
             return []
         try:
-            # 使用 jieba 提取关键词
+            # 使用 jieba 提取关键词（延迟加载，见文件头注释）
+            import jieba.analyse
+
             return jieba.analyse.extract_tags(text, topK=5)
         except Exception:
             return []
@@ -703,6 +706,17 @@ class AdvancedMemorySystem:
             out = list(pending[:limit])
             del pending[:limit]
             return out
+
+    def clear_short_term(self, session_id: str = None) -> None:
+        with self._lock:
+            self.short_term_manager.clear(session_id)
+            self.short_term_memory = self.short_term_manager.short_term_memory
+            self.session_short_term_memory = (
+                self.short_term_manager.session_short_term_memory
+            )
+            self._session_short_term_loaded = (
+                self.short_term_manager._session_short_term_loaded
+            )
 
     # ================= 核心：添加记忆 (异步优化版) =================
 
@@ -1125,6 +1139,8 @@ Output ONLY "YES" or "NO".
             return []
         terms = []
         try:
+            import jieba
+
             for w in jieba.lcut(t):
                 w = (w or "").strip()
                 if len(w) >= 2:

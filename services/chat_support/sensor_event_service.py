@@ -68,6 +68,10 @@ class SensorEventService:
         self.compress_sensor_text = compress_sensor_text
         self.logger = logger
         self.conversation_event_service = conversation_event_service
+        # (display_app -> (monotonic_ts, last_rejected)) —— gatekeeper 同应用
+        # 冷却表，避免同一窗口几分钟内反复问 LLM（答案几乎全是 NO）。
+        self._gatekeeper_cache: dict[str, tuple[float, bool]] = {}
+        self._gatekeeper_cooldown_sec = 30 * 60
 
     def _active_window_title(self) -> str:
         sensor_ref = self.screen_sensor_ref_getter()
@@ -349,6 +353,7 @@ class SensorEventService:
         *,
         context: SensorGenerationContext,
         clean_title: str,
+        display_app: str,
         category: str,
         count: int,
         chat_with_ai: Callable[..., str],
@@ -357,6 +362,15 @@ class SensorEventService:
         if count <= 1 and category not in {"self", "work", "coding"}:
             self._log_info(f"🛑 [Sensor Gatekeeper] 低强度事件跳过 ({clean_title})")
             return SensorGatekeeperResult(allowed=False, reason="low_intensity")
+
+        # 同一应用冷却期内不重复问 LLM：切屏来回在几分钟内触发多次，
+        # 每次 gatekeeper 都是一整轮 LLM 调用，实测几乎全是 NO。
+        cache_key = str(display_app or clean_title or category or "?")
+        now = time.monotonic()
+        cached = self._gatekeeper_cache.get(cache_key)
+        if cached is not None and now - cached[0] < self._gatekeeper_cooldown_sec:
+            self._log_info(f"🛑 [Sensor Gatekeeper] 冷却中沿用上次拒绝 ({cache_key})")
+            return SensorGatekeeperResult(allowed=False, reason="gatekeeper_cooldown")
 
         prompt = self.build_gatekeeper_prompt(
             context=context,
@@ -379,11 +393,13 @@ class SensorEventService:
                 self._log_info(
                     f"🛑 [Sensor Gatekeeper] 拦截本次纯文本回应 ({clean_title})，保持高冷"
                 )
+                self._gatekeeper_cache[cache_key] = (now, True)
                 return SensorGatekeeperResult(
                     allowed=False,
                     reason="gatekeeper_rejected",
                     decision=decision_text,
                 )
+            self._gatekeeper_cache.pop(cache_key, None)
             return SensorGatekeeperResult(
                 allowed=True,
                 reason="gatekeeper_allowed",
@@ -783,6 +799,7 @@ class SensorEventService:
             gatekeeper_result = await self.run_gatekeeper(
                 context=context,
                 clean_title=clean_title,
+                display_app=display_app,
                 category=category,
                 count=count,
                 chat_with_ai=chat_with_ai,

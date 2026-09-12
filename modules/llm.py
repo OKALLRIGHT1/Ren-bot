@@ -1,6 +1,7 @@
 # modules/llm.py
 import inspect
 import json
+import os
 import re
 import threading
 import time
@@ -244,6 +245,10 @@ def _model_cooldown_remaining(model_key: str, *, now=None) -> float:
 
 
 def _trace_log(*lines):
+    # 默认静默：这些逐请求的 LLM Sync 明细会把 backend 日志刷成流水账
+    # （每次 gatekeeper/聊天 ~5 行）。排查路由/冷却问题时设 LLM_TRACE=1。
+    if os.environ.get("LLM_TRACE", "").strip().lower() not in {"1", "true", "yes"}:
+        return
     with _LOG_LOCK:
         for line in lines:
             print(line)
