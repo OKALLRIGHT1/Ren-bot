@@ -231,6 +231,19 @@ class Plugin:
 
         logger.info(f"正在搜索: {query}")
 
+        tavily_key = str(self._read_setting(settings, "tavily_api_key", "")).strip()
+        if tavily_key:
+            try:
+                return await self._tavily_search(
+                    query=query,
+                    api_key=tavily_key,
+                    num_results=num_results,
+                    timeout_sec=timeout_sec,
+                    show_links=link_request,
+                )
+            except Exception as exc:
+                logger.warning(f"Tavily 搜索失败: {exc}")
+
         try:
             main_result = await self._search_with_main_models(
                 query=query,
@@ -1220,6 +1233,37 @@ class Plugin:
         return "\n".join(
             [meta_line, f"关于 '{query}' 的搜索结果（{provider}）：", *lines]
         )
+
+    async def _tavily_search(
+        self,
+        *,
+        query: str,
+        api_key: str,
+        num_results: int,
+        timeout_sec: int,
+        show_links: bool,
+    ) -> str:
+        payload = await self._post_json_async(
+            "https://api.tavily.com/search",
+            {
+                "query": query,
+                "max_results": num_results,
+                "search_depth": "basic",
+                "include_answer": True,
+            },
+            {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            timeout_sec,
+        )
+        answer = ""
+        if isinstance(payload, dict):
+            answer = str(payload.get("answer") or "").strip()
+        results = self._extract_results(payload)
+        formatted = self._format_results(query, results, "Tavily", show_links=show_links)
+        if answer:
+            return f"{formatted}\n摘要：{self._compact_text(answer, limit=240)}"
+        if not results:
+            raise RuntimeError("tavily returned no results")
+        return formatted
 
     async def _ddg_search(
         self, query: str, num_results: int, show_links: bool = False

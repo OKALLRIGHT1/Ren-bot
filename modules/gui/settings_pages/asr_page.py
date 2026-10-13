@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from PySide6 import QtCore, QtWidgets
+from PySide6 import QtCore, QtGui, QtWidgets
 
 from modules.asr.settings import (
     ASR_ACTIVE_WINDOW_SEC_KEY,
@@ -278,6 +278,13 @@ class AsrSettingsPage(QtWidgets.QWidget):
         self.global_wake_words.setEnabled(self.include_global_wake_words.isChecked())
         self.refresh_preview()
         self.load_correction_state()
+
+    def showEvent(self, event: QtGui.QShowEvent) -> None:  # type: ignore[name-defined]
+        super().showEvent(event)
+        try:
+            self.refresh_preview()
+        except Exception:
+            pass
 
     # ── 识别纠错管理 ───────────────────────────────────────────────
 

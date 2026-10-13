@@ -12,6 +12,7 @@ module free of host-project imports.
 from __future__ import annotations
 
 import os
+from pathlib import Path
 from typing import Any, List, Optional, Sequence
 
 import numpy as np
@@ -86,15 +87,33 @@ def _first_file(directory: str, names: Sequence[str]) -> Optional[str]:
 
 
 def resolve_qwen3_model_dir(base_dir: str) -> str:
-    """Prefer the short local folder; also accept the official extract name."""
-    preferred = os.path.join(base_dir, "sherpa_model", "qwen3-0.6b-int8")
-    official = os.path.join(
-        base_dir, "sherpa_model", "sherpa-onnx-qwen3-asr-0.6B-int8-2026-03-25"
+    """Prefer overlay / selected.json, then the short local folder."""
+    from .model_select import asr_model_root, load_selected
+
+    root = asr_model_root(base_dir)
+    selected = load_selected(base_dir).get("model_dir") or ""
+    candidates = []
+    if selected:
+        extra = Path(selected) if os.path.isabs(selected) else root / selected
+        candidates.append(str(extra))
+    candidates.extend(
+        [
+            str(root / "qwen3-0.6b-int8"),
+            str(root / "sherpa-onnx-qwen3-asr-0.6B-int8-2026-03-25"),
+            os.path.join(base_dir, "sherpa_model", "qwen3-0.6b-int8"),
+            os.path.join(
+                base_dir, "sherpa_model", "sherpa-onnx-qwen3-asr-0.6B-int8-2026-03-25"
+            ),
+        ]
     )
-    for folder in (preferred, official):
+    seen = set()
+    for folder in candidates:
+        if folder in seen:
+            continue
+        seen.add(folder)
         if qwen3_paths(folder) is not None:
             return folder
-    return preferred
+    return candidates[0] if candidates else os.path.join(base_dir, "sherpa_model", "qwen3-0.6b-int8")
 
 
 def qwen3_paths(model_dir: str) -> Optional[dict]:
@@ -113,7 +132,9 @@ def qwen3_paths(model_dir: str) -> Optional[dict]:
 
 
 def resolve_vad_path(base_dir: str) -> str:
-    return os.path.join(base_dir, "sherpa_model", "silero_vad.onnx")
+    from .model_select import resolve_vad_path as _resolve_vad
+
+    return _resolve_vad(base_dir)
 
 
 def qwen3_api_available() -> bool:

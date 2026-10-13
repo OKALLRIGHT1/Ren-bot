@@ -18,6 +18,8 @@ from dataclasses import asdict, dataclass
 from enum import Enum
 from typing import Any, Dict, Optional
 
+from core.message_source import LOCAL_LIVE2D_SOURCES, REMOTE_CHAT_SOURCES
+
 
 class ActorKind(str, Enum):
     LOCAL = "local"
@@ -31,18 +33,8 @@ class ActorChannel(str, Enum):
     GROUP = "group"
 
 
-REMOTE_QQ_SOURCES = frozenset({"qq_gateway", "napcat_qq", "qq_private", "qq_group"})
-LOCAL_SOURCES = frozenset(
-    {
-        "text_input",
-        "voice",
-        "codex_input",
-        "screen_sensor",
-        "music_sensor",
-        "local",
-        "gui",
-    }
-)
+REMOTE_QQ_SOURCES = frozenset({*REMOTE_CHAT_SOURCES, "qq_private", "qq_group"})
+LOCAL_SOURCES = frozenset(LOCAL_LIVE2D_SOURCES)
 
 
 @dataclass(frozen=True, slots=True)

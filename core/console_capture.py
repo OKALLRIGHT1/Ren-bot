@@ -8,7 +8,7 @@ from typing import Optional, TextIO
 
 
 DEFAULT_MAX_BYTES = 10 * 1024 * 1024
-DEFAULT_BACKUP_COUNT = 5
+DEFAULT_BACKUP_COUNT = 2
 
 
 class RotatingTextWriter:
@@ -117,6 +117,41 @@ _installed_path: Optional[Path] = None
 _installed_writer: Optional[RotatingTextWriter] = None
 
 
+def prune_log_backups(path: Path, *, backup_count: int, max_bytes: int) -> None:
+    """Drop old numbered backups and shrink a file that rotation missed."""
+    keep = max(0, int(backup_count))
+    index = keep + 1
+    while True:
+        extra = path.with_name(f"{path.name}.{index}")
+        if not extra.exists():
+            break
+        try:
+            extra.unlink()
+        except OSError:
+            break
+        index += 1
+    dated = sorted(path.parent.glob(f"{path.name}.20*"))
+    for old in dated[:-keep] if keep else dated:
+        try:
+            old.unlink()
+        except OSError:
+            continue
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return
+    limit = max(1, int(max_bytes))
+    if size <= limit:
+        return
+    try:
+        with path.open("rb") as fh:
+            fh.seek(-limit, os.SEEK_END)
+            tail = fh.read()
+        path.write_bytes(tail)
+    except OSError:
+        return
+
+
 def install_console_capture(
     log_path: str = "./logs/console.log",
     *,
@@ -136,6 +171,7 @@ def install_console_capture(
 
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
+        prune_log_backups(path, backup_count=backup_count, max_bytes=max_bytes)
         writer = RotatingTextWriter(
             path,
             max_bytes=max_bytes,

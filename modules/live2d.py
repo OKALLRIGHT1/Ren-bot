@@ -6,6 +6,7 @@ import os
 import random
 import time
 import websockets
+from pathlib import Path
 from typing import Optional
 from urllib.parse import urlparse
 
@@ -30,9 +31,16 @@ from config import TTS_RETURN_IDLE, TTS_IDLE_EMO
 from core.logger import get_logger
 from services.runtime_health import get_runtime_health
 
+PERFORMANCE_CAPABILITY = "live2d.performance.v1"
+NATIVE_PERFORMANCE_EMOTIONS = {"think", "angry", "music"}
+_PERFORMANCE_CLIENT_CHECK = None
+
 _CURRENT_COSTUME_CONFIG = {}
 _CURRENT_COSTUME_EMOTION_MAP = {}
 _CURRENT_COSTUME_MODEL_PATH = ""
+_COSTUME_GENERATION = 0
+_PREVIEW_TASK = None
+PREVIEW_SETTLE_DELAY = 0.2
 MODEL_DEFAULT_MOTION = "__model_default__"
 STOP_MOTION = "__stop_motion__"
 
@@ -114,6 +122,80 @@ def update_current_costume_config(config: Optional[dict], model_path: Optional[s
     _CURRENT_COSTUME_EMOTION_MAP = emotion_map if isinstance(emotion_map, dict) else {}
 
 
+def set_performance_client_check(checker) -> None:
+    global _PERFORMANCE_CLIENT_CHECK
+    _PERFORMANCE_CLIENT_CHECK = checker
+
+
+def is_performance_enabled() -> bool:
+    env = str(os.getenv("LIVE2D_PERFORMANCE_ENABLED", "") or "").strip().lower()
+    if env in {"1", "true", "yes", "on"}:
+        return True
+    if env in {"0", "false", "no", "off"}:
+        return False
+    try:
+        from modules.runtime_settings import load_runtime_settings
+
+        return bool(load_runtime_settings().get("live2d_performance_enabled"))
+    except Exception:
+        return False
+
+
+def has_performance_client() -> bool:
+    if not is_performance_enabled():
+        return False
+    checker = _PERFORMANCE_CLIENT_CHECK
+    if checker is None:
+        return False
+    try:
+        return bool(checker())
+    except Exception:
+        return False
+
+
+def _performance_gesture(emotion: str, prefer_motion: Optional[bool] = None) -> str:
+    if prefer_motion is False:
+        return "none"
+    emo = (emotion or "").strip().lower()
+    if prefer_motion is True or emo in NATIVE_PERFORMANCE_EMOTIONS:
+        return "native"
+    return "facs"
+
+
+async def send_performance_intent(
+    emotion: Optional[str],
+    intensity: Optional[float] = None,
+    *,
+    gesture: Optional[str] = None,
+    hold_ms: Optional[int] = None,
+    reason: str = "",
+    prefer_motion: Optional[bool] = None,
+) -> bool:
+    """13700 已废弃。情绪强度改挂在 13200 / 13300 上。"""
+    return False
+
+
+async def send_speech_lifecycle(
+    state: str,
+    *,
+    duration_ms: Optional[int] = None,
+    emotion: Optional[str] = None,
+) -> None:
+    resolved = str(state or "").strip().lower()
+    if resolved not in {"start", "stop"}:
+        return
+    await _send_to_models(
+        msg=13701,
+        msg_id=21,
+        data_builder=lambda mid: {
+            "id": mid,
+            "state": resolved,
+            **({"duration_ms": max(0, int(duration_ms))} if duration_ms is not None else {}),
+            **({"emotion": str(emotion).strip()} if emotion else {}),
+        },
+    )
+
+
 async def go_idle():
     if not TTS_RETURN_IDLE:
         return
@@ -130,6 +212,13 @@ PING_TIMEOUT = 5.0
 SEND_TIMEOUT = 1.5
 CONNECTION_POOL_MAX_AGE = 300  # 5分钟后重新建立连接
 MAX_RECONNECT_DELAY = 15.0
+DISCOVERY_FILE_MAX_AGE_SECONDS = 120.0
+DISCOVERY_PROTOCOL_VERSION = 1
+DISCOVERY_FILE_NAME = "live2d-websocket.json"
+DISCOVERY_APP_IDENTIFIERS = (
+    "com.live2d-suzu.enhanced",
+    "com.live2d-only.app",
+)
 
 _RESOLVED_HOST = None
 
@@ -333,29 +422,114 @@ async def _try_host(host: str) -> bool:
         return False
 
 
+def _discovery_file_candidates() -> list:
+    """Return local discovery candidates without reading user data during import."""
+    override = str(os.getenv("LIVE2D_DISCOVERY_FILE", "") or "").strip()
+    if override:
+        return [Path(override)]
+
+    candidates: list[Path] = []
+    for env_name in ("APPDATA", "LOCALAPPDATA"):
+        root = str(os.getenv(env_name, "") or "").strip()
+        if not root:
+            continue
+        for identifier in DISCOVERY_APP_IDENTIFIERS:
+            candidate = Path(root) / identifier / DISCOVERY_FILE_NAME
+            if candidate not in candidates:
+                candidates.append(candidate)
+    return candidates
+
+
+def _read_discovery_host(
+    path: Path,
+    *,
+    now: Optional[float] = None,
+    max_age: float = DISCOVERY_FILE_MAX_AGE_SECONDS,
+) -> Optional:
+    """Validate a discovery file and construct a fixed local /api endpoint."""
+    logger = _get_logger()
+    try:
+        stat = path.stat()
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        logger.warning(f"无法读取 Live2D 发现文件状态: {path} | {exc}")
+        return None
+
+    age = max(0.0, float(time.time() if now is None else now) - stat.st_mtime)
+    if age > max(0.0, float(max_age)):
+        logger.info(f"忽略过期 Live2D 发现文件: {path} | age={age:.1f}s")
+        return None
+
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        logger.warning(f"Live2D 发现文件损坏: {path} | {type(exc).__name__}")
+        return None
+
+    if not isinstance(payload, dict):
+        logger.warning(f"拒绝格式错误的 Live2D 发现文件: {path}")
+        return None
+
+    protocol_version = payload.get("protocol_version")
+    pid = payload.get("pid")
+    port = payload.get("port")
+    if (
+        isinstance(protocol_version, bool)
+        or protocol_version != DISCOVERY_PROTOCOL_VERSION
+        or isinstance(pid, bool)
+        or not isinstance(pid, int)
+        or pid <= 0
+        or isinstance(port, bool)
+        or not isinstance(port, int)
+        or not 1 <= port <= 65535
+    ):
+        logger.warning(f"拒绝非法 Live2D 发现文件: {path}")
+        return None
+
+    return f"ws://127.0.0.1:{port}/api"
+
+
 async def _resolve_host() -> str:
     global _RESOLVED_HOST
     if _RESOLVED_HOST:
         return _RESOLVED_HOST
 
-    _get_logger().info("正在并发扫描端口 10086-10100, 20000-20020 ...")
+    for discovery_path in _discovery_file_candidates():
+        host = _read_discovery_host(discovery_path)
+        if not host:
+            continue
+        if await _try_host(host):
+            _get_logger().info(
+                f"采用 Live2D 发现文件端点: {discovery_path} -> {_safe_host_label(host)}"
+            )
+            _RESOLVED_HOST = host
+            return host
+        _get_logger().warning(
+            f"Live2D 发现端点连接失败，继续端口扫描: "
+            f"{discovery_path} -> {_safe_host_label(host)}"
+        )
+
+    _get_logger().info(
+        "未采用有效 Live2D 发现端点，正在并发扫描端口 "
+        "10086-10100, 20000-20020 ..."
+    )
 
     ports = list(range(10086, 10101)) + list(range(20000, 20021))
-    tasks = []
-    for p in ports:
-        host = f"ws://127.0.0.1:{p}/api"
-        tasks.append(_try_host(host))
-
+    tasks = [
+        _try_host(f"ws://127.0.0.1:{port}/api")
+        for port in ports
+    ]
     results = await asyncio.gather(*tasks)
 
-    for i, success in enumerate(results):
+    for port, success in zip(ports, results):
         if success:
-            found = f"ws://127.0.0.1:{ports[i]}/api"
-            _get_logger().info(f"发现端口: {found}")
+            found = f"ws://127.0.0.1:{port}/api"
+            _get_logger().info(f"端口扫描发现 Live2D: {found}")
             _RESOLVED_HOST = found
             return found
 
-    _get_logger().warning(f"未找到 ExAPI，将使用默认: {LIVE2D_HOST}")
+    _get_logger().warning(f"发现文件和端口扫描均失败，回退到 LIVE2D_HOST: {LIVE2D_HOST}")
     _RESOLVED_HOST = LIVE2D_HOST
     return _RESOLVED_HOST
 
@@ -499,17 +673,80 @@ def resolve_model_default_motion(model_path: Optional[str] = None) -> Optional[s
     return None
 
 
-async def play_motion(mtn: str, motion_type: int = 0):
+async def play_motion(
+    mtn: str,
+    motion_type: int = 0,
+    *,
+    emotion: Optional[str] = None,
+    intensity: Optional[float] = None,
+    source: Optional[str] = None,
+):
     motion_name = str(mtn or "").strip()
     if motion_name == MODEL_DEFAULT_MOTION:
         motion_name = resolve_model_default_motion() or ""
         if not motion_name:
             return
+    emo = str(emotion or "").strip().lower()
+    motion_source = str(source or ("emotion" if emo else "action")).strip().lower()
+    if motion_source not in {"preview", "emotion", "idle", "action"}:
+        motion_source = "action"
+    payload = {
+        "type": int(motion_type),
+        "mtn": motion_name,
+        "source": motion_source,
+    }
+    if emo:
+        payload["emotion"] = emo
+        try:
+            payload["intensity"] = max(0.0, min(1.0, float(intensity) if intensity is not None else 0.5))
+        except Exception:
+            payload["intensity"] = 0.5
     await _send_to_models(
         msg=13200,
         msg_id=2,
-        data_builder=lambda mid: {"id": mid, "type": int(motion_type), "mtn": motion_name},
+        data_builder=lambda mid: {"id": mid, **payload},
     )
+
+
+async def preview_motion(mtn: str, motion_type: int = 0):
+    """Play only the latest GUI preview after the current costume settles."""
+    global _PREVIEW_TASK
+
+    motion_name = str(mtn or "").strip()
+    if not motion_name:
+        return
+
+    generation = _COSTUME_GENERATION
+    previous = _PREVIEW_TASK
+    current = asyncio.current_task()
+    if previous is not None and previous is not current and not previous.done():
+        previous.cancel()
+        _get_logger().info("新的动作预览已使旧预览失效")
+
+    async def _play_latest():
+        try:
+            await asyncio.sleep(PREVIEW_SETTLE_DELAY)
+            if generation != _COSTUME_GENERATION:
+                _get_logger().info(
+                    f"动作预览因模型代次变化失效: {generation} -> {_COSTUME_GENERATION}"
+                )
+                return
+            await play_motion(
+                motion_name,
+                motion_type=int(motion_type),
+                source="preview",
+            )
+        except asyncio.CancelledError:
+            _get_logger().info("动作预览任务已取消")
+            raise
+
+    task = asyncio.create_task(_play_latest())
+    _PREVIEW_TASK = task
+    try:
+        await task
+    finally:
+        if _PREVIEW_TASK is task:
+            _PREVIEW_TASK = None
 
 
 def pick_motion_candidate(cfg, rng=None):
@@ -548,11 +785,24 @@ def pick_motion_candidate(cfg, rng=None):
     return {"mtn": mtn, "type": motion_type}
 
 
-async def set_expression(exp_value):
+async def set_expression(
+    exp_value,
+    *,
+    emotion: Optional[str] = None,
+    intensity: Optional[float] = None,
+):
+    payload = {"expId": int(exp_value)}
+    emo = str(emotion or "").strip().lower()
+    if emo:
+        payload["emotion"] = emo
+        try:
+            payload["intensity"] = max(0.0, min(1.0, float(intensity) if intensity is not None else 0.5))
+        except Exception:
+            payload["intensity"] = 0.5
     await _send_to_models(
         msg=13300,
         msg_id=1,
-        data_builder=lambda mid: {"id": mid, "expId": int(exp_value)},
+        data_builder=lambda mid: {"id": mid, **payload},
     )
 
 
@@ -617,6 +867,14 @@ async def change_costume(model_path: str, config: dict = None):
     abs_path = abs_path.replace("\\", "/")
 
     safe_cfg = config if isinstance(config, dict) else {}
+
+    global _COSTUME_GENERATION, _PREVIEW_TASK
+    _COSTUME_GENERATION += 1
+    generation = _COSTUME_GENERATION
+    if _PREVIEW_TASK is not None and not _PREVIEW_TASK.done():
+        _PREVIEW_TASK.cancel()
+        _get_logger().info(f"新换装已使旧动作预览失效: generation={generation}")
+
     update_current_costume_config(safe_cfg, model_path=abs_path)
     derived_keys = safe_cfg.get("derived_emotion_keys")
     if derived_keys:
@@ -634,6 +892,11 @@ async def change_costume(model_path: str, config: dict = None):
 
     async def _settle_to_idle():
         await asyncio.sleep(0.6)
+        if generation != _COSTUME_GENERATION:
+            _get_logger().info(
+                f"旧模型待机恢复已失效: {generation} -> {_COSTUME_GENERATION}"
+            )
+            return
         cfg = resolve_emotion_config("idle", EMO_TO_LIVE2D)
         if not cfg:
             cfg = resolve_emotion_config("neutral", EMO_TO_LIVE2D)
@@ -641,12 +904,22 @@ async def change_costume(model_path: str, config: dict = None):
             return
         exp = cfg.get("exp")
         mtn = cfg.get("mtn")
+        if generation != _COSTUME_GENERATION:
+            _get_logger().info("待机恢复发送前因模型代次变化失效")
+            return
         if exp is not None:
             await set_expression(int(exp))
+        if generation != _COSTUME_GENERATION:
+            _get_logger().info("待机动作因模型代次变化失效")
+            return
         if mtn:
-            await play_motion(str(mtn), motion_type=int(cfg.get("type", 0) or 0))
+            await play_motion(
+                str(mtn),
+                motion_type=int(cfg.get("type", 0) or 0),
+                source="idle",
+            )
 
-    if not safe_cfg.get("suppress_auto_idle"):
+    if not safe_cfg.get("suppress_auto_idle") and not has_performance_client():
         try:
             asyncio.create_task(_settle_to_idle())
         except Exception:
@@ -654,6 +927,10 @@ async def change_costume(model_path: str, config: dict = None):
 
 
 def resolve_emotion_config(emotion: str, default_mapping: Optional[dict] = None):
+    """按情绪取「动作 + 表情」资源。
+
+    这张表驱动 13200 / 13300（本模型文件，可带 emotion/intensity）。
+    """
     emo = (emotion or "").strip().lower()
     if not emo:
         return None
@@ -708,9 +985,9 @@ async def trigger_emotion(emotion: Optional[str]) -> bool:
         f"[Live2D Emotion] emotion={emo} source={source} exp={exp} mtn={mtn} type={mtype}"
     )
     if exp is not None:
-        await set_expression(int(exp))
+        await set_expression(int(exp), emotion=emo, intensity=0.5)
     if mtn:
-        await play_motion(str(mtn), motion_type=mtype)
+        await play_motion(str(mtn), motion_type=mtype, emotion=emo, intensity=0.5)
     return True
 
 
@@ -744,12 +1021,15 @@ async def send_bubble(
 ):
     text = (text or "").strip()
 
-    try:
-        used = await trigger_emotion(emotion)
-        if not used:
-            await trigger_motion(text)
-    except Exception as e:
-        _get_logger().warning(f"动作/表情触发失败: {e}")
+    # 有表演客户端时，情绪动作已经由 EmotionController 发过 13200/13300，
+    # 气泡这里不再重发，避免同一句播两遍。
+    if not has_performance_client():
+        try:
+            used = await trigger_emotion(emotion)
+            if not used:
+                await trigger_motion(text)
+        except Exception as e:
+            _get_logger().warning(f"动作/表情触发失败: {e}")
 
     # 有显式时长（通常来自 TTS 音频）时优先信任它，避免字数估算把下一段拖慢。
     # 无显式时长时（关 TTS）再按字数估算。

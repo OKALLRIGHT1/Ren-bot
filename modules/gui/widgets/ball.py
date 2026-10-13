@@ -44,7 +44,12 @@ class DraggableBall(QtWidgets.QPushButton):
         is_long_press = (time.time() - self._press_time) > 0.5
 
         if self._is_dragging or is_long_press:
+            dragged = self._is_dragging
             self._is_dragging = False
+            if dragged and self.main_window is not None:
+                finished = getattr(self.main_window, "_on_ball_drag_finished", None)
+                if callable(finished):
+                    finished()
             event.ignore()
         else:
             self.clicked.emit()

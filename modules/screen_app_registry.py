@@ -5,9 +5,10 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, Optional
+from modules.paths import data_path
 
 
-APP_RULES_PATH = Path("./data/app_category_rules.json")
+APP_RULES_PATH = Path(data_path("app_category_rules.json"))
 
 # Always-on base rules. File rules with the same name can override these.
 BASE_RULES = [

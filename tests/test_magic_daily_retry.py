@@ -7,16 +7,14 @@ import pytest
 if not (Path(__file__).parents[1] / "plugins" / "Isuzu_news" / "magic_daily").is_dir():
     pytest.skip("local Isuzu_news plugin is not part of the public repository", allow_module_level=True)
 
-from plugins.Isuzu_news.magic_daily.constants import (
-    DEFAULT_ANIME,
-    DEFAULT_HITOKOTO,
-    DEFAULT_HOLIDAYS,
-    DEFAULT_HOTWORDS,
-    DEFAULT_IT_NEWS,
-    DEFAULT_WORLD_NEWS,
-)
+from plugins.Isuzu_news.magic_daily.constants import EMPTY_HITOKOTO
 from plugins.Isuzu_news.magic_daily.plugin_impl import Plugin
 from plugins.Isuzu_news.magic_daily.api.bgm import BGMAPI
+
+
+SAMPLE_ANIME = [{"title": "测试番", "image": "https://example.test/a.jpg"}]
+SAMPLE_HOTWORDS = ["测试热点"]
+SAMPLE_IT_NEWS = ["测试 IT"]
 
 
 class _FakeBGMAPI:
@@ -30,7 +28,7 @@ class _FakeBGMAPI:
         return []
 
     def parse_today_anime(self, api_data, max_count=4):
-        return DEFAULT_ANIME[:max_count]
+        return SAMPLE_ANIME[:max_count]
 
 
 class _FakeBilibiliAPI:
@@ -44,7 +42,7 @@ class _FakeBilibiliAPI:
         return {"code": 0, "list": [{"show_name": "测试热点"}]}
 
     def parse_hotwords_data(self, api_data, max_count=4):
-        return DEFAULT_HOTWORDS[:max_count]
+        return SAMPLE_HOTWORDS[:max_count]
 
 
 class _FakeITHomeRSS:
@@ -58,18 +56,18 @@ class _FakeITHomeRSS:
         return object()
 
     def parse_news(self, rss_root, max_count=5):
-        return DEFAULT_IT_NEWS[:max_count]
+        return SAMPLE_IT_NEWS[:max_count]
 
 
 class _FakeSession:
     closed = False
 
 
-def test_bgm_parse_can_disable_default_fallback():
+def test_bgm_parse_does_not_invent_anime():
     api = BGMAPI()
 
     assert api.parse_today_anime([], max_count=2, use_fallback=False) == []
-    assert api.parse_today_anime([], max_count=2)
+    assert api.parse_today_anime([], max_count=2) == []
 
 
 class _CapturingInfoSourceService:
@@ -113,7 +111,7 @@ def test_fetch_all_data_retries_only_defaulted_source():
 
     async def fetch_today_anime(limit=4):
         calls["anime"] += 1
-        return DEFAULT_ANIME[:limit]
+        return SAMPLE_ANIME[:limit]
 
     async def fetch_world_news(limit=5):
         calls["world"] += 1
@@ -128,12 +126,12 @@ def test_fetch_all_data_retries_only_defaulted_source():
             "world_news": fetch_world_news,
         },
         daily_fallbacks={
-            "today_anime": DEFAULT_ANIME,
-            "bili_hot": DEFAULT_HOTWORDS,
-            "hitokoto": DEFAULT_HITOKOTO,
-            "moyu": DEFAULT_HOLIDAYS,
-            "world_news": DEFAULT_WORLD_NEWS,
-            "it_news": DEFAULT_IT_NEWS,
+            "today_anime": [],
+            "bili_hot": [],
+            "hitokoto": dict(EMPTY_HITOKOTO),
+            "moyu": [],
+            "world_news": [],
+            "it_news": [],
         },
     )
 
@@ -202,6 +200,7 @@ def test_fetch_all_data_uses_configured_info_sources_for_alapi_daily_sources(tmp
     )
     assert _CapturingInfoSourceService.calls == [(1, 2, 3, 4)]
     assert Path(_CapturingInfoSourceService.init_kwargs["endpoint_dir"]) == endpoint_dir
+    assert _CapturingInfoSourceService.init_kwargs["daily_fallbacks"]["today_anime"] == []
 
 
 def test_build_report_data_filters_distant_holidays(monkeypatch):
@@ -216,7 +215,7 @@ def test_build_report_data_filters_distant_holidays(monkeypatch):
         return (
             [],
             [],
-            DEFAULT_HITOKOTO,
+            dict(EMPTY_HITOKOTO),
             [
                 {"name": "周末", "days_left": 2},
                 {"name": "中秋节", "days_left": 80},
@@ -232,3 +231,65 @@ def test_build_report_data_filters_distant_holidays(monkeypatch):
     report_data = asyncio.run(plugin._build_report_data())
 
     assert report_data["moyu_list"] == [{"name": "周末", "days_left": 2}]
+    assert "presentation" in report_data
+
+
+def test_presentation_follows_character_and_skips_empty_sections(monkeypatch):
+    plugin = Plugin()
+    plugin._settings["title"] = ""
+    plugin._settings["greeting_style"] = "character"
+    plugin._settings["enable_ai_greeting"] = False
+    plugin._settings["sections"] = ["moyu", "world_news"]
+
+    monkeypatch.setattr(
+        plugin,
+        "_active_character",
+        lambda: {"name": "高松灯", "prompt": "你是高松灯"},
+    )
+    monkeypatch.setattr(plugin, "_character_face_path", lambda _character: "")
+
+    report = {
+        "date_info": {"date_str": "2026-10-13", "week_cn": "星期一"},
+        "anime_list": [{"title": "不该出现"}],
+        "bili_hotwords": ["不该出现"],
+        "hitokoto_data": dict(EMPTY_HITOKOTO),
+        "moyu_list": [{"name": "周末", "days_left": 2}],
+        "world_news": ["一条新闻"],
+        "it_news": ["不该出现"],
+        "presentation": plugin._resolve_presentation(),
+    }
+
+    text = plugin._format_text_report(report)
+    assert "高松灯日报" in text
+    assert "摸鱼日历" in text
+    assert "一条新闻" in text
+    assert "今日新番" not in text
+    assert "B站热点" not in text
+    assert "魔法" not in text
+
+    greeting = plugin._get_default_greeting(report)
+    assert greeting.startswith("📰 高松灯：")
+    assert "魔法" not in greeting
+
+
+def test_custom_greeting_uses_placeholders():
+    plugin = Plugin()
+    plugin._settings["greeting_style"] = "custom"
+    plugin._settings["custom_greeting"] = "{name}送来了{title}"
+    plugin._settings["title"] = "晚刊"
+
+    presentation = {
+        "character_name": "高松灯",
+        "title": "晚刊",
+        "greeting_style": "custom",
+        "custom_greeting": "{name}送来了{title}",
+    }
+    greeting = asyncio.run(
+        plugin._generate_greeting_text({"presentation": presentation, "moyu_list": []})
+    )
+    assert greeting == "📰 高松灯送来了晚刊"
+
+
+def test_scheduled_push_targets_default_empty():
+    plugin = Plugin()
+    assert plugin._settings["scheduled_push_targets"] == []

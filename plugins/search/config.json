@@ -22,7 +22,7 @@
         "query"
     ],
     "type": "delegate",
-    "description": "联网搜索插件，优先使用 Grok 代理做提示式联网检索；也兼容 Exa，并可在失败时回退到 DDG。",
+    "description": "联网搜索插件。优先 Tavily，失败后再用主程序联网模型、Grok 或 Exa，最后可回退 DDG。",
     "example_arg": "今天有什么新闻",
     "timeout_sec": 60,
     "settings": {
@@ -48,7 +48,7 @@
             "type": "text",
             "label": "Grok Base URL",
             "description": "OpenAI 兼容根地址，例如 grok2api 的 http://host:port/v1",
-            "default": "http://20.214.141.16:8317/v1"
+            "default": "http://127.0.0.1:8317/v1"
         },
         "grok_api_key": {
             "type": "secret",
@@ -97,6 +97,12 @@
             "label": "Exa 优先本地",
             "description": "仅在 provider=exa 时生效。",
             "default": true
+        },
+        "tavily_api_key": {
+            "type": "secret",
+            "label": "Tavily API Key",
+            "description": "第一优先级。只写入本机加密存储，留空则跳过 Tavily。",
+            "default": ""
         },
         "api_key": {
             "type": "secret",

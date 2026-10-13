@@ -3,8 +3,11 @@ Live2D-Suzu 主程序入口
 重构后使用Application类管理整个应用
 """
 
+from __future__ import annotations
+
 import os
 import sys
+import time
 
 # Force standard streams to use UTF-8 encoding on Windows to prevent UnicodeEncodeError with emojis
 if sys.platform.startswith('win'):
@@ -52,12 +55,45 @@ if os.path.exists(pyside6_path):
 from core.application import Live2DApplication
 
 
+def acquire_core_lock(seconds: float = 25.0) -> SingleInstanceLock | None:
+    deadline = time.time() + max(0.0, seconds)
+    while True:
+        lock = SingleInstanceLock(ROOT_DIR, "core")
+        if lock.acquire():
+            return lock
+        if time.time() >= deadline:
+            return None
+        time.sleep(0.5)
+
+
 def main():
     """应用主函数"""
-    lock = SingleInstanceLock(ROOT_DIR, "core")
-    if not lock.acquire():
+    lock = acquire_core_lock()
+    if lock is None:
         print("⚠️ [核心程序] 已有 Live2D-Suzu 核心实例在运行，本次启动已退出。")
         sys.exit(CORE_ALREADY_RUNNING_EXIT_CODE)
+
+    # 安装版首启迁移（docs/部分重构.md §13/§18）：注入了 SUZU_DATA_DIR 且
+    # 用户数据目录还没有配置时，把旧 data/ 的配置带过去。必须在
+    # load_custom_models / runtime_settings 读取之前执行。开发模式
+    # （未注入）为 no-op，行为零变化。
+    try:
+        from modules.user_data_migration import maybe_migrate_for_boot
+
+        report = maybe_migrate_for_boot(ROOT_DIR)
+        if isinstance(report, dict):
+            migrated = len(report.get("files") or []) + len(report.get("dirs") or [])
+            errors = len(report.get("errors") or [])
+            print(
+                f"📦 [首启迁移] 旧数据已迁入用户数据目录：{migrated} 项"
+                f"{'，失败 ' + str(errors) + ' 项' if errors else ''}",
+                flush=True,
+            )
+    except Exception as exc:
+        # 迁移失败不阻断启动：Brain 以全新配置起（token 重生成），
+        # 旧数据原样保留在 brain/data/。
+        print(f"⚠️ [首启迁移] 跳过（{exc}）", flush=True)
+
     config.load_custom_models()
     app = Live2DApplication()
     import __main__

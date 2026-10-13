@@ -111,7 +111,7 @@ class EmotionReplyService:
         ]
 
     async def infer_reply_emotion_with_llm(
-        self, text: str, *, scene: str = "chat"
+        self, text: str, *, scene: str = "chat", request_context: Any = None
     ) -> Optional[str]:
         clean = self.clean_text_for_tts(
             self.strip_cmd(self.strip_emo_tags(text or ""))
@@ -121,6 +121,13 @@ class EmotionReplyService:
         try:
             from modules.llm import chat_with_ai
 
+            call_kwargs: dict = {
+                "task_type": "reply_polish",
+                "caller": "reply_emotion_fallback",
+            }
+            if request_context is not None:
+                call_kwargs["request_id"] = request_context.request_id
+                call_kwargs["call_metadata"] = {"_request_context": request_context}
             reply = await asyncio.to_thread(
                 chat_with_ai,
                 [
@@ -135,8 +142,7 @@ class EmotionReplyService:
                         ),
                     }
                 ],
-                task_type="reply_polish",
-                caller="reply_emotion_fallback",
+                **call_kwargs,
             )
             return self.normalize_emo(str(reply or "").strip())
         except Exception as exc:

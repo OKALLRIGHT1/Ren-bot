@@ -187,6 +187,24 @@ class ChatGateway:
             send_call=lambda: adapter.send_file(session_id, file_path, **kwargs),
         )
 
+    async def send_forward(self, adapter_name: str, session_id: str, messages: list, **kwargs: Any) -> Any:
+        adapter = self.adapters.get(adapter_name)
+        if not adapter:
+            raise KeyError(f"Unknown adapter: {adapter_name}")
+        sender = getattr(adapter, "send_forward", None)
+        if not callable(sender):
+            return {"ok": False, "reason": "forward_unavailable", "session_id": session_id}
+        return await self._track_send(
+            adapter_name=adapter_name,
+            session_id=session_id,
+            kind="forward",
+            payload_preview=f"{len(messages or [])} nodes",
+            components=components_to_dicts(
+                [component("forward", "[聊天记录]", {"count": len(messages or [])})]
+            ),
+            send_call=lambda: sender(session_id, messages, **kwargs),
+        )
+
     async def send_share(self, adapter_name: str, session_id: str, url: str, **kwargs: Any) -> Any:
         adapter = self.adapters.get(adapter_name)
         if not adapter:

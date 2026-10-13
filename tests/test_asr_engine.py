@@ -131,3 +131,44 @@ def test_voice_sensor_process_sentence_uses_wake_policy():
     sensor._process_sentence("五十铃，今天天气怎么样")
     # No event loop, so chat.process is not scheduled; accept path must not raise.
     assert sensor.is_woken is True
+
+
+def test_voice_sensor_feed_audio_uses_engine_without_sounddevice(monkeypatch):
+    from modules.asr.config import AsrConfig
+    from modules.asr.sensor import VoiceSensor
+
+    class FakeEngine:
+        name = "qwen3"
+        ready = True
+        samples_per_read = 512
+
+        def __init__(self):
+            self.chunks = []
+
+        def set_hotwords(self, hotwords):
+            return None
+
+        def accept_audio(self, samples):
+            self.chunks.append(len(samples))
+            return ["五十铃你好"]
+
+        def close(self):
+            return None
+
+    def fail_stream(*args, **kwargs):
+        raise AssertionError("remote pcm must not open sounddevice")
+
+    monkeypatch.setattr("modules.asr.sensor.sd.InputStream", fail_stream)
+    engine = FakeEngine()
+    sensor = VoiceSensor(
+        chat_service=object(),
+        config=AsrConfig(),
+        engine=engine,
+    )
+    sensor.start(loop=None, capture=False)
+    assert sensor.running is True
+    assert sensor._thread is None
+    sensor.feed_audio([0.1, 0.2, 0.3])
+    assert engine.chunks == [3]
+    sensor.stop()
+    assert sensor.running is False

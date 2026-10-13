@@ -24,6 +24,8 @@ from config import (
 from modules.security_redaction import redact_sensitive_text
 from modules.task_registry import check_caller_task
 
+from services.chat_support.snapshot import extract_usage
+
 try:
     from modules.model_transport_state import (
         get_preferred_model,
@@ -573,6 +575,7 @@ def _openai_sync_http_client(timeout_sec: float):
         timeout=float(timeout_sec),
         headers=_openai_default_headers(),
         event_hooks={"request": [_drop_sdk_fingerprint_headers]},
+        trust_env=False,
     )
 
 
@@ -586,6 +589,7 @@ def _openai_async_http_client(timeout_sec: float):
         timeout=float(timeout_sec),
         headers=_openai_default_headers(),
         event_hooks={"request": [_hook]},
+        trust_env=False,
     )
 
 
@@ -667,7 +671,7 @@ def _chat_with_openai_responses(
     token_budget = _optional_positive_int(max_tokens)
     if token_budget:
         payload["max_output_tokens"] = token_budget
-    resp = requests.post(url, headers=headers, json=payload, timeout=timeout)
+    resp = requests.post(url, headers=headers, json=payload, timeout=timeout, proxies={"http": None, "https": None})
     if resp.status_code >= 400:
         fallback_payload = {
             "model": model_name,
@@ -676,7 +680,7 @@ def _chat_with_openai_responses(
         if token_budget:
             fallback_payload["max_output_tokens"] = token_budget
         fallback_resp = requests.post(
-            url, headers=headers, json=fallback_payload, timeout=timeout
+            url, headers=headers, json=fallback_payload, timeout=timeout, proxies={"http": None, "https": None}
         )
         if fallback_resp.status_code >= 400:
             raise RuntimeError(
@@ -780,7 +784,7 @@ def _chat_with_gemini_native(
         "contents": _messages_to_gemini_contents(messages_context),
         "generationConfig": generation_config,
     }
-    resp = requests.post(url, headers=headers, json=payload, timeout=timeout)
+    resp = requests.post(url, headers=headers, json=payload, timeout=timeout, proxies={"http": None, "https": None})
     if resp.status_code >= 400:
         raise RuntimeError(f"gemini_native HTTP {resp.status_code}: {resp.text[:280]}")
     data = resp.json()
@@ -903,9 +907,14 @@ async def analyze_image(
 
 
 async def chat_with_ai_stream(
-    messages_context, task_type="default", caller: str = ""
+    messages_context,
+    task_type="default",
+    caller: str = "",
+    request_id: str = "",
+    call_metadata: dict = None,
 ) -> AsyncGenerator[str, None]:
     caller = caller or "unknown"
+    request_id = request_id or uuid.uuid4().hex[:8]
     check = check_caller_task(caller, task_type)
     _warn_caller_task_check(check, prefix="[LLM Stream]")
     model_keys = LLM_ROUTER.get(task_type, LLM_ROUTER.get("default", []))
@@ -954,13 +963,21 @@ async def chat_with_ai_stream(
                             messages=messages_context,
                             stream=True,
                             timeout=20,
+                            stream_options={"include_usage": True},
                         )
+                        stream_usage = None
                         async for chunk in response:
-                            delta = getattr(chunk.choices[0], "delta", None)
-                            content = getattr(delta, "content", None) if delta else None
-                            if content:
-                                yielded_any = True
-                                yield content
+                            choices = getattr(chunk, "choices", None)
+                            if choices:
+                                delta = getattr(choices[0], "delta", None)
+                                content = getattr(delta, "content", None) if delta else None
+                                if content:
+                                    yielded_any = True
+                                    yield content
+                            # final chunk carries usage with empty choices
+                            cu = getattr(chunk, "usage", None)
+                            if cu is not None:
+                                stream_usage = cu
                     finally:
                         await _aclose_openai_client(client)
                 elif method == "openai_responses":
@@ -993,8 +1010,20 @@ async def chat_with_ai_stream(
                         "success": True,
                         "duration_ms": int((time.time() - t0) * 1000),
                         "error": "",
+                        "request_id": request_id,
                     }
                 )
+                # --- snapshot: extract usage and feed back to RequestContext ---
+                usage = extract_usage(
+                    {"usage": stream_usage} if stream_usage else None, method
+                )
+                req_ctx = (
+                    call_metadata.get("_request_context")
+                    if isinstance(call_metadata, dict)
+                    else None
+                )
+                if req_ctx is not None:
+                    req_ctx.record_usage(usage)
                 return
             except Exception as e:
                 safe_error = redact_sensitive_text(e)
@@ -1010,6 +1039,7 @@ async def chat_with_ai_stream(
                         "success": False,
                         "duration_ms": int((time.time() - t0) * 1000),
                         "error": safe_error[:300],
+                        "request_id": request_id,
                     }
                 )
                 cooldown_delay = _start_model_cooldown(
@@ -1218,8 +1248,18 @@ def chat_complete(
                         "success": True,
                         "duration_ms": int((time.time() - t0) * 1000),
                         "error": "",
+                        "request_id": request_id,
                     }
                 )
+                # --- snapshot: extract usage and feed back to RequestContext ---
+                usage = extract_usage(response, method)
+                req_ctx = (
+                    call_metadata.get("_request_context")
+                    if isinstance(call_metadata, dict)
+                    else None
+                )
+                if req_ctx is not None:
+                    req_ctx.record_usage(usage)
                 _trace_log(
                     f"[LLM Sync] ✅ 成功({method}) (len={len(content)}) ({trace})"
                 )
@@ -1253,6 +1293,7 @@ def chat_complete(
                         "success": False,
                         "duration_ms": int((time.time() - t0) * 1000),
                         "error": safe_error[:300],
+                        "request_id": request_id,
                     }
                 )
                 _trace_log(f"[LLM Sync] ❌ 失败: {safe_error} (transport={method}) ({trace})")

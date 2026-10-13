@@ -55,13 +55,11 @@ class ActionGate:
         "mail.read",
         "mail.me",
         "mail.search",
-        "mcp.list_tools",
         "backup.list",
     }
     # backup.create = LOW (owner private, no heavy confirm); restore = HIGH.
     LOW_ACTIONS = {
         "plugin.reload",
-        "mcp.refresh",
         "backup.create",
         "system.spawn_process_trusted",  # open_app trust list
     }

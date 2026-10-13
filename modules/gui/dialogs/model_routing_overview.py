@@ -96,15 +96,15 @@ class ModelRoutingOverviewDialog(QtWidgets.QDialog):
 
     def _setup_ui(self):
         layout = QtWidgets.QVBoxLayout(self)
-        layout.setContentsMargins(16, 16, 16, 16)
-        layout.setSpacing(16)
+        layout.setContentsMargins(12, 10, 12, 10)
+        layout.setSpacing(10)
 
         # 头部说明卡片
         header = QtWidgets.QFrame()
         header.setObjectName("dialogHeader")
         header_layout = QtWidgets.QVBoxLayout(header)
-        header_layout.setContentsMargins(16, 14, 16, 14)
-        header_layout.setSpacing(6)
+        header_layout.setContentsMargins(12, 8, 12, 8)
+        header_layout.setSpacing(4)
 
         title = QtWidgets.QLabel("模型路由总览")
         title.setObjectName("dialogTitle")
@@ -126,19 +126,19 @@ class ModelRoutingOverviewDialog(QtWidgets.QDialog):
         self.caller_view = self._make_table_view(["调用者 (Caller Source)", "映射任务 (Target Task)", "匹配类型", "用途说明"])
         self.model_view = self._make_table_view(["模型标识 (Key)", "接口提供商 (Provider)", "模型代号 (Model)", "接口地址 (Base URL)"])
 
-        # 调整各个表格的列宽拉伸
+        # 调整各个表格的列宽拉伸：关键内容弹性充满，消除突兀空白
         self.route_view.horizontalHeader().setSectionResizeMode(0, QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
-        self.route_view.horizontalHeader().setSectionResizeMode(1, QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
+        self.route_view.horizontalHeader().setSectionResizeMode(1, QtWidgets.QHeaderView.ResizeMode.Stretch)
 
         self.caller_view.horizontalHeader().setSectionResizeMode(0, QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
         self.caller_view.horizontalHeader().setSectionResizeMode(1, QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
         self.caller_view.horizontalHeader().setSectionResizeMode(2, QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
-        self.caller_view.horizontalHeader().setSectionResizeMode(3, QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
+        self.caller_view.horizontalHeader().setSectionResizeMode(3, QtWidgets.QHeaderView.ResizeMode.Stretch)
 
         self.model_view.horizontalHeader().setSectionResizeMode(0, QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
         self.model_view.horizontalHeader().setSectionResizeMode(1, QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
         self.model_view.horizontalHeader().setSectionResizeMode(2, QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
-        self.model_view.horizontalHeader().setSectionResizeMode(3, QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
+        self.model_view.horizontalHeader().setSectionResizeMode(3, QtWidgets.QHeaderView.ResizeMode.Stretch)
 
         self.tabs.addTab(self.route_view, "任务路由")
         self.tabs.addTab(self.caller_view, "Caller 注册表")
@@ -168,18 +168,18 @@ class ModelRoutingOverviewDialog(QtWidgets.QDialog):
         table.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
         table.setFocusPolicy(QtCore.Qt.FocusPolicy.NoFocus)
         table.verticalHeader().setVisible(False)
-        table.verticalHeader().setDefaultSectionSize(42)
-        table.verticalHeader().setMinimumSectionSize(38)
+        table.verticalHeader().setDefaultSectionSize(34)
+        table.verticalHeader().setMinimumSectionSize(28)
         table.setAlternatingRowColors(True)
         table.setWordWrap(False)
-        table.setTextElideMode(QtCore.Qt.TextElideMode.ElideNone)
+        table.setTextElideMode(QtCore.Qt.TextElideMode.ElideRight)
         table.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         table.setHorizontalScrollMode(QtWidgets.QAbstractItemView.ScrollMode.ScrollPerPixel)
         table.setVerticalScrollMode(QtWidgets.QAbstractItemView.ScrollMode.ScrollPerPixel)
         table.horizontalHeader().setDefaultAlignment(
             QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignVCenter
         )
-        table.horizontalHeader().setMinimumSectionSize(96)
+        table.horizontalHeader().setMinimumSectionSize(80)
         table.horizontalHeader().setSectionsMovable(True)
         table.horizontalHeader().setSectionsClickable(False)
         
@@ -189,7 +189,7 @@ class ModelRoutingOverviewDialog(QtWidgets.QDialog):
                 border: 1px solid transparent;
             }
             QTableWidget::item {
-                padding: 6px 12px;
+                padding: 2px 8px;
             }
         """)
         return table

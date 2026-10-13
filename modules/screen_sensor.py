@@ -79,7 +79,9 @@ class ScreenSensor:
         self.DURATION_TRIGGER_THRESHOLD = 20 * 60  # 阈值：连续 20 分钟没切屏触发一次
 
         # 数据文件
-        self.stats_file = "./data/sensor_stats.json"
+        from modules.paths import data_path
+
+        self.stats_file = data_path("sensor_stats.json")
 
         # 核心数据：daily_counts = 有意义的「回到该应用会话」次数，不是原始前台事件数
         self.daily_counts: Dict[str, int] = {}

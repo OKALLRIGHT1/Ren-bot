@@ -10,7 +10,7 @@ from PySide6 import QtCore, QtWidgets
 
 from config import MEMORY_SETTINGS
 from modules.gui.styles import get_memory_dialog_styles
-from modules.gui.utils import FlowLayout
+from modules.gui.utils import FlowLayout, FlowWidget
 from modules.memory_core import MemoryCoreService
 from modules.memory_core.categories import (
     CATEGORIES,
@@ -46,6 +46,244 @@ def _msg(
     message.setWindowTitle(title)
     message.setText(text)
     message.exec()
+
+
+class MemoryTagChip(QtWidgets.QFrame):
+    clicked = QtCore.Signal(object)
+    deleted = QtCore.Signal(object)
+
+    def __init__(
+        self,
+        record: Dict[str, Any],
+        category_id: str = "",
+        parent=None,
+    ):
+        super().__init__(parent)
+        self.record = record
+        self.category_id = category_id
+        self._content = str(record.get("content") or "").strip()
+        self.setObjectName("memoryTagChip")
+        self.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
+        self._build_ui()
+
+    def _build_ui(self):
+        style = self._get_chip_style(self.category_id)
+        self.setStyleSheet(style)
+
+        layout = QtWidgets.QHBoxLayout(self)
+        layout.setContentsMargins(8, 3, 6, 3)
+        layout.setSpacing(6)
+
+        clean_content = " ".join(self._content.split())
+        display_text = clean_content if len(clean_content) <= 36 else clean_content[:33] + "..."
+        self.label = QtWidgets.QLabel(display_text)
+        self.label.setStyleSheet(
+            "border: none; background: transparent; font-size: 12px; font-weight: 500;"
+        )
+        self.label.setAttribute(QtCore.Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        layout.addWidget(self.label)
+
+        self.btn_delete = QtWidgets.QPushButton("×")
+        self.btn_delete.setToolTip("删除此项记忆")
+        self.btn_delete.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
+        self.btn_delete.setStyleSheet(
+            "QPushButton { border: none; background: transparent; color: #9CA3AF; "
+            "font-size: 13px; font-weight: bold; width: 14px; height: 14px; padding: 0; } "
+            "QPushButton:hover { color: #EF4444; background: rgba(239, 68, 68, 0.15); border-radius: 7px; }"
+        )
+        self.btn_delete.clicked.connect(lambda: self.deleted.emit(self.record))
+        layout.addWidget(self.btn_delete)
+        self.setFixedHeight(28)
+        self.setMaximumWidth(380)
+
+        created = str(self.record.get("created_at") or self.record.get("updated_at") or "")
+        confidence = self.record.get("confidence")
+        conf_str = f"置信度: {int(float(confidence)*100)}%" if confidence is not None else ""
+        kind = str(self.record.get("kind") or "")
+        kind_label = {
+            "profile": "身份设定",
+            "preference": "偏好喜好",
+            "fact": "事实",
+            "rule": "互动规则",
+        }.get(kind, kind)
+        tip_lines = [
+            f"内容: {self._content}",
+            f"类型: {kind_label}" if kind_label else "",
+            conf_str,
+            f"记录时间: {created[:19]}" if created else "",
+            "💡 点击可编辑详情，点击 × 删除",
+        ]
+        self.setToolTip("\n".join([line for line in tip_lines if line]))
+
+    def mousePressEvent(self, event):
+        if event.button() == QtCore.Qt.MouseButton.LeftButton:
+            self.clicked.emit(self.record)
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    @staticmethod
+    def _get_chip_style(category_id: str) -> str:
+        palettes = {
+            "likes.music": ("#EFF6FF", "#BFDBFE", "#1E40AF", "#DBEAFE"),
+            "likes.anime": ("#FAF5FF", "#E9D5FF", "#6B21A8", "#F3E8FF"),
+            "likes.games": ("#ECFDF5", "#A7F3D0", "#065F46", "#D1FAE5"),
+            "likes.food": ("#FFF7ED", "#FED7AA", "#9A3412", "#FFEDD5"),
+            "likes.art": ("#FDF2F8", "#FBCFE8", "#9D174D", "#FCE7F3"),
+            "likes": ("#FFF1F2", "#FECDD3", "#9F1239", "#FFE4E6"),
+            "likes.other": ("#FFF1F2", "#FECDD3", "#9F1239", "#FFE4E6"),
+            "dislikes": ("#FEF2F2", "#FECACA", "#991B1B", "#FEE2E2"),
+            "habits": ("#F0FDF4", "#BBF7D0", "#166534", "#DCFCE7"),
+            "status": ("#F0F9FF", "#BAE6FD", "#0369A1", "#E0F2FE"),
+            "interaction": ("#EEF2FF", "#C7D2FE", "#3730A3", "#E0E7FF"),
+            "identity": ("#FEF3C7", "#FDE68A", "#92400E", "#FDE68A"),
+            "events": ("#FFFBEB", "#FCD34D", "#78350F", "#FEF3C7"),
+            "tasks": ("#FEF9C3", "#FACC15", "#713F12", "#FEF08A"),
+        }
+        bg, border, text, hover_bg = palettes.get(
+            category_id, ("#F3F4F6", "#E5E7EB", "#374151", "#E5E7EB")
+        )
+        return (
+            f"QFrame#memoryTagChip {{ background-color: {bg}; border: 1px solid {border}; "
+            f"border-radius: 12px; }} "
+            f"QFrame#memoryTagChip:hover {{ background-color: {hover_bg}; border-color: {text}; }} "
+            f"QLabel {{ color: {text}; }}"
+        )
+
+
+class QuickMemoryEditDialog(QtWidgets.QDialog):
+    def __init__(self, record: Dict[str, Any], parent=None):
+        super().__init__(parent)
+        self.record = record
+        self.setWindowTitle("编辑记忆详情")
+        self.setFixedWidth(400)
+        self._build_ui()
+
+    def _build_ui(self):
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setSpacing(12)
+        layout.setContentsMargins(18, 16, 18, 16)
+
+        form = QtWidgets.QFormLayout()
+        form.setSpacing(10)
+
+        self.content_edit = QtWidgets.QPlainTextEdit()
+        self.content_edit.setPlainText(str(self.record.get("content") or ""))
+        self.content_edit.setMaximumHeight(85)
+        form.addRow("记忆内容", self.content_edit)
+
+        self.category_combo = QtWidgets.QComboBox()
+        self.category_combo.addItem("保持自动分类", "")
+        for cat in category_options():
+            self.category_combo.addItem(cat.label, cat.id)
+        meta = self.record.get("metadata") if isinstance(self.record.get("metadata"), dict) else {}
+        curr_cat = str(meta.get("category_override") or classify_memory_record(self.record))
+        idx = self.category_combo.findData(curr_cat)
+        if idx >= 0:
+            self.category_combo.setCurrentIndex(idx)
+        form.addRow("所属分类", self.category_combo)
+
+        self.kind_combo = QtWidgets.QComboBox()
+        self.kind_combo.addItems(["preference", "fact", "profile", "rule", "episode", "other"])
+        curr_kind = str(self.record.get("kind") or "preference")
+        kind_idx = self.kind_combo.findText(curr_kind)
+        if kind_idx >= 0:
+            self.kind_combo.setCurrentIndex(kind_idx)
+        form.addRow("记录类型", self.kind_combo)
+
+        layout.addLayout(form)
+
+        btns = QtWidgets.QHBoxLayout()
+        self.btn_delete = QtWidgets.QPushButton("删除")
+        self.btn_delete.setObjectName("memoryDangerAction")
+        self.deleted_requested = False
+        self.btn_delete.clicked.connect(self._on_delete)
+        self.btn_cancel = QtWidgets.QPushButton("取消")
+        self.btn_cancel.clicked.connect(self.reject)
+        btns.addWidget(self.btn_cancel)
+
+        self.btn_save = QtWidgets.QPushButton("保存")
+        self.btn_save.setObjectName("memoryPrimaryAction")
+        self.btn_save.clicked.connect(self._on_save)
+        btns.addWidget(self.btn_save)
+        layout.addLayout(btns)
+
+    def _on_delete(self):
+        self.deleted_requested = True
+        self.accept()
+
+    def _on_save(self):
+        if not self.content_edit.toPlainText().strip():
+            _msg(self, "提示", "记忆内容不能为空", QtWidgets.QMessageBox.Icon.Information)
+            return
+        self.accept()
+
+    def get_updated_data(self) -> Dict[str, Any]:
+        return {
+            "content": self.content_edit.toPlainText().strip(),
+            "category_override": str(self.category_combo.currentData() or "").strip(),
+            "kind": self.kind_combo.currentText(),
+        }
+
+
+class QuickMemoryAddDialog(QtWidgets.QDialog):
+    def __init__(self, default_subject: str = "owner", parent=None):
+        super().__init__(parent)
+        self.default_subject = default_subject
+        self.setWindowTitle("新增记忆与偏好")
+        self.setFixedWidth(400)
+        self._build_ui()
+
+    def _build_ui(self):
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setSpacing(12)
+        layout.setContentsMargins(18, 16, 18, 16)
+
+        form = QtWidgets.QFormLayout()
+        form.setSpacing(10)
+
+        self.content_edit = QtWidgets.QPlainTextEdit()
+        self.content_edit.setPlaceholderText("例如：最喜欢的乐队是 Ave Mujica、喜欢喝无糖乌龙茶、叫我小明 等")
+        self.content_edit.setMaximumHeight(85)
+        form.addRow("记忆内容", self.content_edit)
+
+        self.category_combo = QtWidgets.QComboBox()
+        self.category_combo.addItem("自动推导分类", "")
+        for cat in category_options():
+            self.category_combo.addItem(cat.label, cat.id)
+        form.addRow("指定分类", self.category_combo)
+
+        self.kind_combo = QtWidgets.QComboBox()
+        self.kind_combo.addItems(["preference (偏好/喜好)", "fact (事实信息)", "profile (身份/称呼)", "rule (互动规则)"])
+        form.addRow("记录类型", self.kind_combo)
+
+        layout.addLayout(form)
+
+        btns = QtWidgets.QHBoxLayout()
+        btns.addStretch(1)
+        self.btn_cancel = QtWidgets.QPushButton("取消")
+        self.btn_cancel.clicked.connect(self.reject)
+        btns.addWidget(self.btn_cancel)
+
+        self.btn_save = QtWidgets.QPushButton("保存并收录")
+        self.btn_save.setObjectName("memoryPrimaryAction")
+        self.btn_save.clicked.connect(self._on_save)
+        btns.addWidget(self.btn_save)
+        layout.addLayout(btns)
+
+    def _on_save(self):
+        if not self.content_edit.toPlainText().strip():
+            _msg(self, "提示", "请输入记忆内容", QtWidgets.QMessageBox.Icon.Information)
+            return
+        self.accept()
+
+    def get_data(self) -> Dict[str, Any]:
+        raw_kind = self.kind_combo.currentText().split()[0]
+        return {
+            "content": self.content_edit.toPlainText().strip(),
+            "category_override": str(self.category_combo.currentData() or "").strip(),
+            "kind": raw_kind,
+        }
 
 
 class MemoryEditorDialog(QtWidgets.QDialog):
@@ -136,32 +374,106 @@ class MemoryEditorDialog(QtWidgets.QDialog):
 
     def _build_profile_overview_tab(self) -> None:
         page = QtWidgets.QWidget()
-        layout = QtWidgets.QVBoxLayout(page)
+        page_layout = QtWidgets.QVBoxLayout(page)
+        page_layout.setContentsMargins(0, 0, 0, 0)
+        page_layout.setSpacing(10)
+
+        # 1. Filters & Search Bar
         filters = QtWidgets.QHBoxLayout()
-        filters.addWidget(QtWidgets.QLabel("人物"))
+        filters.setSpacing(8)
+        filters.addWidget(QtWidgets.QLabel("人物档案："))
+
         self.profile_person_filter = QtWidgets.QComboBox()
         self.profile_person_filter.addItem("我的档案", "owner")
+        self.profile_person_filter.setMinimumWidth(160)
         self.profile_person_filter.currentIndexChanged.connect(
             self._reload_profile_overview
         )
-        filters.addWidget(self.profile_person_filter, 1)
+        filters.addWidget(self.profile_person_filter)
+
+        self.profile_search_input = QtWidgets.QLineEdit()
+        self.profile_search_input.setPlaceholderText("🔍 搜索记忆标签与偏好...")
+        self.profile_search_input.textChanged.connect(self._on_profile_search_changed)
+        filters.addWidget(self.profile_search_input, 1)
+
         refresh = QtWidgets.QPushButton("刷新")
+        refresh.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
         refresh.clicked.connect(self._reload_profile_overview)
         filters.addWidget(refresh)
-        filters.addStretch(2)
-        layout.addLayout(filters)
 
+        btn_add = QtWidgets.QPushButton("+ 新增记忆")
+        btn_add.setObjectName("memoryPrimaryAction")
+        btn_add.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
+        btn_add.clicked.connect(self._quick_add_memory)
+        filters.addWidget(btn_add)
+        page_layout.addLayout(filters)
+
+        # 2. Hero Card (Dossier Header)
+        self.profile_hero_card = QtWidgets.QFrame()
+        self.profile_hero_card.setObjectName("memoryHeroCard")
+        hero_layout = QtWidgets.QVBoxLayout(self.profile_hero_card)
+        hero_layout.setContentsMargins(16, 12, 16, 12)
+        hero_layout.setSpacing(8)
+
+        hero_top = QtWidgets.QHBoxLayout()
+        self.profile_hero_title = QtWidgets.QLabel("📖 TA 眼中的你")
+        self.profile_hero_title.setObjectName("memoryHeroTitle")
+        self.profile_hero_badge = QtWidgets.QLabel("已记录 0 项偏好与事实")
+        self.profile_hero_badge.setObjectName("memoryHeroBadge")
+        hero_top.addWidget(self.profile_hero_title)
+        hero_top.addWidget(self.profile_hero_badge)
+        hero_top.addStretch(1)
+        hero_layout.addLayout(hero_top)
+
+        self.profile_identity_row = QtWidgets.QHBoxLayout()
+        self.profile_identity_label = QtWidgets.QLabel("认知称呼：")
+        self.profile_identity_label.setStyleSheet("font-weight: 600; font-size: 12px;")
+        self.profile_identity_chips_wrap = QtWidgets.QWidget()
+        self.profile_identity_chips_layout = QtWidgets.QHBoxLayout(
+            self.profile_identity_chips_wrap
+        )
+        self.profile_identity_chips_layout.setContentsMargins(0, 0, 0, 0)
+        self.profile_identity_chips_layout.setSpacing(6)
+        self.profile_identity_row.addWidget(self.profile_identity_label)
+        self.profile_identity_row.addWidget(self.profile_identity_chips_wrap)
+        self.profile_identity_row.addStretch(1)
+        hero_layout.addLayout(self.profile_identity_row)
+        page_layout.addWidget(self.profile_hero_card)
+
+        # 3. Category Wall inside ScrollArea
+        self.profile_wall_scroll = QtWidgets.QScrollArea()
+        self.profile_wall_scroll.setObjectName("memoryWallScroll")
+        self.profile_wall_scroll.setWidgetResizable(True)
+        self.profile_wall_scroll.setHorizontalScrollBarPolicy(
+            QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+        self.profile_wall_scroll.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
+
+        self.profile_wall_container = QtWidgets.QWidget()
+        self.profile_wall_container.setObjectName("memoryWallContent")
+        self.profile_wall_layout = QtWidgets.QVBoxLayout(self.profile_wall_container)
+        self.profile_wall_layout.setContentsMargins(0, 4, 0, 8)
+        self.profile_wall_layout.setSpacing(10)
+
+        self.profile_empty_label = QtWidgets.QLabel("暂无匹配的记忆标签")
+        self.profile_empty_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        self.profile_empty_label.setStyleSheet(
+            "color: #9CA3AF; padding: 40px; font-size: 14px;"
+        )
+        self.profile_empty_label.setVisible(False)
+        self.profile_wall_layout.addWidget(self.profile_empty_label)
+
+        self.profile_wall_layout.addStretch(1)
+        self.profile_wall_scroll.setWidget(self.profile_wall_container)
+        page_layout.addWidget(self.profile_wall_scroll, 1)
+
+        # Hidden tree widget for backward compatibility
         self.profile_overview_tree = QtWidgets.QTreeWidget()
-        self.profile_overview_tree.setObjectName("memoryProfileOverview")
-        self.profile_overview_tree.setColumnCount(2)
-        self.profile_overview_tree.setHeaderLabels(["分类与内容", "记录类型"])
-        self.profile_overview_tree.header().setSectionResizeMode(
-            0, QtWidgets.QHeaderView.ResizeMode.Stretch
-        )
-        self.profile_overview_tree.header().setSectionResizeMode(
-            1, QtWidgets.QHeaderView.ResizeMode.ResizeToContents
-        )
-        layout.addWidget(self.profile_overview_tree, 1)
+        self.profile_overview_tree.setVisible(False)
+
+        self._profile_chips: List[MemoryTagChip] = []
+        self._profile_card_widgets: List[QtWidgets.QFrame] = []
+
         self.tabs.addTab(page, "档案概览")
 
     def _build_memory_core_tab(self) -> None:
@@ -231,6 +543,11 @@ class MemoryEditorDialog(QtWidgets.QDialog):
         self.memory_core_table.setEditTriggers(
             QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers
         )
+        self.memory_core_table.setShowGrid(False)
+        self.memory_core_table.setAlternatingRowColors(True)
+        self.memory_core_table.verticalHeader().setVisible(False)
+        self.memory_core_table.verticalHeader().setDefaultSectionSize(32)
+        self.memory_core_table.setTextElideMode(QtCore.Qt.TextElideMode.ElideRight)
         header = self.memory_core_table.horizontalHeader()
         header.setSectionResizeMode(0, QtWidgets.QHeaderView.ResizeMode.Stretch)
         header.setSectionResizeMode(1, QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
@@ -425,7 +742,8 @@ class MemoryEditorDialog(QtWidgets.QDialog):
             person_id = str(person.get("person_id") or "").strip()
             if not person_id:
                 continue
-            display_name = str(person.get("display_name") or "").strip()
+            raw_display = str(person.get("display_name") or "").strip()
+            display_name = re.sub(r"[\u25a0-\u25ff\ufffd]+", "", raw_display).strip()
             if person_id == "owner":
                 labels[person_id] = (
                     f"我的档案 · {display_name}" if display_name else "我的档案"
@@ -439,8 +757,9 @@ class MemoryEditorDialog(QtWidgets.QDialog):
 
         for character_id, payload in get_character_catalog().items():
             subject_id = self.memory_core.repository.character_subject_id(character_id)
-            name = str((payload or {}).get("name") or character_id).strip()
-            labels[subject_id] = f"角色 · {name}"
+            raw_name = str((payload or {}).get("name") or character_id).strip()
+            name = re.sub(r"[\u25a0-\u25ff\ufffd]+", "", raw_name).strip()
+            labels[subject_id] = f"角色 · {name or character_id}"
 
         for row in rows:
             subject_id = str(row.get("subject_id") or "owner").strip() or "owner"
@@ -482,7 +801,9 @@ class MemoryEditorDialog(QtWidgets.QDialog):
         self.memory_core_person_filter.blockSignals(False)
 
     def _reload_profile_overview(self, *_args) -> None:
-        if not hasattr(self, "profile_overview_tree"):
+        if not hasattr(self, "profile_overview_tree") or not hasattr(
+            self, "profile_wall_container"
+        ):
             return
         selected_person_id = str(
             self.profile_person_filter.currentData() or "owner"
@@ -517,27 +838,31 @@ class MemoryEditorDialog(QtWidgets.QDialog):
         selected_person_id = str(
             self.profile_person_filter.currentData() or "owner"
         ).strip() or "owner"
+        selected_label = labels.get(selected_person_id, selected_person_id)
         if selected_person_id == "owner":
-            rows = [
+            filtered_rows = [
                 row
                 for row in rows
                 if str(row.get("subject_id") or "").strip() in {"", "owner"}
             ]
         else:
-            rows = [
+            filtered_rows = [
                 row
                 for row in rows
                 if str(row.get("subject_id") or "").strip() == selected_person_id
             ]
 
         grouped: Dict[str, List[Dict[str, Any]]] = {}
-        for row in rows:
+        for row in filtered_rows:
             grouped.setdefault(classify_memory_record(row), []).append(row)
 
+        # 1. Update hidden tree for compatibility
         self.profile_overview_tree.clear()
         section_ids = ("identity", "likes", "dislikes", "habits", "status", "interaction")
         for section_id in section_ids:
-            section = CATEGORY_BY_ID[section_id]
+            section = CATEGORY_BY_ID.get(section_id)
+            if not section:
+                continue
             section_count = sum(
                 len(items)
                 for category_id, items in grouped.items()
@@ -579,6 +904,225 @@ class MemoryEditorDialog(QtWidgets.QDialog):
                     )
                     section_item.addChild(leaf)
             section_item.setExpanded(True)
+
+        # 2. Update Hero Card
+        if selected_person_id == "owner":
+            hero_name = "你"
+        else:
+            hero_name = (
+                selected_label.replace("角色 · ", "")
+                .replace("QQ · ", "")
+                .replace("我的档案 · ", "")
+                .strip()
+            )
+        self.profile_hero_title.setText(f"📖 TA 眼中的{hero_name}")
+        self.profile_hero_badge.setText(f"已记录 {len(filtered_rows)} 项偏好与事实")
+
+        # Rebuild Identity chips in Hero Card
+        while self.profile_identity_chips_layout.count():
+            item = self.profile_identity_chips_layout.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.deleteLater()
+
+        self._profile_chips.clear()
+        identity_records = grouped.get("identity", [])
+        if identity_records:
+            for r in identity_records:
+                chip = MemoryTagChip(r, category_id="identity")
+                chip.clicked.connect(self._open_tag_detail)
+                chip.deleted.connect(self._quick_delete_tag)
+                self.profile_identity_chips_layout.addWidget(chip)
+                self._profile_chips.append(chip)
+        else:
+            empty_lbl = QtWidgets.QLabel("(暂无专属称呼或身份设定)")
+            empty_lbl.setStyleSheet("color: #9CA3AF; font-size: 11px;")
+            self.profile_identity_chips_layout.addWidget(empty_lbl)
+
+        # 3. Rebuild Category Wall
+        for card in self._profile_card_widgets:
+            self.profile_wall_layout.removeWidget(card)
+            card.deleteLater()
+        self._profile_card_widgets.clear()
+
+        # Fold generic 'likes' into 'likes.other'
+        direct_likes = grouped.get("likes", [])
+        if direct_likes:
+            grouped.setdefault("likes.other", []).extend(direct_likes)
+
+        display_sections = [
+            ("likes.music", "🎵", "音乐偏好"),
+            ("likes.anime", "🌸", "追番与二次元"),
+            ("likes.games", "🎮", "游戏偏好"),
+            ("likes.food", "🍱", "饮食偏好"),
+            ("likes.art", "🎨", "艺术与审美"),
+            ("likes.other", "⭐", "其他喜好"),
+            ("dislikes", "⚡", "雷区与讨厌"),
+            ("habits", "☕", "作息与习惯"),
+            ("status", "📌", "近期状态"),
+            ("interaction", "💬", "互动与回复规则"),
+            ("events", "📅", "重要经历与事件"),
+            ("tasks", "📋", "待办与承诺"),
+            ("uncategorized", "💡", "其他零散记忆"),
+        ]
+
+        for cat_id, emoji, default_title in display_sections:
+            records = grouped.get(cat_id, [])
+            if not records:
+                continue
+
+            card = QtWidgets.QFrame()
+            card.setObjectName("memoryCategoryCard")
+
+            card_layout = QtWidgets.QVBoxLayout(card)
+            card_layout.setContentsMargins(14, 12, 14, 12)
+            card_layout.setSpacing(10)
+
+            header_layout = QtWidgets.QHBoxLayout()
+            header_layout.setContentsMargins(0, 0, 0, 0)
+            header_layout.setSpacing(8)
+
+            header_lbl = QtWidgets.QLabel(f"{emoji} {default_title}")
+            header_lbl.setObjectName("memoryCategoryHeader")
+            header_layout.addWidget(header_lbl)
+
+            count_badge = QtWidgets.QLabel(f"{len(records)} 项")
+            count_badge.setObjectName("memoryCategoryCountBadge")
+            header_layout.addWidget(count_badge)
+
+            header_layout.addStretch(1)
+            card_layout.addLayout(header_layout)
+
+            flow_widget = FlowWidget(card, margin=0, h_spacing=8, v_spacing=8)
+            for row in records:
+                chip = MemoryTagChip(row, category_id=cat_id, parent=flow_widget)
+                chip.clicked.connect(self._open_tag_detail)
+                chip.deleted.connect(self._quick_delete_tag)
+                flow_widget.addWidget(chip)
+                self._profile_chips.append(chip)
+
+            card_layout.addWidget(flow_widget)
+
+            self._profile_card_widgets.append(card)
+            self.profile_wall_layout.insertWidget(
+                max(0, self.profile_wall_layout.count() - 1),
+                card,
+            )
+
+        self._on_profile_search_changed(self.profile_search_input.text().strip())
+
+    def _on_profile_search_changed(self, text: str = "") -> None:
+        query = (text or "").strip().lower()
+        visible_total = 0
+
+        # Filter hero identity chips
+        for i in range(self.profile_identity_chips_layout.count()):
+            item = self.profile_identity_chips_layout.itemAt(i)
+            w = item.widget()
+            if isinstance(w, MemoryTagChip):
+                match = not query or (query in str(w.record.get("content") or "").lower())
+                w.setVisible(match)
+                if match:
+                    visible_total += 1
+
+        # Filter card chips & hide empty cards
+        for card in self._profile_card_widgets:
+            card_visible_chips = 0
+            chips = card.findChildren(MemoryTagChip)
+            for chip in chips:
+                match = not query or (query in str(chip.record.get("content") or "").lower())
+                chip.setVisible(match)
+                if match:
+                    card_visible_chips += 1
+            card.setVisible(card_visible_chips > 0)
+            badge = card.findChild(QtWidgets.QLabel, "memoryCategoryCountBadge")
+            if badge:
+                badge.setText(f"{card_visible_chips} 项" if query else f"{len(chips)} 项")
+            visible_total += card_visible_chips
+
+        if hasattr(self, "profile_empty_label"):
+            has_records = len(self._profile_chips) > 0
+            if not has_records:
+                self.profile_empty_label.setText("当前档案暂无记忆记录，可点击上方「+ 新增记忆」添加")
+                self.profile_empty_label.setVisible(True)
+            elif visible_total == 0 and query:
+                self.profile_empty_label.setText(f"未找到与 \"{query}\" 相关的记忆标签")
+                self.profile_empty_label.setVisible(True)
+            else:
+                self.profile_empty_label.setVisible(False)
+
+    def _open_tag_detail(self, record: Dict[str, Any]) -> None:
+        if not record or not record.get("id"):
+            return
+        dlg = QuickMemoryEditDialog(record, parent=self)
+        if dlg.exec() == QtWidgets.QDialog.DialogCode.Accepted:
+            if dlg.deleted_requested:
+                self._quick_delete_tag(record)
+                return
+            updated = dlg.get_updated_data()
+            record_id = record["id"]
+            try:
+                self.memory_core.update_memory_record(
+                    record_id,
+                    content=updated["content"],
+                    kind=updated["kind"],
+                )
+                override = updated.get("category_override", "")
+                self.memory_core.set_memory_category_override(record_id, override)
+                self._reload_memory_core_records()
+            except Exception as exc:
+                _msg(self, "修改失败", str(exc), QtWidgets.QMessageBox.Icon.Warning)
+
+    def _quick_delete_tag(self, record: Dict[str, Any]) -> None:
+        record_id = str(record.get("id") or "").strip()
+        if not record_id:
+            return
+        content = str(record.get("content") or "")
+        short_content = content if len(content) <= 30 else content[:27] + "..."
+        answer = QtWidgets.QMessageBox.question(
+            self,
+            "确认删除记忆",
+            f"确定要删除这条记忆标签吗？\n\n「{short_content}」",
+            QtWidgets.QMessageBox.StandardButton.Yes
+            | QtWidgets.QMessageBox.StandardButton.No,
+            QtWidgets.QMessageBox.StandardButton.No,
+        )
+        if answer != QtWidgets.QMessageBox.StandardButton.Yes:
+            return
+        try:
+            self.memory_core.delete_memory_record(record_id)
+            self._reload_memory_core_records()
+        except Exception as exc:
+            _msg(self, "删除失败", str(exc), QtWidgets.QMessageBox.Icon.Warning)
+
+    def _quick_add_memory(self) -> None:
+        selected_person_id = str(
+            self.profile_person_filter.currentData() or "owner"
+        ).strip() or "owner"
+        dlg = QuickMemoryAddDialog(default_subject=selected_person_id, parent=self)
+        if dlg.exec() == QtWidgets.QDialog.DialogCode.Accepted:
+            data = dlg.get_data()
+            if not data["content"]:
+                return
+            try:
+                record_id = self.memory_core.upsert_memory_record(
+                    content=data["content"],
+                    kind=data["kind"],
+                    subject_id=selected_person_id,
+                    confidence=1.0,
+                    importance=0.7,
+                    manual_lock=True,
+                    source_type="manual_gui",
+                    source_id=uuid.uuid4().hex,
+                )
+                if data.get("category_override"):
+                    self.memory_core.set_memory_category_override(
+                        record_id,
+                        data["category_override"],
+                    )
+                self._reload_memory_core_records()
+            except Exception as exc:
+                _msg(self, "添加失败", str(exc), QtWidgets.QMessageBox.Icon.Warning)
 
     def _reload_memory_core_records(self) -> None:
         selected_record_id = self.memory_core_id.text().strip()

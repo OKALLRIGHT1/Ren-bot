@@ -6,8 +6,9 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from modules.json_state_store import JsonTaskStore, now_iso
+from modules.paths import data_path
 
-CODEX_TASKS_PATH = Path("./data/codex_tasks.json")
+CODEX_TASKS_PATH = Path(data_path("codex_tasks.json"))
 MAX_TASKS = 200
 _store = JsonTaskStore(CODEX_TASKS_PATH, max_tasks=MAX_TASKS)
 

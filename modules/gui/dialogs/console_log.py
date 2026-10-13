@@ -16,7 +16,8 @@ class ConsoleLogDialog(QtWidgets.QDialog):
         self.log_dir = Path(log_dir).resolve()
         self.console_log = self.log_dir / "console.log"
         self.agent_log = self.log_dir / "agent.log"
-        self._tail_bytes = 240_000
+        self._tail_bytes = 64_000
+        self._file_offsets = {}
 
         self.setWindowTitle("控制台输出")
         self.resize(940, 620)
@@ -108,20 +109,46 @@ class ConsoleLogDialog(QtWidgets.QDialog):
     def refresh_now(self):
         if self.pause_refresh.isChecked():
             return
-        self._set_text_if_changed(self.console_view, self._read_tail(self.console_log))
-        self._set_text_if_changed(self.agent_view, self._read_tail(self.agent_log))
+        self._append_tail(self.console_view, self.console_log)
+        self._append_tail(self.agent_view, self.agent_log)
 
-    def _set_text_if_changed(self, view, text: str):
-        if view.toPlainText() == text:
+    def _append_tail(self, view, path: Path):
+        key = str(path)
+        try:
+            size = path.stat().st_size if path.exists() else 0
+        except OSError as exc:
+            view.setPlainText(f"读取失败: {exc}")
             return
-        scrollbar = view.verticalScrollBar()
-        old_value = scrollbar.value()
-        was_at_end = old_value >= scrollbar.maximum() - 2
-        view.setPlainText(text)
-        if self.auto_scroll.isChecked() or was_at_end:
-            scrollbar.setValue(scrollbar.maximum())
-        else:
-            scrollbar.setValue(min(old_value, scrollbar.maximum()))
+        offset = self._file_offsets.get(key)
+        if offset is None or offset > size or not view.toPlainText():
+            view.setPlainText(self._read_tail(path))
+            self._file_offsets[key] = size
+            self._scroll_end(view)
+            return
+        if offset == size:
+            return
+        try:
+            with path.open("rb") as fh:
+                fh.seek(offset)
+                chunk = fh.read().decode("utf-8", errors="replace")
+        except OSError as exc:
+            view.appendPlainText(f"\n读取失败: {exc}")
+            return
+        self._file_offsets[key] = size
+        if not chunk:
+            return
+        at_end = self._at_end(view)
+        view.appendPlainText(chunk.rstrip("\n"))
+        if self.auto_scroll.isChecked() or at_end:
+            self._scroll_end(view)
+
+    def _at_end(self, view) -> bool:
+        bar = view.verticalScrollBar()
+        return bar.value() >= bar.maximum() - 2
+
+    def _scroll_end(self, view):
+        bar = view.verticalScrollBar()
+        bar.setValue(bar.maximum())
 
     def _copy_current(self):
         widget = self.tabs.currentWidget()

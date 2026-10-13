@@ -37,15 +37,15 @@ class RhubarbLipSync:
         # 音素到嘴部参数的映射（可根据模型调整）
         self.phoneme_to_mouth = {
             'X': 0.0,      # 静音/闭口
-            'AI': 0.5,     # 'a' 'i' 等开口音
-            'E': 0.6,      # 'e' 音
-            'O': 0.4,      # 'o' 音
-            'U': 0.3,      # 'u' 音
-            'MBP': 0.1,    # 'm' 'b' 'p' 闭口音
-            'L': 0.25,     # 'l' 音
-            'WQ': 0.15,    # 'w' 'q' 音
-            'FV': 0.2,     # 'f' 'v' 音
-            'etc': 0.1,    # 其他音
+            'AI': 0.92,    # 'a' 'i' 等开口音
+            'E': 0.86,     # 'e' 音
+            'O': 0.78,     # 'o' 音
+            'U': 0.62,     # 'u' 音
+            'MBP': 0.12,   # 'm' 'b' 'p' 闭口音
+            'L': 0.42,     # 'l' 音
+            'WQ': 0.28,    # 'w' 'q' 音
+            'FV': 0.34,    # 'f' 'v' 音
+            'etc': 0.22,   # 其他音
         }
         
         logger.info(f"RhubarbLipSync 初始化完成: {self.rhubarb_path}")
@@ -109,13 +109,19 @@ class RhubarbLipSync:
         
         logger.debug(f"Rhubarb 命令: {' '.join(cmd)}")
         
+        # Windows 下隐藏控制台窗口，避免口型分析时在屏幕上闪烁黑色 CMD 窗口
+        kwargs = {}
+        if os.name == "nt":
+            kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+
         process = None
         try:
             # 运行 Rhubarb（使用 asyncio 包装同步调用）
             process = await asyncio.create_subprocess_exec(
                 *cmd,
                 stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE
+                stderr=subprocess.PIPE,
+                **kwargs
             )
             
             stdout, stderr = await asyncio.wait_for(
@@ -257,7 +263,7 @@ class RhubarbLipSync:
         points = [{"time": 0.0, "mouth": 0.0}]
         i = 0
         while t < duration:
-            mouth = 0.12 + 0.43 * abs(math.sin(i * 0.9))
+            mouth = 0.28 + 0.62 * abs(math.sin(i * 0.9))
             points.append({"time": round(t, 3), "mouth": float(mouth)})
             t += step
             i += 1

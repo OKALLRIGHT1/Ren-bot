@@ -89,6 +89,9 @@ def install_missing(rows: List[Dict[str, str]], timeout: int = 600) -> Dict[str,
 
     cmd = [sys.executable, "-m", "pip", "install"] + pkgs
     try:
+        kwargs = {}
+        if os.name == "nt":
+            kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
         proc = subprocess.run(
             cmd,
             capture_output=True,
@@ -96,6 +99,7 @@ def install_missing(rows: List[Dict[str, str]], timeout: int = 600) -> Dict[str,
             encoding="utf-8",
             errors="replace",
             timeout=int(timeout),
+            **kwargs,
         )
         out = (proc.stdout or "")[-6000:]
         err = (proc.stderr or "")[-6000:]

@@ -412,6 +412,38 @@ class GatewaySender:
             self.logger.error(f"Gateway voice reply failed: {e}")
             return False
 
+    async def send_forward_reply(
+        self,
+        messages: List[Dict[str, Any]],
+        ctx: Optional[Dict[str, Any]] = None,
+        **kwargs: Any,
+    ) -> bool:
+        nodes = [item for item in (messages or []) if isinstance(item, dict)]
+        if not nodes:
+            return False
+        target = self.resolve_target(ctx, warning_label="forward reply")
+        if target is None:
+            return False
+        try:
+            result = await self.chat_gateway.send_forward(
+                target["adapter_name"],
+                target["session_id"],
+                nodes,
+                metadata=target["channel_meta"],
+                source=target["source"],
+                **kwargs,
+            )
+        except Exception as exc:
+            self.logger.error(f"Gateway forward reply failed: {exc}")
+            return False
+        if self.is_action_success(result):
+            self.logger.info(
+                f"[QQ-OUT-FORWARD-OK][{target['session_label']}][{target['session_id']}] nodes={len(nodes)}"
+            )
+            return True
+        self.logger.warning(f"Gateway forward reply failed: {result}")
+        return False
+
     async def send_image_reply(
         self, image_path: str, ctx: Optional[Dict[str, Any]] = None, caption: str = ""
     ) -> bool:
@@ -462,6 +494,8 @@ class GatewaySender:
                 self.logger.info(
                     f"[QQ-OUT-IMAGE-OK][{session_label}][{session_id}] image_sent"
                 )
+                if isinstance(result, dict):
+                    return result
                 return True
             self.logger.warning(f"Gateway image reply failed: {result}")
             return False

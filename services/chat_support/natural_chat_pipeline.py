@@ -3,9 +3,17 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Sequence, Set
 
+from config import PROMPT_SNAPSHOT_ENABLED
+from services.chat_support.snapshot import (
+    RequestContext,
+    make_request_id,
+    split_sections,
+    write_snapshot,
+)
 from services.chat_support.character_thought import (
     format_thought_for_prompt,
     generate_character_thought,
@@ -343,6 +351,7 @@ async def build_character_thought_block(
     chat_fn: Callable[..., Any],
     get_short_term_messages: Optional[Callable[..., List[Dict[str, Any]]]] = None,
     logger: Any = None,
+    request_context: Any = None,
 ) -> tuple[str, Dict[str, Any]]:
     """Run Character Thought when the gate allows; returns (prompt_block, trace)."""
     source = str((ctx or {}).get("source") or "").strip().lower()
@@ -395,6 +404,7 @@ async def build_character_thought_block(
             timeout_ms=config.character_thought_timeout_ms,
             max_tokens=config.character_thought_max_tokens,
             on_error=config.character_thought_on_error,
+            request_context=request_context,
         )
     except TimeoutError:
         trace["thought_skipped_reason"] = "timeout"
@@ -445,6 +455,7 @@ async def retry_reply_without_forbidden(
     chat_fn: Callable[..., Any],
     clean_retry_text: Callable[[str], str],
     normalize_qq_reply: Callable[[str], str],
+    request_context: Any = None,
 ) -> str:
     """One-shot constrained rewrite only when forbidden phrases hit."""
     char_name, _cid, _prompt = get_active_character_context()
@@ -464,13 +475,15 @@ async def retry_reply_without_forbidden(
             ),
         },
     ]
+    call_kwargs: dict = {
+        "task_type": "gatekeeper",
+        "caller": "forbidden_phrase_retry",
+    }
+    if request_context is not None:
+        call_kwargs["request_id"] = request_context.request_id
+        call_kwargs["call_metadata"] = {"_request_context": request_context}
     try:
-        reply = await asyncio.to_thread(
-            chat_fn,
-            messages,
-            task_type="gatekeeper",
-            caller="forbidden_phrase_retry",
-        )
+        reply = await asyncio.to_thread(chat_fn, messages, **call_kwargs)
         polished = clean_retry_text(reply or "")
         source = str((ctx or {}).get("source") or "").strip().lower()
         if polished and source in QQ_REMOTE_SOURCES:
@@ -666,6 +679,7 @@ class AssembledChatPrompt:
     context_messages: list = field(default_factory=list)
     thought_trace: Dict[str, Any] = field(default_factory=dict)
     expression_hints: List[str] = field(default_factory=list)
+    snapshot_payload: Dict[str, Any] = field(default_factory=dict)
 
 
 async def assemble_chat_context_messages(
@@ -684,6 +698,7 @@ async def assemble_chat_context_messages(
     tool_sections: Sequence[Optional[str]] = (),
     tool_intent: Sequence[str] = (),
     trace_extra: Optional[Dict[str, Any]] = None,
+    request_context: Optional[RequestContext] = None,
 ) -> AssembledChatPrompt:
     """Thought → PromptParts → brain.build_prompt → clean.
 
@@ -715,6 +730,7 @@ async def assemble_chat_context_messages(
         chat_fn=hooks.thought_chat_fn,
         get_short_term_messages=hooks.get_short_term_messages,
         logger=hooks.logger,
+        request_context=request_context,
     )
     expression_block, expression_hints = hooks.build_expression(
         user_text,
@@ -770,11 +786,85 @@ async def assemble_chat_context_messages(
         conversation_scope=conversation_scope,
     )
     context_messages = await _clean_prompt_messages(list(context_messages or []))
+
+    # --- snapshot_payload: lengths and section names only, no raw content ---
+    system_text = ""
+    if context_messages:
+        for msg in context_messages:
+            if isinstance(msg, dict) and msg.get("role") == "system":
+                system_text = str(msg.get("content", ""))
+                break
+    history_msgs = [
+        m for m in context_messages if isinstance(m, dict) and m.get("role") != "system"
+    ]
+    snapshot_payload = {
+        "sections": split_sections(system_text),
+        "system_total_chars": len(system_text),
+        "system_total_lines": (system_text.count("\n") + 1) if system_text else 0,
+        "history_count": len(history_msgs),
+        "history_total_chars": sum(
+            len(str(m.get("content", ""))) for m in history_msgs
+        ),
+        "tools_count": len([s for s in (tool_sections or ()) if s]),
+        "thought": {
+            "enabled": bool(thought_trace.get("character_thought_used")),
+            "reason": str(
+                thought_trace.get("thought_skipped_reason")
+                or ("ok" if thought_trace.get("character_thought_used") else "off")
+            ),
+            "duration_ms": thought_trace.get("thought_latency_ms"),
+        },
+        "expression_enabled": len(expression_hints) > 0,
+    }
+
     return AssembledChatPrompt(
         context_messages=context_messages,
         thought_trace=dict(thought_trace or {}),
         expression_hints=list(expression_hints or []),
+        snapshot_payload=snapshot_payload,
     )
+
+
+def _write_final_snapshot(
+    req_ctx: RequestContext,
+    t0: float,
+    assembled: Optional[AssembledChatPrompt],
+    status: str,
+    guard_info: Dict[str, Any],
+    ctx: Dict[str, Any],
+    invocation_mode: str,
+) -> None:
+    """Write one complete prompt snapshot JSONL line.
+
+    Only fires when PROMPT_SNAPSHOT_ENABLED is set.  Records lengths,
+    section names, and metrics — never raw content.
+    """
+    if not PROMPT_SNAPSHOT_ENABLED:
+        return
+    payload = (assembled.snapshot_payload if assembled else {}) or {}
+    sections = payload.get("sections", {})
+    snapshot = {
+        "request_id": req_ctx.request_id,
+        "ts": time.time(),
+        "source": str((ctx or {}).get("source", "")),
+        "invocation_mode": invocation_mode,
+        "status": status,
+        "guard": guard_info,
+        "sections": sections,
+        "system_total_chars": payload.get("system_total_chars", 0),
+        "system_total_lines": payload.get("system_total_lines", 0),
+        "history_count": payload.get("history_count", 0),
+        "history_total_chars": payload.get("history_total_chars", 0),
+        "tools_count": payload.get("tools_count", 0),
+        "thought": payload.get("thought", {}),
+        "expression_enabled": payload.get("expression_enabled", False),
+        "expression_injected": "【说法参考·可忽略】" in sections,
+        "thought_injected": "【本轮内心·勿照念】" in sections,
+        "llm_call_count": req_ctx.llm_call_count,
+        "total_latency_ms": int((time.time() - t0) * 1000),
+        "usage": req_ctx.total_usage,
+    }
+    write_snapshot(snapshot)
 
 
 async def run_plain_chat(
@@ -802,118 +892,150 @@ async def run_plain_chat(
     status=continue (without a second model call) when the first pass
     executed tools or forced search is required.
     """
-    assembled = await assemble_chat_context_messages(
-        user_text=user_text,
-        ctx=ctx,
-        hooks=hooks,
-        conversation_session_id=conversation_session_id,
-        memory_session_id=memory_session_id,
-        route_reason=route_reason,
-        capability_match_reason=capability_match_reason,
-        invocation_mode=invocation_mode,
-        need_tools=False,
-        codex_mode=False,
-        tool_intent=[],
-        trace_extra={"plain_chat_pipeline": True},
-    )
-    context_messages = list(assembled.context_messages)
+    # --- prompt snapshot: generate per-turn request_id and context ---
+    req_ctx = RequestContext(request_id=make_request_id())
+    t0 = time.time()
+    snapshot_status = "ok"
+    guard_info: Dict[str, Any] = {"triggered": False, "retried": False}
+    assembled: Optional[AssembledChatPrompt] = None
 
-    tool_event_state: Dict[str, str] = {}
+    try:
+        assembled = await assemble_chat_context_messages(
+            user_text=user_text,
+            ctx=ctx,
+            hooks=hooks,
+            conversation_session_id=conversation_session_id,
+            memory_session_id=memory_session_id,
+            route_reason=route_reason,
+            capability_match_reason=capability_match_reason,
+            invocation_mode=invocation_mode,
+            need_tools=False,
+            codex_mode=False,
+            tool_intent=[],
+            trace_extra={"plain_chat_pipeline": True},
+            request_context=req_ctx,
+        )
+        context_messages = list(assembled.context_messages)
 
-    def _record_tool_execution(**event: Any) -> Any:
-        if hooks.record_tool_execution is None:
-            return None
-        return hooks.record_tool_execution(event_state=tool_event_state, **event)
+        tool_event_state: Dict[str, str] = {}
 
-    react_first_pass = await run_react_first_pass(
-        context_messages=context_messages,
-        ctx=ctx,
-        need_tools=False,
-        deferred_tool_flow=False,
-        task_reasoning=task_reasoning,
-        task_default=task_default,
-        plugin_manager=hooks.plugin_manager,
-        chat_with_ai=hooks.chat_with_ai,
-        contains_cmd=hooks.contains_cmd,
-        strip_cmd_anywhere=hooks.strip_cmd_anywhere,
-        record_tool_execution=_record_tool_execution,
-        invocation_mode=invocation_mode,
-        tool_triggers=[],
-    )
-    context_messages = list(react_first_pass.context_messages or context_messages)
-    continue_outcome = PlainChatOutcome(
-        flow=ChatFlowResult(status=STATUS_CONTINUE, source=source_key),
-        react_first_pass=react_first_pass,
-        context_messages=context_messages,
-        tool_event_state=tool_event_state,
-    )
-    if react_first_pass.triggered or react_first_pass.tool_results:
-        return continue_outcome
+        def _record_tool_execution(**event: Any) -> Any:
+            if hooks.record_tool_execution is None:
+                return None
+            return hooks.record_tool_execution(event_state=tool_event_state, **event)
 
-    forced_search_query = choose_forced_search_query(
-        user_text=user_text,
-        first_reply=react_first_pass.reply or "",
-        followup_query=followup_search_query,
-        triggered=bool(react_first_pass.triggered),
-        tool_results=react_first_pass.tool_results,
-        delegate_triggers=[],
-        looks_like_uncertain_answer=hooks.looks_like_uncertain_answer,
-        is_searchworthy_question=hooks.is_searchworthy_question,
-    )
-    if forced_search_query:
-        return continue_outcome
+        react_first_pass = await run_react_first_pass(
+            context_messages=context_messages,
+            ctx=ctx,
+            need_tools=False,
+            deferred_tool_flow=False,
+            task_reasoning=task_reasoning,
+            task_default=task_default,
+            plugin_manager=hooks.plugin_manager,
+            chat_with_ai=hooks.chat_with_ai,
+            contains_cmd=hooks.contains_cmd,
+            strip_cmd_anywhere=hooks.strip_cmd_anywhere,
+            record_tool_execution=_record_tool_execution,
+            invocation_mode=invocation_mode,
+            tool_triggers=[],
+            request_context=req_ctx,
+        )
+        context_messages = list(react_first_pass.context_messages or context_messages)
+        continue_outcome = PlainChatOutcome(
+            flow=ChatFlowResult(status=STATUS_CONTINUE, source=source_key),
+            react_first_pass=react_first_pass,
+            context_messages=context_messages,
+            tool_event_state=tool_event_state,
+        )
+        if react_first_pass.triggered or react_first_pass.tool_results:
+            snapshot_status = "tool_triggered"
+            return continue_outcome
 
-    try_share = getattr(hooks.personality, "try_share", None)
-    model_finalize = finalize_model_reply(
-        reply=react_first_pass.reply,
-        start_emo=start_emo,
-        extract_emo_tag=hooks.extract_emo_tag,
-        character_sharing_enabled=character_sharing_enabled,
-        try_share=try_share if callable(try_share) else (lambda: ""),
-    )
-    prepared_reply = await prepare_final_reply(
-        final_reply=model_finalize.final_reply,
-        final_emo=model_finalize.final_emo,
-        model_emo_seen=model_finalize.model_emo_seen,
-        user_text=user_text,
-        ctx=ctx,
-        preface_text=preface_text,
-        clean_text_for_tts=hooks.clean_text_for_tts,
-        strip_internal_tags=hooks.strip_internal_tags,
-        strip_cmd_anywhere=hooks.strip_cmd_anywhere,
-        strip_emo_tags_anywhere=hooks.strip_emo_tags_anywhere,
-        should_suppress_followup_preface=hooks.should_suppress_followup_preface,
-        merge_preface_texts=hooks.merge_preface_texts,
-        apply_character_catchphrase=hooks.apply_character_catchphrase,
-        prepare_reply_for_output=hooks.prepare_reply_for_output,
-        infer_reply_emotion_with_llm=hooks.infer_reply_emotion_with_llm,
-    )
-    async def _retry_forbidden(**kwargs: Any) -> str:
-        return await retry_reply_without_forbidden(
-            get_active_character_context=hooks.get_active_character_context,
-            chat_fn=hooks.thought_chat_fn,
-            clean_retry_text=hooks.clean_retry_text,
-            normalize_qq_reply=hooks.normalize_qq_reply,
-            **kwargs,
+        forced_search_query = choose_forced_search_query(
+            user_text=user_text,
+            first_reply=react_first_pass.reply or "",
+            followup_query=followup_search_query,
+            triggered=bool(react_first_pass.triggered),
+            tool_results=react_first_pass.tool_results,
+            delegate_triggers=[],
+            looks_like_uncertain_answer=hooks.looks_like_uncertain_answer,
+            is_searchworthy_question=hooks.is_searchworthy_question,
+        )
+        if forced_search_query:
+            snapshot_status = "forced_search"
+            return continue_outcome
+
+        try_share = getattr(hooks.personality, "try_share", None)
+        model_finalize = finalize_model_reply(
+            reply=react_first_pass.reply,
+            start_emo=start_emo,
+            extract_emo_tag=hooks.extract_emo_tag,
+            character_sharing_enabled=character_sharing_enabled,
+            try_share=try_share if callable(try_share) else (lambda: ""),
+        )
+        prepared_reply = await prepare_final_reply(
+            final_reply=model_finalize.final_reply,
+            final_emo=model_finalize.final_emo,
+            model_emo_seen=model_finalize.model_emo_seen,
+            user_text=user_text,
+            ctx=ctx,
+            preface_text=preface_text,
+            clean_text_for_tts=hooks.clean_text_for_tts,
+            strip_internal_tags=hooks.strip_internal_tags,
+            strip_cmd_anywhere=hooks.strip_cmd_anywhere,
+            strip_emo_tags_anywhere=hooks.strip_emo_tags_anywhere,
+            should_suppress_followup_preface=hooks.should_suppress_followup_preface,
+            merge_preface_texts=hooks.merge_preface_texts,
+            apply_character_catchphrase=hooks.apply_character_catchphrase,
+            prepare_reply_for_output=hooks.prepare_reply_for_output,
+            infer_reply_emotion_with_llm=hooks.infer_reply_emotion_with_llm,
+            request_context=req_ctx,
         )
 
-    final_reply, guard_trace = await apply_forbidden_phrase_guard(
-        text=prepared_reply.text,
-        user_text=user_text,
-        ctx=ctx,
-        config=hooks.natural_config,
-        retry_reply=_retry_forbidden,
-        logger=hooks.logger,
-    )
-    _trace_guard(hooks.trace_process, "forbidden_phrase_guard", guard_trace)
-    return PlainChatOutcome(
-        flow=ChatFlowResult(
-            status=STATUS_REPLIED,
-            reply_text=str(final_reply or ""),
-            emotion=prepared_reply.emotion,
-            source=source_key,
-        ),
-        react_first_pass=react_first_pass,
-        context_messages=context_messages,
-        tool_event_state=tool_event_state,
-    )
+        async def _retry_forbidden(**kwargs: Any) -> str:
+            return await retry_reply_without_forbidden(
+                get_active_character_context=hooks.get_active_character_context,
+                chat_fn=hooks.thought_chat_fn,
+                clean_retry_text=hooks.clean_retry_text,
+                normalize_qq_reply=hooks.normalize_qq_reply,
+                request_context=req_ctx,
+                **kwargs,
+            )
+
+        final_reply, guard_trace = await apply_forbidden_phrase_guard(
+            text=prepared_reply.text,
+            user_text=user_text,
+            ctx=ctx,
+            config=hooks.natural_config,
+            retry_reply=_retry_forbidden,
+            logger=hooks.logger,
+        )
+        _trace_guard(hooks.trace_process, "forbidden_phrase_guard", guard_trace)
+
+        # capture guard info for snapshot
+        guard_info = {
+            "triggered": bool((guard_trace or {}).get("forbidden_phrase_hit")),
+            "retried": bool((guard_trace or {}).get("should_retry")),
+            "retries_done": (guard_trace or {}).get("forbidden_retries", 0),
+        }
+        if guard_info["retried"]:
+            snapshot_status = "forbidden_retry"
+
+        return PlainChatOutcome(
+            flow=ChatFlowResult(
+                status=STATUS_REPLIED,
+                reply_text=str(final_reply or ""),
+                emotion=prepared_reply.emotion,
+                source=source_key,
+            ),
+            react_first_pass=react_first_pass,
+            context_messages=context_messages,
+            tool_event_state=tool_event_state,
+        )
+    except Exception:
+        snapshot_status = "error"
+        raise
+    finally:
+        _write_final_snapshot(
+            req_ctx, t0, assembled, snapshot_status, guard_info, ctx, invocation_mode
+        )

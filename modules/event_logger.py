@@ -14,6 +14,7 @@ import threading
 import time
 import uuid
 from typing import Any, Dict, Optional
+from modules.paths import data_path
 
 
 def _utc_ts() -> str:
@@ -22,8 +23,10 @@ def _utc_ts() -> str:
 
 
 class EventLogger:
-    def __init__(self, db_path: str = "./data/events.sqlite", session_id: Optional[str] = None):
-        self.db_path = db_path
+    def __init__(self, db_path: str = "", session_id: Optional[str] = None):
+        # 路径锚定（docs/部分重构.md §13.1）：默认位置由 modules.paths 解析
+        # （core/application.py 显式传入 data_path("events.sqlite")）。
+        self.db_path = db_path or data_path("events.sqlite")
         self.session_id = session_id or str(uuid.uuid4())
         self._lock = threading.Lock()
 

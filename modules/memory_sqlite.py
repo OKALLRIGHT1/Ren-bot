@@ -29,15 +29,18 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
+from modules.paths import data_path, memory_db_dir, memory_dir
 
 
-DEFAULT_MEMORY_DIR = os.getenv("MEMORY_DIR", "./memory")
+DEFAULT_MEMORY_DIR = os.getenv("MEMORY_DIR", memory_dir())
 DEFAULT_DB_PATH = os.getenv(
     "MEMORY_SQLITE_PATH", os.path.join(DEFAULT_MEMORY_DIR, "memory.sqlite")
 )
 
-LEGACY_PROFILE_JSON = os.getenv("LEGACY_PROFILE_JSON", "./memory_db/profile.json")
-LEGACY_EVENTS_DB = os.getenv("LEGACY_EVENTS_DB", "./data/events.sqlite")
+LEGACY_PROFILE_JSON = os.getenv(
+    "LEGACY_PROFILE_JSON", os.path.join(memory_db_dir(), "profile.json")
+)
+LEGACY_EVENTS_DB = os.getenv("LEGACY_EVENTS_DB", data_path("events.sqlite"))
 
 # Historical transcript mojibake repair (UTF-8 mis-decoded costume notices).
 # Keep until old rows may still exist in user DBs; repair_known_transcript_mojibake uses these.

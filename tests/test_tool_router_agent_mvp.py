@@ -185,15 +185,28 @@ def test_router_uses_workspace_read_capability_when_available():
 
 
 def test_router_uses_mcp_domain_capability_when_available():
+    plugin = McpToolsPlugin()
+    plugin.settings = {"servers": [{"name": "demo", "enabled": False}]}
+    route = ToolRouter(
+        react_map={},
+        direct_map={},
+        delegate_map={"mcp_tools": plugin},
+    ).route("查一下麦当劳优惠券")
+
+    assert route.need_tools is True
+    assert route.tool_triggers == ["mcp_tools"]
+    assert route.reason == "capability:mcp_tools.domain_call"
+
+
+def test_router_skips_mcp_domain_without_servers():
     route = ToolRouter(
         react_map={},
         direct_map={},
         delegate_map={"mcp_tools": McpToolsPlugin()},
     ).route("查一下麦当劳优惠券")
 
-    assert route.need_tools is True
-    assert route.tool_triggers == ["mcp_tools"]
-    assert route.reason == "capability:mcp_tools.domain_call"
+    assert route.need_tools is False
+    assert str(route.reason).startswith("capability_unavailable:")
 
 
 def test_router_does_not_route_explicit_web_search_to_mcp_domain():

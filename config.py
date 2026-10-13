@@ -3,6 +3,10 @@ import json
 import os
 from dotenv import load_dotenv
 
+# 路径锚定（docs/部分重构.md §13.1）：SUZU_DATA_DIR 注入时，data/ 与
+# memory_db/ 随用户数据目录（AppData）走；未注入保持相对路径（开发模式）。
+from modules.paths import data_path, memory_db_dir
+
 # 加载环境变量
 load_dotenv()
 # 图标
@@ -71,10 +75,11 @@ def get_env_float(
 
 CHAT_DEBUG_PRINTS = get_env_bool("CHAT_DEBUG_PRINTS", "0")
 
-# ==================== MCP / 外部聊天网关 ====================
-MCP_ENABLED = get_env_bool("MCP_ENABLED", "1")
-MCP_SERVER_CONFIGS = get_env_json("MCP_SERVER_CONFIGS_JSON", [])
+# Prompt 输入快照开关：启用后每轮对话写一条 JSONL 到 data/prompt_snapshots.jsonl，
+# 仅记录区块名/字符数/调用次数/token 用量，不记录任何原文。
+PROMPT_SNAPSHOT_ENABLED = get_env_bool("PROMPT_SNAPSHOT", "0")
 
+# ==================== 外部聊天网关 ====================
 NAPCAT_ENABLED = get_env_bool("NAPCAT_ENABLED", "0")
 NAPCAT_WEBHOOK_HOST = os.getenv("NAPCAT_WEBHOOK_HOST", "127.0.0.1")
 NAPCAT_WEBHOOK_PORT = get_env_int("NAPCAT_WEBHOOK_PORT", 8095, 1, 65535)
@@ -156,7 +161,10 @@ MQTT_DISPLAY_TOPIC = os.getenv("MQTT_DISPLAY_TOPIC", "suzu/display/status")
 # "qt"：使用 Qt 版 GUI（modules/qt_gui.py，需要 pip install PySide6）
 # "auto"：优先 Qt，失败自动回退 Tk
 # "headless"：不创建桌面 GUI，由外部控制中心接管
-GUI_BACKEND = os.getenv("GUI_BACKEND", "auto").strip().lower() or "auto"
+GUI_BACKEND = os.getenv("GUI_BACKEND", "qt").strip().lower() or "qt"
+# When the enhanced frontend is connected, Qt HUD/settings are hidden.
+# Set KEEP_QT_GUI=1 to keep both for side-by-side comparison.
+KEEP_QT_GUI = get_env_bool("KEEP_QT_GUI", "0")
 START_MINIMIZED_TO_TRAY = get_env_bool("START_MINIMIZED_TO_TRAY", "0")
 GUI_WS_HOST = os.getenv("GUI_WS_HOST", "127.0.0.1")
 GUI_WS_PORT = get_env_int("GUI_WS_PORT", 8096, 1, 65535)
@@ -179,6 +187,7 @@ TTS_CHANNEL = 0  # 音频通道
 # TTS 行为控制
 TTS_RETURN_IDLE = get_env_bool("TTS_RETURN_IDLE", "1")  # TTS完成后是否返回空闲状态
 TTS_IDLE_EMO = os.getenv("TTS_IDLE_EMO", "idle")  # 空闲状态对应的情绪标签
+TTS_EMOTION_LINGER_SEC = get_env_float("TTS_EMOTION_LINGER_SEC", 15.0, 0.0)  # 说话结束后情绪表情保持余韵时间（秒）
 TTS_USE_LIVE2D_PLAYER = True  # 是否使用Live2D播放器
 
 IDLE_RANDOM_MOTION_ENABLED = get_env_bool("IDLE_RANDOM_MOTION_ENABLED", "1")
@@ -259,9 +268,9 @@ SHERPA_MODEL_CONFIG = {
     "joiner": os.path.join(BASE_DIR, "sherpa_model", "joiner-epoch-99-avg-1.onnx"),
 }
 
-# Qwen3-ASR-0.6B（默认）。文件需自行下载到 sherpa_model/qwen3-0.6b-int8/
-# 也接受解压后的官方目录名 sherpa-onnx-qwen3-asr-0.6B-int8-2026-03-25
-ASR_DEFAULT_ENGINE = "qwen3"
+# 默认 Zipformer（随包体积小）。Qwen3 是可替换套件：放到 sherpa_model/qwen3-0.6b-int8
+# 或 %APPDATA%\\Suzu\\asr\\，再把 selected.json / 设置页改成 qwen3。
+ASR_DEFAULT_ENGINE = "zipformer"
 ASR_PROVIDER = "cpu"
 ASR_NUM_THREADS = 2
 QWEN3_ASR_DIR = os.path.join(BASE_DIR, "sherpa_model", "qwen3-0.6b-int8")
@@ -345,11 +354,14 @@ WINDOW_CATEGORIES = {
 }
 # 这些标题必须与你在 GUI 代码里设置的 setWindowTitle 一致
 SELF_WINDOW_TITLES = [
-    "Live2D Agent",  # 主窗口/悬浮球
-    "系统设置中心",  # 设置界面
-    "记忆与档案管理中心",  # 记忆编辑器
-    "插件管理",  # 插件界面
-    "L2D",  # 悬浮球的文字模式
+    "Live2D Agent",  # 旧标题，兼容已打开的窗口
+    "Live2D-Suzu",
+    "系统设置中心",
+    "设置",
+    "记忆与档案管理中心",
+    "插件管理",
+    "能力",
+    "L2D",
     "🧠 记忆与档案管理中心",
 ]
 
@@ -527,7 +539,8 @@ EMBEDDING_CONFIG = {
 }
 
 # ==================== 记忆系统配置 ====================
-MEMORY_DB_PATH = "./memory_db"  # 记忆数据库路径
+# 路径锚定（docs/部分重构.md §13.1）：用户数据目录注入时随 AppData 走。
+MEMORY_DB_PATH = memory_db_dir()  # 记忆数据库路径
 
 # 记忆系统基础设置
 MEMORY_SETTINGS = {
@@ -887,7 +900,7 @@ DND_MODE = False  # 手动免打扰开关默认关闭
 import json
 import logging
 
-CUSTOM_MODELS_PATH = "data/custom_models.json"
+CUSTOM_MODELS_PATH = data_path("custom_models.json")
 CUSTOM_MODELS_ENABLED = get_env_bool("CUSTOM_MODELS_ENABLED", "1")
 CUSTOM_ROUTER_OVERRIDE = get_env_bool("CUSTOM_ROUTER_OVERRIDE", "1")
 

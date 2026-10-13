@@ -1234,6 +1234,7 @@ class NapCatOneBotAdapter(BaseChatAdapter):
         if isinstance(result, dict):
             result.setdefault("image_path", str(image_file))
             result.setdefault("caption", caption)
+            result.setdefault("message_id", self._extract_message_id(result))
         return result
 
     def _image_file_to_data_uri(self, image_file: Path) -> str:
@@ -1296,6 +1297,160 @@ class NapCatOneBotAdapter(BaseChatAdapter):
             result.setdefault("file_path", str(file_item))
             result.setdefault("file_name", file_name)
         return result
+
+    @staticmethod
+    def _extract_message_id(result: Any) -> str:
+        if not isinstance(result, dict):
+            return ""
+        response = result.get("response")
+        data = response.get("data") if isinstance(response, dict) else {}
+        if not isinstance(data, dict):
+            data = {}
+        for source in (result, response if isinstance(response, dict) else {}, data):
+            if not isinstance(source, dict):
+                continue
+            value = source.get("message_id")
+            if value not in (None, "", 0, "0"):
+                return str(value)
+        return ""
+
+    async def delete_message(self, message_id: str, **kwargs: Any) -> Any:
+        msg_id = str(message_id or "").strip()
+        if not msg_id:
+            return {"ok": False, "reason": "empty_message_id"}
+        payload: Dict[str, Any] = {"message_id": int(msg_id) if msg_id.isdigit() else msg_id}
+        return await self._send_action(
+            "",
+            "delete_msg",
+            payload,
+            timeout=float(kwargs.get("timeout") or 8),
+        )
+
+    async def send_forward(self, session_id: str, messages: List[Dict[str, Any]], **kwargs: Any) -> Any:
+        nodes = [item for item in (messages or []) if isinstance(item, dict)]
+        if not nodes:
+            return {"ok": False, "reason": "empty_forward", "session_id": session_id}
+        if not self.reply_enabled:
+            return {"ok": False, "reason": "reply_disabled", "session_id": session_id}
+        prepared = []
+        for node in nodes:
+            content = node.get("content") if isinstance(node.get("content"), list) else node.get("message")
+            data = node.get("data") if isinstance(node.get("data"), dict) else {}
+            if not isinstance(data, dict):
+                data = {}
+            if isinstance(data.get("content"), list) and not isinstance(content, list):
+                content = data.get("content")
+            message_id = str(node.get("id") or data.get("id") or data.get("message_id") or "").strip()
+            if message_id:
+                node_id: Any = int(message_id) if message_id.isdigit() else message_id
+                prepared.append({"type": "node", "data": {"id": node_id}})
+                continue
+            if isinstance(content, str) and content.strip():
+                content = [{"type": "text", "data": {"text": content.strip()}}]
+            if not isinstance(content, list) or not content:
+                return {"ok": False, "reason": "invalid_forward_node", "session_id": session_id}
+            sender = str(node.get("name") or data.get("name") or self.owner_label or "机器人")[:40]
+            prepared.append(
+                {
+                    "type": "node",
+                    "data": {
+                        "name": sender,
+                        "uin": str(node.get("uin") or data.get("uin") or "10000"),
+                        "content": content,
+                    },
+                }
+            )
+        chat_type, peer_id = self._parse_session(session_id)
+        peer: Any = int(peer_id) if str(peer_id).isdigit() else peer_id
+        title = str(
+            kwargs.get("title")
+            or kwargs.get("source")
+            or kwargs.get("prompt")
+            or ""
+        ).strip() or "聊天记录"
+        summary = str(kwargs.get("summary") or "").strip() or f"查看{len(prepared)}条转发消息"
+        news_raw = kwargs.get("news")
+        if isinstance(news_raw, list) and news_raw:
+            news = news_raw
+        else:
+            news = self._forward_news_preview(prepared)
+        payload: Dict[str, Any] = {
+            "messages": prepared,
+            "prompt": "[聊天记录]",
+            "summary": summary,
+            "source": title,
+            "news": news,
+        }
+        if chat_type == "group":
+            payload["group_id"] = peer
+            action = "send_group_forward_msg"
+        elif chat_type == "private":
+            payload["user_id"] = peer
+            action = "send_private_forward_msg"
+        else:
+            return {"ok": False, "reason": f"unsupported_session_type:{chat_type}", "session_id": session_id}
+        result = await self._send_action(session_id, action, payload, **kwargs)
+        if isinstance(result, dict):
+            result.setdefault("forward_count", len(prepared))
+        return result
+
+    @staticmethod
+    def _forward_part_preview(part: Dict[str, Any]) -> str:
+        kind = str(part.get("type") or "").strip().lower()
+        data = part.get("data") if isinstance(part.get("data"), dict) else {}
+        if kind == "text":
+            return str(data.get("text") or "").replace("\n", " ").strip()
+        if kind == "image":
+            return "[图片]"
+        if kind == "video":
+            return "[视频]"
+        if kind == "file":
+            return "[文件]"
+        if kind == "share":
+            return str(data.get("title") or data.get("url") or "[分享]").strip()
+        return ""
+
+    @classmethod
+    def _forward_news_preview(cls, nodes: List[Dict[str, Any]]) -> List[Dict[str, str]]:
+        lines: List[Dict[str, str]] = []
+        for node in nodes:
+            data = node.get("data") if isinstance(node.get("data"), dict) else {}
+            name = str(data.get("name") or "铃").strip() or "铃"
+            content = data.get("content") if isinstance(data.get("content"), list) else []
+            parts = [
+                cls._forward_part_preview(part)
+                for part in content
+                if isinstance(part, dict)
+            ]
+            preview = "".join(item for item in parts if item).strip() or "[图片]"
+            lines.append({"text": f"{name}: {preview}"})
+            if len(lines) >= 4:
+                break
+        return lines or [{"text": "[图片]"}]
+
+    def _check_forward_file(self, session_id: str, part: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        if not isinstance(part, dict):
+            return {"ok": False, "reason": "invalid_forward_node", "session_id": session_id}
+        data = part.get("data") if isinstance(part.get("data"), dict) else {}
+        file_value = str(data.get("file") or "")
+        if not file_value.lower().startswith("file:"):
+            return None
+        from urllib.parse import unquote, urlparse
+
+        parsed = urlparse(file_value)
+        local = unquote(parsed.path or "")
+        if local.startswith("/") and len(local) > 2 and local[2] == ":":
+            local = local[1:]
+        file_item = Path(local)
+        try:
+            file_item = file_item.resolve()
+        except Exception:
+            file_item = file_item.absolute()
+        if not file_item.exists() or not file_item.is_file():
+            return {"ok": False, "reason": "forward_file_missing", "session_id": session_id}
+        if not self._file_allowed(file_item):
+            return self._file_blocked_result(session_id, file_item, "file")
+        return None
 
     async def send_share(self, session_id: str, url: str, **kwargs: Any) -> Any:
         url_text = str(url or "").strip()

@@ -26,56 +26,44 @@
 
 ## 快速开始
 
-Windows、Python 3.10+。克隆仓库后直接双击：
+**产品入口是本仓库的后端 GUI，不是旁边的独立客户端。**
 
-1. `安装环境.bat`：没有 Python 时会尝试用 winget 安装 3.12，然后创建 `.venv` 并安装依赖。首次可能需要几分钟。
-2. `启动.bat`：环境未就绪时会先安装，再启动主程序。
-3. `启动-无窗口.vbs`：环境就绪后不弹出命令行窗口。
+开发机：
 
-安装成功后会写入 `.suzu-ready`。如果还没有 `.env`，会从 `.env.example` 复制一份，**请自行填入 API Key**。失败时看 `logs/setup_env.log`。
+```bat
+启动.bat
+```
 
-已经有 Conda 环境 `live2d-llm` 时，安装脚本会往这个环境装依赖，不再另建 `.venv`。
+或：
 
-手动安装（开发 / Conda）：
+```bash
+python boot.py
+```
+
+后端会打开设置中心 / 遥控窗，并在就绪后拉起 Live2D 桌面形象。不要先双击 `live2d-enhanced.exe`，也不要用 `live2d-suzu-client`。细节见 `docs/打包与启动.md`。
+
+`Live2D-Suzu.exe` 可以给别人用，但必须连同整份仓库一起给；它不是独立安装包。对方先跑 `安装环境.bat`，再 `启动.bat`。密钥、角色路径和 Live2D 程序都要在对方机器上重新配。
+
+本仓库同时包含大脑和 GUI：LLM、记忆、插件、外部服务（Ollama / GPT-SoVITS / NapCat）、HTTP/WS、设置中心。首次配环境：
+
+1. `安装环境.bat`：没有 Python 时会尝试用 winget 安装，然后创建 `.venv` 或写入 Conda 环境 `live2d-llm`。
+2. 如果还没有 `.env`，从 `.env.example` 复制并填入 API Key。失败看 `logs/setup_env.log`。
+
+手动（开发 / Conda）：
 
 ```bash
 conda create -n live2d-llm python=3.10
 conda activate live2d-llm
 pip install -r requirements.txt
-python main.py
 ```
 
-只检查或只安装、不启动：
-
-```bash
-python setup_env.py --ensure --console
-python setup_env.py --check
-```
-
-`main.py` 是推荐入口，会拉起 `boot.py` 并接管远程重启和异常恢复。`boot.py` 只适合临时调试核心进程。
+日常开发用 `启动.bat` 或 `python boot.py`。`python main.py` 仍可作为守护进程入口。
 
 ## Live2D 桌面端
 
-桌面形象是独立程序，可以单独运行，也可以连上本仓库的 Python 主程序。
+Live2D 是独立渲染进程，由本仓库后端在就绪后拉起。形象缩放、表情、隐藏走角色右键；启停和设置走后端 GUI 托盘。
 
-1. 先启动 Live2D 桌面端。
-2. 再启动本仓库主程序（`启动.bat` 或 `python main.py`）。
-3. 在设置中心选择角色、模型、服装、动作映射和语音。
-
-只想看形象时，桌面端可以独立运行；没连主程序时，基础久坐弹窗也在桌面端本地生效。聊天、插件、记忆和 Qt 设置中心都不依赖它。
-
-增强版（Tauri）通过连接档案主动连本机或远程后端：
-
-- 本机可用 `http://127.0.0.1:<port>/gui` 与 `ws://127.0.0.1:<port>/gui`。
-- 非本机地址必须走 TLS（`https` / `wss`）。
-- 访问令牌放在运行时设置或环境变量里，用 `X-GUI-Token` 认证，不要写进仓库或日志。
-
-桌面活动由 Live2D / Tauri 采集并上报 `/gui/activity-ingest`；Python 只消费 `source=live2d-tauri`。连上之后：
-
-- 久坐判定、冷却、免打扰、弹窗模板和表情包由主程序决定
-- 桌面端只负责弹出窗口；角色说话仍走 Live2D 气泡 / TTS
-- 稍后提醒或关闭弹窗会回告主程序，两边冷却保持一致
-- 顶部工作时长显示「工作了多久」，不是「坐了多久」
+桌面活动仍由 Live2D 采集并上报 `/gui/activity-ingest`。连上 Brain 后，久坐模板和冷却由 Brain 决定，窗口由 Live2D 弹出。
 
 ## 常用配置
 

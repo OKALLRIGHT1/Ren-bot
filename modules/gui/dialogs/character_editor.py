@@ -195,6 +195,10 @@ class CharacterEditorWidget(QtWidgets.QWidget):
         self._selected_motion_candidates = []
 
         self.setStyleSheet(get_character_editor_styles_v2())
+        self._save_timer = QtCore.QTimer(self)
+        self._save_timer.setSingleShot(True)
+        self._save_timer.setInterval(400)
+        self._save_timer.timeout.connect(self._save_current_char)
         self._init_ui()
         self._refresh_list()
 
@@ -298,23 +302,23 @@ class CharacterEditorWidget(QtWidgets.QWidget):
 
         form = QtWidgets.QFormLayout()
         self.edit_name = QtWidgets.QLineEdit()
-        self.edit_name.textChanged.connect(self._save_current_char)
+        self.edit_name.textChanged.connect(self._schedule_save_current_char)
         form.addRow("角色名称:", self.edit_name)
         self.edit_user_address = QtWidgets.QLineEdit()
         self.edit_user_address.setPlaceholderText("例如：Master、主人、公子、制作人")
-        self.edit_user_address.textChanged.connect(self._save_current_char)
+        self.edit_user_address.textChanged.connect(self._schedule_save_current_char)
         form.addRow("对用户称呼:", self.edit_user_address)
         self.edit_aliases = QtWidgets.QPlainTextEdit()
         self.edit_aliases.setMaximumHeight(72)
         self.edit_aliases.setPlaceholderText("每行一个别名，例如：祥子、小祥")
-        self.edit_aliases.textChanged.connect(self._save_current_char)
+        self.edit_aliases.textChanged.connect(self._schedule_save_current_char)
         form.addRow("别名:", self.edit_aliases)
         layout.addLayout(form)
 
         layout.addWidget(QtWidgets.QLabel("人设提示词 (System Prompt):"))
         self.edit_prompt = QtWidgets.QTextEdit()
         self.edit_prompt.setMinimumHeight(150)  # 保证输入框有合适高度
-        self.edit_prompt.textChanged.connect(self._save_current_char)
+        self.edit_prompt.textChanged.connect(self._schedule_save_current_char)
         layout.addWidget(self.edit_prompt)
 
         self.character_badge_editor = AssistantBadgeEditor(
@@ -327,19 +331,19 @@ class CharacterEditorWidget(QtWidgets.QWidget):
         self.catchphrase_enabled = QtWidgets.QCheckBox(
             "启用发送层概率追加（不会交给大模型自由发挥）"
         )
-        self.catchphrase_enabled.stateChanged.connect(self._save_current_char)
+        self.catchphrase_enabled.stateChanged.connect(self._schedule_save_current_char)
         catchphrase_layout.addRow("开关:", self.catchphrase_enabled)
 
         self.catchphrase_text = QtWidgets.QLineEdit()
         self.catchphrase_text.setPlaceholderText("例如：……はい。")
-        self.catchphrase_text.textChanged.connect(self._save_current_char)
+        self.catchphrase_text.textChanged.connect(self._schedule_save_current_char)
         catchphrase_layout.addRow("文本:", self.catchphrase_text)
 
         self.catchphrase_probability = QtWidgets.QSpinBox()
         self.catchphrase_probability.setRange(0, 100)
         self.catchphrase_probability.setSuffix("%")
         self.catchphrase_probability.setSingleStep(1)
-        self.catchphrase_probability.valueChanged.connect(self._save_current_char)
+        self.catchphrase_probability.valueChanged.connect(self._schedule_save_current_char)
         catchphrase_layout.addRow("出现概率:", self.catchphrase_probability)
 
         catchphrase_hint = QtWidgets.QLabel(
@@ -355,19 +359,19 @@ class CharacterEditorWidget(QtWidgets.QWidget):
         self.qq_profile_enabled = QtWidgets.QCheckBox(
             "切换到此角色时同步 QQ 昵称/头像"
         )
-        self.qq_profile_enabled.stateChanged.connect(self._save_current_char)
+        self.qq_profile_enabled.stateChanged.connect(self._schedule_save_current_char)
         qq_layout.addRow("开关:", self.qq_profile_enabled)
 
         self.qq_profile_nickname = QtWidgets.QLineEdit()
         self.qq_profile_nickname.setPlaceholderText("例如：五十铃")
-        self.qq_profile_nickname.textChanged.connect(self._save_current_char)
+        self.qq_profile_nickname.textChanged.connect(self._schedule_save_current_char)
         qq_layout.addRow("QQ 昵称:", self.qq_profile_nickname)
 
         self.qq_profile_avatar = QtWidgets.QLineEdit()
         self.qq_profile_avatar.setPlaceholderText(
             "本地头像路径或 URL，例如 assets/avatars/isuzu.png"
         )
-        self.qq_profile_avatar.textChanged.connect(self._save_current_char)
+        self.qq_profile_avatar.textChanged.connect(self._schedule_save_current_char)
         avatar_row = QtWidgets.QHBoxLayout()
         avatar_row.addWidget(self.qq_profile_avatar, 1)
         btn_pick_avatar = QtWidgets.QPushButton("选择头像")
@@ -422,7 +426,7 @@ class CharacterEditorWidget(QtWidgets.QWidget):
 
         form = QtWidgets.QFormLayout()
         self.tts_enabled = QtWidgets.QCheckBox("启用角色专属 GPT-SoVITS")
-        self.tts_enabled.stateChanged.connect(self._save_current_char)
+        self.tts_enabled.stateChanged.connect(self._schedule_save_current_char)
         form.addRow("开关:", self.tts_enabled)
 
         base_hint = QtWidgets.QLabel(
@@ -433,7 +437,7 @@ class CharacterEditorWidget(QtWidgets.QWidget):
         layout.addWidget(base_hint)
 
         self.tts_gpt_w = QtWidgets.QLineEdit()
-        self.tts_gpt_w.textChanged.connect(self._save_current_char)
+        self.tts_gpt_w.textChanged.connect(self._schedule_save_current_char)
         gpt_row = QtWidgets.QHBoxLayout()
         gpt_row.addWidget(self.tts_gpt_w, 1)
         btn_pick_gpt = QtWidgets.QPushButton("选择文件")
@@ -450,7 +454,7 @@ class CharacterEditorWidget(QtWidgets.QWidget):
         form.addRow("GPT_W:", gpt_wrap)
 
         self.tts_sov_w = QtWidgets.QLineEdit()
-        self.tts_sov_w.textChanged.connect(self._save_current_char)
+        self.tts_sov_w.textChanged.connect(self._schedule_save_current_char)
         sov_row = QtWidgets.QHBoxLayout()
         sov_row.addWidget(self.tts_sov_w, 1)
         btn_pick_sov = QtWidgets.QPushButton("选择文件")
@@ -467,7 +471,7 @@ class CharacterEditorWidget(QtWidgets.QWidget):
         form.addRow("SOV_W:", sov_wrap)
 
         self.tts_ref_wav = QtWidgets.QLineEdit()
-        self.tts_ref_wav.textChanged.connect(self._save_current_char)
+        self.tts_ref_wav.textChanged.connect(self._schedule_save_current_char)
         ref_row = QtWidgets.QHBoxLayout()
         ref_row.addWidget(self.tts_ref_wav, 1)
         btn_pick_ref = QtWidgets.QPushButton("选择音频")
@@ -484,12 +488,12 @@ class CharacterEditorWidget(QtWidgets.QWidget):
         form.addRow("REF_WAV:", ref_wrap)
 
         self.tts_prompt_lang = QtWidgets.QLineEdit()
-        self.tts_prompt_lang.textChanged.connect(self._save_current_char)
+        self.tts_prompt_lang.textChanged.connect(self._schedule_save_current_char)
         form.addRow("PROMPT_LANG:", self.tts_prompt_lang)
 
         self.tts_prompt_text = QtWidgets.QTextEdit()
         self.tts_prompt_text.setMinimumHeight(80)
-        self.tts_prompt_text.textChanged.connect(self._save_current_char)
+        self.tts_prompt_text.textChanged.connect(self._schedule_save_current_char)
         form.addRow("PROMPT_TEXT:", self.tts_prompt_text)
         layout.addLayout(form)
 
@@ -578,11 +582,20 @@ class CharacterEditorWidget(QtWidgets.QWidget):
         self.emo_table.setHorizontalHeaderLabels(
             ["情绪", "动作(mtn)", "表情(exp)", "来源"]
         )
-        self.emo_table.horizontalHeader().setStretchLastSection(True)
         self.emo_table.horizontalHeader().setSectionResizeMode(
-            0, QtWidgets.QHeaderView.ResizeMode.Stretch
+            0, QtWidgets.QHeaderView.ResizeMode.ResizeToContents
+        )
+        self.emo_table.horizontalHeader().setSectionResizeMode(
+            1, QtWidgets.QHeaderView.ResizeMode.Stretch
+        )
+        self.emo_table.horizontalHeader().setSectionResizeMode(
+            2, QtWidgets.QHeaderView.ResizeMode.Stretch
+        )
+        self.emo_table.horizontalHeader().setSectionResizeMode(
+            3, QtWidgets.QHeaderView.ResizeMode.ResizeToContents
         )
         self.emo_table.verticalHeader().setVisible(False)
+        self.emo_table.verticalHeader().setDefaultSectionSize(32)
         self.emo_table.setEditTriggers(
             QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers
         )
@@ -590,8 +603,6 @@ class CharacterEditorWidget(QtWidgets.QWidget):
             QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows
         )
         self.emo_table.itemSelectionChanged.connect(self._on_emotion_selection_changed)
-        # 表格要能随高度伸展（Expanding），并保底露出表头+若干行；
-        # 不能用 Ignored，否则会被压成 0 只剩表头。
         self.emo_table.setMinimumHeight(140)
         self.emo_table.setSizePolicy(
             QtWidgets.QSizePolicy.Policy.Expanding,
@@ -849,6 +860,16 @@ class CharacterEditorWidget(QtWidgets.QWidget):
         self.btn_activate.setEnabled(not is_active)
         self.btn_activate.setText("当前已激活" if is_active else "🚀 切换为此角色")
 
+    def _schedule_save_current_char(self, *_args):
+        if not self.current_char_id:
+            return
+        self._save_timer.start()
+
+    def _char_list_label(self, cid: str, name: str) -> str:
+        active_id = self.mgr.data.get("active_id")
+        prefix = "⭐ " if cid == active_id else ""
+        return f"{prefix}{name}"
+
     def _save_current_char(self):
         if not self.current_char_id:
             return
@@ -882,7 +903,17 @@ class CharacterEditorWidget(QtWidgets.QWidget):
         self.mgr.save()
         item = self.char_list.currentItem()
         if item:
-            item.setText(data["name"])
+            item.setText(self._char_list_label(self.current_char_id, data["name"]))
+        if getattr(self.main_app, "_refresh_character_status", None):
+            try:
+                self.main_app._refresh_character_status()
+            except Exception:
+                pass
+        if getattr(self.main_app, "apply_asr_settings", None):
+            try:
+                self.main_app.apply_asr_settings()
+            except Exception:
+                pass
 
     def _reload_badge_data(self):
         self.mgr.load()
@@ -891,6 +922,11 @@ class CharacterEditorWidget(QtWidgets.QWidget):
             self.costume_badge_editor.set_context(
                 self.current_char_id, self.current_costume_name or ""
             )
+        if getattr(self.main_app, "_sync_transcript_identity", None):
+            try:
+                self.main_app._sync_transcript_identity()
+            except Exception:
+                pass
 
     def _pick_tts_file(self, line_edit, title: str, file_filter: str):
         path, _ = QtWidgets.QFileDialog.getOpenFileName(self, title, "", file_filter)
@@ -1032,11 +1068,8 @@ class CharacterEditorWidget(QtWidgets.QWidget):
 
         self._refresh_list()
         self._load_char_to_ui(self.current_char_id)
-        QtWidgets.QMessageBox.information(
-            self,
-            "成功",
-            "角色已切换！\n提示词、TTS 与默认服装已同步。",
-        )
+        self.btn_activate.setEnabled(False)
+        self.btn_activate.setText("已激活 ✓")
 
     def _extract_expression_id(self, name: str, file_name: str):
         for text in [name or "", file_name or ""]:
@@ -1557,13 +1590,12 @@ class CharacterEditorWidget(QtWidgets.QWidget):
             return
         motion_type = int(self.combo_motion_type.currentData() or 0)
         reloaded = self._load_selected_costume_for_preview()
-        for delay_ms in self._preview_retry_delays(reloaded):
-            QtCore.QTimer.singleShot(
-                delay_ms,
-                lambda name=motion_name, type_=motion_type: self.main_app.preview_motion(
-                    name, type_
-                ),
-            )
+        QtCore.QTimer.singleShot(
+            self._preview_delay_ms(reloaded),
+            lambda name=motion_name, type_=motion_type: self.main_app.preview_motion(
+                name, type_
+            ),
+        )
 
     def _preview_selected_expression(self):
         if not self.main_app or not hasattr(self.main_app, "preview_expression"):
@@ -1580,6 +1612,9 @@ class CharacterEditorWidget(QtWidgets.QWidget):
                 delay_ms,
                 lambda value=exp_value: self.main_app.preview_expression(value),
             )
+
+    def _preview_delay_ms(self, reloaded: bool):
+        return 700 if reloaded else 0
 
     def _preview_retry_delays(self, reloaded: bool):
         if reloaded:

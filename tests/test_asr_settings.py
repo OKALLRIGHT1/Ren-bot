@@ -134,13 +134,14 @@ def test_load_asr_settings_defaults():
     assert cfg["asr_use_character_wake_words"] is True
     assert cfg["asr_include_global_wake_words"] is True
     assert cfg["asr_global_wake_words"] == default_global_wake_words()
-    assert cfg["asr_engine"] == ASR_ENGINE_QWEN3
+    assert cfg["asr_engine"] == ASR_ENGINE_ZIPFORMER
     assert cfg["asr_hotwords_from_wake"] is True
 
 
 def test_load_asr_settings_engine_choices():
     assert load_asr_settings({"asr_engine": "zipformer"})["asr_engine"] == ASR_ENGINE_ZIPFORMER
-    assert load_asr_settings({"asr_engine": "nope"})["asr_engine"] == ASR_ENGINE_QWEN3
+    assert load_asr_settings({"asr_engine": "qwen3"})["asr_engine"] == ASR_ENGINE_QWEN3
+    assert load_asr_settings({"asr_engine": "nope"})["asr_engine"] == ASR_ENGINE_ZIPFORMER
 
 
 def test_resolve_asr_hotwords_from_wake_words():
@@ -157,3 +158,56 @@ def test_resolve_asr_hotwords_can_disable():
         wake_words=["五十铃"],
     )
     assert hot == ""
+
+
+def test_save_asr_settings_persists_before_sensor_init(monkeypatch):
+    import modules.asr.settings as asr_settings_mod
+
+    disk_data = {}
+
+    class _FakeProjectStore:
+        def load(self):
+            return dict(disk_data)
+
+        def save(self, patch):
+            disk_data.update(patch or {})
+            return dict(disk_data)
+
+    class _FakeCharacterProvider:
+        def get_active_character(self):
+            return {"name": "新角色", "aliases": ["阿新"]}
+
+    monkeypatch.setattr(asr_settings_mod, "_SETTINGS_STORE", None)
+    monkeypatch.setattr(asr_settings_mod, "_CHARACTER_PROVIDER", None)
+    monkeypatch.setattr(
+        "modules.asr.adapter.project_settings_store",
+        lambda: _FakeProjectStore(),
+    )
+    monkeypatch.setattr(
+        "modules.asr.adapter.project_character_provider",
+        lambda: _FakeCharacterProvider(),
+    )
+
+    saved = asr_settings_mod.save_asr_settings(
+        {
+            "asr_global_wake_words": "小助手\n测试唤醒",
+            "asr_extra_wake_words": "专属词",
+            "asr_use_character_wake_words": True,
+            "asr_include_global_wake_words": True,
+        }
+    )
+    assert disk_data["asr_global_wake_words"] == ["小助手", "测试唤醒"]
+    assert disk_data["asr_extra_wake_words"] == ["专属词"]
+
+    # Simulate VoiceSensor.__init__ later calling configure(settings_store=...)
+    asr_settings_mod.configure(settings_store=_FakeProjectStore())
+    reloaded = asr_settings_mod.load_asr_settings()
+    assert reloaded["asr_global_wake_words"] == ["小助手", "测试唤醒"]
+    assert reloaded["asr_extra_wake_words"] == ["专属词"]
+
+    words = asr_settings_mod.resolve_wake_words(settings=saved)
+    assert "新角色" in words
+    assert "阿新" in words
+    assert "小助手" in words
+    assert "专属词" in words
+

@@ -6,6 +6,8 @@ import asyncio
 import time
 from typing import Any, Callable, Optional, Sequence
 
+from core.message_source import is_hud_user_source
+
 
 async def should_reply(
     user_text: str,
@@ -45,7 +47,8 @@ async def should_reply(
             short_term_messages = list(get_short_term_messages(ctx) or [])
         except Exception:
             short_term_messages = []
-    if short_term_messages:
+    source = str((ctx or {}).get("source") or "").strip().lower()
+    if short_term_messages and not is_hud_user_source(source):
         last_msg = short_term_messages[-1]
         if last_msg.get("role") == "assistant":
             if logger:

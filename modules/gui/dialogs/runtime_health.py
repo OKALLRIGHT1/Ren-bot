@@ -12,14 +12,25 @@ from modules.gui.runtime_health_view import (
 from modules.gui.styles import get_tool_dialog_styles
 
 
-class RuntimeHealthDialog(QtWidgets.QDialog):
-    def __init__(self, health_center: Any, parent=None):
+class RuntimeHealthDialog(QtWidgets.QWidget):
+    def __init__(self, health_center: Any, parent=None, *, embedded: bool = False):
         super().__init__(parent)
         self.health_center = health_center
-        self.setWindowTitle("运行健康中心")
-        self.resize(820, 520)
-        self.setMinimumSize(680, 420)
-        self.setStyleSheet(get_tool_dialog_styles())
+        self._embedded = bool(embedded)
+        self.setAttribute(QtCore.Qt.WidgetAttribute.WA_StyledBackground, True)
+        if not self._embedded:
+            self.setWindowTitle("运行健康中心")
+            self.setWindowFlags(
+                QtCore.Qt.WindowType.Window
+                | QtCore.Qt.WindowType.WindowMinMaxButtonsHint
+                | QtCore.Qt.WindowType.WindowCloseButtonHint
+            )
+            self.setAttribute(QtCore.Qt.WidgetAttribute.WA_QuitOnClose, False)
+            self.setAttribute(QtCore.Qt.WidgetAttribute.WA_DeleteOnClose, True)
+            self.setWindowModality(QtCore.Qt.WindowModality.NonModal)
+            self.resize(820, 520)
+            self.setMinimumSize(680, 420)
+            self.setStyleSheet(get_tool_dialog_styles())
         self._build_ui()
 
         self.refresh_timer = QtCore.QTimer(self)
@@ -30,7 +41,10 @@ class RuntimeHealthDialog(QtWidgets.QDialog):
 
     def _build_ui(self) -> None:
         root = QtWidgets.QVBoxLayout(self)
-        root.setContentsMargins(16, 16, 16, 16)
+        if self._embedded:
+            root.setContentsMargins(0, 0, 0, 0)
+        else:
+            root.setContentsMargins(16, 16, 16, 16)
         root.setSpacing(12)
 
         header = QtWidgets.QFrame()
@@ -46,7 +60,8 @@ class RuntimeHealthDialog(QtWidgets.QDialog):
         self.summary_label = QtWidgets.QLabel("只读展示各组件最近报告的运行状态。")
         self.summary_label.setObjectName("dialogDesc")
         self.summary_label.setWordWrap(True)
-        header_layout.addWidget(title)
+        if not self._embedded:
+            header_layout.addWidget(title)
         header_layout.addWidget(self.overall_label)
         header_layout.addWidget(self.summary_label)
         root.addWidget(header)
@@ -78,10 +93,11 @@ class RuntimeHealthDialog(QtWidgets.QDialog):
         refresh_button = QtWidgets.QPushButton("立即刷新")
         refresh_button.setObjectName("primaryAction")
         refresh_button.clicked.connect(self.refresh_status)
-        close_button = QtWidgets.QPushButton("关闭")
-        close_button.clicked.connect(self.close)
         footer.addWidget(refresh_button)
-        footer.addWidget(close_button)
+        if not self._embedded:
+            close_button = QtWidgets.QPushButton("关闭")
+            close_button.clicked.connect(self.close)
+            footer.addWidget(close_button)
         root.addLayout(footer)
 
     def refresh_status(self) -> None:

@@ -189,7 +189,7 @@ def test_stream_flush_strips_internal_prompt_instruction_leak() -> None:
 def test_mcp_tools_remote_allowlist_policy() -> None:
     plugin = McpToolsPlugin()
 
-    assert plugin._is_tool_allowed("plugin.list")[0] is True
+    assert plugin._is_tool_allowed("plugin.list")[0] is False
     allowed, _ = plugin._is_tool_allowed("mcp.demo.read")
     assert allowed is False
 
@@ -203,13 +203,7 @@ def test_mcp_tools_remote_allowlist_policy() -> None:
     plugin.settings = {"allow_all_remote_tools": {"default": True}}
     assert plugin._is_tool_allowed("mcp.any.run")[0] is True
 
-    plugin.settings = {"allow_all_local_tools": False}
-    assert plugin._is_tool_allowed("plugin.list")[0] is False
-
-    plugin.settings = {
-        "allow_all_local_tools": False,
-        "allowed_tool_names": "plugin.list, mcp.demo.read",
-    }
+    plugin.settings = {"allowed_tool_names": "plugin.list, mcp.demo.read"}
     assert plugin._is_tool_allowed("plugin.list")[0] is True
     assert plugin._is_tool_allowed("mcp.demo.read")[0] is True
 
@@ -225,12 +219,17 @@ def test_mcp_tools_blocks_disallowed_remote_call_before_bridge() -> None:
         def list_server_status(self):
             return []
 
+        def configure_remote_servers(self, *_args, **_kwargs):
+            raise AssertionError("bridge should not be configured")
+
     plugin = McpToolsPlugin()
     plugin.settings = {}
+    plugin._bridge = FailingBridge()
+    plugin._server_signature = "[]"
     result = asyncio.run(
         plugin.run(
             "call_tool ||| mcp.demo.read ||| {}",
-            {"delegate_mode": True, "mcp_bridge": FailingBridge()},
+            {"delegate_mode": True},
         )
     )
     assert "allowlist" in result

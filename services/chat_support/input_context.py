@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Optional
 
-from core.message_source import build_output_profile
+from core.message_source import HUD_USER_SOURCES, LOCAL_LIVE2D_SOURCES, build_output_profile
 
 
 @dataclass(frozen=True)
@@ -70,11 +70,8 @@ def build_chat_input_context(
     chat_log_source = input_source if input_source != "unknown" else "chat"
     output_profile = build_output_profile(str(input_source or "text_input"))
     live2d_enabled = bool(output_profile.get("live2d_enabled", True))
-    codex_mode = (
-        bool(data.get("codex_mode", False))
-        if "codex_mode" in data
-        else input_source == "codex_input"
-    )
+    # 代码助手模式已移除。旧请求里的 codex_mode / codex_input 不再开启特殊会话。
+    codex_mode = False
     source_key = str(input_source or "").strip().lower()
     remote_sources = {
         str(source or "").strip().lower()
@@ -82,14 +79,12 @@ def build_chat_input_context(
         if str(source or "").strip()
     }
     direct_chat_sources = {
-        "text_input",
-        "voice",
-        "desktop",
-        "codex_input",
+        *HUD_USER_SOURCES,
+        *LOCAL_LIVE2D_SOURCES,
         *remote_sources,
     }
     should_bypass_gatekeeper = (
-        source_key in direct_chat_sources or codex_mode or has_external_images
+        source_key in direct_chat_sources or has_external_images
     )
     return ChatInputContext(
         input_source=input_source,

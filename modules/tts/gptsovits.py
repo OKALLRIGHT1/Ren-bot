@@ -8,7 +8,13 @@ import wave
 from typing import Callable, Awaitable, Optional, Tuple
 
 from modules.tts.base import BaseTTS
-from modules.live2d import play_sound_file, send_lip_sync, trigger_emotion
+from modules.live2d import (
+    has_performance_client,
+    play_sound_file,
+    send_lip_sync,
+    send_speech_lifecycle,
+    trigger_emotion,
+)
 from core.logger import get_logger
 
 logger = get_logger()
@@ -230,6 +236,7 @@ class GPTSoVITSTTS(BaseTTS):
 
         # 先完成口型分析，再播放音频；否则短句会在口型数据到达前播完。
         lip_data = None
+        duration = 0.0
         if self.enable_lip_sync and self.lip_sync_engine:
             try:
                 lip_data = await self.lip_sync_engine.analyze_audio(wav_path)
@@ -260,7 +267,24 @@ class GPTSoVITSTTS(BaseTTS):
             except Exception:
                 lip_data = None
 
-        if emotion:
+        if has_performance_client():
+            try:
+                speech_duration = 0.0
+                try:
+                    speech_duration = float(duration)
+                except Exception:
+                    speech_duration = 0.0
+                if speech_duration <= 0:
+                    speech_duration = _estimate_wav_duration_sec(wav_path, "")
+                duration_ms = int(max(0.0, speech_duration) * 1000)
+                await send_speech_lifecycle(
+                    "start",
+                    duration_ms=duration_ms or None,
+                    emotion=emotion,
+                )
+            except Exception:
+                pass
+        elif emotion:
             try:
                 await trigger_emotion(emotion)
             except Exception:

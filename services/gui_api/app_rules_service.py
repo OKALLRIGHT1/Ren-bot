@@ -122,7 +122,9 @@ class AppRulesGuiService:
                     )
                 )
             registry = self._get_registry()
-            path = Path(getattr(registry, "path", self.rules_path or "data/app_category_rules.json"))
+            from modules.paths import data_path
+
+            path = Path(getattr(registry, "path", self.rules_path or data_path("app_category_rules.json")))
             save_rules(objects, path=path)
             registry.reload(force=True)
         except Exception as exc:

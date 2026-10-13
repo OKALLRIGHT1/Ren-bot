@@ -104,6 +104,16 @@ class ShortTermMemoryManager:
             return dict(raw) if isinstance(raw, dict) else None
         return None
 
+    def clear(self, session_id: str = None) -> None:
+        session_key = str(session_id or "").strip()
+        if session_key:
+            self.session_short_term_memory[session_key] = []
+            self._session_short_term_loaded.discard(session_key)
+            return
+        self.short_term_memory.clear()
+        self.session_short_term_memory.clear()
+        self._session_short_term_loaded.clear()
+
     def get_context(self, session_id: str = None, *, recall_intent: bool = False):
         session_key = str(session_id or "").strip()
         if session_key:

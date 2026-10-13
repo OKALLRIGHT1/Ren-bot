@@ -11,7 +11,13 @@ try:
 except Exception:
     miniaudio = None
 
-from modules.live2d import play_sound_file, send_lip_sync, trigger_emotion
+from modules.live2d import (
+    has_performance_client,
+    play_sound_file,
+    send_lip_sync,
+    send_speech_lifecycle,
+    trigger_emotion,
+)
 from core.logger import get_logger
 
 logger = get_logger()
@@ -144,7 +150,17 @@ class EdgeTTS:
                 lip_data = None
 
         if self.use_live2d_player:
-            if emotion:
+            if has_performance_client():
+                try:
+                    duration_ms = int(max(0.0, float(self._estimate_duration_sec(mp3_path, "") or 0.0)) * 1000)
+                    await send_speech_lifecycle(
+                        "start",
+                        duration_ms=duration_ms or None,
+                        emotion=emotion,
+                    )
+                except Exception:
+                    pass
+            elif emotion:
                 try:
                     await trigger_emotion(emotion)
                 except Exception:

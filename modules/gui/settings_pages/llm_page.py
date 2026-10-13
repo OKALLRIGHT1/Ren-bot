@@ -71,8 +71,10 @@ class LlmSettingsPage(QtWidgets.QWidget):
 
         title_wrap = QtWidgets.QVBoxLayout()
         title_wrap.setSpacing(2)
-        title_wrap.addWidget(QtWidgets.QLabel("模型与路由", objectName="header"))
-        page_hint = QtWidgets.QLabel("维护模型清单，并给不同任务指定调用链。")
+        title_wrap.addWidget(QtWidgets.QLabel("聊天模型", objectName="header"))
+        page_hint = QtWidgets.QLabel(
+            "先加一个聊天用的模型。提供商和 Key 可以在「添加模型」里一起填；任务路由给进阶使用。"
+        )
         page_hint.setStyleSheet("color:#6B7280;")
         page_hint.setWordWrap(True)
         title_wrap.addWidget(page_hint)
@@ -129,10 +131,10 @@ class LlmSettingsPage(QtWidgets.QWidget):
         header.setSectionResizeMode(3, QtWidgets.QHeaderView.ResizeMode.Interactive)
         header.setSectionResizeMode(4, QtWidgets.QHeaderView.ResizeMode.Stretch)
         header.setSectionResizeMode(5, QtWidgets.QHeaderView.ResizeMode.Fixed)
-        self.llm_table.setColumnWidth(0, 150)
-        self.llm_table.setColumnWidth(2, 88)
-        self.llm_table.setColumnWidth(3, 170)
-        self.llm_table.setColumnWidth(5, 132)
+        self.llm_table.setColumnWidth(0, 110)
+        self.llm_table.setColumnWidth(2, 76)
+        self.llm_table.setColumnWidth(3, 120)
+        self.llm_table.setColumnWidth(5, 124)
         # 省略号从尾部截断：保留开头最可辨认的部分
         # （如 “gemini-3-fla…” / “https://api.tomo…”），不再用中间省略。
         self.llm_table.setTextElideMode(QtCore.Qt.TextElideMode.ElideRight)
@@ -146,9 +148,8 @@ class LlmSettingsPage(QtWidgets.QWidget):
         self.llm_table.setShowGrid(False)
         self.llm_table.setAlternatingRowColors(True)
         self.llm_table.verticalHeader().setVisible(False)
-        self.llm_table.setMinimumHeight(0)
-        self.llm_table.setMaximumHeight(320)
-        self.llm_table.verticalHeader().setDefaultSectionSize(40)
+        self.llm_table.setMinimumHeight(160)
+        self.llm_table.verticalHeader().setDefaultSectionSize(34)
         model_layout.addWidget(self.llm_table)
         body_layout.addWidget(model_card)
 
@@ -158,15 +159,15 @@ class LlmSettingsPage(QtWidgets.QWidget):
         route_layout.setContentsMargins(14, 10, 14, 10)
         route_layout.setSpacing(6)
         route_layout.addWidget(QtWidgets.QLabel("任务路由", objectName="header"))
-        route_hint = QtWidgets.QLabel("日常优先关注闲聊、推理、总结、代码助手。")
-        route_hint.setStyleSheet("color:#6B7280;")
+        route_hint = QtWidgets.QLabel("日常优先关注闲聊、推理、总结。")
+        route_hint.setStyleSheet("color:#6B7280; font-size:11px;")
         route_hint.setWordWrap(True)
         route_layout.addWidget(route_hint)
 
         route_grid = QtWidgets.QGridLayout()
         route_grid.setContentsMargins(0, 0, 0, 0)
-        route_grid.setHorizontalSpacing(10)
-        route_grid.setVerticalSpacing(10)
+        route_grid.setHorizontalSpacing(8)
+        route_grid.setVerticalSpacing(8)
         route_grid.setColumnStretch(0, 1)
         route_grid.setColumnStretch(1, 1)
 
@@ -178,7 +179,6 @@ class LlmSettingsPage(QtWidgets.QWidget):
             ("gatekeeper", "看门人", "是否触发"),
             ("translation", "翻译", "语言转换"),
             ("screen_classify", "屏幕分类", "画面分类"),
-            ("codex", "代码助手", "工作区链路"),
             ("image_gen", "画图", "点编辑自选顺序，不会自动全选"),
             ("image_edit", "图生图", "点编辑自选顺序，空则回退画图链"),
         ]
@@ -186,34 +186,38 @@ class LlmSettingsPage(QtWidgets.QWidget):
             row_card = QtWidgets.QFrame()
             row_card.setObjectName("launchCard")
             row_layout = QtWidgets.QVBoxLayout(row_card)
-            row_layout.setContentsMargins(10, 8, 10, 8)
-            row_layout.setSpacing(4)
+            row_layout.setContentsMargins(8, 6, 8, 6)
+            row_layout.setSpacing(3)
 
             head = QtWidgets.QHBoxLayout()
+            head.setSpacing(6)
             title = QtWidgets.QLabel(label)
             title.setObjectName("launchTitle")
+            title.setStyleSheet("font-size: 13px; font-weight: 700;")
             desc_label = QtWidgets.QLabel(desc)
             desc_label.setObjectName("launchDesc")
-            desc_label.setWordWrap(True)
-            desc_label.setMaximumHeight(18)
+            desc_label.setStyleSheet("color: #6B7280; font-size: 11px;")
+            desc_label.setToolTip(desc)
             self.router_desc_ui[task] = desc_label
+            head.addWidget(title)
+            head.addWidget(desc_label, 1)
+            row_layout.addLayout(head)
 
             line_wrap = QtWidgets.QHBoxLayout()
             line_wrap.setContentsMargins(0, 0, 0, 0)
+            line_wrap.setSpacing(6)
             line = QtWidgets.QLineEdit()
             line.setReadOnly(True)
             line.setPlaceholderText("未配置")
-            line.setStyleSheet("background:#f3f4f6;")
+            line.setFixedHeight(28)
+            line.setStyleSheet("background:#f3f4f6; font-size: 11px; padding: 2px 6px;")
             self.router_ui[task] = line
             btn = QtWidgets.QPushButton("编辑")
             btn.setObjectName("routerConfigBtn")
+            btn.setFixedHeight(28)
             btn.clicked.connect(lambda c=False, t=task: self._on_conf_router(t))
             line_wrap.addWidget(line, 1)
             line_wrap.addWidget(btn)
-            head.addWidget(title)
-            head.addStretch()
-            row_layout.addLayout(head)
-            row_layout.addWidget(desc_label)
             row_layout.addLayout(line_wrap)
             route_grid.addWidget(row_card, index // 2, index % 2)
 
@@ -274,21 +278,15 @@ class LlmSettingsPage(QtWidgets.QWidget):
 
             action_widget = QtWidgets.QWidget()
             h = QtWidgets.QHBoxLayout(action_widget)
-            h.setContentsMargins(2, 1, 2, 1)
-            h.setSpacing(4)
+            h.setContentsMargins(4, 2, 4, 2)
+            h.setSpacing(6)
             h.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
 
             btn_edit = QtWidgets.QPushButton("编辑")
-            btn_edit.setFixedHeight(28)
-            btn_edit.setMinimumWidth(48)
-            btn_edit.setMaximumWidth(56)
             btn_edit.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
             btn_edit.clicked.connect(lambda c=False, m=mid: self._on_edit_model(m))
 
             btn_del = QtWidgets.QPushButton("删除")
-            btn_del.setFixedHeight(28)
-            btn_del.setMinimumWidth(48)
-            btn_del.setMaximumWidth(56)
             btn_del.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
             btn_edit.setObjectName("tableActionBtn")
             btn_del.setObjectName("tableDangerBtn")

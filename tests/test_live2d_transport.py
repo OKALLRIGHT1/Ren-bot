@@ -242,3 +242,134 @@ def test_connection_backoff_is_capped_at_fifteen_seconds():
         15.0,
         15.0,
     ]
+
+
+def test_discovery_file_builds_fixed_local_api_endpoint(tmp_path):
+    import json
+    import os
+    import time
+    import modules.live2d as live2d
+
+    path = tmp_path / live2d.DISCOVERY_FILE_NAME
+    path.write_text(
+        json.dumps(
+            {
+                "pid": 4321,
+                "port": 20012,
+                "protocol_version": live2d.DISCOVERY_PROTOCOL_VERSION,
+                "url": "ws://user:secret@evil.example:9999/wrong?query=1#fragment",
+                "host": "evil.example",
+                "path": "/wrong",
+            }
+        ),
+        encoding="utf-8",
+    )
+    os.utime(path, (time.time(), time.time()))
+
+    assert live2d._read_discovery_host(path) == "ws://127.0.0.1:20012/api"
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"pid": 1, "port": 0, "protocol_version": 1},
+        {"pid": 1, "port": 65536, "protocol_version": 1},
+        {"pid": 1, "port": True, "protocol_version": 1},
+        {"pid": 0, "port": 20000, "protocol_version": 1},
+        {"pid": 1, "port": 20000, "protocol_version": 2},
+    ],
+)
+def test_discovery_file_rejects_invalid_fields(tmp_path, payload):
+    import json
+    import modules.live2d as live2d
+
+    path = tmp_path / live2d.DISCOVERY_FILE_NAME
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    assert live2d._read_discovery_host(path) is None
+
+
+def test_discovery_file_rejects_corrupt_and_expired_content(tmp_path):
+    import json
+    import os
+    import modules.live2d as live2d
+
+    corrupt = tmp_path / "corrupt.json"
+    corrupt.write_text("{broken", encoding="utf-8")
+    assert live2d._read_discovery_host(corrupt, now=100.0) is None
+
+    expired = tmp_path / "expired.json"
+    expired.write_text(
+        json.dumps({"pid": 1, "port": 20000, "protocol_version": 1}),
+        encoding="utf-8",
+    )
+    os.utime(expired, (1.0, 1.0))
+    assert live2d._read_discovery_host(expired, now=1000.0, max_age=120.0) is None
+
+
+@pytest.mark.asyncio
+async def test_resolve_host_prefers_reachable_discovery_endpoint(monkeypatch, tmp_path):
+    import json
+    import modules.live2d as live2d
+
+    path = tmp_path / live2d.DISCOVERY_FILE_NAME
+    path.write_text(
+        json.dumps({"pid": 123, "port": 20017, "protocol_version": 1}),
+        encoding="utf-8",
+    )
+    attempts = []
+
+    async def fake_try_host(host):
+        attempts.append(host)
+        return host == "ws://127.0.0.1:20017/api"
+
+    monkeypatch.setattr(live2d, "_RESOLVED_HOST", None)
+    monkeypatch.setattr(live2d, "_discovery_file_candidates", lambda: [path])
+    monkeypatch.setattr(live2d, "_try_host", fake_try_host)
+
+    assert await live2d._resolve_host() == "ws://127.0.0.1:20017/api"
+    assert attempts == ["ws://127.0.0.1:20017/api"]
+
+
+@pytest.mark.asyncio
+async def test_resolve_host_scans_after_discovery_connection_failure(monkeypatch, tmp_path):
+    import json
+    import modules.live2d as live2d
+
+    path = tmp_path / live2d.DISCOVERY_FILE_NAME
+    path.write_text(
+        json.dumps({"pid": 123, "port": 20017, "protocol_version": 1}),
+        encoding="utf-8",
+    )
+    attempts = []
+
+    async def fake_try_host(host):
+        attempts.append(host)
+        return host == "ws://127.0.0.1:10088/api"
+
+    monkeypatch.setattr(live2d, "_RESOLVED_HOST", None)
+    monkeypatch.setattr(live2d, "_discovery_file_candidates", lambda: [path])
+    monkeypatch.setattr(live2d, "_try_host", fake_try_host)
+
+    assert await live2d._resolve_host() == "ws://127.0.0.1:10088/api"
+    assert attempts[0] == "ws://127.0.0.1:20017/api"
+    assert "ws://127.0.0.1:10088/api" in attempts
+
+
+@pytest.mark.asyncio
+async def test_resolve_host_falls_back_to_configured_host(monkeypatch, tmp_path):
+    import modules.live2d as live2d
+
+    corrupt = tmp_path / live2d.DISCOVERY_FILE_NAME
+    corrupt.write_text("not-json", encoding="utf-8")
+
+    async def always_fail(host):
+        del host
+        return False
+
+    monkeypatch.setattr(live2d, "_RESOLVED_HOST", None)
+    monkeypatch.setattr(live2d, "_discovery_file_candidates", lambda: [corrupt])
+    monkeypatch.setattr(live2d, "_try_host", always_fail)
+    monkeypatch.setattr(live2d, "LIVE2D_HOST", "ws://127.0.0.1:19999/api")
+
+    assert await live2d._resolve_host() == "ws://127.0.0.1:19999/api"

@@ -6,8 +6,9 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from modules.json_state_store import JsonListStore, now_iso
+from modules.paths import data_path
 
-CODEX_SESSION_PATH = Path("./data/codex_session.json")
+CODEX_SESSION_PATH = Path(data_path("codex_session.json"))
 MAX_ITEMS = 120
 _store = JsonListStore(CODEX_SESSION_PATH, max_items=MAX_ITEMS)
 

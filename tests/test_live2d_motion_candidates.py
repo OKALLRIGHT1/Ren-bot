@@ -32,7 +32,16 @@ def test_play_motion_sends_stop_motion_marker(monkeypatch):
     asyncio.run(live2d.play_motion(live2d.STOP_MOTION))
 
     assert sent == [
-        (13200, 2, {"id": 0, "type": 0, "mtn": live2d.STOP_MOTION})
+        (
+            13200,
+            2,
+            {
+                "id": 0,
+                "type": 0,
+                "mtn": live2d.STOP_MOTION,
+                "source": "action",
+            },
+        )
     ]
 
 
@@ -62,7 +71,16 @@ def test_play_motion_resolves_model_default_pose_from_current_legacy_model(
     asyncio.run(live2d.play_motion(live2d.MODEL_DEFAULT_MOTION))
 
     assert sent == [
-        (13200, 2, {"id": 0, "type": 0, "mtn": "angry01:angry01"})
+        (
+            13200,
+            2,
+            {
+                "id": 0,
+                "type": 0,
+                "mtn": "angry01:angry01",
+                "source": "action",
+            },
+        )
     ]
 
 

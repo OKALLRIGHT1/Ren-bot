@@ -8,7 +8,7 @@
 - 当前插件以 `plugins/<plugin_name>/config.json + plugin.py` 为标准结构。
 - 插件配置优先在 GUI 的 `设置 -> 插件管理` 中编辑；敏感字段会按 `secret/api_key/token/password` 等字段名遮挡。
 - 新增插件时，先写清楚 `name/trigger/llm_command/aliases/description/type/access_control/settings`；需要自然语言触发时，优先补 `get_capabilities()`。希望进工具推理轮时再补 `get_tool_schema()`。
-- 插件禁止读 `ctx["chat_service"]`（主路径已不注入）。发 QQ 用 `ctx["gateway"]`（或 `resolve_gateway(ctx)`），TTS 用 `ctx["tts"]`，换角/点歌事件用 `ctx["app"]`，知识用 `ctx["knowledge"]`。运行时键：`plugin_manager` / `agent_runtime` / `mcp_bridge`。`brain` 仍在。
+- 插件禁止读 `ctx["chat_service"]`（主路径已不注入）。发 QQ 用 `ctx["gateway"]`（或 `resolve_gateway(ctx)`），TTS 用 `ctx["tts"]`，换角/点歌事件用 `ctx["app"]`，知识用 `ctx["knowledge"]`。运行时键：`plugin_manager` / `agent_runtime`。`brain` 仍在。MCP 服务器由 `plugins/mcp_tools` 自己持有。
 - Skill（`skills/SKILL.md`）只是可选提示词注入，不是插件，也没有独立端口。不放 Skill 时插件工具仍然完整。需要执行能力时写 `plugins/`。
 - QQ 侧插件必须认真设置权限，默认不要允许非主人触发截图、文件、系统控制、代码执行等能力。
 
@@ -104,7 +104,6 @@ def _match_weather_now(self, text, ctx):
 - `diary_export`：日记导出与整理
 - `life_manager`：生活数据 / 记录管理
 - `llm_monitor`：模型监控
-- `mode_preset`：模式预设
 
 ### 3.2 系统与工作区类
 

@@ -1277,8 +1277,10 @@ class PluginManager:
             actor = resolve_actor_context(runtime_context)
             return actor.kind == ActorKind.LOCAL
         except Exception:
+            from core.message_source import is_local_actor_source
+
             source = str((runtime_context or {}).get("source") or "").strip().lower()
-            return source in {"", "text_input", "tauri_gui", "local", "gui", "qt_gui"}
+            return is_local_actor_source(source)
 
     def _try_local_popup_confirm(
         self,
@@ -1718,6 +1720,16 @@ class PluginManager:
             )
         return info
 
+    @staticmethod
+    def _observe_key_matches(key: str, text: str) -> bool:
+        needle = str(key or "").strip()
+        haystack = str(text or "")
+        if not needle or not haystack:
+            return False
+        if needle.isascii():
+            return re.search(r"(?i)\b" + re.escape(needle) + r"\b", haystack) is not None
+        return needle.lower() in haystack.lower()
+
     async def execute_observe_commands(
         self, user_text: str, context: dict
     ) -> Tuple[bool, Any]:
@@ -1728,12 +1740,11 @@ class PluginManager:
         if not text:
             return False, None
 
-        low = text.lower()
         # 排序防止短词遮蔽长词
         sorted_keys = sorted(self.observe_map.keys(), key=len, reverse=True)
 
         for key in sorted_keys:
-            if key.lower() in low:
+            if self._observe_key_matches(key, text):
                 plugin = self.observe_map[key]
                 allowed, reason = self._is_plugin_allowed(plugin, context)
                 if not allowed:

@@ -147,7 +147,7 @@ class EmotionController:
             )
             if exp_id is not None:
                 try:
-                    await live2d.set_expression(int(exp_id))
+                    await live2d.set_expression(int(exp_id), emotion=emo, intensity=intensity)
                 except Exception:
                     pass
 
@@ -165,7 +165,10 @@ class EmotionController:
                 if should_play:
                     try:
                         await live2d.play_motion(
-                            motion["mtn"], motion_type=int(motion.get("type", 0))
+                            motion["mtn"],
+                            motion_type=int(motion.get("type", 0)),
+                            emotion=emo,
+                            intensity=intensity,
                         )
                     except Exception:
                         pass
@@ -189,7 +192,9 @@ class EmotionController:
 
         try:
             await live2d.play_motion(
-                str(motion["mtn"]), motion_type=int(motion.get("type", 0))
+                str(motion["mtn"]),
+                motion_type=int(motion.get("type", 0)),
+                source="idle",
             )
         except Exception:
             pass
@@ -213,7 +218,9 @@ class EmotionController:
 
         try:
             await live2d.play_motion(
-                str(motion["mtn"]), motion_type=int(motion.get("type", 0))
+                str(motion["mtn"]),
+                motion_type=int(motion.get("type", 0)),
+                source="idle",
             )
         except Exception:
             return False

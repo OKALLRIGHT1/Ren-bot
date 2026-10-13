@@ -219,13 +219,17 @@ class KnowledgeManagerDialog(QtWidgets.QDialog):
         self.plugin_manager = getattr(main_app, "plugin_manager", None)
         if knowledge_gui is not None:
             self.knowledge_gui = knowledge_gui
-        else:
+        elif self.plugin_manager is not None or self._brain() is not None:
             from services.gui_api.knowledge_service import KnowledgeGuiService
 
             self.knowledge_gui = KnowledgeGuiService(
                 plugin_manager=self.plugin_manager,
                 brain=self._brain(),
             )
+        else:
+            from modules.gui.remote_knowledge import RemoteKnowledgeGui
+
+            self.knowledge_gui = RemoteKnowledgeGui()
         self._knowledge_import_progress = None
         self._knowledge_job_kind = ""
         self.setWindowTitle("知识库管理")
@@ -270,11 +274,13 @@ class KnowledgeManagerDialog(QtWidgets.QDialog):
         header_layout.addLayout(title_row)
 
         desc = QtWidgets.QLabel(
-            "在这里管理知识来源目录，一键学习并生成语义检索库。支持 .md、.txt、.py、.json。"
+            "管理知识来源目录，一键学习并生成语义检索库。支持 .md / .txt / .py / .json。"
+        )
+        desc.setObjectName("dialogDesc")
+        desc.setToolTip(
             "升级后的旧按行碎片不会自动迁移：先点「重建索引库」清空，再点「一键学习」。"
             "未改文件且已是新分块时会跳过；标题栏出现「需要重建」时必须先重建。"
         )
-        desc.setObjectName("dialogDesc")
         desc.setWordWrap(True)
         header_layout.addWidget(desc)
         container_layout.addWidget(header_card)
@@ -287,7 +293,7 @@ class KnowledgeManagerDialog(QtWidgets.QDialog):
         top = QtWidgets.QWidget()
         top_layout = QtWidgets.QVBoxLayout(top)
         top_layout.setContentsMargins(0, 0, 0, 0)
-        top_layout.setSpacing(10)
+        top_layout.setSpacing(6)
 
         self.dir_table = QtWidgets.QTableWidget(0, 2)
         self.dir_table.setHorizontalHeaderLabels(["启用", "知识目录"])
@@ -303,26 +309,27 @@ class KnowledgeManagerDialog(QtWidgets.QDialog):
         )
         self.dir_table.verticalHeader().setVisible(False)
         self.dir_table.setShowGrid(False)
+        self.dir_table.setAlternatingRowColors(True)
         self.dir_table.setFocusPolicy(QtCore.Qt.FocusPolicy.NoFocus)
-        self.dir_table.verticalHeader().setDefaultSectionSize(40)
-        self.dir_table.setMinimumHeight(100)
+        self.dir_table.verticalHeader().setDefaultSectionSize(32)
+        self.dir_table.setMinimumHeight(120)
         top_layout.addWidget(self.dir_table, 1)
 
         action_panel = QtWidgets.QFrame()
         action_panel.setObjectName("dialogSection")
         action_layout = QtWidgets.QVBoxLayout(action_panel)
-        action_layout.setContentsMargins(14, 12, 14, 12)
-        action_layout.setSpacing(10)
+        action_layout.setContentsMargins(8, 6, 8, 6)
+        action_layout.setSpacing(6)
 
-        self.btn_generate_doc = QtWidgets.QPushButton("✍️ 生成知识文档")
-        self.btn_import_file = QtWidgets.QPushButton("📥 导入知识文件")
-        self.btn_import_chat = QtWidgets.QPushButton("💬 导入聊天记录")
+        self.btn_generate_doc = QtWidgets.QPushButton("✍️ 生成文档")
+        self.btn_import_file = QtWidgets.QPushButton("📥 导入文件")
+        self.btn_import_chat = QtWidgets.QPushButton("💬 导入聊天")
         self.btn_add_dir = QtWidgets.QPushButton("➕ 添加目录")
         self.btn_remove_dir = QtWidgets.QPushButton("➖ 移除选中")
         self.btn_save_dirs = QtWidgets.QPushButton("💾 保存目录")
         self.btn_learn = QtWidgets.QPushButton("⚡ 一键学习")
-        self.btn_delete_selected = QtWidgets.QPushButton("🗑️ 清理选中目录知识")
-        self.btn_rebuild = QtWidgets.QPushButton("⚠️ 重建索引库")
+        self.btn_delete_selected = QtWidgets.QPushButton("🗑️ 清理选中")
+        self.btn_rebuild = QtWidgets.QPushButton("⚠️ 重建索引")
 
         self.btn_learn.setObjectName("primary_btn")
 
@@ -345,75 +352,50 @@ class KnowledgeManagerDialog(QtWidgets.QDialog):
         self.btn_delete_selected.setStyleSheet(danger_qss)
         self.btn_rebuild.setStyleSheet(danger_qss)
 
-        def _action_section(title: str, title_color: str, buttons: list[QtWidgets.QWidget]):
-            section = QtWidgets.QWidget()
-            section_layout = QtWidgets.QVBoxLayout(section)
-            section_layout.setContentsMargins(0, 0, 0, 0)
-            section_layout.setSpacing(6)
-            label = QtWidgets.QLabel(title)
-            label.setStyleSheet(f"color:{title_color}; font-weight:600;")
-            section_layout.addWidget(label)
-            row_wrap = QtWidgets.QWidget()
-            row = FlowLayout(row_wrap, margin=0, h_spacing=8, v_spacing=8)
-            for btn in buttons:
-                row.addWidget(btn)
-            section_layout.addWidget(row_wrap)
-            return section
-
-        action_layout.addWidget(
-            _action_section(
-                "导入与生成",
-                "#374151",
-                [self.btn_generate_doc, self.btn_import_file, self.btn_import_chat],
-            )
-        )
-        action_layout.addWidget(
-            _action_section(
-                "目录管理",
-                "#374151",
-                [
-                    self.btn_add_dir,
-                    self.btn_remove_dir,
-                    self.btn_save_dirs,
-                    self.btn_learn,
-                ],
-            )
-        )
-        action_layout.addWidget(
-            _action_section(
-                "危险操作",
-                "#B91C1C",
-                [self.btn_delete_selected, self.btn_rebuild],
-            )
-        )
-
+        toolbar_wrap = QtWidgets.QWidget()
+        toolbar = FlowLayout(toolbar_wrap, margin=0, h_spacing=6, v_spacing=6)
+        all_buttons = [
+            self.btn_add_dir,
+            self.btn_remove_dir,
+            self.btn_save_dirs,
+            self.btn_learn,
+            self.btn_generate_doc,
+            self.btn_import_file,
+            self.btn_import_chat,
+            self.btn_delete_selected,
+            self.btn_rebuild,
+        ]
+        for btn in all_buttons:
+            btn.setFixedHeight(28)
+            toolbar.addWidget(btn)
+        action_layout.addWidget(toolbar_wrap)
         top_layout.addWidget(action_panel)
 
         recent_layout = QtWidgets.QHBoxLayout()
-        recent_label = QtWidgets.QLabel("📋 最近学习目录")
-        recent_label.setStyleSheet("color: #4B5563; font-size: 12px; font-weight: bold;")
+        recent_label = QtWidgets.QLabel("📋 最近学习:")
+        recent_label.setStyleSheet("color: #4B5563; font-size: 11px; font-weight: bold;")
         recent_layout.addWidget(recent_label)
-        recent_layout.addStretch()
-        top_layout.addLayout(recent_layout)
-
         self.recent_box = QtWidgets.QPlainTextEdit()
         self.recent_box.setReadOnly(True)
-        self.recent_box.setMaximumHeight(70)
-        self.recent_box.setStyleSheet("background-color: #F9FAFB; font-size: 12px; color: #4B5563;")
-        top_layout.addWidget(self.recent_box)
+        self.recent_box.setMaximumHeight(32)
+        self.recent_box.setStyleSheet("background-color: #F9FAFB; font-size: 11px; color: #4B5563; padding: 2px;")
+        recent_layout.addWidget(self.recent_box, 1)
+        top_layout.addLayout(recent_layout)
 
         bottom = QtWidgets.QWidget()
         bottom_layout = QtWidgets.QVBoxLayout(bottom)
-        bottom_layout.setContentsMargins(0, 8, 0, 0)
-        bottom_layout.setSpacing(10)
+        bottom_layout.setContentsMargins(0, 4, 0, 0)
+        bottom_layout.setSpacing(6)
 
         search_row = QtWidgets.QHBoxLayout()
         self.search_input = QtWidgets.QLineEdit()
         self.search_input.setPlaceholderText("🔍 输入关键词检索验证知识库内容...")
-        self.search_input.setStyleSheet("padding: 8px; font-size: 13px;")
+        self.search_input.setFixedHeight(28)
+        self.search_input.setStyleSheet("padding: 4px 8px; font-size: 12px;")
         
         self.btn_search = QtWidgets.QPushButton("🔍 检索验证")
         self.btn_search.setObjectName("primary_btn")
+        self.btn_search.setFixedHeight(28)
         search_row.addWidget(self.search_input, 1)
         search_row.addWidget(self.btn_search)
         bottom_layout.addLayout(search_row)
@@ -423,13 +405,13 @@ class KnowledgeManagerDialog(QtWidgets.QDialog):
         self.result_box.setStyleSheet("""
             font-family: 'Cascadia Mono', 'Consolas', 'Fira Code', monospace;
             font-size: 12px;
-            padding: 8px;
+            padding: 6px;
         """)
         bottom_layout.addWidget(self.result_box, 1)
 
         split.addWidget(top)
         split.addWidget(bottom)
-        split.setSizes([350, 240])
+        split.setSizes([450, 180])
 
         footer = QtWidgets.QHBoxLayout()
         footer.addStretch()
@@ -481,23 +463,32 @@ class KnowledgeManagerDialog(QtWidgets.QDialog):
         return service
 
     def _load_dirs_from_plugin(self):
-        if self.plugin_manager is None:
-            return
-        config = self.plugin_manager.plugin_configs.get("knowledge_base") or {}
-        settings = config.get("settings") or {}
-        field = settings.get("knowledge_source_dirs") or {}
-        dirs = field.get("default", []) if isinstance(field, dict) else field
+        dirs: List[dict] = []
+        listed = self._gui().list_dirs() if hasattr(self._gui(), "list_dirs") else {}
+        if listed.get("ok"):
+            raw = (listed.get("data") or {}).get("dirs") or []
+            if isinstance(raw, list):
+                dirs = [item for item in raw if isinstance(item, dict)]
+        if not dirs and self.plugin_manager is not None:
+            config = getattr(self.plugin_manager, "plugin_configs", {}).get("knowledge_base") or {}
+            settings = config.get("settings") or {}
+            field = settings.get("knowledge_source_dirs") or {}
+            raw = field.get("default", []) if isinstance(field, dict) else field
+            if isinstance(raw, list):
+                for item in raw:
+                    if isinstance(item, dict):
+                        path = str(item.get("path") or "").strip()
+                        enabled = bool(item.get("enabled", True))
+                    else:
+                        path = str(item or "").strip()
+                        enabled = True
+                    if path:
+                        dirs.append({"path": path, "enabled": enabled})
         self.dir_table.setRowCount(0)
-        if isinstance(dirs, list):
-            for item in dirs:
-                if isinstance(item, dict):
-                    path = str(item.get("path") or "").strip()
-                    enabled = bool(item.get("enabled", True))
-                else:
-                    path = str(item or "").strip()
-                    enabled = True
-                if path:
-                    self._append_dir_row(path, enabled)
+        for item in dirs:
+            path = str(item.get("path") or "").strip()
+            if path:
+                self._append_dir_row(path, bool(item.get("enabled", True)))
 
         legacy_dir = str((QtCore.QDir.currentPath()))
         legacy_path = QtCore.QDir(legacy_dir).filePath("knowledge_docs")
@@ -850,7 +841,21 @@ class KnowledgeManagerDialog(QtWidgets.QDialog):
             return
         plugin = self._knowledge_plugin()
         gui = self._gui()
-        if plugin is None or gui.brain is None:
+        if plugin is None:
+            learned = gui.learn_configured_dirs() if hasattr(gui, "learn_configured_dirs") else {}
+            if not learned.get("ok"):
+                QtWidgets.QMessageBox.warning(
+                    self,
+                    "失败",
+                    str(learned.get("error") or "知识库插件或 brain 未就绪。"),
+                )
+                return
+            data = learned.get("data") or {}
+            self.result_box.setPlainText(str(data.get("result") or data or "学习完成"))
+            self._refresh_stats()
+            QtWidgets.QMessageBox.information(self, "一键学习", "已交给大脑学习配置目录。")
+            return
+        if gui.brain is None:
             QtWidgets.QMessageBox.warning(self, "失败", "知识库插件或 brain 未就绪。")
             return
         stats = dict((gui.stats().get("data") or {}) if gui.stats().get("ok") else {})

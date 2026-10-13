@@ -6,6 +6,7 @@ import sqlite3
 import threading
 from pathlib import Path
 from typing import Dict
+from modules.paths import data_path
 
 
 class _DataBlob(ctypes.Structure):
@@ -19,8 +20,9 @@ class PluginSecretStore:
     _DPAPI_PREFIX = "dpapi:v1:"
     _PLAIN_PREFIX = "plain:v1:"
 
-    def __init__(self, db_path: str = "data/plugin_secrets.db"):
-        self.db_path = Path(db_path)
+    def __init__(self, db_path: str = ""):
+        # 路径锚定（docs/部分重构.md §13.1）：默认位置由 modules.paths 解析。
+        self.db_path = Path(db_path or data_path("plugin_secrets.db"))
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()
         self._init_db()

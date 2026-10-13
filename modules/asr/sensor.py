@@ -67,6 +67,7 @@ class VoiceSensor:
         self.running = False
         self._thread = None
         self._loop = None
+        self.use_local_capture = True
 
         self.zipformer_cfg = dict(config.sherpa_cfg or {})
         self.base_dir = config.base_dir
@@ -193,7 +194,9 @@ class VoiceSensor:
             return None
         return getattr(engine, "recognizer", engine)
 
-    def start(self, loop):
+    def start(self, loop, *, capture: bool | None = None):
+        if capture is not None:
+            self.use_local_capture = bool(capture)
         if self.engine is None or not getattr(self.engine, "ready", False):
             self._init_engine()
         if self.engine is None or not getattr(self.engine, "ready", False):
@@ -209,9 +212,22 @@ class VoiceSensor:
         self.reload_settings()
         self._loop = loop
         self.running = True
-        self._thread = threading.Thread(target=self._monitor_loop, daemon=True)
-        self._thread.start()
-        self.logger.info("🎤 [Voice] 监听线程已启动")
+        if self.use_local_capture:
+            self._thread = threading.Thread(target=self._monitor_loop, daemon=True)
+            self._thread.start()
+            self.logger.info("🎤 [Voice] 监听线程已启动")
+        else:
+            self._thread = None
+            self.logger.info("🎤 [Voice] 远程 PCM 模式（不打开本机麦克风）")
+
+    def feed_audio(self, samples) -> None:
+        """Ingest a float32 mono 16 kHz chunk from a remote capture client."""
+        if not self.running:
+            return
+        audio = np.asarray(samples, dtype=np.float32).reshape(-1)
+        if audio.size == 0:
+            return
+        self._ingest_samples(audio)
 
     def stop(self):
         self.running = False
@@ -249,30 +265,41 @@ class VoiceSensor:
                 chunk = int(engine.samples_per_read or ZIPFORMER_SAMPLES_PER_READ)
                 samples, _ = stream.read(chunk)
                 samples = samples.reshape(-1)
+                self._ingest_samples(samples)
 
-                if getattr(self, "speaker_extractor", None) and getattr(
-                    self, "owner_embedding", None
-                ):
-                    self.audio_buffer.append(samples)
-
-                utterances = engine.accept_audio(samples)
-                for result_text in utterances:
-                    is_owner = True
-                    similarity = 1.0
-                    if getattr(self, "speaker_extractor", None) and self.audio_buffer:
-                        full_sentence_audio = np.concatenate(self.audio_buffer)
-                        is_owner, similarity = self._verify_speaker(full_sentence_audio)
-                    self.audio_buffer = []
-                    if is_owner:
-                        if getattr(self, "speaker_extractor", None):
-                            self.logger.info(
-                                f"✅ [Voice] 声纹匹配 (相似度: {similarity:.2f})"
-                            )
-                        self._process_sentence(result_text)
-                    else:
-                        self.logger.warning(
-                            f"🚫 [Voice] 声纹不匹配 (相似度: {similarity:.2f})，已拦截: {result_text}"
-                        )
+    def _ingest_samples(self, samples) -> None:
+        audio = np.asarray(samples, dtype=np.float32).reshape(-1)
+        if audio.size == 0:
+            return
+        if self._rebuild_requested:
+            self._rebuild_requested = False
+            self._init_engine()
+        with self._engine_lock:
+            engine = self.engine
+        if engine is None or not engine.ready:
+            return
+        if getattr(self, "speaker_extractor", None) and getattr(
+            self, "owner_embedding", None
+        ):
+            self.audio_buffer.append(audio)
+        utterances = engine.accept_audio(audio)
+        for result_text in utterances:
+            is_owner = True
+            similarity = 1.0
+            if getattr(self, "speaker_extractor", None) and self.audio_buffer:
+                full_sentence_audio = np.concatenate(self.audio_buffer)
+                is_owner, similarity = self._verify_speaker(full_sentence_audio)
+            self.audio_buffer = []
+            if is_owner:
+                if getattr(self, "speaker_extractor", None):
+                    self.logger.info(
+                        f"✅ [Voice] 声纹匹配 (相似度: {similarity:.2f})"
+                    )
+                self._process_sentence(result_text)
+            else:
+                self.logger.warning(
+                    f"🚫 [Voice] 声纹不匹配 (相似度: {similarity:.2f})，已拦截: {result_text}"
+                )
 
     def _verify_speaker(self, audio) -> tuple[bool, float]:
         """Optional speaker verification hook; default accept."""

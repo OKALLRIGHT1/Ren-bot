@@ -1,3 +1,7 @@
+import asyncio
+
+import pytest
+
 from modules.live2d import (
     get_current_costume_model_path,
     is_same_costume_model_path,
@@ -151,3 +155,96 @@ def test_sync_active_character_live2d_skips_when_paths_match(monkeypatch):
     assert applied and applied[0][0].replace("\\", "/").endswith(
         "models/suzu/casual/model.model3.json"
     )
+
+
+@pytest.mark.asyncio
+async def test_preview_motion_sends_once_after_bounded_wait(monkeypatch):
+    import modules.live2d as live2d_mod
+
+    sent = []
+    sleeps = []
+
+    async def fake_sleep(delay):
+        sleeps.append(delay)
+
+    async def fake_play_motion(mtn, motion_type=0, **kwargs):
+        sent.append((mtn, motion_type, kwargs))
+
+    monkeypatch.setattr(live2d_mod.asyncio, "sleep", fake_sleep)
+    monkeypatch.setattr(live2d_mod, "play_motion", fake_play_motion)
+    monkeypatch.setattr(live2d_mod, "_COSTUME_GENERATION", 10)
+    monkeypatch.setattr(live2d_mod, "_PREVIEW_TASK", None)
+
+    await live2d_mod.preview_motion("wave", motion_type=2)
+
+    assert sleeps == [live2d_mod.PREVIEW_SETTLE_DELAY]
+    assert sent == [("wave", 2, {"source": "preview"})]
+    assert live2d_mod._PREVIEW_TASK is None
+
+
+@pytest.mark.asyncio
+async def test_new_costume_invalidates_pending_preview(monkeypatch):
+    import modules.live2d as live2d_mod
+
+    real_sleep = asyncio.sleep
+    released = asyncio.Event()
+    sent = []
+
+    async def blocked_sleep(delay):
+        del delay
+        await released.wait()
+
+    async def fake_send_to_models(**kwargs):
+        sent.append(kwargs["msg"])
+
+    monkeypatch.setattr(live2d_mod.asyncio, "sleep", blocked_sleep)
+    monkeypatch.setattr(live2d_mod, "_send_to_models", fake_send_to_models)
+    monkeypatch.setattr(live2d_mod, "has_performance_client", lambda: True)
+    monkeypatch.setattr(live2d_mod, "_COSTUME_GENERATION", 20)
+    monkeypatch.setattr(live2d_mod, "_PREVIEW_TASK", None)
+
+    preview = asyncio.create_task(live2d_mod.preview_motion("wave"))
+    await real_sleep(0)
+    await live2d_mod.change_costume("C:/models/new/model.model3.json", {})
+    released.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await preview
+
+    assert sent == [12000]
+    assert live2d_mod._COSTUME_GENERATION == 21
+
+
+@pytest.mark.asyncio
+async def test_old_costume_idle_task_is_generation_guarded(monkeypatch):
+    import modules.live2d as live2d_mod
+
+    real_sleep = asyncio.sleep
+    pending = []
+    sent = []
+
+    async def fake_sleep(delay):
+        del delay
+        await real_sleep(0)
+
+    async def fake_send_to_models(**kwargs):
+        sent.append(kwargs["msg"])
+
+    def capture_task(coro):
+        task = asyncio.get_running_loop().create_task(coro)
+        pending.append(task)
+        return task
+
+    monkeypatch.setattr(live2d_mod, "_send_to_models", fake_send_to_models)
+    monkeypatch.setattr(live2d_mod, "has_performance_client", lambda: False)
+    monkeypatch.setattr(live2d_mod.asyncio, "sleep", fake_sleep)
+    monkeypatch.setattr(live2d_mod.asyncio, "create_task", capture_task)
+    monkeypatch.setattr(live2d_mod, "_COSTUME_GENERATION", 30)
+    monkeypatch.setattr(live2d_mod, "_PREVIEW_TASK", None)
+
+    await live2d_mod.change_costume("C:/models/a/model.model3.json", {})
+    await live2d_mod.change_costume("C:/models/b/model.model3.json", {})
+    await asyncio.gather(*pending)
+
+    assert sent.count(12000) == 2
+    assert live2d_mod._COSTUME_GENERATION == 32

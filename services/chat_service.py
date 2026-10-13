@@ -24,7 +24,7 @@ from modules.delegate_task_state import set_task_state as set_delegate_task_stat
 from modules.delegate_session import add_event as delegate_add_event
 from modules.personality_system import get_personality_system
 from modules.runtime_settings import load_runtime_settings
-from core.message_source import REMOTE_CHAT_SOURCES, build_output_profile
+from core.message_source import HUD_USER_SOURCES, REMOTE_CHAT_SOURCES, build_output_profile
 from services.chat_support import (
     active_alert_service,
     diary_service,
@@ -74,7 +74,6 @@ from services.capability_gatekeeper import resolve_ambiguous_capability
 from services.chat_support.tool_invocation import (
     get_tool_invocation_mode,
     should_attach_deferred_tool_catalog,
-    should_attach_mcp_tool_prompt,
 )
 # 引入 Gatekeeper 配置
 try:
@@ -152,7 +151,7 @@ except ImportError:
 
 QQ_REMOTE_SOURCES = gateway_sender.QQ_REMOTE_SOURCES
 OWNER_SHARED_SESSION_ID = "owner_shared"
-OWNER_SHARED_LOCAL_SOURCES = {"text_input", "voice"}
+OWNER_SHARED_LOCAL_SOURCES = set(HUD_USER_SOURCES)
 LEGACY_OWNER_PRIVATE_SESSION_IDS = {
     f"private:{str(item).strip()}"
     for item in (NAPCAT_OWNER_USER_IDS or [])
@@ -257,20 +256,15 @@ class ChatService:
         event_bus,
         logger,
         chat_gateway=None,
-        mcp_bridge=None,
     ):
         self.brain = brain
         self.plugin_manager = plugin_manager
-        self.agent_runtime = AgentRuntime(
-            plugin_manager=plugin_manager,
-            mcp_bridge_getter=lambda: self.mcp_bridge,
-        )
+        self.agent_runtime = AgentRuntime(plugin_manager=plugin_manager)
         self.tool_router = tool_router
         self.presenter = presenter
         self.event_bus = event_bus
         self.logger = logger
         self.chat_gateway = chat_gateway
-        self.mcp_bridge = mcp_bridge
         self.skill_manager = None
         self._app_ref = None
         self.debug_enabled = bool(CHAT_DEBUG_PRINTS)
@@ -338,6 +332,7 @@ class ChatService:
             gateway_getter=lambda: self.chat_gateway,
             send_text=self.gateway_sender.send_reply,
             send_image=self.gateway_sender.send_image_reply,
+            send_forward=self.gateway_sender.send_forward_reply,
         )
         self.tts_port = TtsPort(presenter_getter=lambda: self.presenter)
         self.app_port = AppPort(
@@ -794,6 +789,7 @@ class ChatService:
         return DirectFlowHooks(
             send_text=self._send_gateway_reply,
             send_image=self._send_gateway_image_reply,
+            send_forward=self._send_gateway_forward_reply,
             send_file=self._send_gateway_file_reply,
             send_voice=self._send_gateway_voice_reply,
             cleanup_image=self.gateway_sender.cleanup_image_file,
@@ -1087,6 +1083,14 @@ class ChatService:
                 pass
             return False
 
+    async def _send_gateway_forward_reply(
+        self,
+        messages: List[Dict[str, Any]],
+        ctx: Optional[Dict[str, Any]] = None,
+        **kwargs: Any,
+    ) -> bool:
+        return await self.gateway_sender.send_forward_reply(messages, ctx, **kwargs)
+
     async def _send_gateway_file_reply(
         self, file_path: str, ctx: Optional[Dict[str, Any]] = None, file_name: str = ""
     ) -> bool:
@@ -1142,51 +1146,6 @@ class ChatService:
             parts.append(f"{key}={value}")
         suffix = " ".join(parts)
         self.logger.debug(f"[ProcessTrace] {stage}{(' ' + suffix) if suffix else ''}")
-
-    def _build_mcp_tool_prompt(self, max_tools: int = 16, invocation_mode: str = "") -> str:
-        if not self.mcp_bridge:
-            return ""
-        if not self.plugin_manager or "mcp_tools" not in getattr(
-            self.plugin_manager, "delegate_map", {}
-        ):
-            return ""
-        try:
-            specs = [
-                spec
-                for spec in self.mcp_bridge.list_tools()
-                if getattr(spec, "provider", "local") != "local"
-            ]
-        except Exception:
-            return ""
-        if not specs:
-            return ""
-        if max_tools and len(specs) > max_tools:
-            specs = specs[:max_tools]
-        lines = []
-        for spec in specs:
-            desc = (
-                str(getattr(spec, "description", "") or "").replace("\n", " ").strip()
-            )
-            if len(desc) > 72:
-                desc = desc[:72] + "…"
-            lines.append(f"- {spec.name}: {desc or 'MCP tool'}")
-        from services.chat_support.tool_invocation import normalize_invocation_mode
-
-        mode = normalize_invocation_mode(invocation_mode or get_tool_invocation_mode())
-        if mode in {"dual", "function"}:
-            how = (
-                "这些工具需要通过副脑委托 mcp_tools。"
-                "需要时调用 mcp_tools，并说明目标工具和参数。不要在正文写工具协议。\n"
-            )
-        else:
-            how = (
-                "这些工具需要通过副脑委托调用。需要使用时，先委托 mcp_tools，并说明目标工具和参数。\n"
-                "委托示例：\n"
-                "[CMD: mcp_tools | call_tool ||| 工具名 ||| JSON参数]\n"
-                "如需查看当前可用远程工具，可委托：\n"
-                "[CMD: mcp_tools | list_tools]\n"
-            )
-        return "\n\n【远程MCP工具】\n" + how + "\n".join(lines)
 
     def _remember_search_topic(self, text: str, ctx: Optional[Dict[str, Any]]) -> None:
         if not text_utils.is_search_topic_candidate(
@@ -2020,11 +1979,21 @@ class ChatService:
             apply_confirm_keywords=self.APPLY_CONFIRM_KEYWORDS,
         )
 
+    def _has_visual_context(self, ctx: Optional[Dict[str, Any]] = None) -> bool:
+        data = ctx if isinstance(ctx, dict) else {}
+        source = str(data.get("source") or "").strip().lower()
+        if source == "screen_sensor":
+            return True
+        category = str(data.get("sensor_category") or "").strip().lower()
+        if category and category != "self":
+            return True
+        return bool(data.get("has_screenshot") or data.get("observe_image"))
+
     def _build_live2d_self_awareness_hint(
         self, ctx: Optional[Dict[str, Any]] = None
     ) -> str:
         source = str((ctx or {}).get("source") or "").strip().lower()
-        if source in {"qq_gateway", "napcat_qq", "text_input", "unknown", "desktop"}:
+        if source in {"qq_gateway", "napcat_qq", "text_input", "unknown", "desktop", "tauri_gui", "voice"}:
             active_name = "当前Live2D角色"
             costume_name = ""
             try:
@@ -2046,7 +2015,7 @@ class ChatService:
                 active_name=active_name,
                 costume_line=costume_line,
             )
-            if str((ctx or {}).get("sensor_category") or "") != "self":
+            if self._has_visual_context(ctx):
                 hint = join_prompt_parts(
                     hint, format_sensor_prompt("self_awareness_screenshot")
                 )
@@ -2239,10 +2208,10 @@ class ChatService:
         return self.reply_style_service.extract_emo_tag(text)
 
     async def _infer_reply_emotion_with_llm(
-        self, text: str, *, scene: str = "chat"
+        self, text: str, *, scene: str = "chat", request_context: Any = None
     ) -> Optional[str]:
         return await self.emotion_reply_service.infer_reply_emotion_with_llm(
-            text, scene=scene
+            text, scene=scene, request_context=request_context
         )
 
     def _contains_cmd(self, text: str) -> bool:
@@ -2372,6 +2341,9 @@ class ChatService:
         if apply_catchphrase:
             final_text = self._apply_character_catchphrase(final_text)
         if not final_text:
+            return
+        if text_utils.looks_like_leaked_tool_call(final_text):
+            self.logger.info("skip speaking leaked tool call: %s", final_text[:80])
             return
         transcript_meta = transcript_meta or {}
         output_profile = output_profile or build_output_profile(
@@ -2530,9 +2502,31 @@ class ChatService:
                 **safe_meta,
             )
 
+    def _resolve_gatekeeper_wake_config(self) -> tuple[ tuple[str, ...], int ]:
+        wake_words: tuple[str, ...] = tuple(WAKE_KEYWORDS or ())
+        active_window = int(GATEKEEPER_ACTIVE_SESSION_WINDOW or 20)
+        try:
+            from modules.asr.settings import (
+                ASR_ACTIVE_WINDOW_SEC_KEY,
+                load_asr_settings,
+                resolve_wake_words,
+            )
+
+            asr_cfg = load_asr_settings()
+            resolved = resolve_wake_words(settings=asr_cfg)
+            if resolved:
+                wake_words = tuple(resolved)
+            active_window = int(
+                asr_cfg.get(ASR_ACTIVE_WINDOW_SEC_KEY) or active_window
+            )
+        except Exception:
+            pass
+        return wake_words, active_window
+
     async def _should_reply(
         self, user_text: str, ctx: Optional[Dict[str, Any]] = None
     ) -> bool:
+        wake_keywords, active_window = self._resolve_gatekeeper_wake_config()
         return await gatekeeper_should_reply(
             user_text,
             ctx=ctx,
@@ -2542,11 +2536,11 @@ class ChatService:
             chat_with_ai=chat_with_ai,
             logger=self.logger,
             enabled=bool(GATEKEEPER_ENABLED),
-            wake_keywords=WAKE_KEYWORDS or (),
+            wake_keywords=wake_keywords,
             whitelist=GATEKEEPER_WHITELIST or (),
             blacklist=GATEKEEPER_BLACKLIST or (),
             prompt_template=GATEKEEPER_PROMPT_TEMPLATE or "",
-            active_session_window=int(GATEKEEPER_ACTIVE_SESSION_WINDOW or 20),
+            active_session_window=active_window,
         )
 
     async def _record_proactive_followup(
@@ -2672,7 +2666,6 @@ class ChatService:
         ctx["app"] = getattr(self, "app_port", None) or AppPort.from_chat_service(self)
         ctx["plugin_manager"] = self.plugin_manager
         ctx["agent_runtime"] = self.agent_runtime
-        ctx["mcp_bridge"] = self.mcp_bridge
         ctx["skills"] = getattr(self, "skill_manager", None)
         # Explicit for on-demand tools (e.g. owner_channel_bridge); keeps hard isolation elsewhere.
         if getattr(self, "conversation_event_service", None) is not None:
@@ -2736,30 +2729,18 @@ class ChatService:
         chat_log_source = input_ctx.chat_log_source
         output_profile = input_ctx.output_profile
         live2d_enabled = input_ctx.live2d_enabled
-        codex_mode = input_ctx.codex_mode
-        ctx["codex_mode"] = codex_mode
-        if codex_mode and not str(ctx.get("codex_task_id", "")).strip():
-            ctx["codex_task_id"] = uuid.uuid4().hex[:8]
-        code_path = str(ctx.get("code_path", "") or "").strip()
-        explicit_code_agent_request = self._looks_like_explicit_code_agent_request(user_text)
-        configured_code_agent_exec = self._runtime_bool_setting(
-            "code_agent_allow_exec", "codex_allow_exec"
+        codex_mode = False
+        ctx["codex_mode"] = False
+        explicit_code_agent_request = self._looks_like_explicit_code_agent_request(
+            user_text
         )
-        # 代码助手权限默认仅在 codex_mode 下开放；delegate 只读权限会在副脑上下文单独注入
-        ctx["allow_read"] = bool(ctx.get("allow_read", False)) and (
-            codex_mode or explicit_code_agent_request
+        # 读文件请求和明确点名的外部代码代理才放开对应权限。
+        # 副脑的只读权限仍在委托上下文里单独注入。
+        ctx["allow_read"] = bool(explicit_code_agent_request) or (
+            self._looks_like_user_file_read_request(user_text)
         )
-        ctx["allow_write"] = bool(ctx.get("allow_write", False)) and (
-            codex_mode or explicit_code_agent_request
-        )
-        ctx["allow_exec"] = (
-            bool(ctx.get("allow_exec", False)) or configured_code_agent_exec
-        ) and (codex_mode or explicit_code_agent_request)
-        if not codex_mode and self._looks_like_user_file_read_request(user_text):
-            ctx["allow_read"] = True
-        allow_read = bool(ctx.get("allow_read", False))
-        allow_write = bool(ctx.get("allow_write", False))
-        allow_exec = bool(ctx.get("allow_exec", False))
+        ctx["allow_write"] = bool(explicit_code_agent_request)
+        ctx["allow_exec"] = bool(explicit_code_agent_request)
         feedback_type, feedback_reaction = self._detect_feedback(user_text)
         apply_confirmed, confirm_change_id, confirm_token = (
             self._extract_apply_confirmation(user_text)
@@ -2781,20 +2762,6 @@ class ChatService:
             memory_session=bool(memory_session_id),
         )
         self.personality.update_state()
-
-        if codex_mode:
-            self._set_codex_task_state(ctx, "plan", summary=user_text[:200])
-            if apply_confirmed:
-                self._set_codex_task_state(
-                    ctx,
-                    "user_confirm_apply",
-                    summary="用户确认应用变更",
-                    meta={
-                        "change_id": confirm_change_id,
-                        "confirm_token": confirm_token,
-                    },
-                )
-            self._add_codex_session_event("user_task", text=user_text, ctx=ctx)
 
         # =========================================================================
         # 2. Direct 模式：处理“控制类”硬指令 / 待确认操作（确认/取消）
@@ -3013,6 +2980,8 @@ class ChatService:
                     isinstance(obs_result, dict)
                     and obs_result.get("__type__") == "image_payload"
                 ):
+                    if isinstance(ctx, dict):
+                        ctx["has_screenshot"] = True
                     await self.event_bus.emit("ui.status", text="Analyzing Visuals...")
                     try:
                         from modules import llm
@@ -3114,7 +3083,6 @@ class ChatService:
         if (
             not route.need_tools
             and not effective_triggers
-            and not codex_mode
             and text_utils.is_direct_fact_search_question(user_text)
             and self._has_search_delegate()
         ):
@@ -3123,8 +3091,6 @@ class ChatService:
                 "[SearchRoute] 事实问句直接搜索: %s",
                 str(user_text or "")[:120],
             )
-        if codex_mode and "workspace_ops" not in effective_triggers:
-            effective_triggers.append("workspace_ops")
         normal_triggers, delegate_triggers = self._split_delegate_triggers(
             effective_triggers
         )
@@ -3160,15 +3126,8 @@ class ChatService:
             route_reason=str(route.reason or ""),
             followup_search=bool(followup_search_query),
         )
-        if codex_mode and need_tools:
-            self._set_codex_task_state(
-                ctx,
-                "execute",
-                summary=user_text[:200],
-                meta={"triggers": effective_triggers[:8]},
-            )
-        task_reasoning = "codex" if codex_mode else "tool_reasoning"
-        task_default = "codex" if codex_mode else "default"
+        task_reasoning = "tool_reasoning"
+        task_default = "default"
 
         plain_direct_chat_candidate = (
             reply_flow_service.is_plain_direct_chat_candidate(
@@ -3325,25 +3284,6 @@ class ChatService:
                 compact=True,
                 invocation_mode=invocation_mode,
             )
-            mcp_prompt = ""
-            if should_attach_mcp_tool_prompt(
-                list(effective_triggers or []) + list(delegate_triggers or [])
-            ):
-                mcp_prompt = self._build_mcp_tool_prompt(invocation_mode=invocation_mode)
-            codex_hint = ""
-            if codex_mode:
-                codex_hint = (
-                    "【代码助手模式】你正在处理代码任务。\n"
-                    "1) 不要臆造文件内容，先读取再修改；\n"
-                    "2) 修改文件时优先使用 workspace_ops 工具；\n"
-                    "3) 写入前先生成 diff 预览(change_id + confirm_token)，等待用户确认后再 apply_change；\n"
-                    "4) 仅当用户在本轮消息显式提供 change_id + confirm_token 时才可 apply_change；\n"
-                    "5) 回答中给出关键文件路径与变更点。"
-                )
-                if code_path:
-                    codex_hint += f"\n【用户指定代码路径】{code_path}"
-                codex_hint += f"\n【任务ID】{ctx.get('codex_task_id', '')}"
-                codex_hint += f"\n【权限】allow_read={allow_read}, allow_write={allow_write}, allow_exec={allow_exec}"
 
             prompt_hooks = self._make_plain_chat_hooks(ctx=ctx, user_text=user_text)
             assembled = await assemble_chat_context_messages(
@@ -3358,9 +3298,9 @@ class ChatService:
                 ),
                 invocation_mode=invocation_mode,
                 need_tools=need_tools,
-                codex_mode=codex_mode,
-                extra_runtime_sections=(codex_hint,),
-                tool_sections=(tool_prompt, delegate_prompt, mcp_prompt),
+                codex_mode=False,
+                extra_runtime_sections=(),
+                tool_sections=(tool_prompt, delegate_prompt),
                 tool_intent=list(effective_triggers),
             )
             context_messages = list(assembled.context_messages)

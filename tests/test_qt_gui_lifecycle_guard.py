@@ -14,6 +14,7 @@ class DeletedBridge:
     sig_trigger_costume_name = DeletedSignal()
     sig_apply_character_switch = DeletedSignal()
     sig_sedentary_popup = DeletedSignal()
+    sig_set_frontend_suppressed = DeletedSignal()
 
 
 def test_public_bridge_emitters_ignore_deleted_qt_bridge():
@@ -27,6 +28,7 @@ def test_public_bridge_emitters_ignore_deleted_qt_bridge():
     app.trigger_costume_by_name("default")
     app.apply_character_switch("model.json")
     app.show_sedentary_popup("Code", 60)
+    app.set_frontend_suppressed(True)
 
 
 def test_toggle_show_hide_ignores_deleted_qt_window():

@@ -8,6 +8,12 @@ def test_local_actor():
     assert actor.allows_high_risk is True
 
 
+def test_hud_is_local_actor():
+    actor = resolve_actor_context({"source": "tauri_gui"})
+    assert actor.kind == ActorKind.LOCAL
+    assert actor.allows_high_risk is True
+
+
 def test_owner_private():
     actor = resolve_actor_context(
         {

@@ -312,25 +312,14 @@ class ToolCapabilityManager:
 
 
 class CapabilityManager:
-    def __init__(
-        self,
-        runtime_getter: Callable[[], Any],
-        mcp_bridge_getter: Optional[Callable[[], Any]] = None,
-    ):
+    def __init__(self, runtime_getter: Callable[[], Any]):
         self.runtime_getter = runtime_getter
-        self.mcp_bridge_getter = mcp_bridge_getter or (lambda: None)
 
     def health_check(self) -> Dict[str, Any]:
         runtime = self.runtime_getter()
         tools = runtime.list_tools() if runtime is not None else []
         plugin_manager = getattr(runtime, "plugin_manager", None)
-        bridge = self.mcp_bridge_getter()
-        mcp_servers = []
-        if bridge is not None:
-            try:
-                mcp_servers = bridge.list_server_status()
-            except Exception as exc:
-                mcp_servers = [{"name": "mcp", "connected": False, "error": str(exc)}]
+        mcp_servers = self._mcp_server_status(plugin_manager)
         plugins = self._plugin_status(plugin_manager)
         agent_mail = self._agent_mail_status(plugin_manager)
         runtime_status = self._runtime_status(runtime)
@@ -343,6 +332,20 @@ class CapabilityManager:
             "agent_mail": agent_mail,
             "runtime": runtime_status,
         }
+
+    def _mcp_server_status(self, plugin_manager: Any) -> List[Dict[str, Any]]:
+        plugins = getattr(plugin_manager, "plugins", None) or {}
+        plugin = plugins.get("mcp_tools") if isinstance(plugins, dict) else None
+        if plugin is None:
+            return []
+        getter = getattr(plugin, "list_server_status", None)
+        if not callable(getter):
+            return []
+        try:
+            rows = getter() or []
+        except Exception as exc:
+            return [{"name": "mcp", "connected": False, "error": str(exc)}]
+        return [row for row in rows if isinstance(row, dict)]
 
     def _plugin_status(self, plugin_manager: Any) -> Dict[str, Any]:
         if plugin_manager is None:

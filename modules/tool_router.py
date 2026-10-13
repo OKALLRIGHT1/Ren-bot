@@ -93,37 +93,6 @@ class ToolRouter:
         "是什么",
     ]
 
-    _DEFAULT_MCP_DOMAIN_BRANDS = [
-        "麦当劳",
-        "mcd",
-        "mcdonald",
-        "麦乐送",
-    ]
-    _DEFAULT_MCP_DOMAIN_ACTIONS = [
-        "查",
-        "查一下",
-        "查询",
-        "看",
-        "看一下",
-        "领",
-        "领取",
-        "获取",
-        "优惠",
-        "优惠券",
-        "会员券",
-        "券",
-        "折扣",
-        "活动",
-    ]
-    _DEFAULT_MCP_EXPLICIT_WEB_SEARCH = [
-        "联网",
-        "上网",
-        "网页",
-        "百度",
-        "google",
-        "bing",
-        "搜索",
-    ]
     _CONTEXT_REQUIRED_KEYWORDS = {
         "任务": (
             "待办",
@@ -202,88 +171,6 @@ class ToolRouter:
             or self.direct_map.get(trigger)
         )
         return callable(getattr(plugin, "get_capabilities", None))
-
-    @staticmethod
-    def _read_setting_value(settings: Dict[str, Any], key: str, default: Any) -> Any:
-        raw = settings.get(key, default)
-        if isinstance(raw, dict):
-            if "default" in raw:
-                return raw.get("default")
-            if "value" in raw:
-                return raw.get("value")
-        return raw
-
-    @staticmethod
-    def _normalize_keywords(value: Any) -> List[str]:
-        if isinstance(value, (list, tuple, set)):
-            rows = [str(item).strip().lower() for item in value if str(item).strip()]
-        elif isinstance(value, str):
-            text = value.replace("，", ",").replace("、", ",").replace("|", ",")
-            rows = [
-                item.strip().lower()
-                for line in text.splitlines()
-                for item in line.split(",")
-                if item.strip()
-            ]
-        else:
-            rows = []
-        return list(dict.fromkeys(rows))
-
-    def _get_mcp_domain_route_config(self) -> Optional[Dict[str, Any]]:
-        plugin = self.react_map.get("mcp_tools") or self.delegate_map.get("mcp_tools")
-        if plugin is None:
-            return None
-
-        settings = getattr(plugin, "settings", None)
-        if not isinstance(settings, dict):
-            settings = {}
-
-        enabled_raw = self._read_setting_value(settings, "intent_route_enabled", True)
-        enabled = bool(enabled_raw)
-
-        brand_keywords = self._normalize_keywords(
-            self._read_setting_value(
-                settings, "intent_route_brand_keywords", self._DEFAULT_MCP_DOMAIN_BRANDS
-            )
-        )
-        action_keywords = self._normalize_keywords(
-            self._read_setting_value(
-                settings,
-                "intent_route_action_keywords",
-                self._DEFAULT_MCP_DOMAIN_ACTIONS,
-            )
-        )
-        web_search_keywords = self._normalize_keywords(
-            self._read_setting_value(
-                settings,
-                "intent_route_web_search_override_keywords",
-                self._DEFAULT_MCP_EXPLICIT_WEB_SEARCH,
-            )
-        )
-
-        return {
-            "enabled": enabled,
-            "brand_keywords": brand_keywords,
-            "action_keywords": action_keywords,
-            "web_search_keywords": web_search_keywords,
-        }
-
-    def _should_route_to_mcp_domain(self, text: str) -> bool:
-        route_cfg = self._get_mcp_domain_route_config()
-        if not route_cfg or not route_cfg["enabled"]:
-            return False
-
-        brand_keywords = route_cfg["brand_keywords"]
-        action_keywords = route_cfg["action_keywords"]
-        web_search_keywords = route_cfg["web_search_keywords"]
-
-        if not brand_keywords or not action_keywords:
-            return False
-
-        has_brand = any(k in text for k in brand_keywords)
-        has_action = any(k in text for k in action_keywords)
-        wants_web_search = any(k in text for k in web_search_keywords)
-        return has_brand and has_action and not wants_web_search
 
     @staticmethod
     def _looks_like_workspace_path(text: str) -> bool:
@@ -485,9 +372,6 @@ class ToolRouter:
                 ambiguous_candidates = self._serialize_capability_candidates(
                     list(capability_result.candidates)
                 )
-
-        if not self._plugin_has_capabilities("mcp_tools") and self._should_route_to_mcp_domain(text):
-            return ToolRouteResult(True, ["mcp_tools"], "mcp_domain_preferred")
 
         if not self._plugin_has_capabilities("moegirl_wiki") and self._should_route_to_moegirl(text):
             return ToolRouteResult(True, ["moegirl_wiki"], "moegirl_preferred")

@@ -25,7 +25,6 @@ ROUTE_TASK_OPTIONS = (
     ("translation", "翻译", "语言转换与本地化", ("translation", "chat"), True),
     ("screen_classify", "屏幕分类", "前台应用和画面内容分类", ("chat", "vision"), True),
     ("sensor_vision_talk", "屏幕视觉回复", "根据截图生成屏幕吐槽", ("vision", "chat"), True),
-    ("codex", "代码助手", "Codex 与工作区任务", ("code", "chat"), True),
     ("web_search", "联网搜索", "搜索插件的检索与整理", ("web_search",), False),
     ("image_gen", "文生图", "根据文字生成图片", ("image_gen", "image_edit"), False),
     ("image_edit", "图像编辑", "图生图和局部修改", ("image_edit", "image_gen"), False),

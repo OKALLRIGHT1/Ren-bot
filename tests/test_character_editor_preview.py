@@ -74,7 +74,14 @@ def test_preview_reload_marks_config_as_preview_mode():
     ]
 
 
-def test_preview_retry_delays_repeat_after_model_reload():
+def test_motion_preview_uses_single_delay_after_model_reload():
+    widget = CharacterEditorWidget.__new__(CharacterEditorWidget)
+
+    assert widget._preview_delay_ms(False) == 0
+    assert widget._preview_delay_ms(True) == 700
+
+
+def test_expression_preview_keeps_retry_delays_after_model_reload():
     widget = CharacterEditorWidget.__new__(CharacterEditorWidget)
 
     assert widget._preview_retry_delays(False) == (0,)

@@ -30,8 +30,12 @@ class GuiWebSocketServer:
         self._server = None
         self._clients: set[websockets.WebSocketServerProtocol] = set()
         self._client_capabilities: dict[websockets.WebSocketServerProtocol, Set[str]] = {}
+        self._client_names: dict[websockets.WebSocketServerProtocol, str] = {}
         self._message_handler: Optional[
             Callable[[Dict[str, Any], websockets.WebSocketServerProtocol], Awaitable[None]]
+        ] = None
+        self._disconnect_handler: Optional[
+            Callable[[websockets.WebSocketServerProtocol], Any]
         ] = None
 
     @staticmethod
@@ -94,6 +98,12 @@ class GuiWebSocketServer:
     ) -> None:
         self._message_handler = handler
 
+    def set_disconnect_handler(
+        self,
+        handler: Callable[[websockets.WebSocketServerProtocol], Any],
+    ) -> None:
+        self._disconnect_handler = handler
+
     async def start(self, loop: asyncio.AbstractEventLoop) -> None:
         if self._server is not None:
             return
@@ -119,6 +129,7 @@ class GuiWebSocketServer:
                 pass
         self._clients.clear()
         self._client_capabilities.clear()
+        self._client_names.clear()
 
         try:
             self._server.close()
@@ -244,6 +255,12 @@ class GuiWebSocketServer:
             for ws in list(self._clients)
         )
 
+    def has_client(self, name: str) -> bool:
+        want = str(name or "").strip().lower()
+        if not want:
+            return False
+        return any(value == want for value in list(self._client_names.values()))
+
     async def _dispatch_message(
         self,
         payload: Dict[str, Any],
@@ -253,6 +270,7 @@ class GuiWebSocketServer:
             try:
                 hello = parse_gui_hello(payload)
                 self._client_capabilities[ws] = set(hello.capabilities)
+                self._client_names[ws] = str(hello.client or "").strip().lower()
             except Exception as exc:
                 if self.logger:
                     self.logger.warning(f"GUI WS hello rejected: {exc}")
@@ -303,5 +321,15 @@ class GuiWebSocketServer:
         finally:
             self._clients.discard(ws)
             self._client_capabilities.pop(ws, None)
+            self._client_names.pop(ws, None)
             if self.logger:
                 self.logger.info("GUI WS disconnected")
+            handler = self._disconnect_handler
+            if handler is not None:
+                try:
+                    result = handler(ws)
+                    if asyncio.iscoroutine(result):
+                        await result
+                except Exception as exc:
+                    if self.logger:
+                        self.logger.warning(f"GUI WS disconnect handler error: {exc}")

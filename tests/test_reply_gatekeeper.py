@@ -35,10 +35,22 @@ async def test_last_assistant_message_is_ignored():
     assert (
         await should_reply(
             "然后呢然后呢",
+            ctx={"source": "screen_sensor"},
             get_short_term_messages=lambda ctx: [{"role": "assistant", "content": "嗯"}],
             is_searchworthy_question=lambda text: False,
         )
         is False
+    )
+
+
+@pytest.mark.asyncio
+async def test_hud_chat_is_not_ignored_after_assistant():
+    assert await should_reply(
+        "你喜欢哪只伊布",
+        ctx={"source": "tauri_gui"},
+        get_short_term_messages=lambda ctx: [{"role": "assistant", "content": "嗯"}],
+        is_searchworthy_question=lambda text: False,
+        enabled=False,
     )
 
 
@@ -71,3 +83,22 @@ async def test_blacklist_blocks_and_whitelist_forces():
         get_short_term_messages=lambda ctx: [],
         is_searchworthy_question=lambda text: False,
     )
+
+
+def test_chat_service_resolves_dynamic_wake_words(monkeypatch):
+    from services.chat_service import ChatService
+
+    monkeypatch.setattr(
+        "modules.asr.settings.load_asr_settings",
+        lambda: {"asr_active_window_sec": 35},
+    )
+    monkeypatch.setattr(
+        "modules.asr.settings.resolve_wake_words",
+        lambda settings=None: ["自定义小猫", "测试猫"],
+    )
+
+    service = ChatService.__new__(ChatService)
+    words, window = service._resolve_gatekeeper_wake_config()
+    assert words == ("自定义小猫", "测试猫")
+    assert window == 35
+

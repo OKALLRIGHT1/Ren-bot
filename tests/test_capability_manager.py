@@ -7,24 +7,27 @@ from services.capability_manager import (
 )
 
 
-class Runtime:
-    def list_tools(self):
-        return [
-            {"trigger": "agently_mail", "source": "plugin", "type": "direct"},
-            {"trigger": "mcp.demo.read", "source": "mcp", "type": "mcp"},
-        ]
-
-
-class Bridge:
+class McpPlugin:
     def list_server_status(self):
         return [{"name": "demo", "connected": True, "tool_count": 1, "error": ""}]
 
 
+class Runtime:
+    plugin_manager = type(
+        "PluginManager",
+        (),
+        {"plugins": {"mcp_tools": McpPlugin()}, "load_errors": []},
+    )()
+
+    def list_tools(self):
+        return [
+            {"trigger": "agently_mail", "source": "plugin", "type": "direct"},
+            {"trigger": "mcp_tools", "source": "plugin", "type": "delegate"},
+        ]
+
+
 def test_health_check_reports_tools_and_mcp():
-    manager = CapabilityManager(
-        runtime_getter=lambda: Runtime(),
-        mcp_bridge_getter=lambda: Bridge(),
-    )
+    manager = CapabilityManager(runtime_getter=lambda: Runtime())
 
     report = manager.health_check()
 

@@ -26,10 +26,16 @@ class ProviderSettingsPage(QtWidgets.QWidget):
     def _build_ui(self):
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(8)
 
         top = QtWidgets.QHBoxLayout()
-        top.addWidget(QtWidgets.QLabel("提供商配置 (Providers)", objectName="header"))
+        top.setContentsMargins(0, 0, 0, 0)
+        top_lbl = QtWidgets.QLabel("已配置的 API 提供商")
+        top_lbl.setStyleSheet("font-size: 13px; font-weight: 600; color: #374151;")
+        top.addWidget(top_lbl)
+        top.addStretch(1)
         btn_add = QtWidgets.QPushButton("+ 添加提供商")
+        btn_add.setObjectName("primaryAction")
         btn_add.clicked.connect(self._on_add_provider)
         top.addWidget(btn_add)
         layout.addLayout(top)
@@ -38,13 +44,21 @@ class ProviderSettingsPage(QtWidgets.QWidget):
         self.prov_table.setColumnCount(3)
         self.prov_table.setHorizontalHeaderLabels(["名称", "Base URL", "操作"])
         self.prov_table.horizontalHeader().setSectionResizeMode(
+            0, QtWidgets.QHeaderView.ResizeMode.Interactive
+        )
+        self.prov_table.horizontalHeader().setSectionResizeMode(
             1, QtWidgets.QHeaderView.ResizeMode.Stretch
         )
         self.prov_table.horizontalHeader().setSectionResizeMode(
-            2, QtWidgets.QHeaderView.ResizeMode.ResizeToContents
+            2, QtWidgets.QHeaderView.ResizeMode.Fixed
         )
+        self.prov_table.setColumnWidth(0, 140)
+        self.prov_table.setColumnWidth(2, 128)
         self.prov_table.verticalHeader().setVisible(False)
-        self.prov_table.verticalHeader().setDefaultSectionSize(44)
+        self.prov_table.verticalHeader().setDefaultSectionSize(34)
+        self.prov_table.setShowGrid(False)
+        self.prov_table.setAlternatingRowColors(True)
+        self.prov_table.setTextElideMode(QtCore.Qt.TextElideMode.ElideRight)
         layout.addWidget(self.prov_table, 1)
 
     def reload_from_disk(self):
@@ -55,26 +69,29 @@ class ProviderSettingsPage(QtWidgets.QWidget):
         for name, data in PROVIDERS.items():
             row = self.prov_table.rowCount()
             self.prov_table.insertRow(row)
-            self.prov_table.setItem(row, 0, QtWidgets.QTableWidgetItem(name))
-            self.prov_table.setItem(
-                row,
-                1,
-                QtWidgets.QTableWidgetItem(str((data or {}).get("base_url", ""))),
-            )
+            name_item = QtWidgets.QTableWidgetItem(name)
+            name_item.setToolTip(name)
+            url_str = str((data or {}).get("base_url", ""))
+            url_item = QtWidgets.QTableWidgetItem(url_str)
+            url_item.setToolTip(url_str)
+            self.prov_table.setItem(row, 0, name_item)
+            self.prov_table.setItem(row, 1, url_item)
 
             action_widget = QtWidgets.QWidget()
             h = QtWidgets.QHBoxLayout(action_widget)
-            h.setContentsMargins(4, 4, 4, 4)
-            h.setSpacing(8)
+            h.setContentsMargins(4, 2, 4, 2)
+            h.setSpacing(6)
+            h.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
             btn_edit = QtWidgets.QPushButton("编辑")
+            btn_edit.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
             btn_edit.clicked.connect(lambda c=False, n=name: self._on_edit_provider(n))
             btn_del = QtWidgets.QPushButton("删除")
+            btn_del.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
             btn_edit.setObjectName("tableActionBtn")
             btn_del.setObjectName("tableDangerBtn")
             btn_del.clicked.connect(lambda c=False, n=name: self._on_del_provider(n))
             h.addWidget(btn_edit)
             h.addWidget(btn_del)
-            h.addStretch()
             self.prov_table.setCellWidget(row, 2, action_widget)
 
     def _edit_dialog(self, *args, **kwargs):

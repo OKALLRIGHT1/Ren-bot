@@ -37,7 +37,7 @@ class AsrConfig:
     use_character_wake_words: bool = True
     include_global_wake_words: bool = True
     hotwords_from_wake: bool = True
-    engine: str = "qwen3"
+    engine: str = "zipformer"
     rules_path: str = ""
     learned_path: str = ""
 

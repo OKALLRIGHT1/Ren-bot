@@ -88,14 +88,18 @@ async def _call_chat_with_ai(
     *,
     task_type: str,
     caller: str,
+    request_context: Any = None,
 ) -> Any:
+    kwargs: Dict[str, Any] = {"task_type": task_type, "caller": caller}
+    if request_context is not None:
+        kwargs["request_id"] = request_context.request_id
+        kwargs["call_metadata"] = {"_request_context": request_context}
     if inspect.iscoroutinefunction(chat_with_ai):
-        return await chat_with_ai(messages, task_type=task_type, caller=caller)
+        return await chat_with_ai(messages, **kwargs)
     return await asyncio.to_thread(
         chat_with_ai,
         messages,
-        task_type=task_type,
-        caller=caller,
+        **kwargs,
     )
 
 
@@ -112,11 +116,15 @@ async def _call_chat_complete(
     task_type: str,
     caller: str,
     tools: Optional[list] = None,
+    request_context: Any = None,
 ) -> ChatCompletionResult:
     kwargs: Dict[str, Any] = {"task_type": task_type, "caller": caller}
     if tools:
         kwargs["tools"] = tools
         kwargs["tool_choice"] = "auto"
+    if request_context is not None:
+        kwargs["request_id"] = request_context.request_id
+        kwargs["call_metadata"] = {"_request_context": request_context}
 
     async def _invoke(payload: Dict[str, Any]) -> Any:
         try:
@@ -127,6 +135,10 @@ async def _call_chat_complete(
             if "tools" not in payload:
                 raise
             slim = {"task_type": payload["task_type"], "caller": payload["caller"]}
+            if "request_id" in payload:
+                slim["request_id"] = payload["request_id"]
+            if "call_metadata" in payload:
+                slim["call_metadata"] = payload["call_metadata"]
             if inspect.iscoroutinefunction(chat_with_ai):
                 return await chat_with_ai(messages, **slim)
             return await asyncio.to_thread(chat_with_ai, messages, **slim)
@@ -280,6 +292,7 @@ async def run_tool_command_loop(
     invocation_mode: str = "cmd",
     tools: Optional[list] = None,
     tool_triggers: Optional[Sequence[str]] = None,
+    request_context: Any = None,
 ) -> ToolCommandLoopResult:
     messages = list(context_messages)
     tool_results: list[str] = []
@@ -324,6 +337,7 @@ async def run_tool_command_loop(
             task_type=task_type,
             caller=caller_prefix if iterations == 1 else f"{caller_prefix}_{iterations}",
             tools=request_tools,
+            request_context=request_context,
         )
         if completion.fc_skipped_reason:
             fc_skipped_reason = completion.fc_skipped_reason
@@ -479,6 +493,7 @@ async def run_react_first_pass(
     invocation_mode: str = "cmd",
     tools: Optional[list] = None,
     tool_triggers: Optional[Sequence[str]] = None,
+    request_context: Any = None,
 ) -> ReactFirstPassResult:
     del strip_cmd_anywhere
     first_pass_task = task_reasoning if (need_tools or deferred_tool_flow) else task_default
@@ -501,6 +516,7 @@ async def run_react_first_pass(
         invocation_mode=loop_mode,
         tools=tools if loop_mode != "cmd" else None,
         tool_triggers=tool_triggers,
+        request_context=request_context,
     )
     return ReactFirstPassResult(
         reply=str(loop_result.reply or ""),

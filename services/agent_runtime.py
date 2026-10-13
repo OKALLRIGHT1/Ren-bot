@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Optional
 
-from services.agent_tool_providers import McpToolProvider, PluginToolProvider
+from services.agent_tool_providers import PluginToolProvider
 from services.security.pending_confirm import (
     PendingConfirmAction,
     get_pending_confirm_store,
@@ -21,12 +21,10 @@ class AgentDirectResult:
 
 
 class AgentRuntime:
-    def __init__(self, plugin_manager: Any, mcp_bridge_getter=None):
+    def __init__(self, plugin_manager: Any):
         self.plugin_manager = plugin_manager
         self._pending_store = get_pending_confirm_store()
         self._tool_providers = [PluginToolProvider(plugin_manager)]
-        if mcp_bridge_getter is not None:
-            self._tool_providers.append(McpToolProvider(mcp_bridge_getter))
 
     def list_tools(self) -> list[dict[str, Any]]:
         rows: list[dict[str, Any]] = []
@@ -204,7 +202,9 @@ class AgentRuntime:
                 return None
         except Exception:
             source = str((ctx or {}).get("source") or "").strip().lower()
-            if source not in {"", "text_input", "tauri_gui", "local", "gui", "qt_gui"}:
+            from core.message_source import is_local_actor_source
+
+            if not is_local_actor_source(source):
                 return None
 
         handler = getattr(self.plugin_manager, "local_confirm_handler", None)

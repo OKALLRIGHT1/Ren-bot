@@ -6,8 +6,9 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from modules.json_state_store import JsonListStore, now_iso
+from modules.paths import data_path
 
-DELEGATE_SESSION_PATH = Path("./data/delegate_session.json")
+DELEGATE_SESSION_PATH = Path(data_path("delegate_session.json"))
 MAX_ITEMS = 200
 _store = JsonListStore(DELEGATE_SESSION_PATH, max_items=MAX_ITEMS)
 

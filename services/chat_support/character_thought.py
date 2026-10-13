@@ -313,6 +313,8 @@ def generate_character_thought(
     timeout_ms: int = 4000,
     max_tokens: int = 220,
     on_error: str = "skip_thought",
+    request_id: str = "",
+    request_context: Any = None,
 ) -> tuple[Optional[CharacterThought], str, float]:
     """Returns (thought_or_None, skip_reason, latency_ms)."""
     started = time.perf_counter()
@@ -326,14 +328,20 @@ def generate_character_thought(
     timeout_s = max(0.2, float(timeout_ms or 4000) / 1000.0)
     token_budget = max(1, int(max_tokens or 220))
 
+    call_kwargs: dict = {
+        "task_type": "gatekeeper",
+        "caller": "character_thought",
+        "timeout_sec": timeout_s,
+        "max_tokens": token_budget,
+    }
+    if request_context is not None:
+        call_kwargs["request_id"] = request_context.request_id
+        call_kwargs["call_metadata"] = {"_request_context": request_context}
+    elif request_id:
+        call_kwargs["request_id"] = request_id
+
     try:
-        raw = chat_fn(
-            messages,
-            task_type="gatekeeper",
-            caller="character_thought",
-            timeout_sec=timeout_s,
-            max_tokens=token_budget,
-        )
+        raw = chat_fn(messages, **call_kwargs)
     except Exception as exc:
         latency = (time.perf_counter() - started) * 1000.0
         reason = "timeout" if _is_thought_timeout(exc) else "error"

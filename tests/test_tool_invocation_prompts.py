@@ -4,7 +4,6 @@ from services.chat_support.tool_invocation import (
     get_tool_invocation_mode,
     rewrite_system_tool_rules,
     should_attach_deferred_tool_catalog,
-    should_attach_mcp_tool_prompt,
     should_rewrite_tool_rules,
 )
 
@@ -93,5 +92,3 @@ def test_casual_turn_does_not_attach_deferred_catalog():
     assert should_attach_deferred_tool_catalog(need_tools=False, deferred_tool_flow=True) is True
     assert should_rewrite_tool_rules("dual") is True
     assert should_rewrite_tool_rules("cmd") is False
-    assert should_attach_mcp_tool_prompt(["search_web"]) is False
-    assert should_attach_mcp_tool_prompt(["mcp_tools"]) is True

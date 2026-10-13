@@ -27,12 +27,29 @@ def resolve_icon(path_str) -> QtGui.QIcon:
 
     p = Path(path_str)
 
-    # 如果不是绝对路径，尝试相对于项目根目录查找
+    # 绝对路径直接用；相对路径先按 PyInstaller 数据目录（_MEIPASS）和
+    # 客户端仓库根解析，避免依赖 cwd（打包版 cwd 与 EXE 目录无关）。
     if not p.is_absolute():
-        # 现在的 __file__ 是 modules/gui/utils.py
-        # 项目根目录应该是 ../../ (即 modules 的上一级)
-        root = Path(__file__).resolve().parent.parent.parent
-        p = (root / p).resolve()
+        import sys
+
+        meipass = getattr(sys, "_MEIPASS", None)
+        if meipass:
+            cand = (Path(meipass) / p).resolve()
+            if cand.exists():
+                p = cand
+        if not p.is_absolute():
+            # 现在的 __file__ 是 modules/gui/utils.py
+            # 项目根目录应该是 ../../ (即 modules 的上一级)
+            root = Path(__file__).resolve().parent.parent.parent
+            p = (root / p).resolve()
+
+    if not p.exists():
+        # 过渡期 assets（图标、头像）仍在 live2d-llm 里
+        from paths import BRAIN_ROOT
+
+        brain_asset = (BRAIN_ROOT / Path(path_str)).resolve()
+        if brain_asset.exists():
+            p = brain_asset
 
     if p.exists():
         icon = QtGui.QIcon(str(p))
@@ -44,7 +61,7 @@ def resolve_icon(path_str) -> QtGui.QIcon:
     return make_default_icon()
 
 
-def set_dot_status(label: QtWidgets.QLabel, level: str) -> None:
+def set_dot_status(label: QtWidgets.QWidget, level: str) -> None:
     if level == "busy":
         color = "#F59E0B"
     elif level == "err":
@@ -52,7 +69,8 @@ def set_dot_status(label: QtWidgets.QLabel, level: str) -> None:
     else:
         color = "#22C55E"
     label.setStyleSheet(
-        "QLabel{background:%s; border-radius:6px; min-width:12px; min-height:12px;}" % color
+        "background:%s; border:none; border-radius:6px; min-width:12px; min-height:12px; padding:0;"
+        % color
     )
 
 
@@ -129,7 +147,10 @@ class FlowLayout(QtWidgets.QLayout):
     def minimumSize(self) -> QtCore.QSize:
         size = QtCore.QSize()
         for item in self._items:
-            size = size.expandedTo(item.minimumSize())
+            widget = item.widget()
+            if widget is not None and widget.isHidden():
+                continue
+            size = size.expandedTo(item.sizeHint())
         left, top, right, bottom = self.getContentsMargins()
         size += QtCore.QSize(left + right, top + bottom)
         return size
@@ -163,7 +184,7 @@ class FlowLayout(QtWidgets.QLayout):
 
         for item in self._items:
             widget = item.widget()
-            if widget is not None and not widget.isVisible():
+            if widget is not None and widget.isHidden():
                 continue
             hint = item.sizeHint()
             next_x = x + hint.width() + space_x
@@ -180,6 +201,43 @@ class FlowLayout(QtWidgets.QLayout):
             line_height = max(line_height, hint.height())
 
         return y + line_height - rect.y() + bottom
+
+
+class FlowWidget(QtWidgets.QWidget):
+    """Container widget hosting a FlowLayout that properly supports heightForWidth."""
+
+    def __init__(
+        self,
+        parent: Optional[QtWidgets.QWidget] = None,
+        margin: int = 0,
+        h_spacing: int = 8,
+        v_spacing: int = 8,
+    ):
+        super().__init__(parent)
+        self.flow_layout = FlowLayout(
+            self, margin=margin, h_spacing=h_spacing, v_spacing=v_spacing
+        )
+        self.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Expanding,
+            QtWidgets.QSizePolicy.Policy.Minimum,
+        )
+
+    def hasHeightForWidth(self) -> bool:
+        return True
+
+    def heightForWidth(self, width: int) -> int:
+        return self.flow_layout.heightForWidth(width)
+
+    def sizeHint(self) -> QtCore.QSize:
+        w = self.width() if self.width() > 100 else 500
+        h = self.flow_layout.heightForWidth(w)
+        return QtCore.QSize(w, max(h, 28))
+
+    def minimumSizeHint(self) -> QtCore.QSize:
+        return QtCore.QSize(100, 24)
+
+    def addWidget(self, widget: QtWidgets.QWidget) -> None:
+        self.flow_layout.addWidget(widget)
 
 
 def wrap_in_scroll_area(
@@ -202,6 +260,13 @@ def wrap_in_scroll_area(
     )
     scroll.setHorizontalScrollBarPolicy(horizontal)
     scroll.setVerticalScrollBarPolicy(vertical)
+    if not frame:
+        scroll.setStyleSheet(
+            "QScrollArea { background: transparent; border: none; }"
+            "QScrollArea > QWidget > QWidget { background: transparent; }"
+        )
+        scroll.viewport().setAutoFillBackground(False)
+        widget.setAutoFillBackground(False)
     widget.setSizePolicy(
         QtWidgets.QSizePolicy.Policy.Preferred,
         QtWidgets.QSizePolicy.Policy.Preferred,
@@ -223,6 +288,16 @@ def apply_embedded_mode(
     """Make a dialog/page safe to host inside Settings or other compact shells."""
     if isinstance(widget, QtWidgets.QDialog):
         widget.setWindowFlags(QtCore.Qt.WindowType.Widget)
+        widget.setProperty("embedded", True)
+        existing_qss = widget.styleSheet() or ""
+        if existing_qss and "QDialog { background: transparent;" not in existing_qss:
+            widget.setStyleSheet(
+                existing_qss
+                + "\nQDialog { background: transparent; border: none; }"
+                + "\nQFrame#dialogShell { background: transparent; border: none; }"
+            )
+    if hasattr(widget, "set_embedded_mode") and callable(widget.set_embedded_mode):
+        widget.set_embedded_mode(True)
     widget.setSizePolicy(
         QtWidgets.QSizePolicy.Policy.Expanding,
         QtWidgets.QSizePolicy.Policy.Expanding,

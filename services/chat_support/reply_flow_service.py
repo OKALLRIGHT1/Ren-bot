@@ -239,6 +239,7 @@ async def prepare_final_reply(
     apply_character_catchphrase: Callable[[str], str],
     prepare_reply_for_output: Callable[..., str],
     infer_reply_emotion_with_llm: Callable[..., Awaitable[Optional[str]]],
+    request_context: Any = None,
 ) -> PreparedReply:
     text = clean_text_for_tts(
         strip_internal_tags(strip_cmd_anywhere(strip_emo_tags_anywhere(final_reply)))
@@ -254,7 +255,10 @@ async def prepare_final_reply(
     emotion = final_emo
     seen = bool(model_emo_seen)
     if text and not seen:
-        inferred_emo = await infer_reply_emotion_with_llm(text, scene="chat")
+        emo_kwargs: dict = {"scene": "chat"}
+        if request_context is not None:
+            emo_kwargs["request_context"] = request_context
+        inferred_emo = await infer_reply_emotion_with_llm(text, **emo_kwargs)
         if inferred_emo:
             emotion = inferred_emo
 

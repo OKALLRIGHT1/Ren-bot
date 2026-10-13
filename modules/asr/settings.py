@@ -84,8 +84,30 @@ class _MemorySettingsStore:
 def _resolve_store() -> SettingsStore:
     global _SETTINGS_STORE
     if _SETTINGS_STORE is None:
-        _SETTINGS_STORE = _MemorySettingsStore()
+        try:
+            from .adapter import project_settings_store
+
+            _SETTINGS_STORE = project_settings_store()
+        except Exception:
+            _SETTINGS_STORE = _MemorySettingsStore()
     return _SETTINGS_STORE
+
+
+def _resolve_character_provider(
+    character_provider: Optional[CharacterProvider] = None,
+) -> Optional[CharacterProvider]:
+    global _CHARACTER_PROVIDER
+    if character_provider is not None:
+        return character_provider
+    if _CHARACTER_PROVIDER is not None:
+        return _CHARACTER_PROVIDER
+    try:
+        from .adapter import project_character_provider
+
+        _CHARACTER_PROVIDER = project_character_provider()
+    except Exception:
+        pass
+    return _CHARACTER_PROVIDER
 
 
 def _as_bool(value: Any, default: bool) -> bool:
@@ -113,7 +135,7 @@ def _as_engine(value: Any) -> str:
     text = str(value or "").strip().lower()
     if text in ASR_ENGINE_CHOICES:
         return text
-    return ASR_ENGINE_QWEN3
+    return ASR_ENGINE_ZIPFORMER
 
 
 def normalize_wake_word_list(value: Any) -> List[str]:
@@ -198,11 +220,26 @@ def collect_character_wake_words(character: Optional[Dict[str, Any]]) -> List[st
 
 
 def default_global_wake_words(config: Optional[AsrConfig] = None) -> List[str]:
-    return normalize_wake_word_list(config.wake_keywords if config else ["五十铃", "怜", "Suzu", "助手"])
+    cfg = config
+    if cfg is None:
+        try:
+            from .adapter import build_asr_config
+
+            cfg = build_asr_config()
+        except Exception:
+            pass
+    return normalize_wake_word_list(cfg.wake_keywords if cfg else ["五十铃", "怜", "Suzu", "助手"])
 
 
 def default_asr_settings(config: Optional[AsrConfig] = None) -> Dict[str, Any]:
-    cfg = config or AsrConfig()
+    cfg = config
+    if cfg is None:
+        try:
+            from .adapter import build_asr_config
+
+            cfg = build_asr_config()
+        except Exception:
+            cfg = AsrConfig()
     return {
         ASR_REQUIRE_WAKE_WORD_KEY: cfg.require_wake_word,
         ASR_USE_CHARACTER_WAKE_WORDS_KEY: cfg.use_character_wake_words,
@@ -303,7 +340,7 @@ def resolve_wake_words(
     if cfg[ASR_USE_CHARACTER_WAKE_WORDS_KEY]:
         active = character
         if active is None:
-            provider = character_provider if character_provider is not None else _CHARACTER_PROVIDER
+            provider = _resolve_character_provider(character_provider)
             if provider is not None:
                 try:
                     active = provider.get_active_character()
@@ -339,10 +376,11 @@ def resolve_asr_hotwords(
     cfg = load_asr_settings(settings, config=config)
     if not cfg.get(ASR_HOTWORDS_FROM_WAKE_KEY, True):
         return ""
+    provider = _resolve_character_provider(character_provider)
     words = (
         list(wake_words)
         if wake_words is not None
-        else resolve_wake_words(settings=cfg, config=config, character_provider=character_provider)
+        else resolve_wake_words(settings=cfg, config=config, character_provider=provider)
     )
     return format_asr_hotwords(words)
 

@@ -555,7 +555,9 @@ class FollowupService:
     ) -> Optional[Dict[str, str]]:
         try:
             source = str((ctx or {}).get("source", ""))
-            if source and source != "text_input":
+            from core.message_source import is_hud_user_source
+
+            if source and not is_hud_user_source(source):
                 return None
             if bool((ctx or {}).get("codex_mode", False)):
                 return None
@@ -769,7 +771,9 @@ class FollowupService:
     ) -> Optional[Dict[str, str]]:
         try:
             source = str((ctx or {}).get("source", ""))
-            if source and source != "text_input":
+            from core.message_source import is_hud_user_source
+
+            if source and not is_hud_user_source(source):
                 return None
             if bool((ctx or {}).get("codex_mode", False)):
                 return None

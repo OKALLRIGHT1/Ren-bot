@@ -46,7 +46,6 @@ def test_color_settings_page_collects_current_palette(monkeypatch):
     assert palette is not None
     assert palette["accent"].startswith("#")
     assert "console_main" in palette
-    assert "console_codex" in palette
     page.close()
 
 
@@ -106,7 +105,7 @@ def test_provider_and_llm_pages_construct():
     assert llm.llm_table.columnCount() == 6
     assert llm.llm_table.horizontalHeaderItem(2).text() == "供应商"
     assert "default" in llm.router_ui
-    assert "codex" in llm.router_ui
+    assert "codex" not in llm.router_ui
     provider.close()
     llm.close()
 
@@ -125,6 +124,8 @@ def test_settings_dialog_wires_extracted_pages(monkeypatch):
     monkeypatch.setattr(SettingsDialog, "_safe_init_page", filtered)
     monkeypatch.setattr(dependency_page, "scan_missing_dependencies", lambda *_a, **_k: [])
     dialog = SettingsDialog(parent=None, main_app=None)
+    dialog._ensure_page("providers")
+    dialog._ensure_page("llm")
     assert dialog._provider_page is not None
     assert dialog._llm_page is not None
     dialog._reload_catalog_from_disk()

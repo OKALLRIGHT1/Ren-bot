@@ -61,8 +61,10 @@ def should_use_background_delegate(
         return False
     if is_search_delegate(triggers, ""):
         return False
+    from core.message_source import is_hud_user_source
+
     source = str((ctx or {}).get("source") or "").strip().lower()
-    return source == "text_input"
+    return is_hud_user_source(source)
 
 
 def choose_delegate_execution(

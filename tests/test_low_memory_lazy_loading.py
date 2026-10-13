@@ -1,3 +1,5 @@
+import os
+import subprocess
 import sys
 import types
 import importlib
@@ -155,26 +157,49 @@ def test_gui_app_import_does_not_import_heavy_dialogs(monkeypatch):
         "modules.gui.dialogs.settings",
         "modules.gui.dialogs.knowledge_manager",
         "modules.gui.dialogs.status_screen_manager",
-        "modules.gui.dialogs.codex_assistant",
         "modules.gui.dialogs.console_log",
         "modules.gui.dialogs.expression_library_manager",
         "modules.gui.dialogs.meme_manager",
         "modules.gui.dialogs.memory_editor",
     }
-    sys.modules.pop("modules.gui.app", None)
-    for name in heavy_modules:
-        sys.modules.pop(name, None)
-
-    importlib.import_module("modules.gui.app")
-
-    loaded = heavy_modules.intersection(sys.modules)
-    assert loaded == set()
+    # 在干净子进程里验证：pytest 收集阶段会 import 各测试文件（其中
+    # test_settings_nav 顶部就 import 了 dialogs.settings），所以会话内
+    # 无法观察 gui.app 的「首次 import」。也不能用 pop+reimport —— 那
+    # 会造出新模块对象/类，把其他测试通过旧引用做的 monkeypatch 脱钩
+    # （实测造成 test_settings_nav 顺序假失败）。
+    probe = (
+        "import sys, importlib;"
+        "importlib.import_module('modules.gui.app');"
+        "loaded = [m for m in {"
+        + ",".join(repr(name) for name in sorted(heavy_modules))
+        + "} if m in sys.modules];"
+        "print('LOADED=' + ','.join(loaded))"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", probe],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    )
+    assert result.returncode == 0, result.stderr
+    loaded = [m for m in result.stdout.splitlines() if m.startswith("LOADED=")]
+    assert loaded == ["LOADED="], f"gui.app 拉起了重对话框模块: {loaded}"
 
 
 def test_settings_dialog_import_does_not_import_memory_editor(monkeypatch):
-    sys.modules.pop("modules.gui.dialogs.settings", None)
-    sys.modules.pop("modules.gui.dialogs.memory_editor", None)
-
-    importlib.import_module("modules.gui.dialogs.settings")
-
-    assert "modules.gui.dialogs.memory_editor" not in sys.modules
+    # 同样在子进程验证（会话内 settings 大概率已被测试文件加载）。
+    probe = (
+        "import sys, importlib;"
+        "importlib.import_module('modules.gui.dialogs.settings');"
+        "print('MEMORY_EDITOR_LOADED=' + str('modules.gui.dialogs.memory_editor' in sys.modules))"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", probe],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    )
+    assert result.returncode == 0, result.stderr
+    assert "MEMORY_EDITOR_LOADED=False" in result.stdout

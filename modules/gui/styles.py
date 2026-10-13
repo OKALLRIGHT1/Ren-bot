@@ -259,10 +259,43 @@ def _theme_metrics(p: dict, *, surface: str = "default") -> dict:
     }
 
 
+def get_chevron_down_icon_path(color_hex: str = "#6B7280") -> str:
+    """Ensure a crisp, high-DPI chevron down icon is cached and return its path for QSS."""
+    try:
+        from pathlib import Path
+        import paths
+        from PySide6 import QtCore, QtGui
+
+        cache_dir = Path(paths.CLIENT_ROOT) / ".cache"
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        safe_color = color_hex.replace("#", "")
+        icon_path = cache_dir / f"chevron_down_{safe_color}.png"
+        if not icon_path.exists():
+            pm = QtGui.QPixmap(32, 32)
+            pm.fill(QtCore.Qt.GlobalColor.transparent)
+            painter = QtGui.QPainter(pm)
+            painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing, True)
+            pen = QtGui.QPen(QtGui.QColor(color_hex), 3.0)
+            pen.setCapStyle(QtCore.Qt.PenCapStyle.RoundCap)
+            pen.setJoinStyle(QtCore.Qt.PenJoinStyle.RoundJoin)
+            painter.setPen(pen)
+            path = QtGui.QPainterPath()
+            path.moveTo(6, 12)
+            path.lineTo(16, 22)
+            path.lineTo(26, 12)
+            painter.drawPath(path)
+            painter.end()
+            pm.save(str(icon_path))
+        return icon_path.as_posix()
+    except Exception:
+        return ""
+
+
 # 各种基础控件风格（滚动条、提示框、输入框焦点等）
 def get_common_qss(p: dict) -> str:
     m = _theme_metrics(p)
     radius = m["radius_control"]
+    chevron_path = get_chevron_down_icon_path(p.get("text_secondary", "#6B7280"))
     return f"""
         /* 针对所有的 QScrollBar 进行深度美化 */
         QScrollBar:vertical {{
@@ -348,12 +381,10 @@ def get_common_qss(p: dict) -> str:
             width: 24px;
         }}
         QComboBox::down-arrow {{
-            image: none; /* remove default arrow */
-            border-left: 5px solid transparent;
-            border-right: 5px solid transparent;
-            border-top: 5px solid {p["text_secondary"]};
+            image: url("{chevron_path}");
+            width: 12px;
+            height: 12px;
             margin-right: 8px;
-            margin-top: 2px;
         }}
         QComboBox QAbstractItemView {{
             background-color: {p["bg_card"]};
@@ -541,15 +572,19 @@ def get_panel_styles() -> str:
             border-radius: 0px;
         }}
         QLabel#statusLabel {{
-            color: {p["text_muted"]};
+            color: {p["text_primary"]};
             font-size: 11px;
             font-weight: 600;
             margin-left: 2px;
         }}
         QLabel#characterLabel {{
             color: {p["text_secondary"]};
+            background: {hex_to_rgba(p["bg_soft"], 0.65 if m["glass"] else 0.92)};
+            border: 1px solid {hex_to_rgba(p["border"], 0.40 if m["glass"] else 0.65)};
+            border-radius: 9px;
+            padding: 2px 8px;
             font-size: 11px;
-            margin-left: 4px;
+            font-weight: 500;
         }}
         QLabel#workSessionLabel {{
             color: {p["text_secondary"]};
@@ -615,51 +650,96 @@ def get_panel_styles() -> str:
             font-size: 11px;
             font-weight: 600;
         }}
-        QTextEdit#historyView {{
-            background-color: {console_bg_style};
-            border: 1px solid {hex_to_rgba(p["console_main"]["border"], 0.75 if m["glass"] else 1.0)};
+        QScrollArea#chatTranscript {{
+            background: {hex_to_rgba(p["bg_soft"], 0.55 if m["glass"] else 0.92)};
+            border: 1px solid {hex_to_rgba(p["border"], 0.45)};
             border-radius: {radius_ctl + 2}px;
-            color: {p["console_main"]["fg"]};
-            font-family: 'Cascadia Mono', 'Consolas', 'JetBrains Mono', 'Segoe UI', 'Microsoft YaHei', monospace;
-            font-size: 12px;
-            line-height: 1.6;
-            padding: 10px;
-            selection-background-color: {p["console_main"]["selection_bg"]};
-            selection-color: {p["console_main"]["selection_fg"]};
+        }}
+        QWidget#chatTranscriptInner {{
+            background: transparent;
+        }}
+        QLabel#chatBubble_user {{
+            background-color: {p["accent"]};
+            color: #FFFFFF;
+            border-radius: 14px;
+            border-top-right-radius: 4px;
+            padding: 8px 13px;
+            font-size: 13px;
+        }}
+        QLabel#chatBubble_assistant {{
+            background-color: {p["bg_card"]};
+            color: {p["text_primary"]};
+            border: 1px solid {hex_to_rgba(p["border"], 0.75)};
+            border-radius: 14px;
+            border-top-left-radius: 4px;
+            padding: 8px 13px;
+            font-size: 13px;
+        }}
+        QLabel#chatAssistantName {{
+            color: {p["text_secondary"]};
+            font-size: 11px;
+            font-weight: 600;
+            margin-left: 2px;
+            margin-bottom: 2px;
+        }}
+        QLabel#chatUserName {{
+            color: {p["text_secondary"]};
+            font-size: 11px;
+            font-weight: 600;
+            margin-right: 2px;
+            margin-bottom: 2px;
+        }}
+        QLabel#chatSystemLabel {{
+            color: {p["text_muted"]};
+            font-size: 11px;
+            padding: 4px 8px;
+        }}
+        QLabel#chatTimeLabel {{
+            color: {p["text_muted"]};
+            background-color: {hex_to_rgba(p["border"], 0.28)};
+            border-radius: 9px;
+            font-size: 11px;
+            padding: 2px 8px;
         }}
         QFrame#inputShell {{
-            background-color: {hex_to_rgba(p["bg_soft"], 0.42 if m["glass"] else 0.85)};
+            background-color: {hex_to_rgba(p["bg_soft"], 0.65 if m["glass"] else 0.90)};
             border-radius: {radius_ctl + 6}px;
-            border: 1px solid {hex_to_rgba(p["border"], 0.28 if m["glass"] else 0.65)};
+            border: 1.2px solid {hex_to_rgba(p["border"], 0.40 if m["glass"] else 0.70)};
             min-height: 38px;
-            max-height: 38px;
         }}
         QFrame#inputShell:hover {{
-            background-color: {hex_to_rgba(p["bg_soft"], 0.58 if m["glass"] else 0.95)};
-            border-color: {hex_to_rgba(p["accent"], 0.35)};
+            background-color: {hex_to_rgba(p["bg_soft"], 0.82 if m["glass"] else 0.96)};
+            border-color: {hex_to_rgba(p["accent"], 0.45)};
         }}
-        QLineEdit#chatInput {{
+        QPlainTextEdit#chatInput {{
             background: transparent;
             border: none;
             color: {p["text_primary"]};
             font-size: 13px;
-            padding-left: 2px;
+            padding: 4px 2px;
         }}
-        QLineEdit#chatInput:focus {{
+        QPlainTextEdit#chatInput:focus {{
             border: none;
         }}
         QPushButton#sendButton {{
-            background-color: {p["accent"]};
+            background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
+                stop:0 {p["accent"]}, stop:1 {p["accent_hover"]});
             color: white;
-            border-radius: 15px;
+            border-radius: 11px;
             font-weight: bold;
             font-size: 13px;
-            width: 30px;
-            height: 30px;
+            min-width: 28px;
+            max-width: 28px;
+            min-height: 28px;
+            max-height: 28px;
             border: none;
+            padding: 0px;
         }}
         QPushButton#sendButton:hover {{
-            background-color: {p["accent_hover"]};
+            background: {p["accent_hover"]};
+        }}
+        QPushButton#sendButton:pressed {{
+            background: {p["accent"]};
         }}
         QFrame#toolsBar {{
             background: transparent;
@@ -674,9 +754,9 @@ def get_panel_styles() -> str:
             margin: 0 3px;
         }}
         QPushButton#toolbarBtn {{
-            background: transparent;
+            background: {hex_to_rgba(p["bg_soft"], 0.55 if m["glass"] else 0.85)};
             color: {p["text_secondary"]};
-            border: none;
+            border: 1px solid {hex_to_rgba(p["border"], 0.30 if m["glass"] else 0.55)};
             font-size: 13px;
             min-width: 28px;
             max-width: 28px;
@@ -686,12 +766,32 @@ def get_panel_styles() -> str:
             padding: 0px;
         }}
         QPushButton#toolbarBtn:hover {{
-            background: {hex_to_rgba(p["bg_soft"], 0.65 if m["glass"] else 0.95)};
-            color: {p["text_primary"]};
+            background: {hex_to_rgba(p["accent_soft"], 0.90)};
+            border-color: {hex_to_rgba(p["accent"], 0.45)};
+            color: {p["accent_hover"]};
         }}
         QPushButton#toolbarBtn:pressed {{
-            background: {p["accent_soft"]};
+            background: {hex_to_rgba(p["accent"], 0.20)};
             color: {p["accent_hover"]};
+        }}
+        QPushButton#modePillBtn {{
+            background: {hex_to_rgba(p["accent_soft"], 0.80 if m["glass"] else 0.95)};
+            color: {p["accent_hover"]};
+            border: 1px solid {hex_to_rgba(p["accent"], 0.35)};
+            border-radius: 12px;
+            padding: 2px 10px;
+            font-size: 12px;
+            font-weight: 600;
+            min-height: 24px;
+            max-height: 24px;
+        }}
+        QPushButton#modePillBtn:hover {{
+            background: {p["accent_soft"]};
+            border-color: {p["accent"]};
+            color: {p["accent_hover"]};
+        }}
+        QPushButton#modePillBtn:pressed {{
+            background: {hex_to_rgba(p["accent"], 0.25)};
         }}
         QMenu {{
             background: {hex_to_rgba(p["bg_card"], 0.98 if m["glass"] else 1.0)};
@@ -790,39 +890,64 @@ def get_settings_styles() -> str:
             color: {p["text_primary"]};
             letter-spacing: -0.2px;
         }}
+        QLabel#settingsSectionTitle, QLabel#settingsCardTitle {{
+            font-size: 15px;
+            font-weight: 700;
+            color: {p["text_primary"]};
+        }}
         QListWidget#settingsNav {{
             background: transparent;
             border: none;
             outline: none;
-            padding: 6px;
+            padding: 4px;
         }}
         QListWidget#settingsNav::item {{
-            padding: 11px 14px;
-            margin: 3px 2px;
-            border-radius: 12px;
+            padding: 9px 12px;
+            margin: 2px 2px;
+            border-radius: 10px;
             color: {p["text_secondary"]};
             font-size: 13px;
+            font-weight: 500;
         }}
         QListWidget#settingsNav::item:selected {{
             background: {nav_selected_bg};
             color: {nav_selected_fg};
             font-weight: 700;
+            border-left: 3.5px solid {p["accent"]};
         }}
         QListWidget#settingsNav::item:hover {{
-            background: {hex_to_rgba(p["accent_soft"], 0.65)};
+            background: {hex_to_rgba(p["accent_soft"], 0.70)};
             color: {p["text_primary"]};
+        }}
+        QListWidget#settingsNav QScrollBar:vertical {{
+            width: 4px;
+            background: transparent;
+            margin: 0px;
+        }}
+        QListWidget#settingsNav QScrollBar::handle:vertical {{
+            background: {hex_to_rgba(p["accent"], 0.35)};
+            min-height: 24px;
+            border-radius: 2px;
+        }}
+        QListWidget#settingsNav QScrollBar::handle:vertical:hover {{
+            background: {hex_to_rgba(p["accent"], 0.75)};
+        }}
+        QListWidget#settingsNav QScrollBar::add-line:vertical,
+        QListWidget#settingsNav QScrollBar::sub-line:vertical {{
+            height: 0px;
+            background: none;
         }}
         QTableWidget {{
             background: {bg_soft_style};
             border: 1px solid {border_style};
-            border-radius: {radius_ctl + 2}px;
-            gridline-color: {hex_to_rgba(p["border"], 0.55)};
+            border-radius: {radius_ctl}px;
+            gridline-color: {hex_to_rgba(p["border"], 0.35)};
             color: {p["text_primary"]};
         }}
         QTableWidget::item {{
             color: {p["text_primary"]};
             background-color: transparent;
-            padding: 4px;
+            padding: 2px 6px;
         }}
         QTableWidget::item:selected {{
             background-color: {p["accent_soft"]};
@@ -831,8 +956,9 @@ def get_settings_styles() -> str:
         QHeaderView::section {{
             background: {bg_soft_style};
             color: {p["text_secondary"]};
+            font-size: 11px;
             font-weight: 600;
-            padding: 9px;
+            padding: 5px 8px;
             border: none;
             border-bottom: 1px solid {border_style};
         }}
@@ -841,8 +967,9 @@ def get_settings_styles() -> str:
             color: {p["text_primary"]};
             border: 1px solid {border_style};
             border-radius: {radius_ctl}px;
-            padding: 8px 14px;
+            padding: 6px 12px;
             font-weight: 600;
+            font-size: 12px;
         }}
         QPushButton:hover {{
             border-color: {hex_to_rgba(p["accent"], 0.45)};
@@ -864,7 +991,8 @@ def get_settings_styles() -> str:
             background: {bg_card_style};
             border: 1px solid {border_style};
             color: {p["text_primary"]};
-            padding: 6px 10px;
+            padding: 5px 8px;
+            font-size: 12px;
             selection-background-color: {p["accent_soft"]};
             selection-color: {p["accent_hover"]};
         }}
@@ -872,12 +1000,35 @@ def get_settings_styles() -> str:
             border: 1px solid {p["accent"]};
             background: {p["bg_card"]};
         }}
-        QPushButton#tableActionBtn {{
-            min-width: 52px;
-            max-width: 72px;
-            padding: 4px 10px;
+        QFrame#settingsContentCard QDialog,
+        QFrame#settingsContentCard QScrollArea,
+        QFrame#settingsContentCard QScrollArea > QWidget > QWidget,
+        QFrame#settingsContentCard QStackedWidget {{
+            background: transparent;
+            border: none;
+        }}
+        QTableWidget QComboBox {{
+            padding: 1px 6px;
             font-size: 12px;
+            border-radius: 6px;
+        }}
+        QTableWidget QComboBox::drop-down {{
+            width: 18px;
+        }}
+        QTableWidget QComboBox::down-arrow {{
+            width: 10px;
+            height: 10px;
+            margin-right: 4px;
+        }}
+        QPushButton#tableActionBtn {{
+            min-width: 32px;
+            max-width: 52px;
+            min-height: 22px;
+            max-height: 24px;
+            padding: 1px 6px;
+            font-size: 11px;
             font-weight: 600;
+            border-radius: 5px;
         }}
         QTextBrowser#consoleView, QPlainTextEdit#consoleView {{
             background-color: {p["console_codex"]["bg"]};
@@ -891,24 +1042,28 @@ def get_settings_styles() -> str:
             selection-color: {p["console_codex"]["selection_fg"]};
         }}
         QPushButton#tableDangerBtn {{
-            min-width: 52px;
-            max-width: 72px;
-            padding: 4px 10px;
-            font-size: 12px;
-            font-weight: 700;
+            min-width: 32px;
+            max-width: 52px;
+            min-height: 22px;
+            max-height: 24px;
+            padding: 1px 6px;
+            font-size: 11px;
+            font-weight: 600;
             color: {p["danger"]};
             background: transparent;
-            border: 1px solid {p["danger"]};
+            border: 1px solid {hex_to_rgba(p["danger"], 0.45)};
+            border-radius: 5px;
         }}
         QPushButton#tableDangerBtn:hover {{
             background: {p["danger"]};
             color: white;
         }}
         QPushButton#routerConfigBtn {{
-            min-width: 58px;
-            padding: 6px 12px;
-            font-size: 13px;
-            font-weight: 700;
+            min-width: 48px;
+            padding: 3px 8px;
+            font-size: 11px;
+            font-weight: 600;
+            border-radius: 5px;
         }}
     """
 
@@ -923,7 +1078,7 @@ def get_tool_dialog_styles() -> str:
     radius_card = m["radius_card"]
     radius_ctl = m["radius_control"]
     return common + f"""
-        QDialog {{
+        QDialog, QWidget {{
             background-color: {p["bg_app"]};
             font-family: {m["font"]};
         }}
@@ -949,13 +1104,13 @@ def get_tool_dialog_styles() -> str:
         QTableWidget, QTextEdit, QPlainTextEdit, QListWidget, QTabWidget::pane, QLineEdit, QComboBox {{
             background: {bg_card_style};
             border: 1px solid {border_style};
-            border-radius: {radius_ctl + 2}px;
+            border-radius: {radius_ctl}px;
             color: {p["text_primary"]};
         }}
         QTableWidget::item {{
             color: {p["text_primary"]};
             background-color: transparent;
-            padding: 4px;
+            padding: 3px 6px;
         }}
         QTableWidget::item:selected {{
             background-color: {p["accent_soft"]};
@@ -975,8 +1130,9 @@ def get_tool_dialog_styles() -> str:
         QHeaderView::section {{
             background: {bg_soft_style};
             color: {p["text_secondary"]};
+            font-size: 11px;
             font-weight: 600;
-            padding: 8px;
+            padding: 5px 8px;
             border: none;
             border-bottom: 1px solid {border_style};
         }}
@@ -985,7 +1141,8 @@ def get_tool_dialog_styles() -> str:
             color: {p["text_primary"]};
             border: 1px solid {hex_to_rgba(p["border_strong"], 0.75 if use_glass else 1.0)};
             border-radius: {radius_ctl}px;
-            padding: 8px 14px;
+            padding: 6px 12px;
+            font-size: 12px;
             font-weight: 600;
         }}
         QPushButton:hover {{
@@ -1010,6 +1167,17 @@ def get_tool_dialog_styles() -> str:
             color: {p["text_primary"]};
             spacing: 6px;
         }}
+        QCheckBox::indicator {{
+            width: 16px;
+            height: 16px;
+            border: 1px solid {p["border"]};
+            border-radius: 4px;
+            background: {p["bg_card"]};
+        }}
+        QCheckBox::indicator:checked {{
+            background: {p["accent"]};
+            border-color: {p["accent"]};
+        }}
     """
 
 def get_memory_dialog_styles() -> str:
@@ -1021,6 +1189,7 @@ def get_memory_dialog_styles() -> str:
     bg_soft_style = hex_to_rgba(p["bg_soft"], m["soft_alpha"]) if use_glass else p["bg_soft"]
     border_style = hex_to_rgba(p["border"], m["border_alpha"]) if use_glass else p["border"]
     radius_ctl = m["radius_control"]
+    chevron_path = get_chevron_down_icon_path(p.get("text_secondary", "#6B7280"))
     return common + f"""
         QDialog {{
             background-color: {p["bg_app"]};
@@ -1051,6 +1220,19 @@ def get_memory_dialog_styles() -> str:
             border: 1px solid {border_style};
             border-radius: {radius_ctl}px;
             color: {p["text_primary"]};
+        }}
+        QComboBox {{
+            padding: 4px 10px;
+        }}
+        QComboBox::drop-down {{
+            border: none;
+            width: 22px;
+        }}
+        QComboBox::down-arrow {{
+            image: url("{chevron_path}");
+            width: 12px;
+            height: 12px;
+            margin-right: 8px;
         }}
         QTreeWidget#memoryCategoryTree {{
             padding: 6px;
@@ -1129,6 +1311,49 @@ def get_memory_dialog_styles() -> str:
         }}
         QLabel {{
             color: {p["text_primary"]};
+        }}
+        QFrame#memoryHeroCard {{
+            background: {hex_to_rgba(p["accent_soft"], 0.45 if use_glass else 0.75)};
+            border: 1px solid {hex_to_rgba(p["accent"], 0.25)};
+            border-radius: {radius_ctl + 2}px;
+        }}
+        QLabel#memoryHeroTitle {{
+            font-size: 15px;
+            font-weight: 700;
+            color: {p["text_primary"]};
+        }}
+        QLabel#memoryHeroBadge {{
+            background: {hex_to_rgba(p["accent"], 0.15)};
+            color: {p["accent_hover"]};
+            border-radius: 10px;
+            padding: 2px 10px;
+            font-weight: 700;
+            font-size: 11px;
+        }}
+        QFrame#memoryCategoryCard {{
+            background: {bg_card_style};
+            border: 1px solid {border_style};
+            border-radius: {radius_ctl + 2}px;
+        }}
+        QLabel#memoryCategoryHeader {{
+            font-size: 13px;
+            font-weight: 700;
+            color: {p["text_primary"]};
+        }}
+        QLabel#memoryCategoryCountBadge {{
+            background: {hex_to_rgba(p["bg_soft"], 0.95)};
+            color: {p["text_secondary"]};
+            border-radius: 8px;
+            padding: 1px 7px;
+            font-size: 11px;
+            font-weight: 600;
+        }}
+        QScrollArea#memoryWallScroll {{
+            background: transparent;
+            border: none;
+        }}
+        QWidget#memoryWallContent {{
+            background: transparent;
         }}
     """
 

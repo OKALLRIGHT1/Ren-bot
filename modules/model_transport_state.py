@@ -3,6 +3,7 @@ import threading
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, Optional
+from modules.paths import data_path
 
 try:
     from config import TASK_MODEL_TTL_HOURS
@@ -10,7 +11,7 @@ except Exception:
     TASK_MODEL_TTL_HOURS = 12
 
 
-STATE_PATH = Path("./data/model_transport_state.json")
+STATE_PATH = Path(data_path("model_transport_state.json"))
 _LOCK = threading.Lock()
 
 

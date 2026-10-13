@@ -20,6 +20,35 @@ from modules.gui.settings_pages.dependency_page import DependencySettingsPage
 from modules.gui.settings_pages.provider_page import ProviderSettingsPage
 from modules.gui.settings_pages.llm_page import LlmSettingsPage
 from modules.gui.settings_pages.sensor_prompts_page import SensorPromptsSettingsPage
+from modules.gui.settings_pages.external_services_page import ExternalServicesPage
+from modules.gui.user_ia import (
+    SETTINGS_GROUP_LABELS,
+    SETTINGS_PAGE_BY_ID,
+    SETTINGS_PAGES,
+    is_developer_mode,
+    set_developer_mode,
+)
+from modules.llm_probe import probe_model_endpoint
+
+
+class _ProbeWorker(QtCore.QThread):
+    result_ready = QtCore.Signal(dict)
+
+    def __init__(self, cfg, parent=None):
+        super().__init__(parent)
+        self._cfg = dict(cfg or {})
+
+    def run(self):
+        try:
+            result = probe_model_endpoint(self._cfg)
+        except Exception as exc:
+            result = {
+                "ok": False,
+                "latency_ms": 0,
+                "status": 0,
+                "message": str(exc),
+            }
+        self.result_ready.emit(result)
 
 
 try:
@@ -39,8 +68,6 @@ try:
         COSTUME_MAP,
         CUSTOM_MODELS_PATH,
         LLM_ROUTER,
-        MCP_ENABLED,
-        MCP_SERVER_CONFIGS,
         MODELS,
         NAPCAT_ACCESS_TOKEN,
         NAPCAT_ALLOW_GROUP,
@@ -69,10 +96,6 @@ except ImportError:
     PROVIDERS = {}
 
     CUSTOM_MODELS_PATH = "data/custom_models.json"
-
-    MCP_ENABLED = True
-
-    MCP_SERVER_CONFIGS = []
 
     NAPCAT_ENABLED = False
 
@@ -204,16 +227,41 @@ class ProviderEditDialog(QtWidgets.QDialog):
         layout.addLayout(form)
 
         footer = QtWidgets.QHBoxLayout()
-
+        self.btn_probe = QtWidgets.QPushButton("测试连接")
+        self.btn_probe.clicked.connect(self._on_probe)
+        self.lbl_probe = QtWidgets.QLabel("")
+        self.lbl_probe.setObjectName("settingsPageDesc")
+        footer.addWidget(self.btn_probe)
+        footer.addWidget(self.lbl_probe, 1)
         footer.addStretch()
-
         btn_save = QtWidgets.QPushButton("保存")
-
         btn_save.clicked.connect(self._on_save)
-
         footer.addWidget(btn_save)
-
         layout.addLayout(footer)
+        self._probe_worker = None
+
+    def _on_probe(self):
+        cfg = {
+            "base_url": self.inp_url.text().strip(),
+            "api_key": self.inp_key.text().strip(),
+        }
+        self.lbl_probe.setText("测试中…")
+        self.btn_probe.setEnabled(False)
+        self._probe_worker = _ProbeWorker(cfg, self)
+        self._probe_worker.result_ready.connect(self._on_probe_done)
+        self._probe_worker.start()
+
+    def _on_probe_done(self, result: dict):
+        self.btn_probe.setEnabled(True)
+        ok = bool(result.get("ok"))
+        status = result.get("status") or 0
+        latency = result.get("latency_ms") or 0
+        message = result.get("message") or ""
+        if ok:
+            self.lbl_probe.setText(f"{status} · {latency}ms · {message}")
+        else:
+            prefix = f"{status} · " if status else ""
+            self.lbl_probe.setText(f"{prefix}{message}" + (f" · {latency}ms" if latency else ""))
 
     def _on_save(self):
         name = self.inp_name.text().strip()
@@ -511,16 +559,18 @@ class ModelEditDialog(QtWidgets.QDialog):
         layout.addWidget(tips)
 
         footer = QtWidgets.QHBoxLayout()
-
+        self.btn_probe = QtWidgets.QPushButton("测试连接")
+        self.btn_probe.clicked.connect(self._on_probe)
+        self.lbl_probe = QtWidgets.QLabel("")
+        self.lbl_probe.setObjectName("settingsPageDesc")
+        footer.addWidget(self.btn_probe)
+        footer.addWidget(self.lbl_probe, 1)
         footer.addStretch()
-
         btn_save = QtWidgets.QPushButton("保存")
-
         btn_save.clicked.connect(self._on_save)
-
         footer.addWidget(btn_save)
-
         layout.addLayout(footer)
+        self._probe_worker = None
 
         self.combo_style.currentTextChanged.connect(self._refresh_request_preview)
 
@@ -704,6 +754,50 @@ class ModelEditDialog(QtWidgets.QDialog):
                 selected.append(purpose_id)
         return normalize_purposes(selected)
 
+    def _on_probe(self):
+        import os
+
+        key = self.inp_key.text().strip()
+        if not key:
+            env_names = self.inp_api_key_env.text().strip()
+            for part in env_names.replace("，", ",").split(","):
+                name = part.strip()
+                if name and os.getenv(name):
+                    key = os.getenv(name).strip()
+                    break
+        cfg = {
+            "base_url": self.inp_url.text().strip(),
+            "api_key": key,
+            "model": self.inp_model.text().strip(),
+            "api_style": self.combo_style.currentText().strip(),
+        }
+        provider_name = str(self.combo_provider.currentData() or "").strip()
+        if provider_name and provider_name in PROVIDERS:
+            provider = PROVIDERS.get(provider_name) or {}
+            if not cfg["base_url"]:
+                cfg["base_url"] = str(provider.get("base_url") or "")
+            if not cfg["api_key"]:
+                cfg["api_key"] = str(provider.get("api_key") or "")
+        self.lbl_probe.setText("测试中…")
+        self.btn_probe.setEnabled(False)
+        self._probe_worker = _ProbeWorker(cfg, self)
+        self._probe_worker.result_ready.connect(self._on_probe_done)
+        self._probe_worker.start()
+
+    def _on_probe_done(self, result: dict):
+        self.btn_probe.setEnabled(True)
+        ok = bool(result.get("ok"))
+        status = result.get("status") or 0
+        latency = result.get("latency_ms") or 0
+        message = result.get("message") or ""
+        if ok:
+            self.lbl_probe.setText(f"{status} · {latency}ms · {message}")
+        else:
+            prefix = f"{status} · " if status else ""
+            self.lbl_probe.setText(
+                f"{prefix}{message}" + (f" · {latency}ms" if latency else "")
+            )
+
     def _on_save(self):
         mid = self.inp_id.text().strip()
 
@@ -822,7 +916,6 @@ class RouterConfigDialog(QtWidgets.QDialog):
         "image_edit": ("image_edit", "image_gen"),
         "vision": ("vision",),
         "sensor_vision_talk": ("vision", "chat"),
-        "codex": ("code", "chat"),
         "translation": ("translation", "chat"),
         "summary": ("summary", "chat"),
         "web_search": ("web_search",),
@@ -1619,15 +1712,12 @@ class SettingsDialog(QtWidgets.QDialog):
             | QtCore.Qt.WindowType.WindowMinMaxButtonsHint
             | QtCore.Qt.WindowType.WindowCloseButtonHint
         )
-
-        self.setWindowFlag(QtCore.Qt.WindowType.WindowStaysOnTopHint, False)
-
-        self.setWindowFlag(QtCore.Qt.WindowType.Tool, False)
+        self.setAttribute(QtCore.Qt.WidgetAttribute.WA_QuitOnClose, False)
 
         self.main_app = main_app
 
         self.setObjectName("SettingsDialog")
-        self.setWindowTitle("系统设置中心")
+        self.setWindowTitle("设置")
 
         if main_app is not None and hasattr(main_app, "_icon"):
             self.setWindowIcon(main_app._icon)
@@ -1648,103 +1738,17 @@ class SettingsDialog(QtWidgets.QDialog):
 
         self.setStyleSheet(get_settings_styles())
 
-        self._tab_meta = [
-            {
-                "nav": "🤖 常用 · 模型与路由",
-                "title": "模型与路由",
-                "desc": "配置模型、API 地址与各类任务的调用链，是最常用的基础设置区。",
-            },
-            {
-                "nav": "🌐 常用 · 提供商",
-                "title": "提供商",
-                "desc": "集中管理 Base URL 和 API Key，减少手动重复填写。",
-            },
-            {
-                "nav": "🎭 常用 · 形象管理",
-                "title": "形象管理",
-                "desc": "维护角色人设、提示词、服装与表情动作映射。",
-            },
-            {
-                "nav": "🎨 常用 · 颜色主题",
-                "title": "颜色主题",
-                "desc": "自定义界面配色与控制台颜色，修改后即时生效。",
-            },
-            {
-                "nav": "🧩 高级 · 插件工具",
-                "title": "插件工具",
-                "desc": "进入插件管理器，查看启停状态、兼容入口和插件配置。",
-            },
-            {
-                "nav": "🔌 高级 · 信息源 API",
-                "title": "信息源 API",
-                "desc": "管理 ALAPI 接口 JSON，支持手填、从说明生成草稿、测试并保存。",
-            },
-            {
-                "nav": "📚 高级 · 知识库",
-                "title": "知识库",
-                "desc": "维护助手的本地及远程知识库文档与向量检索配置。",
-            },
-            {
-                "nav": "🗣️ 高级 · 表达学习库",
-                "title": "表达学习库",
-                "desc": "记录和学习定制表情、动作和反应映射的数据库。",
-            },
-            {
-                "nav": "🖼️ 高级 · 表情包库",
-                "title": "表情包库",
-                "desc": "管理生成的表情包、本地图片与对应的文本触发词映射。",
-            },
-            {
-                "nav": "📖 高级 · 日记",
-                "title": "日记",
-                "desc": "单独查看、编辑、删除和导出角色每天生成的日记。",
-            },
-            {
-                "nav": "🧠 高级 · 记忆数据",
-                "title": "记忆数据",
-                "desc": "管理统一记忆和原始对话；日记已移到独立页面。",
-            },
-            {
-                "nav": "📟 高级 · 状态屏",
-                "title": "状态屏",
-                "desc": "配置外置墨水屏或各种状态屏幕的数据源和更新频率。",
-            },
-            {
-                "nav": "🧭 高级 · 应用识别",
-                "title": "应用识别",
-                "desc": "维护屏幕传感器的本地应用分类规则，优先于 AI 分类生效。",
-            },
-            {
-                "nav": "📝 高级 · 屏幕吐槽提示词",
-                "title": "屏幕吐槽提示词",
-                "desc": "查看和修改屏幕感知、看自己窗口、截图描述用的提示词模板。",
-            },
-            {
-                "nav": "⏰ 高级 · 久坐提醒",
-                "title": "久坐提醒",
-                "desc": "调整连续工作判定、休息重置、提醒冷却、弹窗文案和表情包预览。",
-            },
-            {
-                "nav": "🎤 高级 · 语音输入",
-                "title": "语音输入",
-                "desc": "麦克风 ASR：是否需要唤醒词、角色名/别名唤醒、连续对话窗口与自定义词。",
-            },
-            {
-                "nav": "🩺 高级 · 依赖体检",
-                "title": "依赖体检",
-                "desc": "扫描插件缺失依赖并生成安装命令，适合排查插件为什么不能正常工作。",
-            },
-            {
-                "nav": "🌐 常用 · MCP",
-                "title": "MCP",
-                "desc": "集中管理本地 MCP Bridge、远程 MCP 服务器，以及 MCP 是否允许被 QQ 侧触发。",
-            },
-            {
-                "nav": "🔌 常用 · QQ 接入",
-                "title": "QQ 接入",
-                "desc": "集中管理 NapCat、QQ 消息接入、黑白名单、图片识别、语音回复和联系人档案。",
-            },
-        ]
+        self._tab_meta = list(SETTINGS_PAGES)
+        self._page_stack_index = {}
+        self._page_builders = {}
+        self._built_pages: set[str] = set()
+        self._current_page_id = 'start'
+        self._start_page = None
+        self._plugin_page = None
+        self._provider_page = None
+        self._llm_page = None
+        self._collapsed_groups: set[str] = set()
+
         main = QtWidgets.QHBoxLayout(self)
 
         main.setContentsMargins(16, 16, 16, 16)
@@ -1761,127 +1765,64 @@ class SettingsDialog(QtWidgets.QDialog):
 
         nav_layout.setSpacing(10)
 
-        nav_title = QtWidgets.QLabel("设置导航")
+        nav_title = QtWidgets.QLabel("✨ 偏好设置")
 
         nav_title.setObjectName("settingsNavTitle")
 
         nav_layout.addWidget(nav_title)
 
         nav_hint = QtWidgets.QLabel(
-            "把常用配置和高级工具分开，减少页面跳来跳去的负担。"
+            "按功能分类管理，随时切换调整。"
         )
-
         nav_hint.setObjectName("settingsNavHint")
-
         nav_hint.setWordWrap(True)
-
         nav_layout.addWidget(nav_hint)
 
         self.nav_list = QtWidgets.QListWidget()
-
         self.nav_list.setObjectName("settingsNav")
-
-        # 固定导航宽，避免内容区被挤压时导航跟着乱晃。
-        self.nav_list.setFixedWidth(200)
-
-        for meta in self._tab_meta:
-            item = QtWidgets.QListWidgetItem(meta["nav"])
-
-            item.setToolTip(meta["desc"])
-
-            self.nav_list.addItem(item)
-
+        self.nav_list.setFixedWidth(212)
+        self.nav_list.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.nav_list.currentRowChanged.connect(self._on_tab_changed)
-
+        self.nav_list.itemClicked.connect(self._on_nav_item_clicked)
         nav_layout.addWidget(self.nav_list, 1)
+
+        self.dev_check = QtWidgets.QCheckBox("显示开发者选项")
+        self.dev_check.setObjectName("settingsNavHint")
+        self.dev_check.setChecked(is_developer_mode())
+        self.dev_check.toggled.connect(self._set_developer_mode)
+        nav_layout.addWidget(self.dev_check)
 
         main.addWidget(nav_card)
 
         content_card = QtWidgets.QFrame()
-
         content_card.setObjectName("settingsContentCard")
-
         content_layout = QtWidgets.QVBoxLayout(content_card)
-
         content_layout.setContentsMargins(18, 18, 18, 18)
-
         content_layout.setSpacing(14)
 
         header_card = QtWidgets.QFrame()
-
         header_card.setObjectName("settingsHeaderCard")
-
         header_layout = QtWidgets.QVBoxLayout(header_card)
-
         header_layout.setContentsMargins(14, 12, 14, 12)
-
         header_layout.setSpacing(4)
-
         self.page_title = QtWidgets.QLabel("")
-
         self.page_title.setObjectName("settingsPageTitle")
-
         header_layout.addWidget(self.page_title)
-
         self.page_desc = QtWidgets.QLabel("")
-
         self.page_desc.setObjectName("settingsPageDesc")
-
         self.page_desc.setWordWrap(True)
-
         header_layout.addWidget(self.page_desc)
-
         content_layout.addWidget(header_card)
 
         self.stack = QtWidgets.QStackedWidget()
-
         content_layout.addWidget(self.stack, 1)
-
         main.addWidget(content_card, 1)
 
-        self._safe_init_page(self._init_llm_page, "模型与路由")
-
-        self._safe_init_page(self._init_provider_page, "提供商")
-
-        self._safe_init_page(self._init_costume_page, "形象管理")
-
-        self._safe_init_page(self._init_color_page, "颜色主题")
-
-        self._safe_init_page(self._init_plugin_page, "插件工具")
-
-        self._safe_init_page(self._init_info_sources_page, "信息源 API")
-
-        self._safe_init_page(self._init_knowledge_page, "知识库")
-
-        self._safe_init_page(self._init_expression_library_page, "表达学习库")
-
-        self._safe_init_page(self._init_meme_page, "表情包库")
-
-        self._safe_init_page(self._init_diary_page, "日记")
-
-        self._safe_init_page(self._init_memory_page, "记忆数据")
-
-        self._safe_init_page(self._init_status_screen_page, "状态屏")
-
-        self._safe_init_page(self._init_screen_app_rules_page, "应用识别")
-
-        self._safe_init_page(self._init_sensor_prompts_page, "屏幕吐槽提示词")
-
-        self._safe_init_page(self._init_sedentary_page, "久坐提醒")
-
-        self._safe_init_page(self._init_asr_page, "语音输入")
-
-        self._safe_init_page(self._init_dependency_page, "依赖体检")
-
-        self._safe_init_page(self._init_mcp_page, "MCP")
-
-        self._safe_init_page(self._init_gateway_page, "QQ 接入")
-
-        self.nav_list.setCurrentRow(0)
-
-        self._refresh_page_header(0)
+        self._init_all_settings_pages()
+        self._rebuild_nav(select_id="start")
 
     def ensure_on_screen(self):
+
         screen = (
             QtGui.QGuiApplication.screenAt(QtGui.QCursor.pos())
             or QtWidgets.QApplication.primaryScreen()
@@ -1908,12 +1849,22 @@ class SettingsDialog(QtWidgets.QDialog):
     def showEvent(self, event):
         super().showEvent(event)
         self.ensure_on_screen()
-        # Enhanced GUI may have rewritten data/custom_models.json while this
-        # dialog stayed open — pull latest providers/models into memory.
-        self._reload_catalog_from_disk()
-        QtCore.QTimer.singleShot(0, self.ensure_on_screen)
+        # Defer disk/network work so the window paints first.
+        QtCore.QTimer.singleShot(0, self._on_shown)
         QtCore.QTimer.singleShot(80, self.ensure_on_screen)
-        QtCore.QTimer.singleShot(240, self.ensure_on_screen)
+
+    def _on_shown(self):
+        try:
+            self._reload_catalog_from_disk()
+        except Exception:
+            pass
+        start_page = getattr(self, "_start_page", None)
+        if start_page is not None and hasattr(start_page, "refresh"):
+            try:
+                start_page.refresh()
+            except Exception:
+                pass
+        self.ensure_on_screen()
 
     def _reload_catalog_from_disk(self) -> None:
         from modules.gui.settings_pages.catalog_io import reload_model_catalog
@@ -1930,44 +1881,340 @@ class SettingsDialog(QtWidgets.QDialog):
             except Exception:
                 pass
 
+    def _page_initters(self):
+        return {
+            "start": self._init_start_page,
+            "character": self._init_costume_page,
+            "llm": self._init_llm_page,
+            "asr": self._init_asr_page,
+            "color": self._init_color_page,
+            "memory": self._init_memory_page,
+            "diary": self._init_diary_page,
+            "knowledge": self._init_knowledge_page,
+            "expression": self._init_expression_library_page,
+            "meme": self._init_meme_page,
+            "sedentary": self._init_sedentary_page,
+            "sensor_prompts": self._init_sensor_prompts_page,
+            "screen_apps": self._init_screen_app_rules_page,
+            "external_services": self._init_external_services_page,
+            "qq": self._init_gateway_page,
+            "plugins": self._init_plugin_page,
+            "mcp": self._init_mcp_page,
+            "providers": self._init_provider_page,
+            "info_sources": self._init_info_sources_page,
+            "status_screen": self._init_status_screen_page,
+            "runtime_health": self._init_runtime_health_page,
+            "dependency": self._init_dependency_page,
+        }
+
+    def _init_all_settings_pages(self):
+        initters = self._page_initters()
+        self._page_stack_index = {}
+        self._page_builders = {}
+        self._built_pages = set()
+        for spec in SETTINGS_PAGES:
+            page_id = spec["id"]
+            fn = initters.get(page_id)
+            label = str(spec.get("init_label") or spec.get("title") or page_id)
+            placeholder = QtWidgets.QWidget()
+            self._page_stack_index[page_id] = self.stack.addWidget(placeholder)
+            self._page_builders[page_id] = (fn, label)
+        self._ensure_page("start")
+
+    def _ensure_page(self, page_id: str) -> None:
+        page_id = str(page_id or "").strip()
+        if not page_id or page_id in self._built_pages:
+            return
+        builder = self._page_builders.get(page_id)
+        if builder is None:
+            self._built_pages.add(page_id)
+            return
+        fn, label = builder
+        idx = self._page_stack_index.get(page_id)
+        if idx is None:
+            self._built_pages.add(page_id)
+            return
+        if fn is None:
+            self._built_pages.add(page_id)
+            return
+        placeholder = self.stack.widget(idx)
+        count_before = self.stack.count()
+        self._safe_init_page(fn, label)
+        if self.stack.count() == count_before + 1:
+            built = self.stack.widget(count_before)
+            self.stack.removeWidget(built)
+            self.stack.insertWidget(idx, built)
+            if placeholder is not None:
+                self.stack.removeWidget(placeholder)
+                placeholder.deleteLater()
+        self._built_pages.add(page_id)
+
+    def _init_start_page(self):
+        from modules.gui.settings_pages.start_page import StartSettingsPage
+
+        widget = StartSettingsPage(
+            main_app=self.main_app,
+            on_open_page=self.open_page,
+        )
+        self._start_page = widget
+        self.stack.addWidget(widget)
+
+    def _set_developer_mode(self, enabled: bool):
+        set_developer_mode(bool(enabled))
+        if hasattr(self, "dev_check"):
+            self.dev_check.blockSignals(True)
+            self.dev_check.setChecked(bool(enabled))
+            self.dev_check.blockSignals(False)
+        current = self._current_page_id
+        spec = SETTINGS_PAGE_BY_ID.get(current) or {}
+        if spec.get("developer") and not enabled:
+            current = "start"
+        self._rebuild_nav(select_id=current)
+        plugin_page = getattr(self, "_plugin_page", None)
+        if plugin_page is not None and hasattr(plugin_page, "set_developer_visible"):
+            plugin_page.set_developer_visible(bool(enabled))
+
+    def _nav_item_data(self, row: int):
+        item = self.nav_list.item(row) if hasattr(self, "nav_list") else None
+        if item is None:
+            return None
+        data = item.data(QtCore.Qt.ItemDataRole.UserRole)
+        return data if isinstance(data, dict) else None
+
+    NAV_ICONS = {
+        "start": "🚀",
+        "character": "🎀",
+        "llm": "💭",
+        "asr": "🎤",
+        "color": "🎨",
+        "memory": "🧠",
+        "diary": "📖",
+        "knowledge": "📜",
+        "expression": "💬",
+        "meme": "🐱",
+        "sedentary": "🍵",
+        "sensor_prompts": "👀",
+        "screen_apps": "🖥️",
+        "external_services": "🧰",
+        "qq": "🐧",
+        "plugins": "🧩",
+        "mcp": "🔌",
+        "providers": "⚙️",
+        "info_sources": "🌐",
+        "status_screen": "📟",
+        "runtime_health": "💓",
+        "dependency": "🩺",
+    }
+
+    def _rebuild_nav(self, select_id: str | None = None):
+        select_id = str(select_id or self._current_page_id or "start")
+        if select_id not in SETTINGS_PAGE_BY_ID:
+            select_id = "start"
+        spec = SETTINGS_PAGE_BY_ID.get(select_id) or {}
+        select_group = str(spec.get("group") or "")
+        if select_group and select_group in self._collapsed_groups:
+            self._collapsed_groups.remove(select_group)
+        developer = is_developer_mode()
+        if spec.get("developer") and not developer:
+            select_id = "start"
+        self.nav_list.blockSignals(True)
+        self.nav_list.clear()
+        last_group = None
+        target_row = None
+        for page in SETTINGS_PAGES:
+            if page.get("developer") and not developer:
+                continue
+            group_id = str(page.get("group") or "")
+            if group_id != last_group:
+                header_label = SETTINGS_GROUP_LABELS.get(group_id) or ""
+                if header_label:
+                    is_collapsed = group_id in self._collapsed_groups
+                    arrow = "▸" if is_collapsed else "▾"
+                    header = QtWidgets.QListWidgetItem(f"{arrow}  {header_label}")
+                    header.setFlags(QtCore.Qt.ItemFlag.ItemIsEnabled)
+                    header.setData(
+                        QtCore.Qt.ItemDataRole.UserRole,
+                        {"kind": "group", "group": group_id},
+                    )
+                    header.setToolTip("点击折叠 / 展开此类设置")
+                    font = header.font()
+                    font.setPointSize(max(9, font.pointSize() - 1))
+                    font.setBold(True)
+                    header.setFont(font)
+                    header.setForeground(QtGui.QBrush(QtGui.QColor("#8E9AA8")))
+                    header.setSizeHint(QtCore.QSize(0, 30))
+                    self.nav_list.addItem(header)
+                last_group = group_id
+            page_id = page["id"]
+            icon = self.NAV_ICONS.get(page_id, "✨")
+            nav_text = str(page.get("nav") or page_id)
+            item = QtWidgets.QListWidgetItem(f"{icon}  {nav_text}")
+            item.setToolTip(str(page.get("desc") or ""))
+            item.setData(
+                QtCore.Qt.ItemDataRole.UserRole,
+                {"kind": "page", "id": page_id, "group": group_id},
+            )
+            item.setSizeHint(QtCore.QSize(0, 36))
+            is_hidden = group_id in self._collapsed_groups
+            item.setHidden(is_hidden)
+            self.nav_list.addItem(item)
+            if page_id == select_id:
+                target_row = self.nav_list.count() - 1
+        self.nav_list.blockSignals(False)
+        if target_row is None:
+            for row in range(self.nav_list.count()):
+                data = self._nav_item_data(row)
+                if data and data.get("kind") == "page":
+                    target_row = row
+                    select_id = str(data.get("id") or "start")
+                    break
+        if target_row is not None:
+            self.nav_list.blockSignals(True)
+            self.nav_list.setCurrentRow(target_row)
+            self.nav_list.blockSignals(False)
+        self._show_page(select_id)
+
+    def _on_nav_item_clicked(self, item: QtWidgets.QListWidgetItem):
+        data = item.data(QtCore.Qt.ItemDataRole.UserRole)
+        if isinstance(data, dict) and data.get("kind") == "group":
+            group_id = str(data.get("group") or "")
+            if group_id:
+                self._toggle_group_collapse(group_id)
+        elif isinstance(data, dict) and data.get("kind") == "page":
+            page_id = str(data.get("id") or "")
+            if page_id and page_id != self._current_page_id:
+                self._show_page(page_id)
+
+    def _toggle_group_collapse(self, group_id: str):
+        if group_id in self._collapsed_groups:
+            self._collapsed_groups.remove(group_id)
+        else:
+            self._collapsed_groups.add(group_id)
+        self._apply_group_collapse_state()
+
+    def _apply_group_collapse_state(self):
+        sb = self.nav_list.verticalScrollBar()
+        saved_scroll = sb.value() if sb is not None else 0
+        self.nav_list.blockSignals(True)
+        current_group = None
+        for row in range(self.nav_list.count()):
+            item = self.nav_list.item(row)
+            data = item.data(QtCore.Qt.ItemDataRole.UserRole) if item else None
+            if not isinstance(data, dict):
+                continue
+            kind = data.get("kind")
+            if kind == "group":
+                current_group = str(data.get("group") or "")
+                header_label = SETTINGS_GROUP_LABELS.get(current_group) or current_group
+                is_collapsed = current_group in self._collapsed_groups
+                arrow = "▸" if is_collapsed else "▾"
+                item.setText(f"{arrow}  {header_label}")
+            elif kind == "page":
+                page_group = str(data.get("group") or current_group or "")
+                is_collapsed = page_group in self._collapsed_groups
+                item.setHidden(is_collapsed)
+
+        # Restore/keep current selection on active page if visible without auto-scrolling to top
+        active_row = None
+        for row in range(self.nav_list.count()):
+            item = self.nav_list.item(row)
+            data = item.data(QtCore.Qt.ItemDataRole.UserRole) if item else None
+            if isinstance(data, dict) and data.get("kind") == "page" and data.get("id") == self._current_page_id:
+                if not item.isHidden():
+                    active_row = row
+                break
+        if active_row is not None:
+            index = self.nav_list.model().index(active_row, 0)
+            self.nav_list.selectionModel().setCurrentIndex(
+                index,
+                QtCore.QItemSelectionModel.SelectionFlag.ClearAndSelect,
+            )
+        else:
+            self.nav_list.setCurrentItem(None)
+            self.nav_list.clearSelection()
+
+        self.nav_list.blockSignals(False)
+        if sb is not None:
+            sb.setValue(min(saved_scroll, sb.maximum()))
+
+    def _select_nav_row_for_page(self, page_id: str, auto_expand: bool = False) -> bool:
+        for row in range(self.nav_list.count()):
+            data = self._nav_item_data(row)
+            if data and data.get("kind") == "page" and data.get("id") == page_id:
+                page_group = str(data.get("group") or "")
+                if auto_expand and page_group and page_group in self._collapsed_groups:
+                    self._collapsed_groups.remove(page_group)
+                    self._apply_group_collapse_state()
+                self.nav_list.blockSignals(True)
+                self.nav_list.setCurrentRow(row)
+                self.nav_list.blockSignals(False)
+                return True
+        return False
+
+    def _show_page(self, page_id: str):
+        page_id = str(page_id or "").strip() or "start"
+        self._ensure_page(page_id)
+        idx = self._page_stack_index.get(page_id)
+        if idx is None:
+            return
+        self._current_page_id = page_id
+        if 0 <= idx < self.stack.count():
+            self.stack.setCurrentIndex(idx)
+        spec = SETTINGS_PAGE_BY_ID.get(page_id) or {}
+        self.page_title.setText(str(spec.get("title") or ""))
+        self.page_desc.setText(str(spec.get("desc") or ""))
+        title = str(spec.get("title") or "")
+        if any(token in title for token in ("提供商", "聊天模型", "模型", "路由")):
+            self._reload_catalog_from_disk()
+        if page_id == "start":
+            start_page = getattr(self, "_start_page", None)
+            if start_page is not None and hasattr(start_page, "refresh"):
+                try:
+                    start_page.refresh()
+                except Exception:
+                    pass
+
     def _on_tab_changed(self, row):
-        if 0 <= row < self.stack.count():
-            self.stack.setCurrentIndex(row)
-            # Re-read shared catalog when switching to provider/model pages so
-            # changes from Enhanced GUI appear without restarting the process.
-            try:
-                title = str((self._tab_meta[row] or {}).get("title") or "")
-            except Exception:
-                title = ""
-            if any(token in title for token in ("提供商", "模型", "路由", "LLM")):
-                self._reload_catalog_from_disk()
+        data = self._nav_item_data(row)
+        if not data or data.get("kind") != "page":
+            return
+        page_id = str(data.get("id") or "start")
+        if page_id != self._current_page_id:
+            self._show_page(page_id)
 
-            self._refresh_page_header(row)
-
-    def open_page(self, row: int):
-        if 0 <= row < self.nav_list.count():
-            self.nav_list.setCurrentRow(row)
-
-            self.show()
-
-            self.raise_()
-
-            self.activateWindow()
-
-            self.ensure_on_screen()
-            QtCore.QTimer.singleShot(0, self.ensure_on_screen)
-            QtCore.QTimer.singleShot(80, self.ensure_on_screen)
-            QtCore.QTimer.singleShot(240, self.ensure_on_screen)
+    def open_page(self, page_id):
+        if isinstance(page_id, int):
+            data = self._nav_item_data(page_id)
+            if data and data.get("kind") == "page":
+                page_id = data.get("id")
+            else:
+                return
+        page_id = str(page_id or "").strip()
+        spec = SETTINGS_PAGE_BY_ID.get(page_id)
+        if spec is None:
+            return
+        self.show()
+        self.raise_()
+        self.activateWindow()
+        self.ensure_on_screen()
+        QtCore.QTimer.singleShot(0, self.ensure_on_screen)
+        QtCore.QTimer.singleShot(80, self.ensure_on_screen)
+        QtCore.QTimer.singleShot(240, self.ensure_on_screen)
+        if spec.get("developer") and not is_developer_mode():
+            self._show_page(page_id)
+            if not self._select_nav_row_for_page(page_id, auto_expand=True):
+                self.nav_list.clearSelection()
+            return
+        self._rebuild_nav(select_id=page_id)
 
     def _refresh_page_header(self, row: int):
-        if not (0 <= row < len(self._tab_meta)):
+        data = self._nav_item_data(row)
+        if data and data.get("kind") == "page":
+            self._show_page(str(data.get("id") or "start"))
             return
-
-        meta = self._tab_meta[row]
-
-        self.page_title.setText(meta["title"])
-
-        self.page_desc.setText(meta["desc"])
+        spec = SETTINGS_PAGE_BY_ID.get(self._current_page_id) or {}
+        self.page_title.setText(str(spec.get("title") or ""))
+        self.page_desc.setText(str(spec.get("desc") or ""))
 
     def _create_launch_pad_page(
         self,
@@ -2107,7 +2354,7 @@ class SettingsDialog(QtWidgets.QDialog):
         layout = QtWidgets.QVBoxLayout(page)
         layout.setContentsMargins(0, 0, 0, 0)
         widget = LlmSettingsPage(
-            on_open_providers=lambda: self.open_page(1),
+            on_open_providers=lambda: self.open_page("providers"),
             plugin_manager=(
                 getattr(self.main_app, "plugin_manager", None)
                 if self.main_app
@@ -2187,10 +2434,6 @@ class SettingsDialog(QtWidgets.QDialog):
             voice_probability = int(NAPCAT_VOICE_REPLY_PROBABILITY)
 
         return {
-            "mcp_enabled": bool(runtime.get("mcp_enabled", MCP_ENABLED)),
-            "mcp_server_configs": runtime.get("mcp_server_configs", MCP_SERVER_CONFIGS)
-            if isinstance(runtime.get("mcp_server_configs", MCP_SERVER_CONFIGS), list)
-            else MCP_SERVER_CONFIGS,
             "napcat_enabled": bool(runtime.get("napcat_enabled", NAPCAT_ENABLED)),
             "napcat_webhook_host": str(
                 runtime.get("napcat_webhook_host", NAPCAT_WEBHOOK_HOST)
@@ -3151,6 +3394,23 @@ class SettingsDialog(QtWidgets.QDialog):
             "web_search_override_keywords": web_keywords,
         }
 
+    def _load_mcp_server_configs(self) -> list:
+        config = self._load_mcp_tools_config()
+        settings = config.get("settings", {}) if isinstance(config, dict) else {}
+        raw = self._read_plugin_setting(
+            settings if isinstance(settings, dict) else {},
+            "servers",
+            [],
+        )
+        if not isinstance(raw, list):
+            raw = []
+        return self._normalize_mcp_server_configs(raw)
+
+    def _collect_mcp_server_configs(self) -> list:
+        if not hasattr(self, "gateway_mcp_table"):
+            return self._load_mcp_server_configs()
+        return self._parse_mcp_servers_json()
+
     def _collect_mcp_intent_route_settings(self) -> dict:
         if not hasattr(self, "gateway_mcp_intent_route_enabled"):
             return self._load_mcp_intent_route_settings()
@@ -3265,6 +3525,10 @@ class SettingsDialog(QtWidgets.QDialog):
 
         old_intent_route = self._load_mcp_intent_route_settings()
 
+        new_servers = self._collect_mcp_server_configs()
+
+        old_servers = self._load_mcp_server_configs()
+
         config["access_control"] = new_access
 
         settings = config.get("settings", {})
@@ -3310,11 +3574,25 @@ class SettingsDialog(QtWidgets.QDialog):
             description="命中这些词时优先走联网搜索，不抢占 mcp_tools。",
         )
 
+        self._upsert_mcp_setting_entry(
+            settings,
+            "servers",
+            list(new_servers),
+            setting_type="json",
+            label="远程 MCP 服务器",
+            description="由设置里的 MCP 页面维护。每项是 stdio 或 streamable_http 服务器。",
+        )
+        servers_entry = settings.get("servers")
+        if isinstance(servers_entry, dict):
+            servers_entry["ui"] = "hidden"
+
         access_changed = old_access != new_access
 
         intent_route_changed = old_intent_route != new_intent_route
 
-        changed = access_changed or intent_route_changed
+        servers_changed = old_servers != new_servers
+
+        changed = access_changed or intent_route_changed or servers_changed
 
         if not changed:
             return {
@@ -3323,8 +3601,11 @@ class SettingsDialog(QtWidgets.QDialog):
                 "applied": True,
                 "access_control": new_access,
                 "intent_route": new_intent_route,
+                "servers": new_servers,
+                "server_status": self._mcp_plugin_server_status(),
                 "access_changed": False,
                 "intent_route_changed": False,
+                "servers_changed": False,
             }
 
         plugin_manager = (
@@ -3350,8 +3631,11 @@ class SettingsDialog(QtWidgets.QDialog):
                     else "plugin_manager.save_plugin_config 返回 False",
                     "access_control": new_access,
                     "intent_route": new_intent_route,
+                    "servers": new_servers,
+                    "server_status": self._mcp_plugin_server_status() if ok else [],
                     "access_changed": access_changed,
                     "intent_route_changed": intent_route_changed,
+                    "servers_changed": servers_changed,
                 }
 
         config_path = os.path.join("plugins", "mcp_tools", "config.json")
@@ -3366,8 +3650,11 @@ class SettingsDialog(QtWidgets.QDialog):
                 "applied": False,
                 "access_control": new_access,
                 "intent_route": new_intent_route,
+                "servers": new_servers,
+                "server_status": [],
                 "access_changed": access_changed,
                 "intent_route_changed": intent_route_changed,
+                "servers_changed": servers_changed,
             }
 
         except Exception as e:
@@ -3378,9 +3665,26 @@ class SettingsDialog(QtWidgets.QDialog):
                 "error": str(e),
                 "access_control": new_access,
                 "intent_route": new_intent_route,
+                "servers": new_servers,
+                "server_status": [],
                 "access_changed": access_changed,
                 "intent_route_changed": intent_route_changed,
+                "servers_changed": servers_changed,
             }
+
+    def _mcp_plugin_server_status(self) -> list:
+        plugin_manager = (
+            getattr(self.main_app, "plugin_manager", None) if self.main_app else None
+        )
+        plugins = getattr(plugin_manager, "plugins", None) or {}
+        plugin = plugins.get("mcp_tools") if isinstance(plugins, dict) else None
+        getter = getattr(plugin, "list_server_status", None)
+        if not callable(getter):
+            return []
+        try:
+            return list(getter() or [])
+        except Exception:
+            return []
 
     def _refresh_gateway_preview(self, *args):
         if hasattr(self, "gateway_url_preview"):
@@ -3558,8 +3862,6 @@ class SettingsDialog(QtWidgets.QDialog):
 
     def _collect_gateway_settings(self):
         return {
-            "mcp_enabled": self.gateway_mcp_enabled.isChecked(),
-            "mcp_server_configs": self._parse_mcp_servers_json(),
             "napcat_enabled": self.gateway_napcat_enabled.isChecked(),
             "napcat_webhook_host": self.gateway_webhook_host.text().strip()
             or "127.0.0.1",
@@ -3647,8 +3949,6 @@ class SettingsDialog(QtWidgets.QDialog):
 
         update_runtime_settings(new_settings)
 
-        mcp_access_result = self._save_mcp_tools_access_control()
-
         apply_result = {}
 
         if getattr(self.main_app, "apply_external_settings", None):
@@ -3659,8 +3959,6 @@ class SettingsDialog(QtWidgets.QDialog):
                 apply_result = {"error": str(e)}
 
         restart_sensitive_keys = {
-            "mcp_enabled",
-            "mcp_server_configs",
             "napcat_enabled",
             "napcat_webhook_host",
             "napcat_webhook_port",
@@ -3688,7 +3986,6 @@ class SettingsDialog(QtWidgets.QDialog):
         live_apply_ok = (
             bool(apply_result)
             and not apply_result.get("error")
-            and bool(apply_result.get("mcp_live_applied"))
             and bool(apply_result.get("napcat_live_applied"))
         )
 
@@ -3700,60 +3997,13 @@ class SettingsDialog(QtWidgets.QDialog):
             and not live_apply_ok
         )
 
-        restart_needed = restart_needed or bool(
-            mcp_access_result.get("changed") and not mcp_access_result.get("applied")
-        )
-
         message_lines = [
             "设置已保存。",
             "",
             "- QQ 回复是否显示到本地聊天框：对新消息立即生效",
         ]
 
-        if mcp_access_result.get("saved"):
-            if mcp_access_result.get("access_changed"):
-                if mcp_access_result.get("applied"):
-                    message_lines.append("- MCP 的 QQ 触发权限：已保存并更新")
-
-                else:
-                    message_lines.append(
-                        "- MCP 的 QQ 触发权限：已写入配置，建议重启后确认生效"
-                    )
-
-            if mcp_access_result.get("intent_route_changed"):
-                if mcp_access_result.get("applied"):
-                    message_lines.append("- MCP 自然语言路由：已保存并即时生效")
-
-                else:
-                    message_lines.append(
-                        "- MCP 自然语言路由：已写入配置，建议重启后确认生效"
-                    )
-
-        else:
-            message_lines.append(
-                f"- MCP 配置保存失败（{mcp_access_result.get('error') or '未知错误'}）"
-            )
-
         if live_apply_ok:
-            tool_count = len(apply_result.get("mcp_tools") or [])
-
-            message_lines.append(
-                f"- MCP 本地工具桥：已即时刷新（当前 {tool_count} 个工具）"
-            )
-
-            server_items = apply_result.get("mcp_servers") or []
-
-            if server_items:
-                connected_count = sum(
-                    1
-                    for item in server_items
-                    if isinstance(item, dict) and item.get("connected")
-                )
-
-                message_lines.append(
-                    f"- 远程 MCP 服务器：已处理 {len(server_items)} 个，当前连通 {connected_count} 个"
-                )
-
             if new_settings.get("napcat_enabled"):
                 if apply_result.get("napcat_server_running"):
                     message_lines.append(
@@ -3769,7 +4019,7 @@ class SettingsDialog(QtWidgets.QDialog):
                 message_lines.append("- NapCat Webhook：已即时关闭")
 
         else:
-            message_lines.append("- NapCat / MCP 运行时参数：建议重启后完全生效")
+            message_lines.append("- NapCat 运行时参数：建议重启后完全生效")
 
             if apply_result.get("error"):
                 message_lines.append(f"- 即时应用失败：{apply_result.get('error')}")
@@ -3790,7 +4040,7 @@ class SettingsDialog(QtWidgets.QDialog):
                 self,
                 "外部接入",
                 message
-                + "\n\n检测到 NapCat / MCP 接入参数发生变化，是否现在重启应用？",
+                + "\n\n检测到 QQ 接入参数发生变化，是否现在重启应用？",
                 QtWidgets.QMessageBox.StandardButton.Yes
                 | QtWidgets.QMessageBox.StandardButton.No,
             )
@@ -3801,6 +4051,50 @@ class SettingsDialog(QtWidgets.QDialog):
                 return
 
         QtWidgets.QMessageBox.information(self, "外部接入", message)
+
+    def _save_mcp_settings(self, restart_after_save: bool = False):
+        try:
+            result = self._save_mcp_tools_access_control()
+        except Exception as exc:
+            QtWidgets.QMessageBox.warning(self, "MCP", f"配置保存失败：{exc}")
+            return
+
+        lines = ["MCP 设置已保存。", ""]
+        if not result.get("saved"):
+            lines.append(f"- 写入失败：{result.get('error') or '未知错误'}")
+        else:
+            servers = result.get("servers") or []
+            status = result.get("server_status") or []
+            connected = sum(
+                1 for item in status if isinstance(item, dict) and item.get("connected")
+            )
+            if result.get("servers_changed"):
+                lines.append(
+                    f"- 远程服务器：已写入 mcp_tools，共 {len(servers)} 个，当前连通 {connected} 个"
+                )
+            else:
+                lines.append(f"- 远程服务器：没有变化（当前 {len(servers)} 个）")
+            if result.get("access_changed"):
+                lines.append(
+                    "- QQ 触发权限：已更新"
+                    if result.get("applied")
+                    else "- QQ 触发权限：已写入配置，建议重启后确认生效"
+                )
+            if result.get("intent_route_changed"):
+                lines.append(
+                    "- 自然语言路由：已更新"
+                    if result.get("applied")
+                    else "- 自然语言路由：已写入配置，建议重启后确认生效"
+                )
+            if not result.get("applied") and result.get("changed"):
+                lines.append("- 插件未加载，配置已写入文件")
+
+        message = "\n".join(lines)
+        if restart_after_save and getattr(self.main_app, "on_restart_callback", None):
+            QtWidgets.QMessageBox.information(self, "MCP", message + "\n\n即将重启应用。")
+            self.main_app.on_restart_callback()
+            return
+        QtWidgets.QMessageBox.information(self, "MCP", message)
 
     def _init_mcp_page(self):
         page = QtWidgets.QWidget()
@@ -3816,8 +4110,6 @@ class SettingsDialog(QtWidgets.QDialog):
         layout.setContentsMargins(0, 0, 0, 0)
 
         layout.setSpacing(14)
-
-        state = self._load_gateway_settings()
 
         mcp_card = QtWidgets.QFrame()
 
@@ -3835,16 +4127,10 @@ class SettingsDialog(QtWidgets.QDialog):
 
         mcp_layout.addWidget(mcp_title)
 
-        self.gateway_mcp_enabled = QtWidgets.QCheckBox(
-            "启用本地 MCP Bridge（当前阶段主要是本地工具桥）"
-        )
-
-        self.gateway_mcp_enabled.setChecked(bool(state["mcp_enabled"]))
-
-        mcp_layout.addWidget(self.gateway_mcp_enabled)
-
         mcp_desc = QtWidgets.QLabel(
-            "当前已接好本地 MCP 工具桥。除 `plugin.list`、`chat.process`、`chat.gateway.dispatch` 外，还提供 `mcp.list_tools`、`mcp.server_status`、`mcp.call_tool` 等管理入口；远程工具会以 `mcp.<server>.<tool>` 形式暴露。"
+            "在这里添加远程 MCP 服务器。保存后写入 mcp_tools 插件配置并立刻重连。"
+            "没有服务器时，聊天不会把 mcp_tools 放进工具列表。"
+            "远程工具名是 mcp.<server>.<tool>。调用还要在允许名单里写下服务器名，或打开“允许全部远程 MCP 工具”。"
         )
 
         mcp_desc.setObjectName("launchDesc")
@@ -3935,7 +4221,7 @@ class SettingsDialog(QtWidgets.QDialog):
 
         self.gateway_mcp_table.verticalHeader().setVisible(False)
 
-        self.gateway_mcp_table.verticalHeader().setDefaultSectionSize(44)
+        self.gateway_mcp_table.verticalHeader().setDefaultSectionSize(36)
 
         self.gateway_mcp_table.setAlternatingRowColors(True)
 
@@ -3964,8 +4250,9 @@ class SettingsDialog(QtWidgets.QDialog):
         )
 
         self.gateway_mcp_table.horizontalHeader().setSectionResizeMode(
-            5, QtWidgets.QHeaderView.ResizeMode.ResizeToContents
+            5, QtWidgets.QHeaderView.ResizeMode.Fixed
         )
+        self.gateway_mcp_table.setColumnWidth(5, 124)
 
         self.gateway_mcp_table.itemSelectionChanged.connect(
             self._update_gateway_mcp_actions
@@ -3977,7 +4264,7 @@ class SettingsDialog(QtWidgets.QDialog):
 
         mcp_layout.addWidget(self.gateway_mcp_table)
 
-        self._set_gateway_mcp_server_configs(state.get("mcp_server_configs") or [])
+        self._set_gateway_mcp_server_configs(self._load_mcp_server_configs())
 
         self.gateway_mcp_preview = QtWidgets.QLabel("")
 
@@ -4153,14 +4440,14 @@ class SettingsDialog(QtWidgets.QDialog):
 
         btn_save.setObjectName("primaryAction")
 
-        btn_save.clicked.connect(self._save_gateway_settings)
+        btn_save.clicked.connect(self._save_mcp_settings)
 
         footer.addWidget(btn_save)
 
         btn_save_restart = QtWidgets.QPushButton("保存并重启")
 
         btn_save_restart.clicked.connect(
-            lambda checked=False: self._save_gateway_settings(restart_after_save=True)
+            lambda checked=False: self._save_mcp_settings(restart_after_save=True)
         )
 
         btn_save_restart.setEnabled(
@@ -4174,8 +4461,6 @@ class SettingsDialog(QtWidgets.QDialog):
         layout.addLayout(footer)
 
         layout.addStretch()
-
-        self.gateway_mcp_enabled.toggled.connect(self._refresh_gateway_preview)
 
         self.gateway_mcp_allow_local.toggled.connect(self._refresh_gateway_preview)
 
@@ -4206,6 +4491,11 @@ class SettingsDialog(QtWidgets.QDialog):
         root.addWidget(self._wrap_in_scroll_area(container), 1)
 
         self.stack.addWidget(page)
+
+    def _init_external_services_page(self):
+        widget = ExternalServicesPage()
+        apply_embedded_mode(widget)
+        self.stack.addWidget(self._wrap_in_scroll_area(widget))
 
     def _init_gateway_page(self):
         page = QtWidgets.QWidget()
@@ -4588,7 +4878,7 @@ class SettingsDialog(QtWidgets.QDialog):
 
         self.gateway_qq_profile_table.verticalHeader().setVisible(False)
 
-        self.gateway_qq_profile_table.verticalHeader().setDefaultSectionSize(44)
+        self.gateway_qq_profile_table.verticalHeader().setDefaultSectionSize(36)
 
         self.gateway_qq_profile_table.setAlternatingRowColors(True)
 
@@ -4625,8 +4915,9 @@ class SettingsDialog(QtWidgets.QDialog):
         )
 
         self.gateway_qq_profile_table.horizontalHeader().setSectionResizeMode(
-            7, QtWidgets.QHeaderView.ResizeMode.ResizeToContents
+            7, QtWidgets.QHeaderView.ResizeMode.Fixed
         )
+        self.gateway_qq_profile_table.setColumnWidth(7, 124)
 
         self.gateway_qq_profile_table.itemSelectionChanged.connect(
             self._update_gateway_qq_profile_actions
@@ -4705,8 +4996,13 @@ class SettingsDialog(QtWidgets.QDialog):
         plugin_manager = (
             getattr(self.main_app, "plugin_manager", None) if self.main_app else None
         )
+        if plugin_manager is None and self.main_app is not None:
+            # 遥控窗远程模式：大脑的插件管理器不在本进程，走 /gui HTTP。
+            from modules.gui.remote_plugin_manager import RemotePluginManager
+
+            plugin_manager = RemotePluginManager()
         if plugin_manager is None:
-            layout.addWidget(QtWidgets.QLabel("当前上下文不支持插件管理。"))
+            layout.addWidget(QtWidgets.QLabel("当前上下文还不能管理能力。"))
         else:
             widget = PluginManagerDialog(
                 parent=page,
@@ -4714,6 +5010,7 @@ class SettingsDialog(QtWidgets.QDialog):
                 main_app=self.main_app,
                 embedded=True,
             )
+            self._plugin_page = widget
             apply_embedded_mode(widget)
             # 插件页以表格为主，直接填满内容区，不要外层 scroll 吃掉表格高度。
             widget.setSizePolicy(
@@ -4790,6 +5087,29 @@ class SettingsDialog(QtWidgets.QDialog):
         from modules.gui.dialogs.status_screen_manager import StatusScreenManagerDialog
 
         self._add_embedded_dialog_page(StatusScreenManagerDialog, "状态屏")
+
+    def _init_runtime_health_page(self):
+        from modules.gui.dialogs.runtime_health import RuntimeHealthDialog
+
+        page = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout(page)
+        layout.setContentsMargins(0, 0, 0, 0)
+        health_center = (
+            getattr(self.main_app, "runtime_health", None)
+            if self.main_app is not None
+            else None
+        )
+        if health_center is None:
+            try:
+                from services.runtime_health import get_runtime_health
+
+                health_center = get_runtime_health()
+            except Exception:
+                health_center = None
+        widget = RuntimeHealthDialog(health_center, parent=page, embedded=True)
+        apply_embedded_mode(widget)
+        layout.addWidget(widget, 1)
+        self.stack.addWidget(page)
 
     def _init_screen_app_rules_page(self):
         from modules.gui.dialogs.screen_app_rules import ScreenAppRulesDialog

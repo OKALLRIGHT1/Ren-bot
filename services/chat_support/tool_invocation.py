@@ -50,10 +50,6 @@ def should_rewrite_tool_rules(mode: str) -> bool:
     return normalize_invocation_mode(mode) in {"dual", "function"}
 
 
-def should_attach_mcp_tool_prompt(triggers: Optional[Sequence[str]] = None) -> bool:
-    return any(str(item or "").strip() in {"mcp_tools", "mcp"} for item in list(triggers or []))
-
-
 def get_tool_invocation_mode() -> str:
     try:
         from modules.runtime_settings import load_runtime_settings

@@ -279,7 +279,6 @@ def chat_env(monkeypatch):
     monkeypatch.setattr(ChatService, "_build_current_emotion_context", lambda self, ctx=None: "")
     monkeypatch.setattr(ChatService, "_build_reply_style_context", lambda self, text, ctx=None: "")
     monkeypatch.setattr(ChatService, "_build_live2d_self_awareness_hint", lambda self, ctx=None: "")
-    monkeypatch.setattr(ChatService, "_build_mcp_tool_prompt", lambda self, *args, **kwargs: "")
 
     async def no_character_thought(*args, **kwargs):
         # Smoke 默认跳过 Thought，避免多一次 chat_with_ai 打乱 LLM 调用计数
@@ -459,7 +458,7 @@ async def test_process_injects_knowledge_without_removing_brain(chat_env, monkey
     assert injected["plugin_manager"] is service.plugin_manager
     assert injected["agent_runtime"] is service.agent_runtime
     assert not hasattr(service.agent_runtime, "chat_service")
-    assert injected["mcp_bridge"] is service.mcp_bridge
+    assert "mcp_bridge" not in injected
 
 
 @pytest.mark.asyncio

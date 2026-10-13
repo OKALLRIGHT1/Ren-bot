@@ -44,7 +44,9 @@ def policy_for_source(source: str = "remote", *, path_roots: Optional[Sequence[s
     """source: remote | local | trusted_cache (alias of local with roots)."""
     kind = str(source or "remote").strip().lower()
     roots = tuple(Path(p).resolve() for p in (path_roots or []) if str(p).strip())
-    if kind in {"local", "local_ui", "text_input", "voice", "gui", "trusted_cache"}:
+    from core.message_source import is_hud_user_source, is_local_actor_source
+
+    if kind in {"local", "local_ui", "trusted_cache"} or is_hud_user_source(kind) or is_local_actor_source(kind):
         return MediaPolicy(
             allow_http=True,
             allow_file=True,

@@ -496,16 +496,28 @@ class ExpressionLibraryManagerDialog(QtWidgets.QDialog):
         self.table.itemDoubleClicked.connect(lambda *_: self._edit_selected_pattern())
 
     def _get_memory_store(self):
-        if self.main_app is None:
-            return None
-        store = getattr(self.main_app, "memory_store", None)
-        if store is not None:
-            return store
-        brain = getattr(self.main_app, "brain", None)
-        return getattr(brain, "sqlite_store", None)
+        if self.main_app is not None:
+            store = getattr(self.main_app, "memory_store", None)
+            if store is not None:
+                return store
+            brain = getattr(self.main_app, "brain", None)
+            local = getattr(brain, "sqlite_store", None)
+            if local is not None:
+                return local
+        from modules.gui.remote_expression_store import RemoteExpressionStore
+
+        return RemoteExpressionStore()
 
     def _load_runtime_controls(self):
-        runtime = load_runtime_settings()
+        store = self._get_memory_store()
+        runtime = {}
+        if hasattr(store, "get_runtime"):
+            try:
+                runtime = dict(store.get_runtime() or {})
+            except Exception:
+                runtime = {}
+        if not runtime:
+            runtime = load_runtime_settings()
         self.chk_runtime_enabled.setChecked(
             bool(runtime.get("expression_library_enabled", True))
         )
@@ -522,14 +534,17 @@ class ExpressionLibraryManagerDialog(QtWidgets.QDialog):
         self.spin_runtime_max.setValue(max(1, min(8, max_items)))
 
     def _save_runtime_controls(self):
-        update_runtime_settings(
-            {
-                "expression_library_enabled": self.chk_runtime_enabled.isChecked(),
-                "expression_library_use_in_chat": self.chk_runtime_chat.isChecked(),
-                "expression_library_use_in_screen": self.chk_runtime_sensor.isChecked(),
-                "expression_library_max_prompt_items": int(self.spin_runtime_max.value()),
-            }
-        )
+        patch = {
+            "expression_library_enabled": self.chk_runtime_enabled.isChecked(),
+            "expression_library_use_in_chat": self.chk_runtime_chat.isChecked(),
+            "expression_library_use_in_screen": self.chk_runtime_sensor.isChecked(),
+            "expression_library_max_prompt_items": int(self.spin_runtime_max.value()),
+        }
+        store = self._get_memory_store()
+        if hasattr(store, "save_runtime"):
+            store.save_runtime(patch)
+        else:
+            update_runtime_settings(patch)
         QtWidgets.QMessageBox.information(self, "表达学习库", "运行时开关已保存。")
 
     def _scene_text(self, scene: str) -> str:

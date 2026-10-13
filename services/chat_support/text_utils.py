@@ -477,6 +477,22 @@ def strip_cmd_anywhere(text: str, cmd_re: re.Pattern[str]) -> str:
     return cmd_re.sub("", text or "")
 
 
+_LEAKED_TOOL_CALL_RE = re.compile(
+    r"^[A-Za-z][\w\-]*(?:\s*\(.*\)|\s*\".*\")\s*$"
+)
+
+
+def looks_like_leaked_tool_call(text: str) -> bool:
+    raw = str(text or "").strip()
+    if not raw:
+        return False
+    if raw.startswith("[CMD:"):
+        return True
+    if re.fullmatch(r"\[CMD:.*\]", raw, flags=re.DOTALL | re.IGNORECASE):
+        return True
+    return bool(_LEAKED_TOOL_CALL_RE.fullmatch(raw))
+
+
 def strip_internal_tags(text: str) -> str:
     raw = strip_think_tags(str(text or ""))
     raw = re.sub(r"\[tool_use\]\s*\[[^\]]*\]\s*", "", raw, flags=re.IGNORECASE)

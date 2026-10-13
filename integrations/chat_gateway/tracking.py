@@ -60,10 +60,12 @@ class OutboundTracker:
     def __init__(
         self,
         max_items: int = 512,
-        path: str = "data/outbound/outbound_records.jsonl",
+        path: str = "",
     ):
+        from modules.paths import data_dir
+
         self.max_items = max(64, int(max_items or 512))
-        self.path = Path(path)
+        self.path = Path(path or str(Path(data_dir()) / "outbound" / "outbound_records.jsonl"))
         self._records: OrderedDict[str, OutboundRecord] = OrderedDict()
 
     def begin(

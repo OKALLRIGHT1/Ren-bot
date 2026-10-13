@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Callable
+from typing import Any
 
 
 class PluginToolProvider:
@@ -22,29 +22,3 @@ class PluginToolProvider:
                 }
             )
         return rows
-
-
-class McpToolProvider:
-    def __init__(self, bridge_getter: Callable[[], Any]):
-        self.bridge_getter = bridge_getter
-
-    def list_tools(self) -> list[dict[str, Any]]:
-        bridge = self.bridge_getter()
-        if bridge is None:
-            return []
-        rows: list[dict[str, Any]] = []
-        for spec in bridge.list_tools():
-            rows.append(
-                {
-                    "trigger": str(getattr(spec, "name", "") or ""),
-                    "source": "mcp",
-                    "name": str(getattr(spec, "name", "") or ""),
-                    "type": "mcp",
-                    "provider": str(getattr(spec, "provider", "") or ""),
-                    "description": str(getattr(spec, "description", "") or ""),
-                    "input_schema": getattr(spec, "input_schema", {}) or {},
-                    "aliases": [],
-                    "examples": [],
-                }
-            )
-        return [row for row in rows if row["trigger"]]

@@ -88,7 +88,6 @@ def test_second_wave_schemas_encode_old_args():
 
 def test_third_wave_schemas_encode_old_args():
     from plugins.music_player.plugin import Plugin as Music
-    from plugins.mode_preset.plugin import Plugin as Mode
     from plugins.local_knowledge.plugin import Plugin as Knowledge
     from plugins.diary_export.plugin import Plugin as Diary
 
@@ -96,10 +95,6 @@ def test_third_wave_schemas_encode_old_args():
     assert music.get_tool_schema()["name"] == "play_music"
     assert music.format_invocation({"query": "春日影"}) == "春日影"
     assert music.format_invocation({"query": "随机"}) == ""
-    mode = Mode()
-    assert mode.get_tool_schema()["name"] == "mode_preset"
-    assert mode.format_invocation({"action": "apply", "name": "codex"}) == "apply ||| codex"
-    assert mode.format_invocation({"action": "list"}) == "list"
     knowledge = Knowledge()
     assert knowledge.get_tool_schema()["name"] == "knowledge_base"
     assert knowledge.format_invocation({"action": "search", "query": "人设"}) == "search ||| 人设"

@@ -3,8 +3,9 @@ import os
 import uuid
 from copy import deepcopy
 from typing import Any, Dict, Optional
+from modules.paths import data_path
 
-DATA_FILE = "data/characters.json"
+DATA_FILE = data_path("characters.json")
 
 DEFAULT_EMOTION_KEYS = [
     "neutral",
@@ -452,7 +453,14 @@ class CharacterManager:
         return True
 
     def get_costume_runtime_config(self, char_id: str, costume_name: str) -> dict:
-        """返回给 Live2D 的服装配置（含每服装情绪映射）。"""
+        """返回给 Live2D 的服装配置（含每服装情绪映射）。
+
+        emotion_map 是「按 model3.json 派生 ⊕ 角色默认 ⊕ 服装覆盖」的合成结果，
+        消费方：
+          - 12000 换装载荷（前端解析成当前模型的 motion/expression 绑定）
+          - 角色编辑器预览
+          - EmotionController 发 13200 / 13300 时点名本模型文件，并可带 intensity
+        """
         char = self.get_character(char_id)
         if not char:
             return {}

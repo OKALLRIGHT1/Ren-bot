@@ -125,8 +125,7 @@ async def test_code_agent_analyze_without_exec_permission_returns_clear_message(
         {},
     )
 
-    assert "允许执行命令" in result
-    assert "代码助手" in result
+    assert "执行许可" in result
 
 
 @pytest.mark.asyncio

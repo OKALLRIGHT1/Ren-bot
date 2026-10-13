@@ -1,17 +1,18 @@
 from dataclasses import dataclass
 from typing import Optional
 
-# 尝试从根目录的 config.py 导入图标路径
+# 客户端自带资源（与大脑解耦）：assets/avatar.png 是悬浮球默认头像（"灵魂宝石"），
+# assets/icon.ico 是窗口图标。这两个文件随客户端一起打包，即使尚未选择大脑目录
+# 首次启动也能显示正确的悬浮球头像而非回退文字。
 try:
     from config import QT_ICON_PATH
 except Exception:
-    # 默认值，如果根目录 config 没定义
     QT_ICON_PATH = "assets/icon.ico"
 
 
 @dataclass
 class QtGuiConfig:
-    title: str = "Live2D Agent"
+    title: str = "Live2D-Suzu"
     start_minimized_to_tray: bool = False
     compact_size: tuple = (600, 190)
     full_size: tuple = (760, 560)
@@ -25,12 +26,10 @@ class QtGuiConfig:
 # 定义默认悬浮球配置
 DEFAULT_BALL_CONFIG = {
     "text": "L2D",
-    "image_path": None,
-    "enable_image": False,
-    "size": 60,
+    "image_path": "assets/avatar.png",
+    "enable_image": True,
+    "size": 55,
     "font_size": 14,
-    "bg_color": "#3B82F6",
-    "text_color": "white"
+    "bg_color": "transparent",
+    "text_color": "white",
 }
-
-OFFSET_X = 200

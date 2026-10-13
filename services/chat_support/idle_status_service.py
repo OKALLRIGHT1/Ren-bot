@@ -21,8 +21,10 @@ class IdleStatusService:
             live2d_enabled = bool(output_profile.get("live2d_enabled", True))
         if live2d_enabled:
             await self.event_emit("state.changed", state="idle", reason=reason)
-        else:
-            await self.event_emit("ui.status", text="Idle")
+        # Always push HUD status. Local GUI sets「思考中」on send; if we never
+        # entered THINKING (gatekeeper ignore), state may already be idle and
+        # would not emit UI_STATUS on its own.
+        await self.event_emit("ui.status", text="Idle")
 
     def presenter_output_controls_idle(
         self,

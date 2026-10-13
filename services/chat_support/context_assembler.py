@@ -19,6 +19,7 @@ from modules.conversation_events.prompt import (
 )
 from modules.conversation_events.selector import RecentEventSelector
 from modules.conversation_events.store import ConversationEventStore
+from core.message_source import HUD_USER_SOURCES, LOCAL_LIVE2D_SOURCES
 
 _OWNER_PERSON_IDS = frozenset({"owner", "master"})
 _DIALOG_EVENT_TYPES = frozenset(
@@ -28,7 +29,7 @@ _DIALOG_EVENT_TYPES = frozenset(
         ConversationEventType.PROACTIVE_UTTERANCE,
     }
 )
-_DESKTOP_CHANNELS = frozenset({"desktop", "local", "gui", "text_input", "voice"})
+_DESKTOP_CHANNELS = frozenset({*HUD_USER_SOURCES, *LOCAL_LIVE2D_SOURCES, "desktop"})
 _QQ_CHANNELS = frozenset(
     {"qq", "qq_gateway", "napcat_qq", "qq_private", "qq_group", "remote_qq"}
 )

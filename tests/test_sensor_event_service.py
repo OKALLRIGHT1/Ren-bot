@@ -75,6 +75,19 @@ async def test_self_window_awareness_hint_omits_screenshot_projection():
     assert "Live2D 角色" in self_hint
     assert "画面边缘" in other_hint
     assert "实体投影" not in other_hint
+    text_hint = ChatService._build_live2d_self_awareness_hint(
+        service, {"source": "text_input"}
+    )
+    gui_hint = ChatService._build_live2d_self_awareness_hint(
+        service, {"source": "tauri_gui"}
+    )
+    assert "Live2D 角色" in text_hint
+    assert "画面边缘" not in text_hint
+    assert "画面边缘" not in gui_hint
+    shot_hint = ChatService._build_live2d_self_awareness_hint(
+        service, {"source": "text_input", "has_screenshot": True}
+    )
+    assert "画面边缘" in shot_hint
 
 
 def test_generation_context_passes_self_category_into_persona():

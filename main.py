@@ -31,15 +31,22 @@ def classify_worker_exit(exit_code):
 
 def run_worker():
     """启动子进程运行 boot.py"""
-    # 获取当前 python解释器路径
-    python_exe = sys.executable
+    python_exe = os.environ.get("SUZU_PYTHON") or sys.executable
     # 获取 boot.py 的绝对路径
     script_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "boot.py")
     
     print(f"🚀 [守护进程] 正在启动核心: {script_path}")
     
     # 启动子进程
-    process = subprocess.Popen([python_exe, script_path])
+    env = os.environ.copy()
+    env["GUI_BACKEND"] = "qt"
+    env["SUZU_AUTOSTART_LIVE2D"] = "1"
+    flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    process = subprocess.Popen(
+        [python_exe, script_path],
+        env=env,
+        creationflags=flags,
+    )
     
     # 等待子进程结束
     process.wait()

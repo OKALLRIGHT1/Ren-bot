@@ -7,8 +7,8 @@ from modules.state_machine import AgentState
 def test_idle_random_motion_runs_only_when_idle(monkeypatch):
     calls = []
 
-    async def fake_play_motion(mtn, motion_type=0):
-        calls.append(("motion", mtn, motion_type))
+    async def fake_play_motion(mtn, motion_type=0, **kwargs):
+        calls.append(("motion", mtn, motion_type, kwargs))
 
     monkeypatch.setattr("modules.live2d.play_motion", fake_play_motion)
     monkeypatch.setattr(
@@ -32,6 +32,6 @@ def test_idle_random_motion_runs_only_when_idle(monkeypatch):
     asyncio.run(run())
 
     assert calls == [
-        ("motion", "idle-extra", 0),
-        ("motion", "idle-base", 1),
+        ("motion", "idle-extra", 0, {"source": "idle"}),
+        ("motion", "idle-base", 1, {"source": "idle"}),
     ]

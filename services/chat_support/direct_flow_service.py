@@ -48,6 +48,7 @@ class DirectFlowHooks:
     emit_idle_status_when_safe: Callable[..., Awaitable[Any]]
     schedule_app_restart: Callable[[Dict[str, Any]], None]
     logger: Any = None
+    send_forward: Optional[Callable[..., Awaitable[bool]]] = None
 
 
 @dataclass

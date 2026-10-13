@@ -36,13 +36,26 @@ def _resolve_root() -> Path:
 
 
 ROOT = _resolve_root()
-APP_ENTRY = ROOT / "main.py"
+APP_ENTRY = ROOT / "boot.py"
 LOG_PATH = ROOT / "logs" / "launcher.log"
+
+
+def _prune_launcher_log() -> None:
+    try:
+        if not LOG_PATH.exists() or LOG_PATH.stat().st_size <= 2 * 1024 * 1024:
+            return
+        with LOG_PATH.open("rb") as fh:
+            fh.seek(-(1024 * 1024), os.SEEK_END)
+            tail = fh.read()
+        LOG_PATH.write_bytes(tail)
+    except OSError:
+        return
 
 
 def _log(message: str) -> None:
     try:
         LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        _prune_launcher_log()
         stamp = time.strftime("%Y-%m-%d %H:%M:%S")
         with LOG_PATH.open("a", encoding="utf-8") as f:
             f.write(f"[{stamp}] {message}\n")
@@ -111,17 +124,29 @@ def _candidate_commands() -> list[list[str]]:
         seen.add(key)
         commands.append(cmd)
 
+    def add_python(python_exe: str) -> None:
+        exe = Path(python_exe)
+        if os.name == "nt":
+            pythonw = exe.with_name("pythonw.exe")
+            if pythonw.is_file():
+                add([str(pythonw), str(APP_ENTRY)])
+        add([str(exe), str(APP_ENTRY)])
+
     ready = setup_env.ready_python(ROOT)
     if ready:
-        add([ready, str(APP_ENTRY)])
+        add_python(ready)
 
     local_venv = setup_env.venv_python(ROOT)
     if local_venv.exists():
-        add([str(local_venv), str(APP_ENTRY)])
+        add_python(str(local_venv))
 
-    conda_exe = shutil.which("conda")
-    if conda_exe:
-        add([conda_exe, "run", "-n", CONDA_ENV, "python", str(APP_ENTRY)])
+    conda_python = setup_env.conda_env_python(CONDA_ENV)
+    if conda_python:
+        add_python(conda_python)
+    else:
+        conda_exe = shutil.which("conda")
+        if conda_exe:
+            add([conda_exe, "run", "-n", CONDA_ENV, "python", str(APP_ENTRY)])
 
     py_exe = shutil.which("pythonw") or shutil.which("python")
     if py_exe:
@@ -145,6 +170,8 @@ def _start_process() -> tuple[subprocess.Popen | None, str]:
     env = os.environ.copy()
     env.setdefault("PYTHONUNBUFFERED", "1")
     env.setdefault("PYTHONIOENCODING", "utf-8")
+    env["GUI_BACKEND"] = "qt"
+    env["SUZU_AUTOSTART_LIVE2D"] = "1"
 
     last_error = ""
     for cmd in _candidate_commands():
@@ -183,6 +210,12 @@ def _run_splash(proc: subprocess.Popen) -> None:
     root.title("Live2D-Suzu")
     root.resizable(False, False)
     root.geometry("360x120")
+    icon = ROOT / "assets" / "icon.ico"
+    if icon.is_file():
+        try:
+            root.iconbitmap(str(icon))
+        except Exception:
+            pass
     try:
         root.eval("tk::PlaceWindow . center")
     except Exception:
@@ -249,7 +282,7 @@ def _ensure_runtime() -> bool:
 def main() -> int:
     os.chdir(ROOT)
     if not APP_ENTRY.exists():
-        msg = f"找不到 main.py。\n\n当前识别的项目目录：{ROOT}"
+        msg = f"找不到 boot.py。\n\n当前识别的项目目录：{ROOT}"
         _log(msg)
         _show_error(msg)
         return 1

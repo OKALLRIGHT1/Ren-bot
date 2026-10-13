@@ -4,8 +4,11 @@ import tempfile
 from pathlib import Path
 from typing import Any, Dict
 
+from modules.paths import data_path
 
-RUNTIME_SETTINGS_PATH = Path("./data/runtime_settings.json")
+# 路径锚定（docs/部分重构.md §13.1）：环境变量注入时走用户数据目录，
+# 否则保持 './data/runtime_settings.json' 相对路径（开发模式行为不变）。
+RUNTIME_SETTINGS_PATH = Path(data_path("runtime_settings.json"))
 EMBEDDING_MODEL_ID_KEY = "embedding_model_id"
 EMBEDDING_MODEL_IDS_KEY = "embedding_model_ids"
 OLLAMA_AUTOSTART_KEY = "ollama_autostart_enabled"

@@ -113,15 +113,6 @@ class ColorSettingsPage(QtWidgets.QWidget):
         add_color_row(main_console_form, "弱文本", "console_main.muted")
         add_color_row(main_console_form, "标签", "console_main.label")
 
-        codex_console_form = add_group("代码助手控制台")
-        add_color_row(codex_console_form, "背景", "console_codex.bg")
-        add_color_row(codex_console_form, "文字", "console_codex.fg")
-        add_color_row(codex_console_form, "边框", "console_codex.border")
-        add_color_row(codex_console_form, "选中背景", "console_codex.selection_bg")
-        add_color_row(codex_console_form, "选中文字", "console_codex.selection_fg")
-        add_color_row(codex_console_form, "弱文本", "console_codex.muted")
-        add_color_row(codex_console_form, "标签", "console_codex.label")
-
         body_layout.addStretch()
         layout.addWidget(body, 1)
 

@@ -721,7 +721,23 @@ Output:
                     if self.sm:
                         await self.sm.set_state(AgentState.IDLE, reason="all_done")
                     if self.go_idle_fn:
-                        await self.go_idle_fn()
+                        try:
+                            import config
+                            linger = float(getattr(config, "TTS_EMOTION_LINGER_SEC", 15.0) or 0.0)
+                        except Exception:
+                            linger = 15.0
+                        if linger > 0:
+                            async def _delayed_go_idle(delay: float):
+                                await asyncio.sleep(delay)
+                                if self.sm and self.sm.state != AgentState.IDLE:
+                                    return
+                                try:
+                                    await self.go_idle_fn()
+                                except Exception:
+                                    pass
+                            asyncio.create_task(_delayed_go_idle(linger))
+                        else:
+                            await self.go_idle_fn()
 
             except Exception as e:
                 print(f"💥 [Player] 错误: {e}")

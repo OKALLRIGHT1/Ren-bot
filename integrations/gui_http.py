@@ -13,6 +13,7 @@ from urllib.parse import urlparse
 
 from aiohttp import web
 from integrations.gui_media import GuiMediaRegistry, MediaTicketError
+from modules.paths import data_path, memory_dir
 from modules.security_redaction import is_secret_setting
 
 
@@ -361,19 +362,17 @@ class GuiHttpServer:
 
     def _build_paths(self, root: str) -> Dict[str, str]:
         return {
-            "customModels": self._join_path(root, "data", "custom_models.json"),
-            "runtimeSettings": self._join_path(root, "data", "runtime_settings.json"),
-            "characters": self._join_path(root, "data", "characters.json"),
+            "customModels": data_path("custom_models.json"),
+            "runtimeSettings": data_path("runtime_settings.json"),
+            "characters": data_path("characters.json"),
             "mcpConfig": self._join_path(root, "plugins", "mcp_tools", "config.json"),
         }
 
     def _get_memory_store(self):
         try:
-            root = self._find_backend_root(os.getcwd())
-            if root:
-                memory_db = Path(root) / "memory" / "memory.sqlite"
-                os.environ["MEMORY_SQLITE_PATH"] = str(memory_db)
-                os.environ.setdefault("MEMORY_DIR", str(memory_db.parent))
+            mem = Path(memory_dir())
+            os.environ["MEMORY_DIR"] = str(mem)
+            os.environ["MEMORY_SQLITE_PATH"] = str(mem / "memory.sqlite")
             import importlib.util
 
             module_path = (
@@ -575,6 +574,20 @@ class GuiHttpServer:
             return 400
         return 400
 
+    def _asr_gui_service(self):
+        from services.gui_api.asr_service import AsrGuiService
+
+        apply_settings = None
+        app = self.app_ref
+        if app is not None and hasattr(app, "apply_asr_settings"):
+            apply_settings = app.apply_asr_settings
+        return AsrGuiService(apply_settings=apply_settings)
+
+    def _sensor_prompts_gui_service(self):
+        from services.gui_api.sensor_prompts_service import SensorPromptsGuiService
+
+        return SensorPromptsGuiService()
+
     def _theme_gui_service(self):
         from modules.runtime_settings import load_runtime_settings, update_runtime_settings
         from services.gui_api.theme_service import ThemeGuiService
@@ -669,26 +682,9 @@ class GuiHttpServer:
         root = self._find_backend_root(os.getcwd()) or os.getcwd()
         return LogsGuiService(log_dir=Path(root) / "logs")
 
-    def _codex_gui_service(self):
-        from modules.runtime_settings import load_runtime_settings, update_runtime_settings
-        from services.gui_api.codex_service import CodexGuiService
-
-        return CodexGuiService(
-            load_runtime=load_runtime_settings,
-            update_runtime=update_runtime_settings,
-        )
-
     def _logs_result_status(self, result: Dict[str, Any]) -> int:
         error = str(result.get("error") or "")
         if error in {"invalid_name", "log_not_allowed", "path_escape"}:
-            return 400
-        return 400
-
-    def _codex_result_status(self, result: Dict[str, Any]) -> int:
-        error = str(result.get("error") or "")
-        if error in {"runtime_store_unavailable"}:
-            return 503
-        if error in {"empty_payload"}:
             return 400
         return 400
 
@@ -846,8 +842,8 @@ class GuiHttpServer:
             "latest_rust_event": latest_rust_event,
         }
 
-    def _get_event_logger_path(self, root: str) -> Path:
-        return Path(self._join_path(root, "data", "events.sqlite"))
+    def _get_event_logger_path(self, _root: str) -> Path:
+        return Path(data_path("events.sqlite"))
 
     @staticmethod
     def _extract_expression_id(name: str, file_name: str) -> Optional[int]:
@@ -1689,12 +1685,22 @@ class GuiHttpServer:
         if self.app_ref is None:
             return
         try:
-            character_module = self._load_local_module(
-                "gui_http_character_manager",
-                ["modules", "character_manager.py"],
-            )
-            character_manager = character_module.character_manager
+            from modules.character_manager import character_manager
+
             character_manager.load()
+        except Exception:
+            try:
+                character_module = self._load_local_module(
+                    "gui_http_character_manager",
+                    ["modules", "character_manager.py"],
+                )
+                character_module.character_manager.load()
+            except Exception:
+                pass
+        try:
+            apply_asr = getattr(self.app_ref, "apply_asr_settings", None)
+            if callable(apply_asr):
+                apply_asr()
         except Exception:
             pass
 
@@ -1940,7 +1946,6 @@ class GuiHttpServer:
                     "qq-gateway",
                     "app-rules",
                     "logs",
-                    "codex",
                     "status-screen",
                 ],
             }
@@ -2920,6 +2925,46 @@ class GuiHttpServer:
             return self._json_response(result, status=self._meme_result_status(result))
         return self._json_response(result)
 
+    async def _handle_asr_get(self, _request: web.Request) -> web.Response:
+        result = self._asr_gui_service().get_settings()
+        if not result.get("ok"):
+            return self._json_response(result, status=400)
+        return self._json_response(result)
+
+    async def _handle_asr_save(self, request: web.Request) -> web.Response:
+        payload = await self._read_payload(request)
+        result = self._asr_gui_service().save_settings(payload)
+        if not result.get("ok"):
+            return self._json_response(result, status=400)
+        return self._json_response(result)
+
+    async def _handle_asr_preview(self, request: web.Request) -> web.Response:
+        payload = await self._read_payload(request)
+        result = self._asr_gui_service().preview(payload)
+        if not result.get("ok"):
+            return self._json_response(result, status=400)
+        return self._json_response(result)
+
+    async def _handle_sensor_prompts_get(self, _request: web.Request) -> web.Response:
+        result = self._sensor_prompts_gui_service().get_settings()
+        if not result.get("ok"):
+            return self._json_response(result, status=400)
+        return self._json_response(result)
+
+    async def _handle_sensor_prompts_save(self, request: web.Request) -> web.Response:
+        payload = await self._read_payload(request)
+        result = self._sensor_prompts_gui_service().save_settings(payload)
+        if not result.get("ok"):
+            return self._json_response(result, status=400)
+        return self._json_response(result)
+
+    async def _handle_sensor_prompts_preview(self, request: web.Request) -> web.Response:
+        payload = await self._read_payload(request)
+        result = self._sensor_prompts_gui_service().preview(payload)
+        if not result.get("ok"):
+            return self._json_response(result, status=400)
+        return self._json_response(result)
+
     async def _handle_theme_get(self, _request: web.Request) -> web.Response:
         result = self._theme_gui_service().list_themes()
         if not result.get("ok"):
@@ -2988,19 +3033,6 @@ class GuiHttpServer:
         result = self._logs_gui_service().tail(name, max_bytes=max_bytes_i)
         if not result.get("ok"):
             return self._json_response(result, status=self._logs_result_status(result))
-        return self._json_response(result)
-
-    async def _handle_codex_get(self, _request: web.Request) -> web.Response:
-        result = self._codex_gui_service().get_settings()
-        if not result.get("ok"):
-            return self._json_response(result, status=self._codex_result_status(result))
-        return self._json_response(result)
-
-    async def _handle_codex_save(self, request: web.Request) -> web.Response:
-        payload = await self._read_payload(request)
-        result = self._codex_gui_service().save_settings(payload)
-        if not result.get("ok"):
-            return self._json_response(result, status=self._codex_result_status(result))
         return self._json_response(result)
 
     async def _handle_status_screen_get(self, _request: web.Request) -> web.Response:
@@ -3294,6 +3326,19 @@ class GuiHttpServer:
         )
         app.router.add_get(self._api_path("/qq/gateway"), self._handle_qq_gateway_get)
         app.router.add_post(self._api_path("/qq/gateway"), self._handle_qq_gateway_save)
+        app.router.add_get(self._api_path("/asr"), self._handle_asr_get)
+        app.router.add_post(self._api_path("/asr"), self._handle_asr_save)
+        app.router.add_post(self._api_path("/asr/preview"), self._handle_asr_preview)
+        app.router.add_get(
+            self._api_path("/sensor-prompts"), self._handle_sensor_prompts_get
+        )
+        app.router.add_post(
+            self._api_path("/sensor-prompts"), self._handle_sensor_prompts_save
+        )
+        app.router.add_post(
+            self._api_path("/sensor-prompts/preview"),
+            self._handle_sensor_prompts_preview,
+        )
         app.router.add_get(self._api_path("/theme"), self._handle_theme_get)
         app.router.add_post(self._api_path("/theme"), self._handle_theme_save)
         app.router.add_get(self._api_path("/app-rules"), self._handle_app_rules_list)
@@ -3302,8 +3347,6 @@ class GuiHttpServer:
         app.router.add_get(self._api_path("/logs"), self._handle_logs_list)
         app.router.add_get(self._api_path("/logs/tail"), self._handle_logs_tail)
         app.router.add_post(self._api_path("/logs/tail"), self._handle_logs_tail)
-        app.router.add_get(self._api_path("/codex"), self._handle_codex_get)
-        app.router.add_post(self._api_path("/codex"), self._handle_codex_save)
         app.router.add_get(self._api_path("/status-screen"), self._handle_status_screen_get)
         app.router.add_post(self._api_path("/status-screen"), self._handle_status_screen_save)
         app.router.add_post(

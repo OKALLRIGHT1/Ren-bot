@@ -76,8 +76,6 @@ from config import (
     LIP_SYNC_ENABLED,
     RHUBARB_PATH,
     LIP_SYNC_SMOOTH_WINDOW,
-    MCP_SERVER_CONFIGS,
-    MCP_ENABLED,
     NAPCAT_ENABLED,
     NAPCAT_WEBHOOK_HOST,
     NAPCAT_WEBHOOK_PORT,
@@ -124,6 +122,7 @@ from modules.live2d import (
     trigger_motion,
     change_costume,
     play_motion,
+    preview_motion,
     set_expression,
     estimate_bubble_display_ms,
 )
@@ -144,7 +143,6 @@ from core.container import ServiceContainer
 from core.event_bus import EventBus, Events
 from core.message_source import build_output_profile
 from modules.event_logger import EventLogger
-from integrations.mcp import MCPToolBridge
 from integrations.chat_gateway import (
     ChatGateway,
     NapCatOneBotAdapter,
@@ -212,7 +210,6 @@ class Live2DApplication:
         self.tts = None
         self.presenter = None
         self.chat_service = None
-        self.mcp_bridge = None
         self.chat_gateway = None
         self.chat_gateway_server = None
         self._napcat_enabled = bool(NAPCAT_ENABLED)
@@ -229,20 +226,24 @@ class Live2DApplication:
         self.gui_ws_server = None
         self.gui_http_server = None
         self.display_mqtt_client = None
-        self.display_state_config_path = Path("./data/display_state_config.json")
+        # 路径锚定（docs/部分重构.md §13.1）：data/ 随用户数据目录走。
+        from modules.paths import data_path
+
+        self.display_state_config_path = Path(data_path("display_state_config.json"))
         self.display_mqtt_last_error = "未初始化"
         self._runtime_mode = ""
         self._headless_stop_event = threading.Event()
         self._requested_exit_code = 0
         # Restart must not kill NapCat/Ollama/etc.; only real exit stops managed ones.
         self._skip_external_stop_on_cleanup = False
+        self._live2d_process = None
 
         # 日记状态标记，防止重复记录
         self.last_summary_date = None
 
         # 配置
         self.tts_enabled = bool(TTS_ENABLED)
-        self.runtime_settings_path = Path("./data/runtime_settings.json")
+        self.runtime_settings_path = Path(data_path("runtime_settings.json"))
         self.think_motion_enabled = True
         try:
             from config import THINK_MOTION_ENABLED, THINK_MOTION_NAME
@@ -530,10 +531,6 @@ class Live2DApplication:
             settings["napcat_access_token"] = napcat_access_token
             self._save_runtime_settings(settings)
         return {
-            "mcp_enabled": bool(settings.get("mcp_enabled", MCP_ENABLED)),
-            "mcp_server_configs": settings.get("mcp_server_configs", MCP_SERVER_CONFIGS)
-            if isinstance(settings.get("mcp_server_configs", MCP_SERVER_CONFIGS), list)
-            else MCP_SERVER_CONFIGS,
             "napcat_enabled": bool(settings.get("napcat_enabled", NAPCAT_ENABLED)),
             "napcat_webhook_host": str(
                 settings.get("napcat_webhook_host", NAPCAT_WEBHOOK_HOST)
@@ -682,88 +679,6 @@ class Live2DApplication:
             if self.logger:
                 self.logger.warning(f"Gateway voice synth failed: {e}")
             return None
-
-    def _register_mcp_local_tools(self):
-        if not self.mcp_bridge:
-            return
-        self.mcp_bridge.clear_local_tools()
-        self.mcp_bridge.register_local_tool(
-            "plugin.list",
-            lambda: [
-                getattr(p, "name", k) for k, p in self.plugin_manager.plugins.items()
-            ],
-            description="List currently loaded local plugin display names.",
-        )
-        self.mcp_bridge.register_local_tool(
-            "chat.process",
-            lambda text, source="text_input": self.on_gui_send(
-                text, {"source": source}
-            ),
-            description="Send a message into the chat pipeline.",
-            input_schema={
-                "type": "object",
-                "properties": {
-                    "text": {"type": "string"},
-                    "source": {"type": "string"},
-                },
-            },
-        )
-        self.mcp_bridge.register_local_tool(
-            "chat.gateway.dispatch",
-            self.dispatch_gateway_payload,
-            description="Dispatch a raw inbound payload to a registered external chat adapter.",
-            input_schema={
-                "type": "object",
-                "properties": {
-                    "adapter_name": {"type": "string"},
-                    "payload": {"type": "object"},
-                },
-                "required": ["adapter_name", "payload"],
-            },
-        )
-        self.mcp_bridge.register_local_tool(
-            "mcp.list_tools",
-            lambda provider="": [
-                {
-                    "name": spec.name,
-                    "provider": spec.provider,
-                    "description": spec.description,
-                    "input_schema": spec.input_schema,
-                }
-                for spec in self.mcp_bridge.list_tools(provider=provider or None)
-            ],
-            description="List currently available MCP tools, including remote tools.",
-            input_schema={
-                "type": "object",
-                "properties": {"provider": {"type": "string"}},
-            },
-        )
-        self.mcp_bridge.register_local_tool(
-            "mcp.server_status",
-            self.mcp_bridge.list_server_status,
-            description="List current remote MCP server connection status.",
-        )
-        self.mcp_bridge.register_local_tool(
-            "mcp.call_tool",
-            self.mcp_bridge.call_tool,
-            description="Call a local or remote MCP tool by unified tool name.",
-            input_schema={
-                "type": "object",
-                "properties": {
-                    "name": {"type": "string"},
-                    "arguments": {"type": "object"},
-                },
-                "required": ["name"],
-            },
-        )
-
-    def get_mcp_tool_names(self):
-        if not self.mcp_bridge:
-            return []
-        try:
-            return [spec.name for spec in self.mcp_bridge.list_tools()]
-        except Exception:
-            return []
 
     async def _select_sedentary_meme_image_path_async(
         self, app_name: str, active_minutes: int
@@ -1117,15 +1032,11 @@ class Live2DApplication:
         if activity_before_fp != activity_after_fp:
             self.notify_activity_config_changed(activity_revision)
         result = {
-            "mcp_enabled": bool(external_settings["mcp_enabled"]),
             "napcat_enabled": bool(external_settings["napcat_enabled"]),
             "skill_enabled": bool(external_settings["skill_enabled"]),
-            "mcp_live_applied": False,
             "napcat_live_applied": False,
             "skill_live_applied": False,
             "napcat_server_running": False,
-            "mcp_servers": [],
-            "mcp_tools": [],
             "skill_count": 0,
             "active_skills": [],
             "sedentary_live_applied": False,
@@ -1186,18 +1097,6 @@ class Live2DApplication:
             result["skill_live_applied"] = True
             result["skill_count"] = len(self.skill_manager.skills)
             result["active_skills"] = list(self.skill_manager.active_skills)
-
-        if self.mcp_bridge is not None:
-            if external_settings["mcp_enabled"]:
-                self._register_mcp_local_tools()
-                result["mcp_servers"] = self.mcp_bridge.configure_remote_servers(
-                    external_settings.get("mcp_server_configs") or []
-                )
-            else:
-                self.mcp_bridge.clear_local_tools()
-                self.mcp_bridge.clear_remote_servers()
-            result["mcp_live_applied"] = True
-            result["mcp_tools"] = self.get_mcp_tool_names()
 
         napcat_adapter = None
         group_no_at_keywords = []
@@ -1271,7 +1170,6 @@ class Live2DApplication:
             self.logger.info(
                 "External settings applied: "
                 f"skills={external_settings['skill_enabled']} active={len(result['active_skills'])} loaded={result['skill_count']}, "
-                f"mcp={external_settings['mcp_enabled']} tools={len(result['mcp_tools'])} servers={len(result['mcp_servers'])}, "
                 f"napcat={external_settings['napcat_enabled']} server_running={result['napcat_server_running']}"
             )
         if self.chat_service is not None:
@@ -1285,11 +1183,13 @@ class Live2DApplication:
 
     def initialize(self):
         # Initialize application.
+        from modules.paths import data_path, logs_dir
+
         # 1. 设置日志
         try:
             from core.console_capture import install_console_capture
 
-            install_console_capture("./logs/console.log")
+            install_console_capture(f"{logs_dir()}/console.log")
         except Exception:
             pass
         from core.logger import setup_logging, set_logger
@@ -1306,6 +1206,14 @@ class Live2DApplication:
         except Exception:
             pass
         self.logger.info(f"TTS startup state: {'on' if self.tts_enabled else 'off'}")
+        dnd_value = self._load_runtime_settings().get("dnd_mode")
+        if isinstance(dnd_value, bool):
+            try:
+                import config as runtime_config
+
+                runtime_config.DND_MODE = dnd_value
+            except Exception:
+                pass
 
         # Optional: auto-start external services (Ollama / GPT-SoVITS / NapCat).
         try:
@@ -1314,7 +1222,7 @@ class Live2DApplication:
             self.logger.warning(f"External services autostart skipped: {e}")
 
         # 2. 初始化事件日志
-        self.event_logger = EventLogger("./data/events.sqlite")
+        self.event_logger = EventLogger(data_path("events.sqlite"))
         self.skill_manager = SkillManager(logger=self.logger)
 
         # 3. 初始化核心组件
@@ -1418,7 +1326,6 @@ class Live2DApplication:
         )
 
         # 7. 初始化聊天服务
-        self.mcp_bridge = MCPToolBridge()
         self.chat_gateway = ChatGateway()
         self.chat_gateway.on_message(self._handle_external_chat_message)
         self.chat_gateway.on_notice(self._handle_external_chat_notice)
@@ -1433,7 +1340,6 @@ class Live2DApplication:
             event_bus=self.event_bus,
             logger=self.logger,
             chat_gateway=self.chat_gateway,
-            mcp_bridge=self.mcp_bridge,
         )
         self.chat_service.skill_manager = self.skill_manager
         self.chat_service.app = self
@@ -1477,6 +1383,14 @@ class Live2DApplication:
                         and self.gui_ws_server.has_capable_client("live2d.protocol.v1")
                     ),
                 ),
+            )
+        )
+        from modules import live2d as live2d_module
+
+        live2d_module.set_performance_client_check(
+            lambda: bool(
+                self.gui_ws_server
+                and self.gui_ws_server.has_capable_client("live2d.performance.v1")
             )
         )
         self.gui_http_server = GuiHttpServer(
@@ -1540,12 +1454,48 @@ class Live2DApplication:
         return None
 
     def _init_voice_sensor_if_configured(self):
+        try:
+            from modules.asr.adapter import (
+                project_character_provider,
+                project_logger,
+                project_settings_store,
+            )
+            from modules.asr.settings import configure as configure_asr_settings
+
+            configure_asr_settings(
+                settings_store=project_settings_store(),
+                character_provider=project_character_provider(),
+                logger=project_logger(),
+            )
+        except Exception as exc:
+            if self.logger:
+                self.logger.warning(f"ASR settings configure failed: {exc}")
         if not getattr(config, "VOICE_SENSOR_ENABLED", False):
             self.voice_sensor = None
             if self.logger:
                 self.logger.info("VoiceSensor disabled; voice module not preloaded")
             return None
         return self._ensure_voice_sensor_loaded()
+
+    def _asr_health_record(self) -> tuple[str, str, dict]:
+        sensor = getattr(self, "voice_sensor", None)
+        if sensor is None:
+            return "disabled", "ASR 未启用", {}
+        engine = getattr(sensor, "engine", None)
+        if engine is not None and getattr(engine, "ready", False):
+            return (
+                "healthy",
+                f"ASR 已启用（{getattr(engine, 'name', 'ready')}）",
+                {"engine": str(getattr(engine, "name", "") or "")},
+            )
+        try:
+            from modules.asr.engine import missing_qwen3_reason
+
+            reason = missing_qwen3_reason(getattr(sensor, "base_dir", ".") or ".")
+        except Exception:
+            reason = ""
+        summary = str(reason or "语音输入未就绪").strip()
+        return "offline", summary, {"engine_ready": False}
 
     def _report_initial_runtime_health(self) -> None:
         from config import MODELS
@@ -1584,12 +1534,7 @@ class Live2DApplication:
                 else "TTS 未启用",
                 {},
             ),
-            (
-                "asr",
-                "healthy" if self.voice_sensor is not None else "disabled",
-                "ASR 已启用" if self.voice_sensor is not None else "ASR 未启用",
-                {},
-            ),
+            ("asr", *self._asr_health_record()),
             (
                 "plugin_manager",
                 "healthy" if self.plugin_manager is not None else "offline",
@@ -1710,7 +1655,9 @@ class Live2DApplication:
         if not text or not str(text).strip():
             return
         from pathlib import Path
-        history_path = Path("data/recent_chat_history.json")
+        from modules.paths import data_path
+
+        history_path = Path(data_path("recent_chat_history.json"))
         try:
             items = []
             if history_path.exists():
@@ -1727,7 +1674,9 @@ class Live2DApplication:
 
     def _load_recent_chat_history(self) -> list:
         from pathlib import Path
-        history_path = Path("data/recent_chat_history.json")
+        from modules.paths import data_path
+
+        history_path = Path(data_path("recent_chat_history.json"))
         try:
             if history_path.exists():
                 items = json.loads(history_path.read_text(encoding="utf-8"))
@@ -1845,26 +1794,22 @@ class Live2DApplication:
             else:
                 await self.gui_ws_server.send(ws, log_payload)
 
-    def _apply_mode_preset(self, preset: str) -> str:
-        name = str(preset or "").strip().lower()
-        if not name:
-            return "mode preset is empty"
+    def set_dnd_mode(self, enabled: bool) -> None:
+        enabled = bool(enabled)
         try:
-            from plugins.mode_preset.plugin import Plugin as ModePresetPlugin
+            import config as runtime_config
 
-            plugin = ModePresetPlugin()
-            result = plugin._apply(name, {"chat_service": self.chat_service})
-            try:
-                import config as runtime_config
+            runtime_config.DND_MODE = enabled
+        except Exception:
+            pass
+        settings = self._load_runtime_settings()
+        settings["dnd_mode"] = enabled
+        self._save_runtime_settings(settings)
 
-                self.tts_enabled = bool(
-                    getattr(runtime_config, "TTS_ENABLED", self.tts_enabled)
-                )
-            except Exception:
-                pass
-            return str(result or "")
-        except Exception as exc:
-            return f"mode preset apply failed: {exc}"
+    def _apply_mode_preset(self, preset: str) -> str:
+        from modules.companion_mode import apply_preset
+
+        return apply_preset(self, preset)
 
     async def _on_gui_ws_message(self, payload: Dict[str, Any], ws) -> None:
         msg_type = str(payload.get("type") or "").strip().lower()
@@ -1904,12 +1849,34 @@ class Live2DApplication:
                     ui.request_hud_hotkey()
             self._emit_gui_ws({"type": "hud_control", "action": action})
             return
+        if name == "preview_motion":
+            motion_name = str(payload.get("motion_name") or payload.get("name") or "").strip()
+            motion_type = int(payload.get("motion_type") or payload.get("type") or 0)
+            if motion_name:
+                self.on_gui_preview_motion(motion_name, motion_type)
+            return
+        if name == "preview_expression":
+            exp_id = payload.get("exp_id")
+            if exp_id is not None:
+                self.on_gui_preview_expression(exp_id)
+            return
+        if name == "change_costume":
+            path = str(payload.get("path") or "").strip()
+            config = payload.get("config") if isinstance(payload.get("config"), dict) else {}
+            if path:
+                self.on_gui_change_costume(path, config)
+            return
         if name == "send_text":
             text = str(payload.get("text") or "").strip()
             if text:
-                self._record_recent_chat_log("user", text)
-                self._emit_gui_ws({"type": "log", "role": "user", "text": text})
-                self.on_gui_send(text, {"source": "tauri_gui"})
+                hidden_command = text.startswith("[CMD:")
+                if not hidden_command:
+                    self._record_recent_chat_log("user", text)
+                    self._emit_gui_ws({"type": "log", "role": "user", "text": text})
+                self.on_gui_send(
+                    text,
+                    {"source": "tauri_gui", "hidden_command": hidden_command},
+                )
             return
         if name == "cancel":
             self.cancel_gui_chat()
@@ -1959,7 +1926,7 @@ class Live2DApplication:
                 desired = payload.get("value")
                 if desired is None:
                     desired = not bool(getattr(runtime_config, "DND_MODE", False))
-                runtime_config.DND_MODE = bool(desired)
+                self.set_dnd_mode(bool(desired))
             except Exception:
                 pass
             await self._send_gui_snapshot(ws)
@@ -2158,13 +2125,6 @@ class Live2DApplication:
                             "text": "Costume not found",
                             "level": "info",
                         },
-                    )
-                    return
-                if value == "codex":
-                    if hasattr(self.qt_ui, "_on_codex_clicked"):
-                        self.qt_ui._on_codex_clicked()
-                    await self.gui_ws_server.send(
-                        ws, {"type": "status", "text": "???????", "level": "info"}
                     )
                     return
                 if value == "monitor":
@@ -2406,11 +2366,27 @@ class Live2DApplication:
                 bubble_parts = split_local_bubble_text_parts(text) or [text]
 
                 async def _emit_silent_bubbles(seq: int, parts: list[str], emo):
-                    from modules.live2d import send_lip_sync
+                    from modules.live2d import send_lip_sync, send_speech_lifecycle
                     from modules.text_lip_sync import (
                         build_text_lip_sync,
                         estimate_text_speech_duration,
                     )
+
+                    # 没 TTS 也要驱动 voice lifecycle（msg 13701），否则前端引擎不知道
+                    # 在"说话"，LipSyncController 的 speaking 门关着，嘴永远不会动。
+                    # 不检查 has_performance_client()：即使大脑认为没有 performance client，
+                    # 发 13701 也无害（前端不认就忽略），但漏发会导致纯文本回复永远不动嘴。
+                    try:
+                        total_ms = sum(
+                            max(2200, int(estimate_text_speech_duration(p) * 1000 + 450))
+                            for p in parts
+                        )
+                        await send_speech_lifecycle(
+                            "start", duration_ms=total_ms, emotion=emo
+                        )
+                        self.logger.info(f"[silent-tts] voice lifecycle start sent, total_ms={total_ms}, parts={len(parts)}")
+                    except Exception as exc:
+                        self.logger.warning(f"silent voice lifecycle start failed: {exc}")
 
                     for part in parts:
                         if seq != self._silent_bubble_seq:
@@ -2450,6 +2426,12 @@ class Live2DApplication:
 
                     if seq != self._silent_bubble_seq:
                         return
+                    # 纯文本回复结束后也要发 voice lifecycle stop，把 speaking 门关掉。
+                    try:
+                        await send_speech_lifecycle("stop")
+                        self.logger.info("[silent-tts] voice lifecycle stop sent")
+                    except Exception as exc:
+                        self.logger.warning(f"silent voice lifecycle stop failed: {exc}")
                     if self.state_machine.state != AgentState.SPEAKING:
                         return
                     self.logger.debug("TTS disabled; set idle")
@@ -2523,19 +2505,18 @@ class Live2DApplication:
         # Trigger restart flow.
         print("🔁 [App] 接收到重启请求...")
 
-        if not self._watchdog_is_running():
-            self._spawn_delayed_watchdog_restart()
-
         # Restart should NOT stop external services. Keep NapCat/Ollama/etc.
         # running across backend restarts; only full exit closes managed ones.
-        # Flag also protects the outer finally-cleanup path after sys.exit.
         self._skip_external_stop_on_cleanup = True
+        self._requested_exit_code = 0
+        self._spawn_boot_restart()
+        ui = getattr(self, "qt_ui", None)
+        app = getattr(ui, "_app", None) if ui is not None else None
+        if app is not None:
+            app.quit()
+            return
         self.cleanup(stop_external_services=False)
-
-        # Exit code 100 signals the outer watchdog to relaunch.
-        import sys
-
-        sys.exit(100)
+        raise SystemExit(0)
 
     def _watchdog_is_running(self) -> bool:
         """Return True when the outer main.py watchdog owns its instance lock."""
@@ -2551,6 +2532,72 @@ class Live2DApplication:
         except Exception as exc:
             self.logger.warning(f"Watchdog lock check failed; scheduling restart helper: {exc}")
             return False
+
+    def _spawn_boot_restart(self) -> None:
+        """Relaunch boot.py directly, without a visible console."""
+        import subprocess
+        import sys
+
+        root = Path(__file__).resolve().parents[1]
+        entry = root / "boot.py"
+        python_exe = os.environ.get("SUZU_PYTHON") or r"D:\Anaconda\python.exe"
+        pythonw = str(Path(python_exe).with_name("pythonw.exe"))
+        if os.path.isfile(pythonw):
+            python_exe = pythonw
+        elif not os.path.isfile(python_exe):
+            python_exe = sys.executable
+        waiter_exe = python_exe if os.path.isfile(pythonw) else python_exe
+        env = os.environ.copy()
+        env["GUI_BACKEND"] = "qt"
+        env["SUZU_AUTOSTART_LIVE2D"] = "1"
+        env["PYTHONUNBUFFERED"] = "1"
+        flags = (
+            getattr(subprocess, "DETACHED_PROCESS", 0)
+            | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+            | getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        )
+        # The current process still owns the core lock. Launch through a waiter
+        # so the new boot.py starts only after this process has exited.
+        waiter = (
+            "import subprocess, sys, time\n"
+            "from pathlib import Path\n"
+            "from core.single_instance import SingleInstanceLock\n"
+            f"root = Path({str(root)!r})\n"
+            f"entry = Path({str(entry)!r})\n"
+            f"python_exe = {python_exe!r}\n"
+            "deadline = time.time() + 30.0\n"
+            "while time.time() < deadline:\n"
+            "    lock = SingleInstanceLock(root, 'core')\n"
+            "    if lock.acquire():\n"
+            "        lock.release()\n"
+            "        break\n"
+            "    time.sleep(0.4)\n"
+            "flags = getattr(subprocess, 'DETACHED_PROCESS', 0) | getattr(subprocess, 'CREATE_NEW_PROCESS_GROUP', 0) | getattr(subprocess, 'CREATE_NO_WINDOW', 0)\n"
+            "env = dict(**__import__('os').environ)\n"
+            "env['GUI_BACKEND'] = 'qt'\n"
+            "env['SUZU_AUTOSTART_LIVE2D'] = '1'\n"
+            "subprocess.Popen([python_exe, str(entry)], cwd=str(root), env=env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, close_fds=True, creationflags=flags)\n"
+        )
+        startupinfo = None
+        if os.name == "nt":
+            startupinfo = subprocess.STARTUPINFO()
+            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            startupinfo.wShowWindow = 0
+        try:
+            subprocess.Popen(
+                [waiter_exe, "-c", waiter],
+                cwd=str(root),
+                env=env,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                close_fds=True,
+                startupinfo=startupinfo,
+                creationflags=flags,
+            )
+            self.logger.info("Scheduled direct boot.py restart")
+        except Exception as exc:
+            self.logger.error(f"Failed to restart boot.py: {exc}")
 
     def _spawn_delayed_watchdog_restart(self) -> None:
         """Start main.py after the current core process releases its single-instance lock."""
@@ -2572,11 +2619,13 @@ class Live2DApplication:
             "        lock.release()\n"
             "        break\n"
             "    time.sleep(0.5)\n"
-            "flags = getattr(subprocess, 'DETACHED_PROCESS', 0) | getattr(subprocess, 'CREATE_NEW_PROCESS_GROUP', 0)\n"
+            "flags = getattr(subprocess, 'DETACHED_PROCESS', 0) | getattr(subprocess, 'CREATE_NEW_PROCESS_GROUP', 0) | getattr(subprocess, 'CREATE_NO_WINDOW', 0)\n"
             "subprocess.Popen([sys.executable, str(entry)], cwd=str(root), stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, close_fds=True, creationflags=flags)\n"
         )
-        flags = getattr(subprocess, "DETACHED_PROCESS", 0) | getattr(
-            subprocess, "CREATE_NEW_PROCESS_GROUP", 0
+        flags = (
+            getattr(subprocess, "DETACHED_PROCESS", 0)
+            | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+            | getattr(subprocess, "CREATE_NO_WINDOW", 0)
         )
         try:
             subprocess.Popen(
@@ -2752,6 +2801,11 @@ class Live2DApplication:
         elif self.logger:
             self.logger.info("Restart cleanup: keep external services running")
 
+        # Only the renderer this process started is stopped, and only on a real exit.
+        # Restart (100) leaves it running so the desktop model does not flicker off.
+        if stop_external_services:
+            self._stop_owned_live2d_renderer()
+
         # 🟢 停止语音监听，释放麦克风
         if self.voice_sensor:
             try:
@@ -2898,12 +2952,9 @@ class Live2DApplication:
         )
 
     def _sync_qt_gui_visibility(self) -> None:
-        ui = getattr(self, "qt_ui", None)
-        if ui is None or not hasattr(ui, "set_frontend_suppressed"):
-            return
-        if self._keep_qt_gui_visible():
-            return
-        ui.set_frontend_suppressed(self._has_enhanced_gui_client())
+        # The in-brain Qt tray is the only settings window now. Live2D is just
+        # the desktop model, so its connection must not hide that tray.
+        return
 
     def _has_frontend_pcm_client(self) -> bool:
         server = getattr(self, "gui_ws_server", None)
@@ -3007,9 +3058,16 @@ class Live2DApplication:
     def apply_asr_settings(self, settings: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """Persist-applied ASR policy hot-reload for VoiceSensor."""
         try:
-            from modules.asr.settings import load_asr_settings, resolve_wake_words
+            from modules.asr.settings import (
+                load_asr_settings,
+                resolve_wake_words,
+                save_asr_settings,
+            )
 
-            cfg = load_asr_settings(settings if isinstance(settings, dict) else None)
+            if isinstance(settings, dict) and settings:
+                cfg = save_asr_settings(settings)
+            else:
+                cfg = load_asr_settings()
             words = resolve_wake_words(settings=cfg)
             result: Dict[str, Any] = {
                 "ok": True,
@@ -3091,6 +3149,7 @@ class Live2DApplication:
                 try:
                     self.gui_http_server.start()
                     self._publish_gui_activity_endpoint()
+                    self._start_live2d_renderer_when_ready()
                 except Exception as exc:
                     if self.logger:
                         self.logger.error(f"GUI HTTP start failed: {exc}")
@@ -3121,7 +3180,7 @@ class Live2DApplication:
             return
 
         async def _process():
-            # 默认来自文本输入，可被外部窗口覆盖为 codex_input 等来源
+            # 默认来自文本输入，调用方可以覆盖 source。
             merged_ctx: Dict[str, Any] = {"source": "text_input"}
             if isinstance(ctx, dict):
                 merged_ctx.update(ctx)
@@ -3148,7 +3207,14 @@ class Live2DApplication:
 
         def _start():
             prev = getattr(self, "_gui_chat_task", None)
+            incoming = str(text or "").strip()
+            hidden_command = incoming.startswith("[CMD:") or bool(
+                isinstance(ctx, dict) and ctx.get("hidden_command")
+            )
             if prev is not None and not prev.done():
+                if hidden_command:
+                    # Toolbar/dev commands must not abort an in-flight user turn.
+                    return
                 prev.cancel()
             task = self.loop.create_task(_process())
             self._gui_chat_task = task
@@ -3516,6 +3582,10 @@ class Live2DApplication:
                     self.sync_active_character_live2d()
             except Exception:
                 pass
+            try:
+                self.apply_asr_settings()
+            except Exception:
+                pass
             self._schedule_character_qq_profile_sync(char_id, char)
             return True
         except Exception as e:
@@ -3530,7 +3600,7 @@ class Live2DApplication:
 
         async def _do():
             try:
-                await play_motion(str(motion_name), motion_type=int(motion_type))
+                await preview_motion(str(motion_name), motion_type=int(motion_type))
             except Exception as e:
                 self.logger.error(f"预览动作失败: {e}")
 
@@ -3623,6 +3693,143 @@ class Live2DApplication:
     def _run_headless(self):
         self.logger.info("Headless runtime started; desktop GUI is disabled")
         self._headless_stop_event.wait()
+
+    def _live2d_exe_candidates(self) -> list[Path]:
+        candidates: list[Path] = []
+        configured = os.environ.get("SUZU_LIVE2D_EXE", "").strip()
+        if not configured:
+            try:
+                import client_config
+
+                configured = str(client_config.effective().get("live2d_exe") or "").strip()
+            except Exception:
+                configured = ""
+        if configured:
+            candidates.append(Path(configured))
+        root = Path(__file__).resolve().parents[1]
+        candidates.extend(
+            [
+                root.parent
+                / "live2d-enhanced-connection-profiles"
+                / "src-tauri"
+                / "target"
+                / "release"
+                / "live2d-enhanced.exe",
+                Path(r"D:\Live2D Suzu Enhanced\live2d-enhanced.exe"),
+            ]
+        )
+        return candidates
+
+    def _resolve_live2d_exe(self) -> Optional[Path]:
+        for path in self._live2d_exe_candidates():
+            if path.is_file():
+                return path
+        return None
+
+    def _live2d_already_running(self) -> bool:
+        if psutil is not None:
+            try:
+                return any(
+                    str(proc.info.get("name") or "").lower() == "live2d-enhanced.exe"
+                    for proc in psutil.process_iter(["name"])
+                )
+            except Exception:
+                return False
+        if os.name != "nt":
+            return False
+        try:
+            import subprocess
+
+            kwargs = {}
+            if os.name == "nt":
+                kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+
+            out = subprocess.run(
+                ["tasklist", "/FI", "IMAGENAME eq live2d-enhanced.exe", "/FO", "CSV"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                **kwargs,
+            ).stdout
+            return "live2d-enhanced.exe" in out.lower()
+        except Exception:
+            return False
+
+    def _wait_local_health(self, timeout: float = 20.0) -> bool:
+        import urllib.request
+
+        prefix = str(getattr(config, "GUI_HTTP_PREFIX", "/gui") or "/gui").rstrip("/") or "/gui"
+        port = int(getattr(config, "GUI_HTTP_PORT", 8097) or 8097)
+        url = f"http://127.0.0.1:{port}{prefix}/health"
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            try:
+                with opener.open(url, timeout=1.5) as response:
+                    if 200 <= int(response.status) < 300:
+                        return True
+            except Exception:
+                time.sleep(0.3)
+        return False
+
+    def _start_live2d_renderer_when_ready(self) -> None:
+        if os.environ.get("SUZU_ROLE", "").strip().lower() in {"renderer", "live2d"}:
+            return
+        auto = os.environ.get("SUZU_AUTOSTART_LIVE2D", "").strip().lower()
+        if auto in {"0", "false", "no"}:
+            return
+        if not auto:
+            try:
+                import client_config
+
+                if not bool(client_config.effective().get("auto_start_live2d", True)):
+                    return
+            except Exception:
+                pass
+
+        def worker() -> None:
+            if not self._wait_local_health():
+                if self.logger:
+                    self.logger.warning("Live2D renderer skipped: GUI health did not become ready")
+                return
+            if self._live2d_already_running():
+                if self.logger:
+                    self.logger.info("Live2D renderer already running; skip spawn")
+                return
+            exe = self._resolve_live2d_exe()
+            if exe is None:
+                if self.logger:
+                    self.logger.warning("Live2D renderer exe not found; skip spawn")
+                return
+            env = os.environ.copy()
+            env["SUZU_ROLE"] = "renderer"
+            try:
+                from subprocess import DEVNULL, Popen
+
+                proc = Popen([str(exe)], cwd=str(exe.parent), env=env, stdin=DEVNULL)
+            except Exception as exc:
+                if self.logger:
+                    self.logger.error(f"Live2D renderer start failed: {exc}")
+                return
+            self._live2d_process = proc
+            if self.logger:
+                self.logger.info(f"Started Live2D renderer: {exe}")
+
+        threading.Thread(target=worker, name="suzu-live2d", daemon=True).start()
+
+    def _stop_owned_live2d_renderer(self) -> None:
+        proc = self._live2d_process
+        self._live2d_process = None
+        if proc is None or proc.poll() is not None:
+            return
+        try:
+            proc.terminate()
+            proc.wait(timeout=8)
+        except Exception:
+            try:
+                proc.kill()
+            except Exception:
+                pass
 
     def request_runtime_control(self, action: str) -> tuple[bool, str]:
         action = str(action or "").strip().lower()

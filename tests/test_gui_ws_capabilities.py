@@ -74,6 +74,37 @@ async def test_hello_updates_client_capabilities():
 
 
 @pytest.mark.asyncio
+async def test_hello_tracks_client_name_for_enhanced_gui():
+    server = GuiWebSocketServer(access_token="secret")
+    client = FakeWs()
+    server._clients.add(client)
+    await server._dispatch_message(
+        {
+            "type": "hello",
+            "client": "live2d-enhanced",
+            "protocol_version": 1,
+            "capabilities": ["gui.v1"],
+        },
+        client,
+    )
+    assert server.has_client("live2d-enhanced") is True
+    assert server.has_client("qt") is False
+    server._clients.discard(client)
+    server._client_names.pop(client, None)
+    assert server.has_client("live2d-enhanced") is False
+
+
+def test_audio_pcm_capability_is_detected():
+    server = GuiWebSocketServer(access_token="secret")
+    client = FakeWs()
+    server._clients.add(client)
+    server._client_capabilities[client] = {"gui.v1", "audio.pcm.v1"}
+    assert server.has_capable_client("audio.pcm.v1") is True
+    assert server.client_has_capability(client, "audio.pcm.v1") is True
+    assert server.has_capable_client("nope") is False
+
+
+@pytest.mark.asyncio
 async def test_activity_config_capability_is_supported_for_targeted_broadcast():
     server = GuiWebSocketServer(access_token="secret")
     capable = FakeWs()

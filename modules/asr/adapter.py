@@ -14,6 +14,7 @@ single adapter.
 
 from __future__ import annotations
 
+import os
 from typing import Any, Optional
 
 from .config import AsrConfig
@@ -40,11 +41,19 @@ def build_asr_config() -> AsrConfig:
     """Build an :class:`AsrConfig` from legacy ``config.py`` constants."""
     import config as project_config
 
+    from modules.asr.model_select import asr_model_root, load_selected, zipformer_cfg
+
+    base_dir = getattr(project_config, "BASE_DIR", ".")
+    selected = load_selected(base_dir)
+    engine = str(selected.get("engine") or getattr(project_config, "ASR_DEFAULT_ENGINE", "zipformer"))
+    qwen_dir = selected.get("model_dir") or getattr(project_config, "QWEN3_ASR_DIR", "")
+    if qwen_dir and not os.path.isabs(str(qwen_dir)):
+        qwen_dir = str(asr_model_root(base_dir) / qwen_dir)
     return AsrConfig(
-        base_dir=getattr(project_config, "BASE_DIR", "."),
-        sherpa_cfg=dict(getattr(project_config, "SHERPA_MODEL_CONFIG", {}) or {}),
-        qwen3_dir=getattr(project_config, "QWEN3_ASR_DIR", ""),
-        vad_path=getattr(project_config, "SILERO_VAD_MODEL", ""),
+        base_dir=base_dir,
+        sherpa_cfg=zipformer_cfg(base_dir),
+        qwen3_dir=str(qwen_dir or ""),
+        vad_path=str(asr_model_root(base_dir) / "silero_vad.onnx"),
         provider=str(getattr(project_config, "ASR_PROVIDER", "cpu")),
         num_threads=int(getattr(project_config, "ASR_NUM_THREADS", 2)),
         wake_keywords=list(getattr(project_config, "WAKE_KEYWORDS", ["五十铃", "怜", "Suzu", "助手"])),
@@ -55,7 +64,7 @@ def build_asr_config() -> AsrConfig:
         use_character_wake_words=bool(getattr(project_config, "ASR_USE_CHARACTER_WAKE_WORDS", True)),
         include_global_wake_words=bool(getattr(project_config, "ASR_INCLUDE_GLOBAL_WAKE_WORDS", True)),
         hotwords_from_wake=True,
-        engine=str(getattr(project_config, "ASR_DEFAULT_ENGINE", "qwen3")),
+        engine=engine,
     )
 
 

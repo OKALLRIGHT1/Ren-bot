@@ -178,16 +178,10 @@ class MCPServerStatus:
 
 
 class MCPToolBridge:
-    """Local + remote MCP tool bridge.
+    """Remote MCP client used by plugins/mcp_tools.
 
-    Current stage:
-    - register local tools
-    - discover remote MCP tools from stdio / streamable_http servers
-    - invoke local or remote MCP tools by unified name
-
-    Naming:
-    - local tools keep original names, e.g. `plugin.list`
-    - remote tools are exposed as `mcp.<server>.<tool>`
+    Discovers stdio / streamable_http servers and invokes tools as
+    `mcp.<server>.<tool>`. Each list or call opens a fresh session.
     """
 
     def __init__(self):

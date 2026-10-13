@@ -34,11 +34,20 @@ class Runtime:
                 },
             },
         )()
+        mcp_plugin = type(
+            "McpPlugin",
+            (),
+            {
+                "list_server_status": lambda self: [
+                    {"name": "demo", "connected": True, "tool_count": 1, "error": ""}
+                ]
+            },
+        )()
         self.plugin_manager = type(
             "PluginManager",
             (),
             {
-                "plugins": {"agently_mail": mail_plugin},
+                "plugins": {"agently_mail": mail_plugin, "mcp_tools": mcp_plugin},
                 "load_errors": [{"plugin": "broken", "error": "boom"}],
             },
         )()
@@ -65,14 +74,8 @@ class Runtime:
         ]
 
 
-class Bridge:
-    def list_server_status(self):
-        return [{"name": "demo", "connected": True, "tool_count": 1, "error": ""}]
-
-
 class ChatService:
     agent_runtime = Runtime()
-    mcp_bridge = Bridge()
     app_root = "D:/Desktop/live2d-suzu/live2d-llm"
 
 
@@ -80,7 +83,6 @@ def runtime_ctx(**extra):
     host = ChatService()
     ctx = {
         "agent_runtime": host.agent_runtime,
-        "mcp_bridge": host.mcp_bridge,
         "app_root": host.app_root,
         "cwd": host.app_root,
     }
@@ -181,7 +183,7 @@ async def test_agent_runtime_reports_code_location():
 
     assert "主程序代码目录: D:/Desktop/live2d-suzu/live2d-llm" in result
     assert "当前工作目录: D:/Desktop/live2d-suzu/live2d-llm" in result
-    assert "代码助手目标目录: D:/Desktop/other-project" in result
+    assert "指定目录: D:/Desktop/other-project" in result
 
 
 @pytest.mark.asyncio
