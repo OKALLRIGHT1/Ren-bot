@@ -130,7 +130,11 @@ def missing_required_arguments(
 ) -> List[str]:
     if schema is None:
         getter = getattr(plugin, "get_tool_schema", None)
-        schema = getter() if callable(getter) else None
+        raw = getter() if callable(getter) else None
+        if isinstance(raw, list):
+            schema = raw[0] if raw else None
+        else:
+            schema = raw
     params = schema_parameters(schema)
     required = [
         str(item).strip()
@@ -171,10 +175,19 @@ def collect_invocation_args(
     return args
 
 
-def format_invocation(plugin: Any, arguments: Mapping[str, Any], raw_arguments: str = "") -> str:
+def format_invocation(
+    plugin: Any,
+    arguments: Mapping[str, Any],
+    raw_arguments: str = "",
+    tool_name: str = "",
+) -> str:
     formatter = getattr(plugin, "format_invocation", None)
     if callable(formatter):
-        formatted = formatter(dict(arguments or {}))
+        payload = dict(arguments or {})
+        try:
+            formatted = formatter(payload, tool_name=tool_name)
+        except TypeError:
+            formatted = formatter(payload)
         if formatted is not None:
             return str(formatted).strip()
     args = dict(arguments or {})

@@ -47,6 +47,14 @@ _ACCESS_CONTROL_WARN_IF_DEFAULT = {
 }
 
 
+def _uses_builtin_plugin_dir(plugin_dir: str) -> bool:
+    norm = os.path.normcase(os.path.normpath(str(plugin_dir or "")))
+    return norm in {
+        os.path.normcase(os.path.normpath("./plugins")),
+        os.path.normcase(os.path.normpath("plugins")),
+    }
+
+
 def _safe_print(message: Any = "") -> None:
     text = str(message)
     stream = getattr(sys, "stdout", None)
@@ -59,7 +67,7 @@ def _safe_print(message: Any = "") -> None:
 
 
 class PluginManager:
-    def __init__(self, plugin_dir="./plugins"):
+    def __init__(self, plugin_dir="./plugins", extra_plugin_dirs=None):
         self.plugin_dir = plugin_dir
         self.plugins: Dict[str, Any] = {}
         self.react_map: Dict[str, Any] = {}
@@ -70,6 +78,14 @@ class PluginManager:
         self._load_disabled_plugins()
         self.plugin_configs: Dict[str, dict] = {}  # 存储每个插件的配置
         self.plugin_dirs: Dict[str, str] = {}  # ✅ 新增：存储 trigger -> 文件夹名的映射
+        self.plugin_roots: Dict[str, str] = {}
+        if extra_plugin_dirs is None:
+            extra_plugin_dirs = (
+                [os.path.join("data", "installed_plugins")]
+                if _uses_builtin_plugin_dir(plugin_dir)
+                else []
+            )
+        self.extra_plugin_dirs = [str(path) for path in extra_plugin_dirs if str(path or "").strip()]
         self.llm_command_map: Dict[
             str, str
         ] = {}  # ✅ 新增：存储 llm_command -> trigger 的映射
@@ -282,10 +298,36 @@ class PluginManager:
             qq_summary = "已接入但无人可触发"
         return f"本地：{local_summary}｜QQ：{qq_summary}"
 
-    def _is_plugin_allowed(self, plugin, context: Optional[dict]) -> Tuple[bool, str]:
+    def _is_plugin_allowed(
+        self,
+        plugin,
+        context: Optional[dict],
+        *,
+        invoked_tool: str = "",
+        invoked_alias: str = "",
+        args: str = "",
+    ) -> Tuple[bool, str]:
         access_control = self._normalize_access_control(
             getattr(plugin, "access_control", None)
         )
+        resolver = getattr(plugin, "resolve_access_control", None)
+        if callable(resolver):
+            try:
+                resolved = resolver(
+                    context,
+                    invoked_tool=invoked_tool,
+                    invoked_alias=invoked_alias,
+                    args=args,
+                )
+            except TypeError:
+                try:
+                    resolved = resolver(context)
+                except Exception:
+                    resolved = None
+            except Exception:
+                resolved = None
+            if resolved:
+                access_control = self._normalize_access_control(resolved)
 
         if self._is_remote_qq_context(context):
             if not access_control["allow_remote_qq"]:
@@ -372,6 +414,20 @@ class PluginManager:
         for alias in self._direct_command_aliases(plugin):
             self.direct_map[alias] = plugin
 
+        self._register_extra_llm_commands(trigger, plugin)
+
+    def _extra_llm_commands(self, plugin: Any) -> List[str]:
+        return self._normalize_alias_list(getattr(plugin, "llm_commands", None))
+
+    def _register_extra_llm_commands(self, trigger: str, plugin: Any) -> None:
+        primary = str(getattr(plugin, "llm_command", "") or trigger or "").strip()
+        for extra in self._extra_llm_commands(plugin):
+            if extra == trigger or extra == primary:
+                continue
+            self.llm_command_map[extra] = trigger
+            if extra not in self.react_map:
+                self.react_map[extra] = plugin
+
     def _unmap_plugin(self, trigger: str, plugin: Any) -> None:
         p_type = getattr(plugin, "type", "react")
         aliases = self._plugin_aliases(trigger, plugin)
@@ -395,6 +451,15 @@ class PluginManager:
             if self.direct_map.get(alias) is plugin:
                 self.direct_map.pop(alias, None)
 
+        primary = str(getattr(plugin, "llm_command", "") or trigger or "").strip()
+        for extra in self._extra_llm_commands(plugin):
+            if extra == trigger or extra == primary:
+                continue
+            if self.react_map.get(extra) is plugin:
+                self.react_map.pop(extra, None)
+            if self.llm_command_map.get(extra) == trigger:
+                self.llm_command_map.pop(extra, None)
+
     # -------------------- Load --------------------
     def load_plugins(self):
         self.plugins = {}
@@ -403,24 +468,54 @@ class PluginManager:
         self.plugin_configs = {}
         self.observe_map = {}  # ✅ 防止残留
         self.plugin_dirs = {}  # ✅ 重置文件夹映射
+        self.plugin_roots = {}
         self.llm_command_map = {}  # ✅ 重置LLM命令映射
         self.load_errors = []
 
-        _safe_print(f"🔌 [系统] 正在扫描插件目录: {self.plugin_dir}")
+        scan_roots = [root for root in self._plugin_scan_roots() if os.path.isdir(root)]
+        _safe_print("🔌 [系统] 正在扫描插件目录: " + ", ".join(scan_roots))
 
-        if not os.path.exists(self.plugin_dir):
+        if not scan_roots:
             return
 
-        # 只扫描子文件夹，不再支持单文件插件
-        for item_name in os.listdir(self.plugin_dir):
-            plugin_path = os.path.join(self.plugin_dir, item_name)
+        # 只扫描子文件夹，不再支持单文件插件。主程序目录优先，同名触发词不再装第二份。
+        for scan_root in scan_roots:
+            self._load_plugins_from_root(scan_root)
+
+        self._report_load_health()
+        self._log_plugin_security_summary()
+
+    def _plugin_scan_roots(self) -> List[str]:
+        roots = []
+        if self.plugin_dir:
+            roots.append(self.plugin_dir)
+        seen = {os.path.normcase(os.path.normpath(path)) for path in roots}
+        for extra in self.extra_plugin_dirs:
+            key = os.path.normcase(os.path.normpath(extra))
+            if key in seen:
+                continue
+            seen.add(key)
+            roots.append(extra)
+        return roots
+
+    def _plugin_root_path(self, trigger: str) -> str:
+        roots = getattr(self, "plugin_roots", None) or {}
+        root = roots.get(trigger)
+        if root:
+            return root
+        dir_name = self.plugin_dirs.get(trigger, trigger)
+        return os.path.join(self.plugin_dir, dir_name)
+
+    def _load_plugins_from_root(self, scan_root: str) -> None:
+        for item_name in os.listdir(scan_root):
+            plugin_path = os.path.join(scan_root, item_name)
 
             # 跳过文件，只处理文件夹
             if not os.path.isdir(plugin_path):
                 continue
 
-            # 跳过以下划线开头的文件夹
-            if item_name.startswith("_"):
+            # 跳过隐藏目录和以下划线开头的文件夹
+            if item_name.startswith("_") or item_name.startswith("."):
                 continue
 
             try:
@@ -433,10 +528,16 @@ class PluginManager:
                 with open(config_path, "r", encoding="utf-8-sig") as f:
                     config = json.load(f)
 
+                if config.get("library") is True:
+                    continue
+
                 # 保存配置
                 trigger = config.get("trigger")
                 if not trigger:
                     _safe_print(f"⚠️ 插件 {item_name} 的配置缺少 trigger，已跳过")
+                    continue
+                if trigger in self.plugin_configs:
+                    _safe_print(f"   ⚠️ 插件触发词已存在，跳过 {item_name}: {trigger}")
                     continue
 
                 config["access_control"] = self._normalize_access_control(
@@ -447,6 +548,7 @@ class PluginManager:
                 self.plugin_dirs[trigger] = (
                     item_name  # ✅ 关键修复：记录 trigger 对应的真实文件夹名称
                 )
+                self.plugin_roots[trigger] = os.path.abspath(plugin_path)
 
                 # 尝试加载插件代码
                 module_path = os.path.join(plugin_path, "plugin.py")
@@ -484,6 +586,9 @@ class PluginManager:
                         "direct_command_aliases",
                         getattr(inst, "direct_command_aliases", []),
                     )
+                )
+                inst.llm_commands = self._normalize_alias_list(
+                    config.get("llm_commands", getattr(inst, "llm_commands", []))
                 )
 
                 # 从配置中设置显示元数据，name 始终以 config 为准，保证 UI/列表使用中文名
@@ -544,9 +649,6 @@ class PluginManager:
                 import traceback
 
                 traceback.print_exc()
-
-        self._report_load_health()
-        self._log_plugin_security_summary()
 
     def _report_load_health(self) -> None:
         # 把本次扫描的插件加载失败聚合成一条健康状态，供健康中心与 GUI 展示。
@@ -643,6 +745,11 @@ class PluginManager:
 
         config = dict(config or {})
         provided_secret_values = config.pop("_secret_values", {})
+        existing = self.plugin_configs.get(trigger) or {}
+        if not config.get("llm_commands") and existing.get("llm_commands"):
+            config["llm_commands"] = existing.get("llm_commands")
+        if not config.get("direct_command_aliases") and existing.get("direct_command_aliases"):
+            config["direct_command_aliases"] = existing.get("direct_command_aliases")
         config["access_control"] = self._normalize_access_control(
             config.get("access_control")
         )
@@ -681,7 +788,7 @@ class PluginManager:
         )
         config["type"] = resolved_type
 
-        config_path = os.path.join(self.plugin_dir, dir_name, "config.json")
+        config_path = os.path.join(self._plugin_root_path(trigger), "config.json")
         try:
             with open(config_path, "w", encoding="utf-8") as f:
                 json.dump(config, f, ensure_ascii=False, indent=4)
@@ -709,6 +816,12 @@ class PluginManager:
                 effective_config.get(
                     "direct_command_aliases",
                     getattr(plugin, "direct_command_aliases", []),
+                )
+            )
+            plugin.llm_commands = self._normalize_alias_list(
+                effective_config.get(
+                    "llm_commands",
+                    getattr(plugin, "llm_commands", []),
                 )
             )
             if hasattr(plugin, "timeout_sec"):
@@ -752,8 +865,7 @@ class PluginManager:
         icon_file = config.get("icon", "icon.png")
 
         # ✅ 优化：使用正确的文件夹名称
-        dir_name = self.plugin_dirs.get(trigger, trigger)
-        icon_path = os.path.join(self.plugin_dir, dir_name, icon_file)
+        icon_path = os.path.join(self._plugin_root_path(trigger), icon_file)
 
         if os.path.exists(icon_path):
             return icon_path
@@ -765,8 +877,7 @@ class PluginManager:
             return None
 
         # ✅ 优化：使用正确的文件夹名称
-        dir_name = self.plugin_dirs.get(trigger, trigger)
-        readme_path = os.path.join(self.plugin_dir, dir_name, "README.md")
+        readme_path = os.path.join(self._plugin_root_path(trigger), "README.md")
         if os.path.exists(readme_path):
             return readme_path
         return None
@@ -1437,28 +1548,37 @@ class PluginManager:
             self.react_map.get(trigger)
             or self.delegate_map.get(trigger)
             or self.plugins.get(trigger)
+            or self.react_map.get(name)
         )
         if not plugin:
             outputs.append(f"【{trigger} 结果】未找到该工具（可能未安装/trigger 写错）")
             return outputs, used, True
 
         plugin_type = getattr(plugin, "type", "react")
-        if plugin_type not in allowed_types:
+        extras = set(self._extra_llm_commands(plugin))
+        if plugin_type not in allowed_types and name not in extras and trigger not in extras:
             return outputs, used, False
 
         plugin_name = getattr(plugin, "name", trigger)
-        allowed, reason = self._is_plugin_allowed(plugin, context)
+        runtime_context = dict(context or {})
+        runtime_context["invoked_tool"] = name
+        allowed, reason = self._is_plugin_allowed(
+            plugin,
+            runtime_context,
+            invoked_tool=name,
+            args=str(args or ""),
+        )
         if not allowed:
-            denied_message = self._get_access_denied_message(plugin, context, reason)
+            denied_message = self._get_access_denied_message(plugin, runtime_context, reason)
             outputs.append(f"【{trigger} 不可用】{denied_message}")
             return outputs, used, True
 
         used.append(trigger)
         self._record_deferred_tool_stat(trigger, "executed")
         try:
-            runtime_context = context
             if plugin_type == "delegate":
-                runtime_context = self._build_delegate_runtime_context(context)
+                runtime_context = self._build_delegate_runtime_context(runtime_context)
+                runtime_context["invoked_tool"] = name
             result = await self._run_with_timeout(plugin, args, runtime_context)
             rendered = self._plugin_result_text(trigger, result)
             if rendered is not None:
@@ -1515,13 +1635,25 @@ class PluginManager:
                 self.react_map.get(trigger)
                 or self.delegate_map.get(trigger)
                 or self.plugins.get(trigger)
+                or self.react_map.get(name)
             )
-            missing = missing_required_arguments(plugin, call.arguments)
+            from services.chat_support.tool_schema import schema_for_tool
+
+            missing = missing_required_arguments(
+                plugin,
+                call.arguments,
+                schema=schema_for_tool(plugin, name),
+            )
             if missing:
                 tool_outputs.append(missing_required_message(name, missing))
                 used_triggers.append(trigger or name)
                 continue
-            args = format_invocation(plugin, call.arguments, call.raw_arguments)
+            args = format_invocation(
+                plugin,
+                call.arguments,
+                call.raw_arguments,
+                tool_name=name,
+            )
             outputs, used, _found = await self._run_named_tool(
                 name,
                 args,
@@ -1600,10 +1732,17 @@ class PluginManager:
                     )
                     continue
 
-                allowed, reason = self._is_plugin_allowed(plugin, context)
+                runtime_context = dict(context or {})
+                runtime_context["invoked_alias"] = key
+                allowed, reason = self._is_plugin_allowed(
+                    plugin,
+                    runtime_context,
+                    invoked_alias=key,
+                    args=str(args or ""),
+                )
                 if not allowed:
                     denied_message = denied_message or self._get_access_denied_message(
-                        plugin, context, reason
+                        plugin, runtime_context, reason
                     )
                     _safe_print(f"🔌 [Direct] 插件无权触发: {plugin_name} -> {reason}")
                     self._dbg(f"🔌 [Direct] 插件无权触发: {plugin_name} -> {reason}")
@@ -1616,7 +1755,7 @@ class PluginManager:
                 # 这样 plugin.py 里的 if "camera" in args 逻辑依然有效
                 try:
                     # 执行插件
-                    res = await self._run_with_timeout(plugin, args, context)
+                    res = await self._run_with_timeout(plugin, args, runtime_context)
                     _safe_print(f"🔌 [Direct] 执行成功: {plugin_name}")
                     self._dbg("🔌 [Direct] 执行成功")
                     return True, res
@@ -1880,7 +2019,7 @@ class PluginManager:
 
             # 2. 获取插件目录
             dir_name = self.plugin_dirs.get(trigger, trigger)
-            plugin_path = os.path.join(self.plugin_dir, dir_name)
+            plugin_path = self._plugin_root_path(trigger)
 
             # 3. 重新加载配置
             config_path = os.path.join(plugin_path, "config.json")
@@ -1918,6 +2057,9 @@ class PluginManager:
                     "direct_command_aliases",
                     getattr(inst, "direct_command_aliases", []),
                 )
+            )
+            inst.llm_commands = self._normalize_alias_list(
+                config.get("llm_commands", getattr(inst, "llm_commands", []))
             )
 
             resolved_type = self._resolve_plugin_type(

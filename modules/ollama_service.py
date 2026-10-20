@@ -96,12 +96,18 @@ def start_ollama_service(
         }
 
     creationflags = 0
+    startupinfo = None
     if os.name == "nt":
         creationflags = int(
-            getattr(subprocess, "DETACHED_PROCESS", 0)
-            | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+            getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
             | getattr(subprocess, "CREATE_NO_WINDOW", 0)
         )
+        try:
+            startupinfo = subprocess.STARTUPINFO()
+            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            startupinfo.wShowWindow = 0  # SW_HIDE
+        except Exception:
+            pass
     try:
         subprocess.Popen(
             [exe, "serve"],
@@ -111,6 +117,7 @@ def start_ollama_service(
             stderr=subprocess.DEVNULL,
             close_fds=True,
             creationflags=creationflags,
+            startupinfo=startupinfo,
         )
     except Exception as exc:
         return {

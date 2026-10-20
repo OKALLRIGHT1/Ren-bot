@@ -311,6 +311,9 @@ class ExternalServicesPage(QtWidgets.QWidget):
 class _ServiceEditDialog(QtWidgets.QDialog):
     def __init__(self, parent, service: Dict[str, Any]):
         super().__init__(parent)
+        self.setAttribute(QtCore.Qt.WidgetAttribute.WA_TranslucentBackground, False)
+        self.setAttribute(QtCore.Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.setAutoFillBackground(True)
         self.setWindowTitle(f"编辑 {service.get('label') or service.get('id') or '服务'}")
         self.setMinimumWidth(460)
         layout = QtWidgets.QVBoxLayout(self)

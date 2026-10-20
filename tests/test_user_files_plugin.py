@@ -126,7 +126,7 @@ def test_user_files_natural_language_requires_clear_file_intent():
     plugin = Plugin()
 
     assert plugin.should_handle_direct("帮我看看下载目录里的 a.txt", {}, "用户文件")
-    assert plugin.should_handle_direct("读取 Documents 里的 notes.txt", {}, "文件助手")
+    assert plugin.should_handle_direct("读取 Documents 里的 notes.txt", {}, "用户文件")
     assert not plugin.should_handle_direct("我今天下载了一个游戏", {}, "下载")
 
 

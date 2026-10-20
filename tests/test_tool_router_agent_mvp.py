@@ -21,14 +21,14 @@ class Plugin:
 
 def _router():
     code_agent = Plugin("代码代理", ["codex", "claude code", "cc"])
-    user_files = Plugin("用户文件助手", ["用户文件", "文件助手", "下载目录"])
+    user_files = Plugin("用户文件助手", ["用户文件", "下载目录"])
     direct = {"code_agent": code_agent, "user_files": user_files}
     return ToolRouter(react_map={}, direct_map=direct, delegate_map={})
 
 
 def _router_with_direct_aliases():
     code_agent = Plugin("代码代理", ["codex", "claude code", "cc"])
-    user_files = Plugin("用户文件助手", ["用户文件", "文件助手", "下载目录"])
+    user_files = Plugin("用户文件助手", ["用户文件", "下载目录"])
     direct = {
         "code_agent": code_agent,
         "codex": code_agent,

@@ -141,6 +141,13 @@ plugins/meme_pack/data/
 # =========================
 # Packaged binaries (local)
 # =========================
-Live2D-Suzu.exe
-Suzu.exe
+*.exe
+frontend/
+output_installer/
+*.iss
 *.spec.bak
+runtime.zip
+build_runtime/
+runtime/
+.cache/
+modules/gui/assets/

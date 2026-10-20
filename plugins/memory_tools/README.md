@@ -1,51 +1,20 @@
+<!-- MANUAL README -->
+
 # 记忆与画像查询
 
-`plugins/memory_tools/` · 类型 `delegate` · 触发词 `memory_tools`
+查长期记忆、人物画像和本地活动统计。记忆本身由主程序在聊天里自动写入，这张卡只负责查询。
 
-查询长期记忆、人物画像和本地活动统计。参数：query/profile/activity ||| 自然语言问题
+## 怎么用
 
-## 调用方式
-
-| 项 | 值 |
-| --- | --- |
-| 触发词 | `memory_tools` |
-| LLM 指令 | `memory_tools` |
-| 插件类型 | `delegate` |
-| 别名 | `/memory`、`/记忆` |
-| 超时 | 30 秒 |
-
-示例：
-
-```
-[CMD: memory_tools | query ||| 我上次提过的项目是什么]
-```
+- `/记忆 我上次提过的项目是什么`
+- `/memory 她喜欢什么`
+- 也可以让她查画像或最近活动
 
 ## 权限
 
-| 渠道 | 允许 |
-| --- | --- |
-| 本地桌面 | ✅ |
-| QQ 远程 | ✅ |
-| QQ 主人 | ✅ |
-| QQ 他人 | ❌ |
-| 群聊未 @ | ❌ |
+- 本地可用
+- QQ 仅主人；群聊需要 @
 
-## 动作
+## 要填的配置
 
-取自源码里的 action/alias 映射表：
-
-`activity` `profile` `query`
-
-## 依赖与数据
-
-- 宿主模块：`modules`、`services`
-
-## 源码
-
-约 164 行 Python。
-
----
-
-本节以上由 `dev_scripts/gen_plugin_readme.py` 从 `config.json` 与源码 AST 生成，改完插件请重新运行以免过期。
-
-<!-- KEEP BELOW: 手写补充，重新生成时保留 -->
+不用填。没有单独的 API Key。记忆库在主程序数据目录里。

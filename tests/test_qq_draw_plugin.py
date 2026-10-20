@@ -30,11 +30,11 @@ def test_build_request_url_dedupes_v1_when_base_has_v1():
     assert url == "https://x666.me/v1/images/generations"
     url2 = plugin._build_request_url(
         provider={
-            "base_url": "https://api.tomori.de5.net",
+            "base_url": "https://api.example.com",
             "endpoint_path": "/v1/images/generations",
         }
     )
-    assert url2 == "https://api.tomori.de5.net/v1/images/generations"
+    assert url2 == "https://api.example.com/v1/images/generations"
 
 
 def test_default_http_headers_include_browser_ua():

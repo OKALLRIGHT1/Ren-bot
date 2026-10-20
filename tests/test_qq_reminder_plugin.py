@@ -3,7 +3,7 @@ import pytest
 from plugins.qq_reminder.plugin import Plugin
 
 
-def _qq_ctx(user_id="1132824061"):
+def _qq_ctx(user_id="10001"):
     return {
         "source": "qq_gateway",
         "channel_meta": {
@@ -32,8 +32,8 @@ async def test_qq_reminder_disables_matching_clock_in(tmp_path, monkeypatch):
     plugin._reminders = [
         {
             "id": "a1",
-            "owner_user_id": "1132824061",
-            "target_session": "private:1132824061",
+            "owner_user_id": "10001",
+            "target_session": "private:10001",
             "weekdays": [0, 1, 2, 3, 4],
             "hour": 17,
             "minute": 20,

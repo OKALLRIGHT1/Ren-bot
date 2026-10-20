@@ -348,6 +348,12 @@ class ConnectionSettingsPage(QtWidgets.QWidget):
         app = self.main_app
         callback = getattr(app, "on_start_live2d_callback", None)
         if not callable(callback):
+            owner = getattr(app, "app", None) if app is not None else None
+            if hasattr(owner, "start_live2d_renderer"):
+                callback = lambda: owner.start_live2d_renderer(force=True)
+            else:
+                callback = getattr(owner, "_start_live2d_renderer_when_ready", None)
+        if not callable(callback):
             QtWidgets.QMessageBox.information(
                 self, "桌面形象", "启动入口还没接上，请先用「启动本机后端」。"
             )

@@ -456,9 +456,10 @@ class ScreenSensor:
         previous = str(getattr(self, "_rust_health_state", "") or "")
         self._rust_health_state = state
         last_seen = float(getattr(self, "_last_rust_event_seen_at", 0.0) or 0.0)
-        summary = (
-            "Rust 活动事件正常" if state == "healthy" else "Rust 活动事件已过期"
-        )
+        if state == "healthy":
+            summary = "Rust 活动事件正常" if (now_ts - last_seen < 60) else "活动监听中（前台空闲）"
+        else:
+            summary = "等待前端窗口活动事件"
         try:
             self.runtime_health.report(
                 "rust_activity",
@@ -478,7 +479,7 @@ class ScreenSensor:
             pass
         if previous == state:
             return
-        if state == "healthy" and previous:
+        if state == "healthy" and previous and previous != "healthy":
             self.logger.info("[Screen] Live2D activity events resumed")
         elif state == "degraded":
             self.logger.warning(
@@ -488,8 +489,11 @@ class ScreenSensor:
     def _warn_rust_events_stale(
         self, now_ts: float, stale_threshold_sec: float
     ) -> None:
+        last_seen = float(getattr(self, "_last_rust_event_seen_at", 0.0) or 0.0)
+        # 如果曾经接收过 Rust 事件，说明通道正常，只是用户当前未切换前台应用
+        state = "healthy" if last_seen > 0 else "degraded"
         self._set_rust_activity_health(
-            state="degraded",
+            state=state,
             now_ts=now_ts,
             stale_threshold_sec=stale_threshold_sec,
         )

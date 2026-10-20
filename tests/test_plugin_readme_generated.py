@@ -101,6 +101,9 @@ def test_security_and_gotcha_notes_survive(name):
         pytest.skip(f"{name} 不存在")
     gen = _load_gen()
     content = open(path, encoding="utf-8").read()
+    if gen.is_manual_readme(content):
+        assert "怎么用" in content, f"{name} 的用法说明被清空了"
+        return
     assert gen.KEEP_MARKER in content
     tail = content.split(gen.KEEP_MARKER, 1)[1]
     assert tail.strip(), f"{name} 的手写补充被清空了"

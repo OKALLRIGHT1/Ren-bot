@@ -278,3 +278,37 @@ def test_live2d_only_sync_is_compatibility_not_enhanced_source(tmp_path, monkeyp
     assert client["sedentary_reminder_minutes"] == 40
     assert client["include_window_title"] is True
     assert client["revision"] == 4
+
+
+def test_publish_gui_activity_endpoint_syncs_enhanced_and_creates_backend_launch(tmp_path, monkeypatch):
+    app = _make_app(tmp_path)
+    app.gui_http_server = DummyGuiHttpServer()
+    app._save_runtime_settings(
+        {
+            "gui_access_token": "gui-token-xyz",
+            "sedentary_reminder_minutes": 50,
+            "sedentary_break_minutes": 6,
+            "sedentary_cooldown_minutes": 45,
+        }
+    )
+    appdata = tmp_path / "appdata"
+    monkeypatch.setenv("APPDATA", str(appdata))
+
+    app._publish_gui_activity_endpoint()
+
+    enhanced_path = appdata / "com.live2d-suzu.enhanced" / "runtime_settings.json"
+    assert enhanced_path.exists()
+    enhanced_data = json.loads(enhanced_path.read_text(encoding="utf-8"))
+    assert enhanced_data["activity_monitor_enabled"] is True
+    assert enhanced_data["gui_activity_endpoint"] == DummyGuiHttpServer.activity_ingest_url()
+    assert enhanced_data["gui_access_token"] == DummyGuiHttpServer.access_token
+    assert enhanced_data["sedentary_reminder_minutes"] == 50
+    assert enhanced_data["sedentary_break_minutes"] == 6
+    assert enhanced_data["sedentary_cooldown_minutes"] == 45
+
+    launch_path = appdata / "com.live2d-suzu.enhanced" / "backend-launch.json"
+    assert launch_path.exists()
+    launch_data = json.loads(launch_path.read_text(encoding="utf-8"))
+    assert "backend_root" in launch_data
+    assert "python_executable" in launch_data
+

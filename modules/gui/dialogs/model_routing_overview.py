@@ -87,6 +87,9 @@ class BadgeWidget(QtWidgets.QWidget):
 class ModelRoutingOverviewDialog(QtWidgets.QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
+        self.setAttribute(QtCore.Qt.WidgetAttribute.WA_TranslucentBackground, False)
+        self.setAttribute(QtCore.Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.setAutoFillBackground(True)
         self.setWindowTitle("模型路由总览")
         self.resize(1000, 700)
         self.setMinimumSize(880, 580)

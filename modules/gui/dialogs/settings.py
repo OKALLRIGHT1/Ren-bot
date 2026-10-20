@@ -173,70 +173,99 @@ class ProviderEditDialog(QtWidgets.QDialog):
         super().__init__(parent)
 
         self.setWindowTitle("编辑提供商" if provider_name else "添加提供商")
-
-        self.setFixedWidth(460)
+        self.setFixedWidth(500)
+        self.setAttribute(QtCore.Qt.WidgetAttribute.WA_TranslucentBackground, False)
+        self.setAttribute(QtCore.Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.setAutoFillBackground(True)
+        self.setStyleSheet(
+            get_settings_styles()
+            + """
+            ProviderEditDialog, QDialog {
+                background-color: #F1F5F9;
+            }
+            QFrame#providerCard {
+                background: #FFFFFF;
+                border: 1px solid #E2E8F0;
+                border-radius: 12px;
+            }
+            QFormLayout QLabel {
+                font-size: 12px;
+                font-weight: 600;
+                color: #475569;
+            }
+            """
+        )
 
         self.result_data = None
-
         data = data or {}
 
         layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(14, 14, 14, 14)
+        layout.setSpacing(10)
+
+        card = QtWidgets.QFrame(self)
+        card.setObjectName("providerCard")
+        card_layout = QtWidgets.QVBoxLayout(card)
+        card_layout.setContentsMargins(14, 12, 14, 12)
+        card_layout.setSpacing(8)
 
         form = QtWidgets.QFormLayout()
+        form.setSpacing(10)
+        form.setLabelAlignment(
+            QtCore.Qt.AlignmentFlag.AlignRight | QtCore.Qt.AlignmentFlag.AlignVCenter
+        )
 
         self.inp_name = QtWidgets.QLineEdit(provider_name)
-
         self.inp_name.setPlaceholderText("例如: SiliconFlow, DeepSeek-Official")
-
         form.addRow("提供商名称:", self.inp_name)
 
         self.inp_url = QtWidgets.QLineEdit(str(data.get("base_url", "")))
-
         self.inp_url.setPlaceholderText(
             "https://api.example.com/v1 或 .../api/paas/v4"
         )
-
         form.addRow("Base URL:", self.inp_url)
 
         key_layout = QtWidgets.QHBoxLayout()
-
+        key_layout.setContentsMargins(0, 0, 0, 0)
+        key_layout.setSpacing(6)
         self.inp_key = QtWidgets.QLineEdit(str(data.get("api_key", "")))
-
         self.inp_key.setEchoMode(QtWidgets.QLineEdit.EchoMode.Password)
-
         self.inp_key.setPlaceholderText("sk-...")
-
         btn_eye = QtWidgets.QToolButton()
-
         btn_eye.setText("显示")
-
+        btn_eye.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
         btn_eye.pressed.connect(
             lambda: self.inp_key.setEchoMode(QtWidgets.QLineEdit.EchoMode.Normal)
         )
-
         btn_eye.released.connect(
             lambda: self.inp_key.setEchoMode(QtWidgets.QLineEdit.EchoMode.Password)
         )
-
         key_layout.addWidget(self.inp_key)
-
         key_layout.addWidget(btn_eye)
-
         form.addRow("API Key:", key_layout)
 
-        layout.addLayout(form)
+        card_layout.addLayout(form)
+        layout.addWidget(card_layout.parentWidget() if False else card)
 
         footer = QtWidgets.QHBoxLayout()
-        self.btn_probe = QtWidgets.QPushButton("测试连接")
+        footer.setSpacing(8)
+        self.btn_probe = QtWidgets.QPushButton("测试连接", self)
         self.btn_probe.clicked.connect(self._on_probe)
-        self.lbl_probe = QtWidgets.QLabel("")
-        self.lbl_probe.setObjectName("settingsPageDesc")
+        self.lbl_probe = QtWidgets.QLabel("", self)
+        self.lbl_probe.setStyleSheet("color: #64748B; font-size: 11px;")
         footer.addWidget(self.btn_probe)
         footer.addWidget(self.lbl_probe, 1)
-        footer.addStretch()
-        btn_save = QtWidgets.QPushButton("保存")
+        footer.addStretch(1)
+
+        btn_cancel = QtWidgets.QPushButton("取消", self)
+        btn_cancel.clicked.connect(self.reject)
+        footer.addWidget(btn_cancel)
+
+        btn_save = QtWidgets.QPushButton("保存", self)
+        btn_save.setObjectName("primaryAction")
         btn_save.clicked.connect(self._on_save)
         footer.addWidget(btn_save)
+
         layout.addLayout(footer)
         self._probe_worker = None
 
@@ -297,79 +326,138 @@ class ModelEditDialog(QtWidgets.QDialog):
         super().__init__(parent)
 
         self.setWindowTitle("编辑模型" if model_id else "添加模型")
-
-        self.setFixedWidth(560)
+        self.resize(600, 720)
+        self.setMinimumSize(540, 480)
+        self.setAttribute(QtCore.Qt.WidgetAttribute.WA_TranslucentBackground, False)
+        self.setAttribute(QtCore.Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.setAutoFillBackground(True)
+        self.setStyleSheet(
+            get_settings_styles()
+            + """
+            ModelEditDialog, QDialog {
+                background-color: #F1F5F9;
+            }
+            QFrame#modelCard {
+                background: #FFFFFF;
+                border: 1px solid #E2E8F0;
+                border-radius: 12px;
+            }
+            QLabel#cardTitle {
+                font-size: 13px;
+                font-weight: 700;
+                color: #0F172A;
+            }
+            QLabel#cardDesc {
+                color: #64748B;
+                font-size: 11px;
+            }
+            QFormLayout QLabel {
+                font-size: 12px;
+                font-weight: 600;
+                color: #475569;
+            }
+            """
+        )
 
         self.result_data = None
-
         self._original = dict(model_data or {})
-
         self._original_id = str(model_id or "")
-
         self._on_provider_saved = on_provider_saved
 
-        layout = QtWidgets.QVBoxLayout(self)
+        main_layout = QtWidgets.QVBoxLayout(self)
+        main_layout.setContentsMargins(14, 14, 14, 14)
+        main_layout.setSpacing(10)
+
+        # 滚动区域支持不同分辨率与扩展接口
+        scroll = QtWidgets.QScrollArea(self)
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
+        scroll.setStyleSheet(
+            "QScrollArea { background: transparent; border: none; }"
+            "QScrollArea > QWidget > QWidget { background: transparent; }"
+        )
+        scroll_content = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout(scroll_content)
+        layout.setContentsMargins(0, 0, 4, 4)
+        layout.setSpacing(10)
+        scroll.setWidget(scroll_content)
+        main_layout.addWidget(scroll, 1)
+
+        # --- 卡片 1: 基础连接配置 ---
+        base_card = QtWidgets.QFrame(scroll_content)
+        base_card.setObjectName("modelCard")
+        base_layout = QtWidgets.QVBoxLayout(base_card)
+        base_layout.setContentsMargins(14, 12, 14, 12)
+        base_layout.setSpacing(8)
+
+        base_title = QtWidgets.QLabel("🔗 基本连接配置", base_card)
+        base_title.setObjectName("cardTitle")
+        base_layout.addWidget(base_title)
 
         form = QtWidgets.QFormLayout()
+        form.setContentsMargins(0, 4, 0, 0)
+        form.setSpacing(10)
+        form.setLabelAlignment(
+            QtCore.Qt.AlignmentFlag.AlignRight | QtCore.Qt.AlignmentFlag.AlignVCenter
+        )
 
         self.combo_provider = QtWidgets.QComboBox()
         self.combo_provider.setToolTip(
             "选择提供商会套用它的 URL/Key；模型自己填的地址在调用时优先。"
         )
-
         self._reload_provider_combo(
             select_name=str(self._original.get("provider") or "")
         )
-
         self.combo_provider.currentIndexChanged.connect(self._on_provider_select)
 
         provider_row = QtWidgets.QWidget()
-
         provider_layout = QtWidgets.QHBoxLayout(provider_row)
-
         provider_layout.setContentsMargins(0, 0, 0, 0)
-
+        provider_layout.setSpacing(6)
         provider_layout.addWidget(self.combo_provider, 1)
-
         btn_add_provider = QtWidgets.QPushButton("+ 新增提供商")
-
+        btn_add_provider.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
         btn_add_provider.clicked.connect(self._on_add_provider_inline)
-
         provider_layout.addWidget(btn_add_provider)
-
         form.addRow("提供商:", provider_row)
 
         self.inp_id = QtWidgets.QLineEdit(model_id)
-
         self.inp_id.setPlaceholderText("my-gpt-4")
-
         self.inp_id.setToolTip(
             "任务路由、插件模型队列和向量选择都引用这个 ID；改名会一并更新。"
         )
-
         form.addRow("模型 ID:", self.inp_id)
 
         self.inp_model = QtWidgets.QLineEdit(str(self._original.get("model", "")))
-
         self.inp_model.setPlaceholderText("gpt-4o / gemini-3-flash-preview ...")
-
         form.addRow("上游模型名:", self.inp_model)
 
         self.inp_url = QtWidgets.QLineEdit(str(self._original.get("base_url", "")))
-
         self.inp_url.setPlaceholderText(
             "https://api.example.com/v1 或 https://open.bigmodel.cn/api/paas/v4"
         )
-
         form.addRow("Base URL:", self.inp_url)
 
         self.inp_key = QtWidgets.QLineEdit(str(self._original.get("api_key", "")))
-
         self.inp_key.setEchoMode(QtWidgets.QLineEdit.EchoMode.Password)
-
         self.inp_key.setPlaceholderText("sk-...")
 
-        form.addRow("API Key:", self.inp_key)
+        key_row = QtWidgets.QWidget()
+        key_layout = QtWidgets.QHBoxLayout(key_row)
+        key_layout.setContentsMargins(0, 0, 0, 0)
+        key_layout.setSpacing(6)
+        key_layout.addWidget(self.inp_key, 1)
+        btn_eye = QtWidgets.QToolButton()
+        btn_eye.setText("显示")
+        btn_eye.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
+        btn_eye.pressed.connect(
+            lambda: self.inp_key.setEchoMode(QtWidgets.QLineEdit.EchoMode.Normal)
+        )
+        btn_eye.released.connect(
+            lambda: self.inp_key.setEchoMode(QtWidgets.QLineEdit.EchoMode.Password)
+        )
+        key_layout.addWidget(btn_eye)
+        form.addRow("API Key:", key_row)
 
         self.inp_api_key_env = QtWidgets.QLineEdit(
             str(self._original.get("api_key_env", "") or "")
@@ -380,43 +468,41 @@ class ModelEditDialog(QtWidgets.QDialog):
         form.addRow("Key 环境变量:", self.inp_api_key_env)
 
         self.combo_style = QtWidgets.QComboBox()
-
         self.combo_style.setEditable(True)
-
         for x in self.API_STYLE_OPTIONS:
             self.combo_style.addItem(x)
-
         style_text = str(self._original.get("api_style", "") or "")
-
         self.combo_style.setCurrentText(style_text)
-
         form.addRow("api_style:", self.combo_style)
 
-        layout.addLayout(form)
+        base_layout.addLayout(form)
+        layout.addWidget(base_card)
 
-        purpose_card = QtWidgets.QFrame()
-        purpose_card.setObjectName("settingsHeaderCard")
+        # --- 卡片 2: 模型用途 ---
+        purpose_card = QtWidgets.QFrame(scroll_content)
+        purpose_card.setObjectName("modelCard")
         purpose_layout = QtWidgets.QVBoxLayout(purpose_card)
-        purpose_layout.setContentsMargins(12, 10, 12, 10)
-        purpose_layout.setSpacing(6)
-        purpose_title = QtWidgets.QLabel("模型用途")
-        purpose_title.setObjectName("settingsPageTitle")
+        purpose_layout.setContentsMargins(14, 12, 14, 12)
+        purpose_layout.setSpacing(8)
+        purpose_title = QtWidgets.QLabel("🏷️ 模型用途", purpose_card)
+        purpose_title.setObjectName("cardTitle")
         purpose_layout.addWidget(purpose_title)
         purpose_hint = QtWidgets.QLabel(
-            "给模型打标签后，插件/路由可按用途筛选。例如画图插件只会使用勾选了「画图/图生图」的模型。"
+            "给模型打标签后，插件/路由可按用途筛选。例如画图插件只会使用勾选了「画图/图生图」的模型。",
+            purpose_card,
         )
-        purpose_hint.setObjectName("settingsPageDesc")
+        purpose_hint.setObjectName("cardDesc")
         purpose_hint.setWordWrap(True)
         purpose_layout.addWidget(purpose_hint)
 
         purpose_grid = QtWidgets.QGridLayout()
-        purpose_grid.setContentsMargins(0, 0, 0, 0)
-        purpose_grid.setHorizontalSpacing(10)
-        purpose_grid.setVerticalSpacing(6)
+        purpose_grid.setContentsMargins(0, 4, 0, 0)
+        purpose_grid.setHorizontalSpacing(14)
+        purpose_grid.setVerticalSpacing(8)
         self.purpose_checks = {}
         selected_purposes = set(get_model_purposes(self._original))
         for index, (purpose_id, label) in enumerate(MODEL_PURPOSE_OPTIONS):
-            check = QtWidgets.QCheckBox(label)
+            check = QtWidgets.QCheckBox(label, purpose_card)
             check.setToolTip(purpose_id)
             check.setChecked(purpose_id in selected_purposes)
             self.purpose_checks[purpose_id] = check
@@ -424,21 +510,27 @@ class ModelEditDialog(QtWidgets.QDialog):
         purpose_layout.addLayout(purpose_grid)
         layout.addWidget(purpose_card)
 
-        self.image_card = QtWidgets.QFrame()
-        self.image_card.setObjectName("settingsHeaderCard")
+        # --- 卡片 3: 图像专用接口 ---
+        self.image_card = QtWidgets.QFrame(scroll_content)
+        self.image_card.setObjectName("modelCard")
         image_layout = QtWidgets.QVBoxLayout(self.image_card)
-        image_layout.setContentsMargins(12, 10, 12, 10)
-        image_layout.setSpacing(6)
-        image_title = QtWidgets.QLabel("生图接口（画图/图生图用途）")
-        image_title.setObjectName("settingsPageTitle")
+        image_layout.setContentsMargins(14, 12, 14, 12)
+        image_layout.setSpacing(8)
+        image_title = QtWidgets.QLabel("🎨 生图接口（画图/图生图用途）", self.image_card)
+        image_title.setObjectName("cardTitle")
         image_layout.addWidget(image_title)
         image_hint = QtWidgets.QLabel(
-            "画图插件只从这里读模型。可只填 Base URL + 上游模型名；端点留空时默认 /v1/images/generations。"
+            "画图插件只从这里读模型。可只填 Base URL + 上游模型名；端点留空时默认 /v1/images/generations。",
+            self.image_card,
         )
-        image_hint.setObjectName("settingsPageDesc")
+        image_hint.setObjectName("cardDesc")
         image_hint.setWordWrap(True)
         image_layout.addWidget(image_hint)
         image_form = QtWidgets.QFormLayout()
+        image_form.setSpacing(8)
+        image_form.setLabelAlignment(
+            QtCore.Qt.AlignmentFlag.AlignRight | QtCore.Qt.AlignmentFlag.AlignVCenter
+        )
         self.inp_endpoint = QtWidgets.QLineEdit(
             str(self._original.get("endpoint_path", "") or "")
         )
@@ -457,21 +549,27 @@ class ModelEditDialog(QtWidgets.QDialog):
         image_layout.addLayout(image_form)
         layout.addWidget(self.image_card)
 
-        self.embedding_card = QtWidgets.QFrame()
-        self.embedding_card.setObjectName("settingsHeaderCard")
+        # --- 卡片 4: 向量专用接口 ---
+        self.embedding_card = QtWidgets.QFrame(scroll_content)
+        self.embedding_card.setObjectName("modelCard")
         embedding_layout = QtWidgets.QVBoxLayout(self.embedding_card)
-        embedding_layout.setContentsMargins(12, 10, 12, 10)
-        embedding_layout.setSpacing(6)
-        embedding_title = QtWidgets.QLabel("向量接口（向量用途）")
-        embedding_title.setObjectName("settingsPageTitle")
+        embedding_layout.setContentsMargins(14, 12, 14, 12)
+        embedding_layout.setSpacing(8)
+        embedding_title = QtWidgets.QLabel("📐 向量接口（向量用途）", self.embedding_card)
+        embedding_title.setObjectName("cardTitle")
         embedding_layout.addWidget(embedding_title)
         embedding_hint = QtWidgets.QLabel(
-            "向量模型只能单选。维度必须与已有索引一致；更换模型或维度后需要明确重建。"
+            "向量模型只能单选。维度必须与已有索引一致；更换模型或维度后需要明确重建。",
+            self.embedding_card,
         )
-        embedding_hint.setObjectName("settingsPageDesc")
+        embedding_hint.setObjectName("cardDesc")
         embedding_hint.setWordWrap(True)
         embedding_layout.addWidget(embedding_hint)
         embedding_form = QtWidgets.QFormLayout()
+        embedding_form.setSpacing(8)
+        embedding_form.setLabelAlignment(
+            QtCore.Qt.AlignmentFlag.AlignRight | QtCore.Qt.AlignmentFlag.AlignVCenter
+        )
         self.inp_embedding_api_url = QtWidgets.QLineEdit(
             str(self._original.get("embedding_api_url", "") or "")
         )
@@ -511,65 +609,61 @@ class ModelEditDialog(QtWidgets.QDialog):
         embedding_layout.addLayout(embedding_form)
         layout.addWidget(self.embedding_card)
 
-        preview_card = QtWidgets.QFrame()
-
-        preview_card.setObjectName("settingsHeaderCard")
-
+        # --- 卡片 5: 请求预览 ---
+        preview_card = QtWidgets.QFrame(scroll_content)
+        preview_card.setObjectName("modelCard")
         preview_layout = QtWidgets.QVBoxLayout(preview_card)
+        preview_layout.setContentsMargins(14, 12, 14, 12)
+        preview_layout.setSpacing(8)
 
-        preview_layout.setContentsMargins(12, 10, 12, 10)
-
-        preview_layout.setSpacing(6)
-
-        preview_title = QtWidgets.QLabel("请求预览")
-
-        preview_title.setObjectName("settingsPageTitle")
-
+        preview_title = QtWidgets.QLabel("📡 请求预览", preview_card)
+        preview_title.setObjectName("cardTitle")
         preview_layout.addWidget(preview_title)
 
-        self.lbl_transport_preview = QtWidgets.QLabel("")
-
-        self.lbl_transport_preview.setObjectName("settingsPageDesc")
-
+        self.lbl_transport_preview = QtWidgets.QLabel("", preview_card)
+        self.lbl_transport_preview.setObjectName("cardDesc")
         self.lbl_transport_preview.setWordWrap(True)
-
         preview_layout.addWidget(self.lbl_transport_preview)
 
-        self.preview_url = QtWidgets.QPlainTextEdit()
-
+        self.preview_url = QtWidgets.QPlainTextEdit(preview_card)
         self.preview_url.setReadOnly(True)
-
-        self.preview_url.setFixedHeight(82)
-
+        self.preview_url.setFixedHeight(72)
+        self.preview_url.setStyleSheet(
+            "QPlainTextEdit { background: #F8FAFC; border: 1px solid #E2E8F0; border-radius: 8px; font-family: 'Cascadia Mono', 'Consolas', monospace; font-size: 11px; padding: 6px; }"
+        )
         self.preview_url.setPlaceholderText("这里会显示当前配置预计请求的完整 URL")
-
         preview_layout.addWidget(self.preview_url)
-
         layout.addWidget(preview_card)
 
+        # 底部操作栏（固定在窗口底部）
         tips = QtWidgets.QLabel(
-            '提示：聊天模型用 api_style；画图和向量模型使用各自的专用接口字段。'
-            " 向量模型在记忆窗口中单独选择，不进入普通模型回退链。"
+            "提示：聊天模型用 api_style；画图和向量模型使用各自专用接口字段。向量模型在记忆窗口中单独选择。",
+            self,
         )
-
         tips.setWordWrap(True)
-
-        tips.setStyleSheet("color:#6B7280;")
-
-        layout.addWidget(tips)
+        tips.setStyleSheet("color: #64748B; font-size: 11px; padding: 2px 4px;")
+        main_layout.addWidget(tips)
 
         footer = QtWidgets.QHBoxLayout()
-        self.btn_probe = QtWidgets.QPushButton("测试连接")
+        footer.setSpacing(8)
+        self.btn_probe = QtWidgets.QPushButton("测试连接", self)
         self.btn_probe.clicked.connect(self._on_probe)
-        self.lbl_probe = QtWidgets.QLabel("")
-        self.lbl_probe.setObjectName("settingsPageDesc")
+        self.lbl_probe = QtWidgets.QLabel("", self)
+        self.lbl_probe.setStyleSheet("color: #64748B; font-size: 11px;")
         footer.addWidget(self.btn_probe)
         footer.addWidget(self.lbl_probe, 1)
-        footer.addStretch()
-        btn_save = QtWidgets.QPushButton("保存")
+        footer.addStretch(1)
+
+        btn_cancel = QtWidgets.QPushButton("取消", self)
+        btn_cancel.clicked.connect(self.reject)
+        footer.addWidget(btn_cancel)
+
+        btn_save = QtWidgets.QPushButton("保存配置", self)
+        btn_save.setObjectName("primaryAction")
         btn_save.clicked.connect(self._on_save)
         footer.addWidget(btn_save)
-        layout.addLayout(footer)
+
+        main_layout.addLayout(footer)
         self._probe_worker = None
 
         self.combo_style.currentTextChanged.connect(self._refresh_request_preview)
@@ -930,8 +1024,11 @@ class RouterConfigDialog(QtWidgets.QDialog):
         super().__init__(parent)
 
         self.setWindowTitle(f"路由配置: {task_name}")
-
         self.resize(760, 520)
+        self.setAttribute(QtCore.Qt.WidgetAttribute.WA_TranslucentBackground, False)
+        self.setAttribute(QtCore.Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.setAutoFillBackground(True)
+        self.setStyleSheet(get_settings_styles())
 
         self.task_name = str(task_name or "").strip()
 
@@ -1126,6 +1223,10 @@ class MCPServerEditDialog(QtWidgets.QDialog):
 
     def __init__(self, parent=None, server_data=None, default_transport: str = "stdio"):
         super().__init__(parent)
+        self.setAttribute(QtCore.Qt.WidgetAttribute.WA_TranslucentBackground, False)
+        self.setAttribute(QtCore.Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.setAutoFillBackground(True)
+        self.setStyleSheet(get_settings_styles())
 
         self.result_data = None
 
@@ -1529,8 +1630,11 @@ class QQUserProfileEditDialog(QtWidgets.QDialog):
         self._original = dict(profile_data or {})
 
         self.setWindowTitle("编辑 QQ 档案" if profile_data else "新增 QQ 档案")
-
         self.resize(560, 520)
+        self.setAttribute(QtCore.Qt.WidgetAttribute.WA_TranslucentBackground, False)
+        self.setAttribute(QtCore.Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.setAutoFillBackground(True)
+        self.setStyleSheet(get_settings_styles())
 
         self._init_ui(preset_user_id)
 

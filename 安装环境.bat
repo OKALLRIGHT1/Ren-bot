@@ -1,18 +1,25 @@
 @echo off
 setlocal
 cd /d "%~dp0"
-chcp 65001 >nul 2>&1
-echo [Live2D-Suzu] å¼€å§‹å®‰è£…è¿è¡ŒçŽ¯å¢ƒï¼Œé¦–æ¬¡å¯èƒ½éœ€è¦å‡ åˆ†é’Ÿã€‚
+title Ren-bot »·¾³°²×°
+
+echo ========================================================
+echo               Ren-bot ÔËÐÐ»·¾³°²×°Ïòµ¼
+echo ========================================================
 echo.
+echo ÕýÔÚ¼ì²é²¢ÅäÖÃÔËÐÐ»·¾³£¬Ê×´Î°²×°¿ÉÄÜÐèÒª¼¸·ÖÖÓ£¬ÇëÄÍÐÄµÈ´ý...
+echo.
+
 call "%~dp0setup_env.cmd" --ensure --console
 set "ERR=%ERRORLEVEL%"
 echo.
 if "%ERR%"=="0" (
-  echo çŽ¯å¢ƒå·²å°±ç»ªã€‚æŽ¥ä¸‹æ¥å¯ä»¥åŒå‡»ã€Œå¯åŠ¨.batã€æˆ–ã€Œå¯åŠ¨-æ— çª—å£.vbsã€ã€‚
-  echo å¦‚å°šæœªé…ç½®ï¼Œè¯·ç¼–è¾‘ .env å¡«å…¥ API Keyã€‚
+    echo [³É¹¦] Ren-bot ÔËÐÐ»·¾³ÒÑ¾ÍÐ÷£¡
+    echo ½ÓÏÂÀ´Äú¿ÉÒÔÖ±½ÓË«»÷ "ren-bot.exe" »ò "Æô¶¯.bat" Æô¶¯³ÌÐò¡£
 ) else (
-  echo å®‰è£…å¤±è´¥ã€‚è¯·æŸ¥çœ‹ logs\setup_env.logã€‚
-  echo éœ€è¦ Python 3.10 æˆ–æ›´é«˜ç‰ˆæœ¬ï¼šhttps://www.python.org/downloads/
+    echo [Ê§°Ü] »·¾³°²×°Óöµ½ÎÊÌâ£¬ÍË³öÂë£º%ERR%
+    echo Çë²é¿´ÈÕÖ¾ÎÄ¼þ£ºlogs\setup_env.log
+    echo ÌáÊ¾£ºÈôÎ´°²×° Python£¬ÇëÇ°Íù https://www.python.org/ ÏÂÔØ°²×° Python 3.10+£¬²¢¹´Ñ¡ "Add python.exe to PATH"¡£
 )
 echo.
 pause

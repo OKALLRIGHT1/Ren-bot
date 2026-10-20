@@ -231,6 +231,7 @@ CAPABILITY_GROUP_LABELS = {
 # Primary group per plugin trigger. Unknown triggers fall back to companion.
 CAPABILITY_GROUPS: Dict[str, str] = {
     "timer": "companion",
+    "life_hub": "companion",
     "diary_manager": "companion",
     "memory_tools": "companion",
     "database": "companion",
@@ -239,7 +240,6 @@ CAPABILITY_GROUPS: Dict[str, str] = {
     "egg_search": "companion",
     "xinsanguo_voice": "companion",
     "播放音乐": "companion",
-    "disaster_warning": "companion",
     "magic_daily": "companion",
     "moegirl_wiki": "companion",
     "knowledge_base": "companion",
@@ -248,6 +248,8 @@ CAPABILITY_GROUPS: Dict[str, str] = {
     "info_gateway": "companion",
     "vision": "companion",
     "打开": "desktop",
+    "desktop_hub": "desktop",
+    "owner_console": "desktop",
     "app_control": "desktop",
     "user_files": "desktop",
     "qq截图": "desktop",
@@ -263,7 +265,6 @@ CAPABILITY_GROUPS: Dict[str, str] = {
     "qq角色": "qq",
     "code_agent": "developer",
     "workspace_ops": "developer",
-    "skill_runtime": "developer",
     "mcp_tools": "developer",
     "agent_runtime": "developer",
     "llm_monitor": "developer",
@@ -425,6 +426,11 @@ def chat_setup_status(*, runtime_health: Any = None) -> Dict[str, Any]:
 
     live2d_state = "unknown"
     cached = getattr(runtime_health, "last_snapshot", None) if runtime_health is not None else None
+    if cached is None and runtime_health is not None and hasattr(runtime_health, "snapshot"):
+        try:
+            cached = runtime_health.snapshot()
+        except Exception:
+            cached = None
     if isinstance(cached, dict):
         try:
             from modules.gui.runtime_health_view import component_rows

@@ -32,8 +32,8 @@ def _public_dns(monkeypatch):
 
 
 def test_normalize_base_url_strips_v1():
-    assert normalize_base_url("https://dl.tomori.de5.net") == "https://dl.tomori.de5.net/"
-    assert normalize_base_url("https://dl.tomori.de5.net/v1/") == "https://dl.tomori.de5.net/"
+    assert normalize_base_url("https://dl.example.com") == "https://dl.example.com/"
+    assert normalize_base_url("https://dl.example.com/v1/") == "https://dl.example.com/"
 
 
 def test_source_url_allows_supported_public_host(monkeypatch):
@@ -69,7 +69,7 @@ def test_download_url_rejects_metadata_redirect_target(monkeypatch):
     with pytest.raises(XDownloadError):
         validate_download_url(
             "http://169.254.169.254/latest/meta-data",
-            base_url="https://dl.tomori.de5.net/",
+            base_url="https://dl.example.com/",
             source_url="https://v.douyin.com/abc/",
         )
 
@@ -78,8 +78,25 @@ def test_error_messages_hide_internals():
     text = user_message_for_error(XDownloadError("auth", "Bearer super-secret", status=401))
     assert "密钥" not in text or "联系管理员" in text
     assert "super-secret" not in text
-    assert "稍后" in user_message_for_error(XDownloadError("timeout", "timeout"))
+    assert "超时" in user_message_for_error(XDownloadError("timeout", "timeout"))
+    assert "连不上" in user_message_for_error(XDownloadError("network", "network"))
     assert "平台解析失败" in user_message_for_error(XDownloadError("upstream", "stack", status=502))
+
+
+@pytest.mark.asyncio
+async def test_parse_session_uses_happy_eyeballs():
+    from plugins.qq_watermark.xdownload import XDownloadClient
+
+    client = XDownloadClient(base_url="https://dl.example.com/", api_key="x")
+    timeout = __import__("aiohttp").ClientTimeout(total=5)
+    session = client._session(timeout)
+    try:
+        delay = getattr(session.connector, "_happy_eyeballs_delay", None)
+        if delay is None:
+            delay = getattr(session.connector, "happy_eyeballs_delay", None)
+        assert delay is not None
+    finally:
+        await session.close()
 
 
 def test_interpret_video_and_gallery():
@@ -134,9 +151,12 @@ async def test_image_record_is_images_with_title(tmp_path):
         cover_url="https://sns-img.xhscdn.com/cover.jpg",
     )
     assert ok is True
-    assert captured["kwargs"]["prompt"] == "七宗罪这一块"
-    assert len(captured["nodes"]) == 2
-    assert all(node["data"]["content"][0]["type"] == "image" for node in captured["nodes"])
+    assert captured["kwargs"]["title"] == "七宗罪这一块"
+    assert len(captured["nodes"]) == 3
+    header = captured["nodes"][0]["data"]["content"][0]
+    assert header["type"] == "text"
+    assert header["data"]["text"] == "七宗罪这一块"
+    assert all(node["data"]["content"][0]["type"] == "image" for node in captured["nodes"][1:])
 
 
 @pytest.mark.asyncio
@@ -162,18 +182,28 @@ async def test_napcat_forward_uses_multimsg_card_fields(tmp_path, monkeypatch):
                 "data": {
                     "name": "灯",
                     "uin": "10000",
+                    "content": [{"type": "text", "data": {"text": "七宗罪这一块"}}],
+                },
+            },
+            {
+                "type": "node",
+                "data": {
+                    "name": "灯",
+                    "uin": "10000",
                     "content": [{"type": "image", "data": {"file": first.resolve().as_uri()}}],
                 },
-            }
+            },
         ],
-        prompt="七宗罪这一块",
+        title="七宗罪这一块",
+        source="qq_gateway",
     )
     assert result["ok"] is True
     payload = captured["payload"]
     assert captured["action"] == "send_group_forward_msg"
     assert payload["prompt"] == "[聊天记录]"
     assert payload["source"] == "七宗罪这一块"
-    assert payload["news"] == [{"text": "灯: [图片]"}]
+    assert payload["news"][0] == {"text": "灯: 七宗罪这一块"}
+    assert payload["news"][1] == {"text": "灯: [图片]"}
     assert payload["summary"].startswith("查看")
 
 
@@ -216,4 +246,4 @@ def test_config_secret_is_not_committed():
     secret = config["settings"]["api_key"]
     assert secret["type"] == "secret"
     assert secret["default"] == ""
-    assert config["settings"]["base_url"]["default"].rstrip("/") == "https://dl.tomori.de5.net"
+    assert config["settings"]["base_url"]["default"].rstrip("/") == "https://dl.example.com"

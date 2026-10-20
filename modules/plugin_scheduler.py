@@ -1,7 +1,7 @@
 """Shared background-loop helper for plugins.
 
-Several plugins (`qq_reminder`, `life_manager`, `task_manager`,
-`disaster_warning`) each re-implemented the same shape: create an
+Several plugins (`qq_reminder`, `life_manager`, `task_manager`)
+each re-implemented the same shape: create an
 `asyncio.Task`, loop forever, sleep between ticks, swallow-and-back-off on
 error, cancel cleanly on shutdown. `PeriodicTask` holds that shape once.
 

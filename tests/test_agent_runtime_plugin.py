@@ -76,7 +76,7 @@ class Runtime:
 
 class ChatService:
     agent_runtime = Runtime()
-    app_root = "D:/Desktop/live2d-suzu/live2d-llm"
+    app_root = "/mock/workspace/live2d-llm"
 
 
 def runtime_ctx(**extra):
@@ -175,15 +175,15 @@ async def test_agent_runtime_reports_code_location():
     result = await plugin.run(
         "agent 位置",
         {
-            "app_root": "D:/Desktop/live2d-suzu/live2d-llm",
-            "cwd": "D:/Desktop/live2d-suzu/live2d-llm",
-            "code_path": "D:/Desktop/other-project",
+            "app_root": "/mock/workspace/live2d-llm",
+            "cwd": "/mock/workspace/live2d-llm",
+            "code_path": "/mock/workspace/other-project",
         },
     )
 
-    assert "主程序代码目录: D:/Desktop/live2d-suzu/live2d-llm" in result
-    assert "当前工作目录: D:/Desktop/live2d-suzu/live2d-llm" in result
-    assert "指定目录: D:/Desktop/other-project" in result
+    assert "主程序代码目录: /mock/workspace/live2d-llm" in result
+    assert "当前工作目录: /mock/workspace/live2d-llm" in result
+    assert "指定目录: /mock/workspace/other-project" in result
 
 
 @pytest.mark.asyncio

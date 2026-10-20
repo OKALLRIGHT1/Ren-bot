@@ -8,6 +8,7 @@ import shutil
 from PySide6 import QtWidgets, QtCore, QtGui
 from modules.gui.styles import get_tool_dialog_styles
 from modules.gui.utils import FlowWidget
+from modules.gui.dialogs.plugin_market_panel import PluginMarketPanel
 from modules.gui.user_ia import (
     CAPABILITY_GROUP_LABELS,
     capability_group,
@@ -145,6 +146,23 @@ class PluginManagerDialog(QtWidgets.QDialog):
             desc_label.setWordWrap(True)
             container_layout.addWidget(desc_label)
 
+        # --- 本机能力 / 插件市场 ---
+        view_row = QtWidgets.QHBoxLayout()
+        view_row.setContentsMargins(0, 0, 0, 0)
+        view_row.setSpacing(8)
+        self.local_view_button = QtWidgets.QPushButton("本机能力")
+        self.market_view_button = QtWidgets.QPushButton("插件市场")
+        for button in (self.local_view_button, self.market_view_button):
+            button.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
+            button.setFixedHeight(30)
+            button.setCheckable(True)
+        self.local_view_button.clicked.connect(lambda: self._set_market_mode(False))
+        self.market_view_button.clicked.connect(lambda: self._set_market_mode(True))
+        view_row.addWidget(self.local_view_button)
+        view_row.addWidget(self.market_view_button)
+        view_row.addStretch(1)
+        container_layout.addLayout(view_row)
+
         # --- 单行紧凑控制栏：搜索 + 分组筛选 + 统计 + 导入/刷新 ---
         filter_row = QtWidgets.QHBoxLayout()
         filter_row.setContentsMargins(0, 0, 0, 0)
@@ -165,9 +183,9 @@ class PluginManagerDialog(QtWidgets.QDialog):
         self.stats_label = QtWidgets.QLabel("")
         self.stats_label.setStyleSheet("color: #6B7280; font-size: 11px; padding: 0 4px;")
 
-        import_btn = QtWidgets.QPushButton("导入插件")
-        refresh_btn = QtWidgets.QPushButton("刷新")
-        for btn in (import_btn, refresh_btn):
+        self.import_btn = QtWidgets.QPushButton("导入插件")
+        self.refresh_btn = QtWidgets.QPushButton("刷新")
+        for btn in (self.import_btn, self.refresh_btn):
             btn.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
             btn.setFixedHeight(30)
             btn.setStyleSheet(
@@ -188,14 +206,14 @@ class PluginManagerDialog(QtWidgets.QDialog):
                 }
                 """
             )
-        import_btn.clicked.connect(self._import_local_plugin)
-        refresh_btn.clicked.connect(self._refresh_plugins)
+        self.import_btn.clicked.connect(self._import_local_plugin)
+        self.refresh_btn.clicked.connect(self._refresh_plugins)
 
         filter_row.addWidget(self.search_input, 1)
         filter_row.addWidget(self.group_filter)
         filter_row.addWidget(self.stats_label)
-        filter_row.addWidget(import_btn)
-        filter_row.addWidget(refresh_btn)
+        filter_row.addWidget(self.import_btn)
+        filter_row.addWidget(self.refresh_btn)
         container_layout.addLayout(filter_row)
 
         self._developer_visible = is_developer_mode()
@@ -241,6 +259,12 @@ class PluginManagerDialog(QtWidgets.QDialog):
         self.cards_scroll.setWidget(self.cards_container)
         container_layout.addWidget(self.cards_scroll, 1)
 
+        self.market_panel = PluginMarketPanel(plugin_manager, self)
+        self.market_panel.setVisible(False)
+        self.market_panel.plugins_changed.connect(self._refresh_plugins)
+        container_layout.addWidget(self.market_panel, 1)
+        self._set_market_mode(False)
+
         # 保留隐藏的 table 属性以兼容潜在外部引用
         self.table = QtWidgets.QTableWidget(self)
         self.table.setVisible(False)
@@ -266,6 +290,37 @@ class PluginManagerDialog(QtWidgets.QDialog):
         self._developer_visible = bool(visible)
         self._reload_group_filter()
         self._refresh_plugins()
+        if hasattr(self, "market_panel"):
+            self.market_panel.set_developer_visible(visible)
+
+    def _set_market_mode(self, enabled: bool):
+        market = bool(enabled)
+        self.local_view_button.setChecked(not market)
+        self.market_view_button.setChecked(market)
+        active = (
+            "QPushButton { background: #EFF6FF; color: #1D4ED8; border: 1px solid #93C5FD;"
+            " border-radius: 8px; padding: 4px 10px; font-size: 12px; font-weight: 700; }"
+        )
+        idle = (
+            "QPushButton { background: #FFFFFF; color: #374151; border: 1px solid #D1D5DB;"
+            " border-radius: 8px; padding: 4px 10px; font-size: 12px; font-weight: 600; }"
+            "QPushButton:hover { border-color: #93C5FD; color: #1D4ED8; background: #EFF6FF; }"
+        )
+        self.local_view_button.setStyleSheet(idle if market else active)
+        self.market_view_button.setStyleSheet(active if market else idle)
+        for widget in (
+            self.search_input,
+            self.group_filter,
+            self.stats_label,
+            self.import_btn,
+            self.refresh_btn,
+            self.cards_scroll,
+        ):
+            widget.setVisible(not market)
+        self.market_panel.setVisible(market)
+        if market:
+            self.market_panel.set_developer_visible(self._developer_visible)
+            self.market_panel.open_market()
 
     def _reload_group_filter(self):
         if not hasattr(self, "group_filter"):
@@ -758,7 +813,13 @@ class PluginEditorDialog(QtWidgets.QDialog):
             get_tool_dialog_styles()
             + """
             QDialog {
-                background-color: #F8FAFC;
+                background-color: #F1F5F9;
+            }
+            QLabel {
+                background: transparent;
+            }
+            QCheckBox {
+                background: transparent;
             }
             QFrame#editorHeaderCard {
                 background: #FFFFFF;
@@ -775,6 +836,9 @@ class PluginEditorDialog(QtWidgets.QDialog):
                 border: 1px solid #E2E8F0;
                 border-radius: 8px;
             }
+            QFrame#permSubCard QLabel, QFrame#permSubCard QCheckBox {
+                background: transparent;
+            }
             QFrame#settingMiniCard {
                 background: #FFFFFF;
                 border: 1px solid #E2E8F0;
@@ -782,6 +846,9 @@ class PluginEditorDialog(QtWidgets.QDialog):
             }
             QFrame#settingMiniCard:hover {
                 border-color: #CBD5E1;
+            }
+            QFrame#settingMiniCard QLabel, QFrame#settingMiniCard QCheckBox {
+                background: transparent;
             }
             QFrame#tagChipBox {
                 background: #F8FAFC;
@@ -1158,9 +1225,9 @@ class PluginEditorDialog(QtWidgets.QDialog):
         local_sub_layout.setContentsMargins(10, 8, 10, 8)
         local_sub_layout.setSpacing(3)
         self.allow_local_checkbox = QtWidgets.QCheckBox("💻 允许桌面本地触发", local_sub)
-        self.allow_local_checkbox.setStyleSheet("font-weight: 600; font-size: 12px; color: #1E293B;")
+        self.allow_local_checkbox.setStyleSheet("font-weight: 600; font-size: 12px; color: #1E293B; background: transparent;")
         local_desc = QtWidgets.QLabel("麦克风语音、桌面聊天框与屏幕插话", local_sub)
-        local_desc.setStyleSheet("color: #64748B; font-size: 11px; padding-left: 20px;")
+        local_desc.setStyleSheet("color: #64748B; font-size: 11px; padding-left: 24px; background: transparent;")
         local_sub_layout.addWidget(self.allow_local_checkbox)
         local_sub_layout.addWidget(local_desc)
         perm_cols.addWidget(local_sub, 4)
@@ -1172,11 +1239,11 @@ class PluginEditorDialog(QtWidgets.QDialog):
         qq_sub_layout.setContentsMargins(10, 8, 10, 8)
         qq_sub_layout.setSpacing(4)
         self.allow_remote_qq_checkbox = QtWidgets.QCheckBox("🐧 允许 QQ 消息触发", qq_sub)
-        self.allow_remote_qq_checkbox.setStyleSheet("font-weight: 600; font-size: 12px; color: #1E293B;")
+        self.allow_remote_qq_checkbox.setStyleSheet("font-weight: 600; font-size: 12px; color: #1E293B; background: transparent;")
         qq_sub_layout.addWidget(self.allow_remote_qq_checkbox)
 
         qq_sub_row = QtWidgets.QHBoxLayout()
-        qq_sub_row.setContentsMargins(20, 0, 0, 0)
+        qq_sub_row.setContentsMargins(24, 0, 0, 0)
         qq_sub_row.setSpacing(10)
         self.allow_qq_owner_checkbox = QtWidgets.QCheckBox("主人", qq_sub)
         self.allow_qq_others_checkbox = QtWidgets.QCheckBox("其他联系人", qq_sub)
@@ -1186,7 +1253,7 @@ class PluginEditorDialog(QtWidgets.QDialog):
             self.allow_qq_others_checkbox,
             self.allow_group_without_at_checkbox,
         ):
-            cb.setStyleSheet("font-size: 11px; color: #334155;")
+            cb.setStyleSheet("font-size: 11px; color: #334155; background: transparent;")
             qq_sub_row.addWidget(cb)
         qq_sub_row.addStretch(1)
         qq_sub_layout.addLayout(qq_sub_row)
@@ -1568,19 +1635,19 @@ class PluginEditorDialog(QtWidgets.QDialog):
 
                 lbl_title = QtWidgets.QLabel(str(label), mini_card)
                 lbl_title.setStyleSheet(
-                    "font-weight: 700; font-size: 12px; color: #1E293B;"
+                    "font-weight: 700; font-size: 12px; color: #1E293B; background: transparent;"
                 )
                 card_layout.addWidget(lbl_title)
 
                 if description:
                     desc_label = QtWidgets.QLabel(str(description), mini_card)
-                    desc_label.setStyleSheet("color: #64748B; font-size: 11px;")
+                    desc_label.setStyleSheet("color: #64748B; font-size: 11px; background: transparent;")
                     desc_label.setWordWrap(True)
                     card_layout.addWidget(desc_label)
 
                 if validation_error:
                     warn_label = QtWidgets.QLabel(f"格式提醒：{validation_error}", mini_card)
-                    warn_label.setStyleSheet("color: #B45309; font-size: 11px;")
+                    warn_label.setStyleSheet("color: #B45309; font-size: 11px; background: transparent;")
                     warn_label.setWordWrap(True)
                     card_layout.addWidget(warn_label)
 
@@ -1596,13 +1663,13 @@ class PluginEditorDialog(QtWidgets.QDialog):
 
                 lbl_title = QtWidgets.QLabel(str(label), mini_card)
                 lbl_title.setStyleSheet(
-                    "font-weight: 700; font-size: 12px; color: #1E293B;"
+                    "font-weight: 700; font-size: 12px; color: #1E293B; background: transparent;"
                 )
                 left_col.addWidget(lbl_title)
 
                 if description:
                     desc_label = QtWidgets.QLabel(str(description), mini_card)
-                    desc_label.setStyleSheet("color: #64748B; font-size: 11px;")
+                    desc_label.setStyleSheet("color: #64748B; font-size: 11px; background: transparent;")
                     desc_label.setWordWrap(True)
                     left_col.addWidget(desc_label)
 
@@ -1610,13 +1677,13 @@ class PluginEditorDialog(QtWidgets.QDialog):
                     store_label = QtWidgets.QLabel(
                         "安全存储于本机密钥库，config.json 默认留空", mini_card
                     )
-                    store_label.setStyleSheet("color: #2563EB; font-size: 10px;")
+                    store_label.setStyleSheet("color: #2563EB; font-size: 10px; background: transparent;")
                     store_label.setWordWrap(True)
                     left_col.addWidget(store_label)
 
                 if validation_error:
                     warn_label = QtWidgets.QLabel(f"格式提醒：{validation_error}", mini_card)
-                    warn_label.setStyleSheet("color: #B45309; font-size: 11px;")
+                    warn_label.setStyleSheet("color: #B45309; font-size: 11px; background: transparent;")
                     warn_label.setWordWrap(True)
                     left_col.addWidget(warn_label)
 
@@ -2207,9 +2274,17 @@ class PluginEditorDialog(QtWidgets.QDialog):
         body.setSpacing(8)
 
         left_box = QtWidgets.QVBoxLayout()
-        left_box.addWidget(QtWidgets.QLabel("可选模型"))
+        lbl_pool = QtWidgets.QLabel("可选模型")
+        lbl_pool.setStyleSheet("font-size: 11px; font-weight: 600; color: #475569; background: transparent;")
+        left_box.addWidget(lbl_pool)
         list_pool = QtWidgets.QListWidget()
         list_pool.setMinimumHeight(160)
+        list_pool.setStyleSheet(
+            "QListWidget { background: #F8FAFC; border: 1px solid #E2E8F0; border-radius: 8px; padding: 4px; font-size: 11px; }"
+            "QListWidget::item { padding: 6px 8px; border-radius: 6px; color: #1E293B; }"
+            "QListWidget::item:hover { background: #EFF6FF; color: #1D4ED8; }"
+            "QListWidget::item:selected { background: #2563EB; color: #FFFFFF; }"
+        )
         left_box.addWidget(list_pool)
         body.addLayout(left_box, 1)
 
@@ -2217,19 +2292,36 @@ class PluginEditorDialog(QtWidgets.QDialog):
         mid.addStretch()
         btn_add = QtWidgets.QPushButton("->")
         btn_rm = QtWidgets.QPushButton("<-")
+        btn_mid_style = (
+            "QPushButton { background: #FFFFFF; border: 1px solid #CBD5E1; border-radius: 6px; padding: 4px 10px; font-size: 12px; font-weight: 700; color: #334155; }"
+            "QPushButton:hover { background: #EFF6FF; border-color: #93C5FD; color: #1D4ED8; }"
+            "QPushButton:pressed { background: #DBEAFE; }"
+        )
+        btn_add.setStyleSheet(btn_mid_style)
+        btn_rm.setStyleSheet(btn_mid_style)
         mid.addWidget(btn_add)
         mid.addWidget(btn_rm)
         mid.addStretch()
         body.addLayout(mid)
 
         right_box = QtWidgets.QVBoxLayout()
-        right_box.addWidget(QtWidgets.QLabel("执行链（上优先）"))
+        lbl_chain = QtWidgets.QLabel("执行链（上优先）")
+        lbl_chain.setStyleSheet("font-size: 11px; font-weight: 600; color: #475569; background: transparent;")
+        right_box.addWidget(lbl_chain)
         list_chain = QtWidgets.QListWidget()
         list_chain.setMinimumHeight(160)
+        list_chain.setStyleSheet(
+            "QListWidget { background: #F8FAFC; border: 1px solid #E2E8F0; border-radius: 8px; padding: 4px; font-size: 11px; }"
+            "QListWidget::item { padding: 6px 8px; border-radius: 6px; color: #1E293B; }"
+            "QListWidget::item:hover { background: #EFF6FF; color: #1D4ED8; }"
+            "QListWidget::item:selected { background: #2563EB; color: #FFFFFF; }"
+        )
         right_box.addWidget(list_chain)
         sort_row = QtWidgets.QHBoxLayout()
         btn_up = QtWidgets.QPushButton("上移")
         btn_down = QtWidgets.QPushButton("下移")
+        btn_up.setStyleSheet(btn_mid_style)
+        btn_down.setStyleSheet(btn_mid_style)
         sort_row.addWidget(btn_up)
         sort_row.addWidget(btn_down)
         right_box.addLayout(sort_row)

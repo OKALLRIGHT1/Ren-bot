@@ -1362,12 +1362,12 @@ class NapCatOneBotAdapter(BaseChatAdapter):
             )
         chat_type, peer_id = self._parse_session(session_id)
         peer: Any = int(peer_id) if str(peer_id).isdigit() else peer_id
-        title = str(
-            kwargs.get("title")
-            or kwargs.get("source")
-            or kwargs.get("prompt")
-            or ""
-        ).strip() or "聊天记录"
+        title = str(kwargs.get("title") or "").strip()
+        if not title:
+            prompt = str(kwargs.get("prompt") or "").strip()
+            if prompt and prompt not in {"qq_gateway", "napcat_qq", "[聊天记录]"}:
+                title = prompt
+        title = title or "聊天记录"
         summary = str(kwargs.get("summary") or "").strip() or f"查看{len(prepared)}条转发消息"
         news_raw = kwargs.get("news")
         if isinstance(news_raw, list) and news_raw:

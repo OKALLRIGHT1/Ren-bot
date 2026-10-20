@@ -432,44 +432,8 @@ CODEX_AUTORUN_TIMEOUT_SEC = get_env_int("CODEX_AUTORUN_TIMEOUT_SEC", 120, 1)
 CODEX_AUTORUN_COMMANDS = get_env_list("CODEX_AUTORUN_COMMANDS", "", sep=";;")
 CODEX_AUTOROLLBACK_ON_FAIL = get_env_bool("CODEX_AUTOROLLBACK_ON_FAIL", "0")
 
-# 可用模型池定义
-MODELS = {
-    # 聪明但贵的模型，适用于复杂推理
-    "gemini-3-flash": {
-        "api_key": os.getenv(""),
-        "base_url": "",
-        "model": "gemini-3-flash-preview",
-        "api_style": "openai",
-    },
-    # 性价比高的模型，适用于日常聊天
-    "deepseek": {
-        "api_key": os.getenv("DEEPSEEK_API_KEY"),
-        "base_url": "https://api.deepseek.com",
-        "model": "deepseek-chat",
-    },
-    # 优先级较低的模型，作为保底选项
-    "or-dp": {
-        "api_key": os.getenv("OR_API_KEY"),
-        "base_url": "https://openrouter.ai/api/v1",
-        "model": "nex-agi/deepseek-v3.1-nex-n1:free",
-    },
-    # 本地 Ollama 兜底（看门/轻量任务链路末位；主聊天不要优先它）
-    "local": {
-        "api_key": "sk-no-key-needed",
-        "base_url": "http://localhost:11434/v1",
-        "model": "gemma4:e4b",
-    },
-    "glm-4-flash": {
-        "api_key": os.getenv("BIGM_API_KEY"),
-        "base_url": "https://open.bigmodel.cn/api/paas/v4",
-        "model": "glm-4-flash",
-    },
-    "GLM-4V-Flash": {
-        "api_key": os.getenv("BIGM_API_KEY"),
-        "base_url": "https://open.bigmodel.cn/api/paas/v4",
-        "model": "GLM-4V-Flash",
-    },
-}
+# # 可用模型池定义（默认清空，由用户在「偏好设置 -> 聊天模型」或 custom_models.json 中配置）
+MODELS = {}
 
 if CODEX_API_KEY:
     MODELS[CODEX_MODEL_KEY] = {
@@ -481,7 +445,6 @@ if CODEX_API_KEY:
 CODEX_ROUTE_CHAIN = []
 if CODEX_MODEL_KEY in MODELS:
     CODEX_ROUTE_CHAIN.append(CODEX_MODEL_KEY)
-CODEX_ROUTE_CHAIN += ["gemini-3-flash"]
 
 # 任务路由：根据不同场景选择模型
 TASK_MODEL_TTL_HOURS = 12  # 任务级成功模型粘性时长（小时）
@@ -498,27 +461,24 @@ TOOL_INVOCATION_MODE = (
 
 LLM_ROUTER = {
     # 默认闲聊场景
-    "default": ["gemini-3-flash", "glm-4.7-flash"],
-    # 回复润色 / 情绪兜底：初始复用 default 链，先把语义从闲聊里拆出来
-    "reply_polish": ["gemini-3-flash", "glm-4.7-flash"],
+    "default": [],
+    # 回复润色 / 情绪兜底
+    "reply_polish": [],
     # 复杂推理场景
-    "tool_reasoning": ["gemini-3-flash", "or-dp"],
+    "tool_reasoning": [],
     # 记忆总结场景
-    "summary": ["glm-4-flash"],
-    # 联网搜索：只应选择 purposes 包含 web_search 的模型
+    "summary": [],
+    # 联网搜索
     "web_search": [],
-    # 看门人：是否回复 / 工具与能力确认；云端 flash 优先，本地 gemma 垫底
-    "gatekeeper": ["glm-4-flash", "gemini-3-flash", "local"],
-    # 兼容旧 task_type 名，与 gatekeeper 同一条链
-    "tool_gatekeeper": ["glm-4-flash", "gemini-3-flash", "local"],
-    # 长期记忆写回抽取：默认与看门链一致（云端优先，local 垫底）
-    "memory_writeback": ["glm-4-flash", "gemini-3-flash", "local"],
-    "translation": ["glm-4-flash", "gemini-3-flash"],
-    "screen_classify": ["glm-4-flash", "gemini-3-flash"],
-    "sensor_vision_talk": ["glm-4-flash", "gemini-3-flash"],
-    # 代码助手专用链路（优先走专用 API）
+    # 看门人
+    "gatekeeper": [],
+    "tool_gatekeeper": [],
+    "memory_writeback": [],
+    "translation": [],
+    "screen_classify": [],
+    "sensor_vision_talk": [],
+    # 代码助手专用链路
     "codex": CODEX_ROUTE_CHAIN,
-    # 生图 / 图生图：填模型 ID 队列；插件会优先只挑 purposes 含画图/图生图 的模型
     "image_gen": [],
     "image_edit": [],
 }

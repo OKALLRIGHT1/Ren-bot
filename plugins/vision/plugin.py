@@ -2,6 +2,11 @@ import asyncio
 from typing import Optional
 
 from modules.vision.capture import take_camera_photo_base64, take_screenshot_base64
+from plugins.composite_plugin import attach_inner_config, setting_value
+from plugins.qq_screenshot.plugin import QQ_SCREENSHOT_HINTS
+from plugins.qq_screenshot.plugin import Plugin as ScreenshotPlugin
+
+SCREENSHOT_ALIASES = QQ_SCREENSHOT_HINTS + ("/截图发我",)
 from services.capability_manager import ToolCapability, ToolCapabilityMatch
 
 
@@ -35,6 +40,43 @@ REMOTE_SEND_HINTS = (
 
 
 class Plugin:
+    allow_natural_language_direct = True
+    llm_commands = ["qq_screenshot"]
+
+    def __init__(self):
+        self._screenshot = ScreenshotPlugin()
+        attach_inner_config(self._screenshot, "qq_screenshot")
+        self.reload_config()
+
+    def reload_config(self):
+        settings = getattr(self, "settings", None) or {}
+        if not settings:
+            self._screenshot.reload_config()
+            return
+        self._screenshot._settings = {
+            "capture_target": str(setting_value(settings, "capture_target", "primary") or "primary"),
+            "monitor_index": int(setting_value(settings, "monitor_index", 1) or 1),
+            "include_window_title": bool(setting_value(settings, "include_window_title", True)),
+        }
+
+    def resolve_access_control(
+        self,
+        context=None,
+        *,
+        invoked_tool: str = "",
+        invoked_alias: str = "",
+        args: str = "",
+    ):
+        if str(invoked_tool or "") == "qq_screenshot" or str(invoked_alias or "") in SCREENSHOT_ALIASES:
+            return getattr(self._screenshot, "access_control", None)
+        return getattr(self, "access_control", None)
+
+    def should_handle_direct(self, text: str, context: dict, key: str) -> bool:
+        raw = str(text or "").strip()
+        if str(key or "") in SCREENSHOT_ALIASES:
+            return any(hint in raw for hint in SCREENSHOT_ALIASES)
+        return False
+
     def get_capabilities(self):
         return [
             ToolCapability(
@@ -87,8 +129,12 @@ class Plugin:
 
     async def run(self, args: str, context: dict):
         try:
+            tool = str((context or {}).get("invoked_tool") or "")
+            alias = str((context or {}).get("invoked_alias") or "")
+            if tool == "qq_screenshot" or alias in SCREENSHOT_ALIASES:
+                return await self._screenshot.run(args, context)
             if self._looks_like_remote_send_request(args, context):
-                return None
+                return await self._screenshot.run(args, context)
 
             mode = self._detect_mode(args)
             if not mode:

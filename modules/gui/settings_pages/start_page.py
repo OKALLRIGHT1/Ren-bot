@@ -27,6 +27,14 @@ class StartSettingsPage(QtWidgets.QWidget):
         self._on_open_page = on_open_page
         self._build_ui()
         self.refresh()
+        self._refresh_timer = QtCore.QTimer(self)
+        self._refresh_timer.setInterval(2500)
+        self._refresh_timer.timeout.connect(self.refresh)
+        self._refresh_timer.start()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self.refresh()
 
     def _build_ui(self):
         layout = QtWidgets.QVBoxLayout(self)
@@ -181,16 +189,17 @@ class StartSettingsPage(QtWidgets.QWidget):
         if path:
             self._exe_edit.setText(path)
 
-    def _save_live2d(self):
+    def _save_live2d(self) -> bool:
         if client_config is None:
             QtWidgets.QMessageBox.warning(self, "桌面形象", "客户端配置模块不可用。")
-            return
+            return False
         patch = {
             "live2d_exe": (self._exe_edit.text() or "").strip(),
             "auto_start_live2d": self._auto_l2d_check.isChecked(),
         }
         client_config.save(patch)
         self._l2d_hint.setText("已保存。下次启动会用这个程序；也可以点「立即启动」。")
+        return True
 
     def _start_live2d(self):
         self._save_live2d()
@@ -198,7 +207,10 @@ class StartSettingsPage(QtWidgets.QWidget):
         callback = getattr(app, "on_start_live2d_callback", None)
         if not callable(callback):
             owner = getattr(app, "app", None) if app is not None else None
-            callback = getattr(owner, "_start_live2d_renderer_when_ready", None)
+            if hasattr(owner, "start_live2d_renderer"):
+                callback = lambda: owner.start_live2d_renderer(force=True)
+            else:
+                callback = getattr(owner, "_start_live2d_renderer_when_ready", None)
         if not callable(callback):
             QtWidgets.QMessageBox.information(self, "桌面形象", "启动入口还没接上。")
             return

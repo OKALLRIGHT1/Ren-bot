@@ -37,6 +37,45 @@ def _as_function_schema(raw: Any, fallback_name: str) -> Optional[Dict[str, Any]
     }
 
 
+def iter_plugin_tool_schemas(plugin: Any, fallback_name: str = "") -> List[Dict[str, Any]]:
+    getter = getattr(plugin, "get_tool_schema", None)
+    if not callable(getter):
+        return []
+    raw = getter()
+    if raw is None:
+        return []
+    items = raw if isinstance(raw, list) else [raw]
+    schemas: List[Dict[str, Any]] = []
+    seen: Set[str] = set()
+    for item in items:
+        schema = _as_function_schema(item, fallback_name)
+        if schema is None or schema["name"] in seen:
+            continue
+        seen.add(schema["name"])
+        schemas.append(schema)
+    return schemas
+
+
+def schema_for_tool(plugin: Any, tool_name: str) -> Optional[Dict[str, Any]]:
+    name = str(tool_name or "").strip()
+    fallback = str(
+        getattr(plugin, "llm_command", "")
+        or getattr(plugin, "plugin_trigger", "")
+        or name
+        or ""
+    ).strip()
+    schemas = iter_plugin_tool_schemas(plugin, fallback)
+    if not schemas:
+        return None
+    if name:
+        for schema in schemas:
+            if schema["name"] == name:
+                return schema
+    if len(schemas) == 1:
+        return schemas[0]
+    return None
+
+
 def _plugin_type(plugin: Any) -> str:
     return str(getattr(plugin, "type", "react") or "react")
 
@@ -70,23 +109,35 @@ def build_openai_tools(
         plugin = resolve_plugin(plugin_manager, trigger)
         if plugin is None:
             continue
-        plugin_type = _plugin_type(plugin)
-        if allowed and plugin_type not in allowed:
-            continue
-        getter = getattr(plugin, "get_tool_schema", None)
-        if not callable(getter):
-            continue
         llm_cmd = str(
             getattr(plugin, "llm_command", "")
             or getattr(plugin, "plugin_trigger", "")
             or trigger
             or ""
         ).strip()
-        schema = _as_function_schema(getter(), llm_cmd)
-        if schema is None or schema["name"] in seen_names:
+        schemas = iter_plugin_tool_schemas(plugin, llm_cmd)
+        if not schemas:
             continue
-        seen_names.add(schema["name"])
-        tools.append({"type": "function", "function": schema})
+        plugin_type = _plugin_type(plugin)
+        extras = {
+            str(item).strip()
+            for item in (getattr(plugin, "llm_commands", None) or [])
+            if str(item).strip()
+        }
+        if allowed and plugin_type not in allowed:
+            wanted = str(trigger or "").strip()
+            schemas = [
+                schema
+                for schema in schemas
+                if schema["name"] == wanted or schema["name"] in extras
+            ]
+            if not schemas:
+                continue
+        for schema in schemas:
+            if schema["name"] in seen_names:
+                continue
+            seen_names.add(schema["name"])
+            tools.append({"type": "function", "function": schema})
 
     if include_tool_search and "tool_search" not in seen_names:
         tools.append({"type": "function", "function": dict(TOOL_SEARCH_SCHEMA)})

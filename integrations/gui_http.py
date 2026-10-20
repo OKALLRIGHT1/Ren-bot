@@ -150,10 +150,13 @@ class GuiHttpServer:
     def _request_authorized(self, request: web.Request) -> bool:
         if request.path == self._api_path("/health"):
             return True
-        if not self.access_token:
-            return False
         provided = self._extract_token(request)
-        return bool(provided) and secrets.compare_digest(provided, self.access_token)
+        if provided:
+            return bool(self.access_token) and secrets.compare_digest(provided, self.access_token)
+        remote = str(request.remote or "").strip().lower()
+        if remote in {"127.0.0.1", "::1", "localhost"} and self.host in {"127.0.0.1", "localhost", "::1"}:
+            return True
+        return False
 
     @web.middleware
     async def _cors_middleware(self, request: web.Request, handler):

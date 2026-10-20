@@ -54,25 +54,7 @@ def overall_presentation(snapshot: Any) -> Dict[str, str]:
 
 
 def _derived_brain_record(snapshot: Dict[str, Any], components: Dict[str, Any]) -> Dict[str, Any] | None:
-    existing = components.get("brain")
-    if isinstance(existing, dict):
-        return existing
-    hud = components.get("hud_link")
-    if isinstance(hud, dict):
-        return hud
-    overall = str(snapshot.get("overall") or "").strip().lower()
-    if overall == "offline":
-        return {
-            "state": "offline",
-            "effective_state": "offline",
-            "summary": "大脑未连接",
-        }
-    if components or overall in {"healthy", "degraded"}:
-        return {
-            "state": "healthy",
-            "effective_state": "healthy",
-            "summary": "大脑进程在线",
-        }
+    # 运行健康中心当前处于大脑主进程的原生 Qt 窗口中，无需展示虚拟的“大脑”行以防误导
     return None
 
 

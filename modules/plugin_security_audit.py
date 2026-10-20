@@ -6,15 +6,18 @@ from typing import Any, Callable, Dict, Iterable, List
 RISK_FLAGS_BY_TRIGGER: Dict[str, List[str]] = {
     "agently_mail": ["mail"],
     "app_control": ["process_control"],
+    "owner_console": ["process_control"],
     "code_agent": ["process_control", "code_or_skill"],
     "info_gateway": ["paid_api"],
+    "magic_daily": ["paid_api"],
     "mcp_tools": ["code_or_skill"],
     "qq_draw": ["paid_api"],
     "qq_file_browser": ["file_access"],
     "qq_music": ["paid_api"],
     "qq_screenshot": ["file_access"],
+    "vision": ["file_access"],
+    "desktop_hub": ["process_control"],
     "search_web": ["paid_api"],
-    "skill_runtime": ["code_or_skill"],
     "user_files": ["file_access"],
 }
 

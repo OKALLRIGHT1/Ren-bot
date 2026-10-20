@@ -1,6 +1,5 @@
 import json
 import os
-from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -64,15 +63,44 @@ class _FakePluginManager:
         return True
 
 
-def test_disaster_plugin_editor_hides_json_and_keeps_it_on_save(monkeypatch):
+def test_plugin_editor_hides_hidden_settings_and_keeps_them_on_save(monkeypatch):
     _app()
     monkeypatch.setattr(QtWidgets.QMessageBox, "information", lambda *a, **k: None)
     monkeypatch.setattr(QtWidgets.QMessageBox, "warning", lambda *a, **k: None)
-    raw = json.loads(
-        Path("plugins/disaster_warning/config.json").read_text(encoding="utf-8-sig")
-    )
+    raw = {
+        "name": "测试插件",
+        "trigger": "test_hidden_settings",
+        "type": "react",
+        "description": "hidden settings fixture",
+        "timeout_sec": 30,
+        "settings": {
+            "enabled": {"type": "bool", "label": "启用", "default": True},
+            "watch_regions_json": {
+                "type": "json",
+                "ui": "hidden",
+                "default": [{"name": "demo"}],
+            },
+            "wolfx_ws_url": {
+                "type": "text",
+                "ui": "hidden",
+                "default": "wss://example.invalid/all",
+            },
+            "status_ui_port": {
+                "type": "number",
+                "ui": "hidden",
+                "default": 8765,
+            },
+            "status_ui_url": {
+                "type": "link",
+                "label": "状态页",
+                "default": "",
+            },
+        },
+    }
     manager = _FakePluginManager(raw)
-    dialog = PluginEditorDialog(plugin_manager=manager, trigger="disaster_warning")
+    dialog = PluginEditorDialog(
+        plugin_manager=manager, trigger="test_hidden_settings"
+    )
     assert "watch_regions_json" not in dialog.config_fields
     assert "wolfx_ws_url" not in dialog.config_fields
     assert "enabled" in dialog.config_fields

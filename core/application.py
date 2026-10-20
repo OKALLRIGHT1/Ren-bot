@@ -7,10 +7,11 @@ import json
 import os
 import re
 import secrets
+import sys
 import threading
 import time
 from pathlib import Path
-from typing import Optional, Any, Dict
+from typing import Optional, Any, Dict, List
 from datetime import datetime
 from datetime import timedelta
 from urllib.parse import unquote, urlparse
@@ -23,7 +24,9 @@ def _read_existing_napcat_token() -> str:
     env_config = os.getenv("NAPCAT_ONEBOT_CONFIG", "").strip()
     if env_config:
         search_roots.append(Path(env_config))
-    search_roots.append(Path(r"D:\tools\napcat"))
+    napcat_dir = os.getenv("NAPCAT_DIR", "").strip()
+    if napcat_dir:
+        search_roots.append(Path(napcat_dir))
     for root in search_roots:
         try:
             paths = [root] if root.is_file() else root.rglob("onebot11_*.json")
@@ -161,13 +164,24 @@ from modules.live2d_transport import (
 )
 
 
+LIVE2D_APP_IDS = (
+    "com.live2d-suzu.enhanced",
+    "com.live2d-only.app",
+)
 LIVE2D_ONLY_APP_ID = "com.live2d-only.app"
 LIVE2D_ACTIVITY_SETTING_KEYS = (
+    "activity_monitor_enabled",
     "gui_activity_endpoint",
     "gui_access_token",
+    "gui_http_host",
+    "gui_http_port",
+    "gui_http_prefix",
     "sedentary_reminder_minutes",
     "sedentary_break_minutes",
     "sedentary_cooldown_minutes",
+    "activity_include_process_path",
+    "activity_include_window_title",
+    "activity_include_browser_context",
 )
 
 try:
@@ -331,6 +345,7 @@ class Live2DApplication:
         )
         settings = self._load_runtime_settings()
         patch = {
+            "activity_monitor_enabled": bool(settings.get("activity_monitor_enabled", True)),
             "gui_http_host": getattr(server, "host", GUI_HTTP_HOST),
             "gui_http_port": int(getattr(server, "port", GUI_HTTP_PORT)),
             "gui_http_prefix": getattr(server, "path_prefix", GUI_HTTP_PREFIX),
@@ -346,6 +361,12 @@ class Live2DApplication:
                 self.logger.info(f"GUI activity endpoint published: {endpoint}")
         self._sync_live2d_activity_settings(settings)
 
+    def _live2d_activity_settings_paths(self) -> List[Path]:
+        appdata = str(os.getenv("APPDATA") or "").strip()
+        if not appdata:
+            return []
+        return [Path(appdata) / app_id / "runtime_settings.json" for app_id in LIVE2D_APP_IDS]
+
     def _live2d_activity_settings_path(self) -> Optional[Path]:
         appdata = str(os.getenv("APPDATA") or "").strip()
         if not appdata:
@@ -353,45 +374,72 @@ class Live2DApplication:
         return Path(appdata) / LIVE2D_ONLY_APP_ID / "runtime_settings.json"
 
     def _sync_live2d_activity_settings(self, settings: Dict[str, Any]) -> bool:
-        path = self._live2d_activity_settings_path()
-        if path is None:
+        paths = self._live2d_activity_settings_paths()
+        legacy = self._live2d_activity_settings_path()
+        if legacy and legacy not in paths:
+            paths.append(legacy)
+        if not paths:
             return False
         patch = {
             key: settings[key]
             for key in LIVE2D_ACTIVITY_SETTING_KEYS
             if key in settings and settings[key] not in (None, "")
         }
+        if "activity_monitor_enabled" not in patch:
+            patch["activity_monitor_enabled"] = True
         if not patch:
             return False
-        current: Dict[str, Any] = {}
-        if path.exists():
+
+        root_dir = Path(__file__).resolve().parents[1]
+        launch_cfg = {
+            "backend_root": str(root_dir),
+            "python_executable": str(sys.executable),
+            "start_on_launch": False,
+            "stop_on_exit": False,
+        }
+
+        success = True
+        for path in paths:
             try:
-                loaded = json.loads(path.read_text(encoding="utf-8"))
-                if isinstance(loaded, dict):
-                    current = loaded
+                current: Dict[str, Any] = {}
+                if path.exists():
+                    try:
+                        loaded = json.loads(path.read_text(encoding="utf-8"))
+                        if isinstance(loaded, dict):
+                            current = loaded
+                    except Exception as exc:
+                        if self.logger:
+                            self.logger.warning(
+                                f"Live2D activity settings read failed for {path}: {exc}"
+                            )
+                if not all(current.get(key) == value for key, value in patch.items()):
+                    current.update(patch)
+                    temp_path = path.with_suffix(path.suffix + ".tmp")
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    temp_path.write_text(
+                        json.dumps(current, ensure_ascii=False, indent=2),
+                        encoding="utf-8",
+                    )
+                    os.replace(temp_path, path)
+
+                launch_path = path.parent / "backend-launch.json"
+                if not launch_path.exists():
+                    launch_tmp = launch_path.with_suffix(".tmp")
+                    launch_tmp.write_text(
+                        json.dumps(launch_cfg, ensure_ascii=False, indent=2),
+                        encoding="utf-8",
+                    )
+                    os.replace(launch_tmp, launch_path)
             except Exception as exc:
+                success = False
                 if self.logger:
                     self.logger.warning(
-                        f"Live2D activity settings read failed: {exc}"
+                        f"Live2D activity settings sync failed for {path}: {exc}"
                     )
-        if all(current.get(key) == value for key, value in patch.items()):
-            return True
-        current.update(patch)
-        temp_path = path.with_suffix(path.suffix + ".tmp")
-        try:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            temp_path.write_text(
-                json.dumps(current, ensure_ascii=False, indent=2),
-                encoding="utf-8",
-            )
-            os.replace(temp_path, path)
-        except Exception as exc:
-            if self.logger:
-                self.logger.warning(f"Live2D activity settings sync failed: {exc}")
-            return False
-        if self.logger:
+
+        if self.logger and success:
             self.logger.info("Live2D activity settings synchronized")
-        return True
+        return success
 
     @staticmethod
     def _build_gui_activity_endpoint(host: str, port: int, path_prefix: str) -> str:
@@ -2540,7 +2588,7 @@ class Live2DApplication:
 
         root = Path(__file__).resolve().parents[1]
         entry = root / "boot.py"
-        python_exe = os.environ.get("SUZU_PYTHON") or r"D:\Anaconda\python.exe"
+        python_exe = os.environ.get("SUZU_PYTHON") or sys.executable
         pythonw = str(Path(python_exe).with_name("pythonw.exe"))
         if os.path.isfile(pythonw):
             python_exe = pythonw
@@ -3715,9 +3763,19 @@ class Live2DApplication:
                 / "target"
                 / "release"
                 / "live2d-enhanced.exe",
+                root / "frontend" / "live2d-enhanced.exe",
+                root / "live2d-enhanced.exe",
+                root / "bin" / "live2d-enhanced.exe",
+                root.parent / "frontend" / "live2d-enhanced.exe",
+                root.parent / "live2d-enhanced.exe",
                 Path(r"D:\Live2D Suzu Enhanced\live2d-enhanced.exe"),
             ]
         )
+        for env_key in ("LOCALAPPDATA", "PROGRAMFILES", "ProgramFiles(x86)"):
+            base = os.environ.get(env_key)
+            if base:
+                candidates.append(Path(base) / "Live2D Suzu Enhanced" / "live2d-enhanced.exe")
+                candidates.append(Path(base) / "Live2D-Suzu" / "live2d-enhanced.exe")
         return candidates
 
     def _resolve_live2d_exe(self) -> Optional[Path]:
@@ -3772,20 +3830,21 @@ class Live2DApplication:
                 time.sleep(0.3)
         return False
 
-    def _start_live2d_renderer_when_ready(self) -> None:
+    def start_live2d_renderer(self, force: bool = False) -> None:
         if os.environ.get("SUZU_ROLE", "").strip().lower() in {"renderer", "live2d"}:
             return
-        auto = os.environ.get("SUZU_AUTOSTART_LIVE2D", "").strip().lower()
-        if auto in {"0", "false", "no"}:
-            return
-        if not auto:
-            try:
-                import client_config
+        if not force:
+            auto = os.environ.get("SUZU_AUTOSTART_LIVE2D", "").strip().lower()
+            if auto in {"0", "false", "no"}:
+                return
+            if not auto:
+                try:
+                    import client_config
 
-                if not bool(client_config.effective().get("auto_start_live2d", True)):
-                    return
-            except Exception:
-                pass
+                    if not bool(client_config.effective().get("auto_start_live2d", True)):
+                        return
+                except Exception:
+                    pass
 
         def worker() -> None:
             if not self._wait_local_health():
@@ -3803,19 +3862,56 @@ class Live2DApplication:
                 return
             env = os.environ.copy()
             env["SUZU_ROLE"] = "renderer"
-            try:
-                from subprocess import DEVNULL, Popen
+            if hasattr(self, "runtime_settings_path") and self.runtime_settings_path:
+                env["LIVE2D_MAIN_RUNTIME_SETTINGS"] = str(self.runtime_settings_path)
+            server = getattr(self, "gui_http_server", None)
+            if server:
+                endpoint = (
+                    server.activity_ingest_url()
+                    if hasattr(server, "activity_ingest_url")
+                    else self._build_gui_activity_endpoint(
+                        getattr(server, "host", GUI_HTTP_HOST),
+                        getattr(server, "port", GUI_HTTP_PORT),
+                        getattr(server, "path_prefix", GUI_HTTP_PREFIX),
+                    )
+                )
+                env["LIVE2D_ACTIVITY_ENDPOINT"] = endpoint
+                token = str(getattr(server, "access_token", "") or "").strip()
+                if token:
+                    env["LIVE2D_ACTIVITY_TOKEN"] = token
+            env["LIVE2D_ACTIVITY_ENABLED"] = "1"
+            kwargs: dict[str, Any] = {}
+            if os.name == "nt":
+                import subprocess
 
-                proc = Popen([str(exe)], cwd=str(exe.parent), env=env, stdin=DEVNULL)
+                kwargs["creationflags"] = getattr(
+                    subprocess, "CREATE_NO_WINDOW", 0x08000000
+                )
+            try:
+                import subprocess
+
+                proc = subprocess.Popen(
+                    [str(exe)],
+                    cwd=str(exe.parent),
+                    env=env,
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    close_fds=True,
+                    **kwargs,
+                )
             except Exception as exc:
                 if self.logger:
-                    self.logger.error(f"Live2D renderer start failed: {exc}")
+                    self.logger.error(f"Live2D renderer start failed for {exe}: {exc}")
                 return
             self._live2d_process = proc
             if self.logger:
                 self.logger.info(f"Started Live2D renderer: {exe}")
 
         threading.Thread(target=worker, name="suzu-live2d", daemon=True).start()
+
+    def _start_live2d_renderer_when_ready(self) -> None:
+        self.start_live2d_renderer(force=False)
 
     def _stop_owned_live2d_renderer(self) -> None:
         proc = self._live2d_process
@@ -3886,6 +3982,7 @@ class Live2DApplication:
         self.qt_ui.loop = self.loop
         self.qt_ui.chat_service = self.chat_service
         self.qt_ui.app = self
+        self.qt_ui.on_start_live2d_callback = lambda: self.start_live2d_renderer(force=True)
         self.qt_ui.load_display_state_config = self.load_display_state_config
         self.qt_ui.save_display_state_config = self.save_display_state_config
         self.qt_ui.publish_display_state = self.publish_display_state

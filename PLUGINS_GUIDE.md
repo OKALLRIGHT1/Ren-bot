@@ -92,37 +92,43 @@ def _match_weather_now(self, text, ctx):
 
 插件会随本地目录变化而变化，以下是当前主线能力分类。实际启用状态以 GUI 插件管理器为准。
 
-### 3.1 效率与信息类
+### 3.1 合并后的常用卡片
 
-- `task_manager`：任务中枢，处理待办、提醒、任务跟进
-- `delegate_status`：查看最近副脑任务与单个任务详情
-- `timer`：番茄钟 / 倒计时
-- `search`：联网搜索
+- `life_hub`（生活提醒）：记账、提醒、待办、番茄钟、QQ 周期提醒
+- `magic_daily`（日报）：图片日报 + 天气，需填写 ALAPI Token
+- `owner_console`（主人控制台）：`/帮助`、`/重启`（仅主人）、Agent 自检、副脑任务、模型监控
+- `vision`（屏幕）：看屏幕/摄像头分析；QQ 里「截图发我」发回主人
+- `desktop_hub`（桌面）：打开信任列表里的软件，以及 CPU/内存/音量/亮度/锁屏
+
+### 3.2 效率与信息类
+
+- `search`：联网搜索（Tavily / 联网模型 / Grok / Exa，可回退 DDG）
+- `web_reader`：读指定网页正文
 - `local_knowledge`：本地知识库 / 第二大脑
-
+- `memory_tools`：查询长期记忆与画像
+- `diary_export`：日记查询与导出
 - `dice_plugin`：骰子投掷（.r / .ra / .rc / .sc）
-- `diary_export`：日记导出与整理
-- `life_manager`：生活数据 / 记录管理
-- `llm_monitor`：模型监控
+- `moegirl_wiki`：萌娘百科查询
 
-### 3.2 系统与工作区类
+### 3.3 系统与工作区类
 
-- `open_app`：快速启动，本地直接打开应用
-- `system_monitor`：系统运维，查状态和部分系统控制
-- `workspace_ops`：工作区与文件助手
+- `workspace_ops`：当前项目工作区（代码读写、预览确认、回滚）
+- `user_files`：桌面 / 文档 / 下载等白名单目录
+- `qq_file_browser`：QQ 里 `/文件` 浏览并发送
 - `backup_manager`：备份恢复
-- `music_player`：音乐播放器
+- `music_player`：播放本地音乐文件夹
+- `code_agent`：把任务交给本机 Codex / Claude Code
+- `mcp_tools`：MCP 工具桥（在设置 → 开发者 → MCP 配服务器）
+- `agently_mail`：本机 agently-cli 邮件
 
-### 3.3 感知与远程类
+### 3.4 感知与远程类
 
-- `vision`：视觉感知，负责截图/拍照分析
-- `qq_screenshot`：QQ 远程截图，负责把当前屏幕直接发回 QQ
-- `qq_draw`：QQ 固定命令生图，直连兼容 OpenAI 风格的图片接口并回发 QQ
-- `qq_reminder`：QQ 私聊定时提醒，支持工作日/每天定时提醒
-- `qq_help`：QQ 功能总览，快速查看常用能力和命令
-- `qq_role_switch`：QQ 角色切换，可在 QQ 中查看角色列表并快速切换角色
-- `mcp_tools`：MCP 工具桥
-- 表情包相关插件：从数据库版表情包库中按语义、标签、情绪选择图片，具体名称以本地插件目录为准
+- `qq_draw`：QQ `/画图`，模型来自「模型与路由」的画图用途
+- `qq_music`：QQ 搜歌发语音（和本地音乐播放器分开）
+- `qq_watermark`：QQ `/去水印`，需填解析服务 API Key
+- `qq_role_switch`：QQ 角色切换
+- `meme_pack`：表情包库
+- 其它娱乐向：`what_to_eat`、`egg_search`、`xinsanguo_voice`
 
 `qq_role_switch` 支持：`/角色列表`、`/角色 当前`、`/角色 角色名`，切换时会同步角色 TTS 和默认服装。
 

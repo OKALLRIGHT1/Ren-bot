@@ -259,21 +259,38 @@ def _theme_metrics(p: dict, *, surface: str = "default") -> dict:
     }
 
 
+def _get_gui_asset_dir():
+    import tempfile
+    from pathlib import Path
+    candidates = [
+        Path(__file__).resolve().parent / "assets",
+        Path.cwd() / ".cache",
+        Path(tempfile.gettempdir()) / "live2d_gui_assets",
+    ]
+    for d in candidates:
+        try:
+            d.mkdir(parents=True, exist_ok=True)
+            test_file = d / ".write_test"
+            test_file.write_text("ok", encoding="utf-8")
+            test_file.unlink(missing_ok=True)
+            return d
+        except Exception:
+            continue
+    return Path(tempfile.gettempdir())
+
+
 def get_chevron_down_icon_path(color_hex: str = "#6B7280") -> str:
     """Ensure a crisp, high-DPI chevron down icon is cached and return its path for QSS."""
     try:
-        from pathlib import Path
-        import paths
         from PySide6 import QtCore, QtGui
 
-        cache_dir = Path(paths.CLIENT_ROOT) / ".cache"
-        cache_dir.mkdir(parents=True, exist_ok=True)
-        safe_color = color_hex.replace("#", "")
-        icon_path = cache_dir / f"chevron_down_{safe_color}.png"
+        asset_dir = _get_gui_asset_dir()
+        safe_color = color_hex.replace("#", "").upper()
+        icon_path = asset_dir / f"chevron_down_{safe_color}.png"
         if not icon_path.exists():
-            pm = QtGui.QPixmap(32, 32)
-            pm.fill(QtCore.Qt.GlobalColor.transparent)
-            painter = QtGui.QPainter(pm)
+            img = QtGui.QImage(32, 32, QtGui.QImage.Format.Format_ARGB32_Premultiplied)
+            img.fill(QtCore.Qt.GlobalColor.transparent)
+            painter = QtGui.QPainter(img)
             painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing, True)
             pen = QtGui.QPen(QtGui.QColor(color_hex), 3.0)
             pen.setCapStyle(QtCore.Qt.PenCapStyle.RoundCap)
@@ -285,7 +302,36 @@ def get_chevron_down_icon_path(color_hex: str = "#6B7280") -> str:
             path.lineTo(26, 12)
             painter.drawPath(path)
             painter.end()
-            pm.save(str(icon_path))
+            img.save(str(icon_path))
+        return icon_path.as_posix()
+    except Exception:
+        return ""
+
+
+def get_checkmark_icon_path(color_hex: str = "#FFFFFF") -> str:
+    """Ensure a crisp, high-DPI checkmark icon is cached and return its path for QSS."""
+    try:
+        from PySide6 import QtCore, QtGui
+
+        asset_dir = _get_gui_asset_dir()
+        safe_color = color_hex.replace("#", "").upper()
+        icon_path = asset_dir / f"checkmark_{safe_color}.png"
+        if not icon_path.exists():
+            img = QtGui.QImage(32, 32, QtGui.QImage.Format.Format_ARGB32_Premultiplied)
+            img.fill(QtCore.Qt.GlobalColor.transparent)
+            painter = QtGui.QPainter(img)
+            painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing, True)
+            pen = QtGui.QPen(QtGui.QColor(color_hex), 3.6)
+            pen.setCapStyle(QtCore.Qt.PenCapStyle.RoundCap)
+            pen.setJoinStyle(QtCore.Qt.PenJoinStyle.RoundJoin)
+            painter.setPen(pen)
+            path = QtGui.QPainterPath()
+            path.moveTo(8, 16)
+            path.lineTo(13.5, 22.5)
+            path.lineTo(24, 9.5)
+            painter.drawPath(path)
+            painter.end()
+            img.save(str(icon_path))
         return icon_path.as_posix()
     except Exception:
         return ""
@@ -296,7 +342,11 @@ def get_common_qss(p: dict) -> str:
     m = _theme_metrics(p)
     radius = m["radius_control"]
     chevron_path = get_chevron_down_icon_path(p.get("text_secondary", "#6B7280"))
+    check_path = get_checkmark_icon_path("#FFFFFF")
     return f"""
+        QLabel {{
+            background: transparent;
+        }}
         /* 针对所有的 QScrollBar 进行深度美化 */
         QScrollBar:vertical {{
             background: transparent;
@@ -336,6 +386,22 @@ def get_common_qss(p: dict) -> str:
         }}
         QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal {{
             background: transparent;
+        }}
+
+        /* QMessageBox 全局通用弹窗样式，确保各主题下均为实体底色且文本高对比度 */
+        QMessageBox {{
+            background-color: {p["bg_app"]};
+            color: {p["text_primary"]};
+            font-family: {m["font"]};
+        }}
+        QMessageBox QLabel {{
+            color: {p["text_primary"]};
+            background: transparent;
+            font-size: 13px;
+        }}
+        QMessageBox QPushButton {{
+            min-width: 68px;
+            padding: 6px 14px;
         }}
 
         /* QToolTip 风格美化 */
@@ -440,9 +506,40 @@ def get_common_qss(p: dict) -> str:
             color: {p["text_secondary"]};
             font-weight: 600;
         }}
-        QCheckBox, QRadioButton {{
+        QCheckBox {{
             spacing: 8px;
             color: {p["text_primary"]};
+            background: transparent;
+        }}
+        QCheckBox::indicator {{
+            width: 17px;
+            height: 17px;
+            border: 1px solid {p.get("border_strong", p["border"])};
+            border-radius: 4px;
+            background-color: {p["bg_card"]};
+        }}
+        QCheckBox::indicator:hover {{
+            border-color: {p["accent"]};
+            background-color: {p["bg_card"]};
+        }}
+        QCheckBox::indicator:checked {{
+            background-color: {p["accent"]};
+            border-color: {p["accent_hover"]};
+            image: url("{check_path}");
+        }}
+        QCheckBox::indicator:checked:hover {{
+            background-color: {p["accent_hover"]};
+            border-color: {p["accent_hover"]};
+            image: url("{check_path}");
+        }}
+        QCheckBox::indicator:disabled {{
+            border-color: {hex_to_rgba(p["border"], 0.6)};
+            background-color: {p["bg_soft"]};
+        }}
+        QRadioButton {{
+            spacing: 8px;
+            color: {p["text_primary"]};
+            background: transparent;
         }}
         QTabWidget::pane {{
             border: 1px solid {p["border"]};
@@ -844,6 +941,20 @@ def get_settings_styles() -> str:
             {bg_qss}
             background-color: {dialog_bg};
         }}
+        QMessageBox {{
+            background-color: {dialog_bg};
+            color: {p["text_primary"]};
+            font-family: {m["font"]};
+        }}
+        QMessageBox QLabel {{
+            color: {p["text_primary"]};
+            background: transparent;
+            font-size: 13px;
+        }}
+        QMessageBox QPushButton {{
+            min-width: 68px;
+            padding: 6px 14px;
+        }}
         QFrame#settingsNavCard, QFrame#settingsContentCard {{
             background: {bg_card_style};
             border: 1px solid {border_style};
@@ -1000,7 +1111,9 @@ def get_settings_styles() -> str:
             border: 1px solid {p["accent"]};
             background: {p["bg_card"]};
         }}
-        QFrame#settingsContentCard QDialog,
+        QFrame#settingsContentCard QDialog[embedded="true"],
+        QFrame#settingsContentCard > QStackedWidget,
+        QFrame#settingsContentCard > QStackedWidget > QWidget,
         QFrame#settingsContentCard QScrollArea,
         QFrame#settingsContentCard QScrollArea > QWidget > QWidget,
         QFrame#settingsContentCard QStackedWidget {{
@@ -1077,10 +1190,16 @@ def get_tool_dialog_styles() -> str:
     border_style = hex_to_rgba(p["border"], m["border_alpha"]) if use_glass else p["border"]
     radius_card = m["radius_card"]
     radius_ctl = m["radius_control"]
+    check_path = get_checkmark_icon_path("#FFFFFF")
     return common + f"""
-        QDialog, QWidget {{
+        QDialog {{
             background-color: {p["bg_app"]};
             font-family: {m["font"]};
+            color: {p["text_primary"]};
+        }}
+        QLabel {{
+            background: transparent;
+            color: {p["text_primary"]};
         }}
         QFrame#dialogShell {{
             background: {bg_card_style};
@@ -1165,18 +1284,33 @@ def get_tool_dialog_styles() -> str:
         }}
         QCheckBox {{
             color: {p["text_primary"]};
-            spacing: 6px;
+            spacing: 8px;
+            background: transparent;
         }}
         QCheckBox::indicator {{
-            width: 16px;
-            height: 16px;
-            border: 1px solid {p["border"]};
+            width: 17px;
+            height: 17px;
+            border: 1px solid {border_style};
             border-radius: 4px;
-            background: {p["bg_card"]};
+            background-color: {p["bg_card"]};
+        }}
+        QCheckBox::indicator:hover {{
+            border-color: {p["accent"]};
+            background-color: {p["bg_card"]};
         }}
         QCheckBox::indicator:checked {{
-            background: {p["accent"]};
-            border-color: {p["accent"]};
+            background-color: {p["accent"]};
+            border-color: {p["accent_hover"]};
+            image: url("{check_path}");
+        }}
+        QCheckBox::indicator:checked:hover {{
+            background-color: {p["accent_hover"]};
+            border-color: {p["accent_hover"]};
+            image: url("{check_path}");
+        }}
+        QCheckBox::indicator:disabled {{
+            border-color: {hex_to_rgba(p["border"], 0.6)};
+            background-color: {p["bg_soft"]};
         }}
     """
 

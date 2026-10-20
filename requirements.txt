@@ -7,9 +7,9 @@ edge-tts
 jieba
 mcp
 networkx
-numpy
+numpy<2
 openai
-opencv-python
+opencv-python>=4.8.0,<4.11
 paho-mqtt
 Pillow
 psutil

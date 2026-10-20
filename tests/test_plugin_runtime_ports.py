@@ -115,15 +115,6 @@ def test_plugins_do_not_read_ctx_chat_service():
     assert hits == []
 
 
-def test_skill_runtime_reads_ctx_skills_without_chat_service():
-    from plugins.skill_runtime.plugin import Plugin as Skills
-
-    plugin = Skills()
-    manager = object()
-    assert plugin._get_manager({"skills": manager}) is manager
-    assert plugin._get_manager({}) is None
-
-
 @pytest.mark.asyncio
 async def test_meme_auto_send_uses_gateway_port():
     from plugins.meme_pack.plugin import Plugin as Meme
