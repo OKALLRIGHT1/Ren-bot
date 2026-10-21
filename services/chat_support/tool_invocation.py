@@ -100,6 +100,33 @@ def unpack_tool_call(call: Any) -> ToolCallRequest:
     )
 
 
+def arguments_invalid(call: Any) -> bool:
+    """True when the model sent argument text that is not a JSON object."""
+    raw = str(getattr(call, "raw_arguments", "") or "").strip()
+    if isinstance(call, Mapping):
+        function = call.get("function") if isinstance(call.get("function"), Mapping) else {}
+        raw = str(
+            function.get("arguments")
+            or call.get("arguments")
+            or call.get("raw_arguments")
+            or ""
+        ).strip()
+        arguments = call.get("arguments")
+        if isinstance(function.get("arguments"), str):
+            raw = str(function.get("arguments") or "").strip()
+        if isinstance(arguments, dict):
+            return False
+    elif isinstance(getattr(call, "arguments", None), dict) and not raw:
+        return False
+    if not raw:
+        return False
+    try:
+        data = json.loads(raw)
+    except Exception:
+        return True
+    return not isinstance(data, dict)
+
+
 def parse_arguments_blob(raw: Any) -> Tuple[Dict[str, Any], str]:
     if isinstance(raw, dict):
         return dict(raw), json.dumps(raw, ensure_ascii=False)
@@ -109,10 +136,10 @@ def parse_arguments_blob(raw: Any) -> Tuple[Dict[str, Any], str]:
     try:
         data = json.loads(text)
     except Exception:
-        return {"query": text}, text
+        return {}, text
     if isinstance(data, dict):
         return dict(data), text
-    return {"query": text}, text
+    return {}, text
 
 
 def schema_parameters(schema: Optional[Mapping[str, Any]]) -> Dict[str, Any]:

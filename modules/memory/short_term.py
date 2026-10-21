@@ -1,8 +1,20 @@
 import logging
+import threading
 from typing import Any, Dict, List, Optional
 
 
 logger = logging.getLogger(__name__)
+
+
+def _restored_event_id(row: Dict[str, Any]) -> str:
+    meta = row.get("meta") if isinstance(row, dict) else {}
+    if not isinstance(meta, dict):
+        meta = {}
+    existing = str(meta.get("event_id") or "").strip()
+    if existing:
+        return existing
+    row_id = str((row or {}).get("id") or "").strip()
+    return f"legacy:{row_id}" if row_id else ""
 
 
 class ShortTermMemoryManager:
@@ -18,6 +30,7 @@ class ShortTermMemoryManager:
         self.short_term_memory: List[Dict[str, str]] = []
         self.session_short_term_memory: Dict[str, List[Dict[str, str]]] = {}
         self._session_short_term_loaded = set()
+        self._lock = threading.Lock()
 
     @staticmethod
     def _normalize_item(
@@ -42,10 +55,16 @@ class ShortTermMemoryManager:
                 limit=self.max_short_term, session_scope="global"
             )
             if rows:
-                self.short_term_memory = [
-                    self._normalize_item(r["role"], r["content"])
+                restored = [
+                    self._normalize_item(
+                        r["role"],
+                        r["content"],
+                        event_id=_restored_event_id(r),
+                    )
                     for r in reversed(rows)
                 ]
+                with self._lock:
+                    self.short_term_memory = restored
                 logger.info(
                     "Restored %s global short-term memories",
                     len(self.short_term_memory),
@@ -67,13 +86,22 @@ class ShortTermMemoryManager:
                 context_session_id=session_key,
             )
             if rows:
-                self.session_short_term_memory[session_key] = [
-                    self._normalize_item(r["role"], r["content"])
+                restored = [
+                    self._normalize_item(
+                        r["role"],
+                        r["content"],
+                        event_id=_restored_event_id(r),
+                    )
                     for r in reversed(rows)
                 ]
             else:
-                self.session_short_term_memory.setdefault(session_key, [])
-            self._session_short_term_loaded.add(session_key)
+                restored = None
+            with self._lock:
+                if restored is not None:
+                    self.session_short_term_memory[session_key] = restored
+                else:
+                    self.session_short_term_memory.setdefault(session_key, [])
+                self._session_short_term_loaded.add(session_key)
         except Exception as e:
             logger.warning("Failed to restore session memory (%s): %s", session_key, e)
 
@@ -88,6 +116,10 @@ class ShortTermMemoryManager:
         """Append a turn. Returns the full evicted item when the window slides, else None."""
         item = self._normalize_item(role, content, event_id=event_id)
         session_key = str(session_id or "").strip()
+        with self._lock:
+            return self._append_unlocked(item, session_key)
+
+    def _append_unlocked(self, item: Dict[str, str], session_key: str) -> Optional[Dict[str, str]]:
         if session_key:
             bucket = self.session_short_term_memory.setdefault(session_key, [])
             bucket.append(item)
@@ -106,6 +138,10 @@ class ShortTermMemoryManager:
 
     def clear(self, session_id: str = None) -> None:
         session_key = str(session_id or "").strip()
+        with self._lock:
+            self._clear_unlocked(session_key)
+
+    def _clear_unlocked(self, session_key: str) -> None:
         if session_key:
             self.session_short_term_memory[session_key] = []
             self._session_short_term_loaded.discard(session_key)
@@ -118,9 +154,11 @@ class ShortTermMemoryManager:
         session_key = str(session_id or "").strip()
         if session_key:
             self.restore_session(session_key)
-            short_ctx = list(self.session_short_term_memory.get(session_key, []))
+            with self._lock:
+                short_ctx = list(self.session_short_term_memory.get(session_key, []))
         else:
-            short_ctx = list(self.short_term_memory)
+            with self._lock:
+                short_ctx = list(self.short_term_memory)
         if recall_intent:
             short_ctx = [
                 m for m in short_ctx if (m.get("role") or "").strip() == "user"

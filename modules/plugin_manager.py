@@ -37,6 +37,19 @@ DEFAULT_ACCESS_CONTROL = {
     "allow_group_without_at": False,
 }
 
+
+def plugin_public_description(plugin: Any) -> str:
+    """Description shown to people and to the model. Plugins may hide parts."""
+    getter = getattr(plugin, "public_description", None)
+    if callable(getter):
+        try:
+            text = str(getter() or "").strip()
+        except Exception:
+            text = ""
+        if text:
+            return text
+    return str(getattr(plugin, "description", "") or "")
+
 # Plugins that must declare access_control for long-term ops visibility
 _ACCESS_CONTROL_WARN_IF_DEFAULT = {
     "打开",
@@ -97,7 +110,7 @@ class PluginManager:
         if not os.path.exists(plugin_dir):
             os.makedirs(plugin_dir)
 
-        self.default_timeout_sec = 6.0
+        self.default_timeout_sec = 30.0
         self.debug_enabled = bool(CHAT_DEBUG_PRINTS)
         # Optional local UI confirm: Callable[[title, summary], bool]
         self.local_confirm_handler: Optional[Any] = None
@@ -971,7 +984,7 @@ class PluginManager:
             for p in plugins:
                 # 使用llm_command而不是trigger
                 llm_cmd = getattr(p, "llm_command", "") or getattr(p, "trigger", "")
-                desc = (getattr(p, "description", "") or "").strip()
+                desc = plugin_public_description(p).strip()
                 desc = desc.replace("\n", " ").strip()
                 desc = re.sub(r"\[CMD:[^\]]*\]", "", desc)
                 desc = re.sub(r"\s+", " ", desc).strip()
@@ -1000,7 +1013,7 @@ class PluginManager:
         for p in plugins:
             llm_cmd = getattr(p, "llm_command", "") or getattr(p, "trigger", "")
             example_arg = getattr(p, "example_arg", "")
-            desc = getattr(p, "description", "")
+            desc = plugin_public_description(p)
             name = getattr(p, "name", llm_cmd) or llm_cmd
             # 添加别名信息
             aliases = getattr(p, "aliases", [])
@@ -1043,7 +1056,7 @@ class PluginManager:
                 continue
             seen.add(pid)
             name = str(getattr(plugin, "name", trigger) or trigger).strip()
-            desc = str(getattr(plugin, "description", "") or "").replace("\n", " ").strip()
+            desc = plugin_public_description(plugin).replace("\n", " ").strip()
             desc = re.sub(r"\[CMD:[^\]]*\]", "", desc)
             desc = re.sub(r"\s+", " ", desc).strip()
             if len(desc) > 42:
@@ -1105,7 +1118,7 @@ class PluginManager:
                     trigger,
                     llm_cmd,
                     str(getattr(plugin, "name", "") or ""),
-                    str(getattr(plugin, "description", "") or ""),
+                    plugin_public_description(plugin),
                     " ".join(str(a) for a in aliases),
                 ]
             ).lower()
@@ -1129,7 +1142,7 @@ class PluginManager:
                     "command": llm_cmd,
                     "name": str(getattr(plugin, "name", trigger) or trigger),
                     "type": str(getattr(plugin, "type", "react") or "react"),
-                    "description": str(getattr(plugin, "description", "") or ""),
+                    "description": plugin_public_description(plugin),
                     "example_arg": str(getattr(plugin, "example_arg", "") or ""),
                     "examples": list(getattr(plugin, "tool_examples", []) or []),
                 }
@@ -1172,7 +1185,7 @@ class PluginManager:
         lines = []
         for p in plugins:
             llm_cmd = getattr(p, "llm_command", "") or getattr(p, "trigger", "")
-            desc = (getattr(p, "description", "") or "").replace("\n", " ").strip()
+            desc = plugin_public_description(p).replace("\n", " ").strip()
             if compact and len(desc) > 60:
                 desc = desc[:60] + "…"
             lines.append(f"- {llm_cmd}: {desc or '委托副脑处理的复杂任务'}")
@@ -1359,14 +1372,21 @@ class PluginManager:
             }
             # Register immediately so react tool-loop path can also reply “确认”
             try:
-                from services.security.pending_confirm import get_pending_confirm_store
+                from services.security.pending_confirm import (
+                    confirm_prompt,
+                    get_pending_confirm_store,
+                    session_key_from_ctx,
+                )
 
-                get_pending_confirm_store().set(
+                _action, status = get_pending_confirm_store().try_set(
                     trigger=trigger,
                     summary=summary,
                     payload=payload,
                     expires_in=300,
+                    session_key=session_key_from_ctx(runtime_context),
                 )
+                if status == "busy":
+                    return confirm_prompt(_action.summary) + "\n还有一个操作在等确认，这次没有覆盖它。"
             except Exception:
                 pass
             return {
@@ -1460,7 +1480,9 @@ class PluginManager:
                 await task
             except asyncio.CancelledError:
                 pass
-            return f"⚠️ 工具超时（>{timeout}s）"
+            return (
+                f"⚠️ 工具超时（>{timeout}s），结果未知，不要用相同参数重试。"
+            )
 
     def _resolve_command_trigger(self, llm_cmd: str) -> str:
         name = str(llm_cmd or "").strip()
@@ -1512,8 +1534,10 @@ class PluginManager:
 
     def _plugin_result_text(self, trigger: str, result: Any) -> Any:
         if isinstance(result, dict) and str(result.get("__agent_result__") or "") == "confirmation_required":
+            from services.security.pending_confirm import confirm_prompt
+
             summary = str(result.get("summary") or "需要确认这个操作。").strip()
-            return summary + "\n确认请回复“确认”，取消请回复“取消”。"
+            return confirm_prompt(summary)
         return result
 
     async def _run_named_tool(
@@ -1551,12 +1575,17 @@ class PluginManager:
             or self.react_map.get(name)
         )
         if not plugin:
-            outputs.append(f"【{trigger} 结果】未找到该工具（可能未安装/trigger 写错）")
-            return outputs, used, True
+            outputs.append(f"【{name} 未执行】未找到该工具（可能未安装或名称写错）。")
+            return outputs, used, False
 
-        plugin_type = getattr(plugin, "type", "react")
-        extras = set(self._extra_llm_commands(plugin))
-        if plugin_type not in allowed_types and name not in extras and trigger not in extras:
+        from services.chat_support.tool_schema import plugin_executable_in_pass
+
+        if not plugin_executable_in_pass(
+            plugin,
+            allowed_types=set(allowed_types or set()),
+            invoked_name=name,
+        ):
+            outputs.append(f"【{name} 未执行】当前轮次不允许这个工具。")
             return outputs, used, False
 
         plugin_name = getattr(plugin, "name", trigger)
@@ -1571,8 +1600,9 @@ class PluginManager:
         if not allowed:
             denied_message = self._get_access_denied_message(plugin, runtime_context, reason)
             outputs.append(f"【{trigger} 不可用】{denied_message}")
-            return outputs, used, True
+            return outputs, used, False
 
+        plugin_type = getattr(plugin, "type", "react")
         used.append(trigger)
         self._record_deferred_tool_stat(trigger, "executed")
         try:
@@ -1609,6 +1639,8 @@ class PluginManager:
 
         if not allow_tools:
             return False, "", [], []
+        from services.chat_support.tool_invocation import arguments_invalid
+
         allowed_types = set(allowed_types or {"react"})
         tool_outputs: List[str] = []
         used_triggers: List[str] = []
@@ -1616,19 +1648,24 @@ class PluginManager:
         for call in calls_from_iterable(calls):
             name = str(call.name or "").strip()
             if not name:
+                tool_outputs.append("【未执行】缺少工具名。")
                 continue
-            triggered = True
+            if arguments_invalid(call):
+                tool_outputs.append(f"【{name} 未执行】参数不是合法 JSON。")
+                continue
             if name == "tool_search":
-                query = str((call.arguments or {}).get("query") or call.raw_arguments or "").strip()
-                outputs, used, _found = await self._run_named_tool(
+                query = str((call.arguments or {}).get("query") or "").strip()
+                outputs, used, executed = await self._run_named_tool(
                     "tool_search",
                     query,
                     context,
                     allowed_types,
                     invocation_mode=invocation_mode,
                 )
-                tool_outputs.extend(outputs)
-                used_triggers.extend(used)
+                tool_outputs.append(outputs[0] if outputs else f"【{name} 未执行】没有返回结果。")
+                if executed:
+                    triggered = True
+                    used_triggers.extend(used)
                 continue
             trigger = self._resolve_command_trigger(name)
             plugin = (
@@ -1646,7 +1683,6 @@ class PluginManager:
             )
             if missing:
                 tool_outputs.append(missing_required_message(name, missing))
-                used_triggers.append(trigger or name)
                 continue
             args = format_invocation(
                 plugin,
@@ -1654,15 +1690,19 @@ class PluginManager:
                 call.raw_arguments,
                 tool_name=name,
             )
-            outputs, used, _found = await self._run_named_tool(
+            outputs, used, executed = await self._run_named_tool(
                 name,
                 args,
                 context,
                 allowed_types,
                 invocation_mode=invocation_mode,
             )
-            tool_outputs.extend(outputs)
-            used_triggers.extend(used)
+            tool_outputs.append(
+                outputs[0] if outputs else f"【{name} 未执行】没有返回结果。"
+            )
+            if executed:
+                triggered = True
+                used_triggers.extend(used)
         return triggered, "", tool_outputs, used_triggers
 
     def _build_runtime_context(self, context: dict) -> dict:
@@ -1685,7 +1725,7 @@ class PluginManager:
         return runtime
 
     async def execute_direct_commands(
-        self, user_text: str, context: dict
+        self, user_text: str, context: dict, *, dry_run: bool = False
     ) -> Tuple[bool, Optional[str]]:
         """
         Direct 模式：默认只响应 /命令；插件显式允许时才可自然语言触发。
@@ -1750,6 +1790,8 @@ class PluginManager:
 
                 _safe_print(f"🔌 [Direct] 命中关键词 [{key}] -> 触发插件: {plugin_name}")
                 self._dbg(f"🔌 [Direct] 命中关键词 [{key}] -> 触发插件: {plugin_name}")
+                if dry_run:
+                    return True, None
 
                 # 将用户的原始整句话作为参数传给插件
                 # 这样 plugin.py 里的 if "camera" in args 逻辑依然有效
@@ -1849,7 +1891,8 @@ class PluginManager:
                     "trigger": trigger,
                     "name": getattr(plugin, "name", trigger),
                     "type": getattr(plugin, "type", "react"),
-                    "description": getattr(plugin, "description", ""),
+                    "description": plugin_public_description(plugin),
+                    "card_summary": str(config.get("card_summary") or "").strip(),
                     "enabled": self.is_plugin_enabled(trigger),
                     "version": config.get("version", "1.0.0"),
                     "author": config.get("author", ""),
@@ -1962,16 +2005,21 @@ class PluginManager:
                 continue
 
             self._dbg(f"\n🔌 [ReAct] ----- 处理命令#{idx}: {llm_cmd} | {args} -----")
-            triggered = True
-            outputs, used, _found = await self._run_named_tool(
+            outputs, used, executed = await self._run_named_tool(
                 llm_cmd,
                 args,
                 context,
                 allowed_types,
                 invocation_mode="cmd",
             )
-            tool_outputs.extend(outputs)
-            used_triggers.extend(used)
+            tool_outputs.append(
+                "\n".join(str(item) for item in outputs)
+                if outputs
+                else f"【{llm_cmd} 未执行】没有返回结果。"
+            )
+            if executed:
+                triggered = True
+                used_triggers.extend(used)
 
         self._dbg("\n🔌 [ReAct] ========== 工具执行总结 ==========")
         self._dbg(f"🔌 [ReAct] 触发状态: {triggered}")

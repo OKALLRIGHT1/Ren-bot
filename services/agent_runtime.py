@@ -104,15 +104,18 @@ class AgentRuntime:
         )
 
     async def handle_direct_text(self, text: str, ctx: Dict[str, Any]) -> AgentDirectResult:
-        if self._is_cancel(text) and self._pending_store.peek():
-            self._pending_store.clear()
+        from services.security.pending_confirm import confirm_prompt, session_key_from_ctx
+
+        session_key = session_key_from_ctx(ctx)
+        if self._is_cancel(text) and self._pending_store.peek(session_key):
+            self._pending_store.clear(session_key)
             return AgentDirectResult(
                 handled=True,
                 reply="已取消这次操作。",
                 meta={"path": "agent_confirm"},
             )
-        if self._is_confirm(text) and self._pending_store.peek():
-            pending = self._pending_store.take()
+        if self._is_confirm(text) and self._pending_store.peek(session_key):
+            pending = self._pending_store.take(session_key)
             if pending is None or pending.expired:
                 return AgentDirectResult(
                     handled=True,
@@ -126,6 +129,18 @@ class AgentRuntime:
                 meta={"path": "agent_confirm", "trigger": pending.trigger},
             )
 
+        pending = self._pending_store.peek(session_key)
+        if pending is not None:
+            matched, _preview = await self.plugin_manager.execute_direct_commands(
+                text, ctx, dry_run=True
+            )
+            if matched:
+                return AgentDirectResult(
+                    handled=True,
+                    reply=confirm_prompt(pending.summary)
+                    + "\n还有一个操作在等确认，这次没有执行新的工具。普通聊天可以继续。",
+                    meta={"path": "agent_confirm", "blocked_tool": True},
+                )
         handled, reply = await self.plugin_manager.execute_direct_commands(text, ctx)
         normalized = self._normalize_confirmation_reply(reply)
         if normalized is not None:
@@ -179,15 +194,25 @@ class AgentRuntime:
                 meta={"path": "agent_confirm", "trigger": trigger, "via": "local_popup"},
             )
 
-        self._pending_store.set(
+        from services.security.pending_confirm import confirm_prompt, session_key_from_ctx
+
+        action, status = self._pending_store.try_set(
             trigger=trigger,
             summary=summary,
             payload=payload,
             expires_in=expires_in,
+            session_key=session_key_from_ctx(ctx),
         )
+        if status == "busy":
+            return AgentDirectResult(
+                handled=True,
+                reply=confirm_prompt(action.summary)
+                + "\n还有一个操作在等确认，这次没有覆盖它。",
+                meta={"path": "agent_confirm", "trigger": action.trigger, "busy": True},
+            )
         return AgentDirectResult(
             handled=True,
-            reply=summary + "\n确认请回复“确认”，取消请回复“取消”。",
+            reply=confirm_prompt(summary),
             meta={"path": "agent_confirm", "trigger": trigger},
         )
 
@@ -286,22 +311,11 @@ class AgentRuntime:
         return reply
 
     def _is_confirm(self, text: str) -> bool:
-        return str(text or "").strip().lower() in {
-            "确认",
-            "同意",
-            "执行",
-            "发送",
-            "ok",
-            "yes",
-            "confirm",
-        }
+        from services.security.pending_confirm import normalize_decision_word
+
+        return normalize_decision_word(text) == "确认"
 
     def _is_cancel(self, text: str) -> bool:
-        return str(text or "").strip().lower() in {
-            "取消",
-            "算了",
-            "不要",
-            "不要发",
-            "cancel",
-            "no",
-        }
+        from services.security.pending_confirm import normalize_decision_word
+
+        return normalize_decision_word(text) == "取消"

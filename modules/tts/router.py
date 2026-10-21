@@ -55,6 +55,7 @@ class SpeakItem:
     chunk_chars: int
     show_bubble: bool
     append_ui: bool = False
+    stream_id: int = 0
 
 
 @dataclass
@@ -67,6 +68,7 @@ class AudioItem:
     tail_padding: float = 0.5
     show_bubble: bool = True
     append_ui: bool = False
+    stream_id: int = 0
 
 
 def _split_text(text: str, max_chars: int) -> list[str]:
@@ -505,6 +507,7 @@ Output:
             else int(chunk_chars),
             show_bubble=show_bubble,
             append_ui=bool(append_ui),
+            stream_id=self._current_stream_id,
         )
         await self._q.put(item)
 
@@ -514,6 +517,10 @@ Output:
         while True:
             try:
                 item = await self._q.get()
+
+                if item.stream_id and item.stream_id != self._current_stream_id:
+                    self._q.task_done()
+                    continue
 
                 if not self.enabled:
                     self._q.task_done()
@@ -535,15 +542,14 @@ Output:
                         self._audio_q.task_done()
 
                 self._interrupt_event.clear()
-                if self._interrupt_event.is_set():
-                    self._q.task_done()
-                    continue
 
                 segments = [item.text]
                 if item.split_long:
                     segments = _split_text(item.text, item.chunk_chars) or [item.text]
 
                 for idx, seg in enumerate(segments):
+                    if item.stream_id and item.stream_id != self._current_stream_id:
+                        break
                     if self._interrupt_event.is_set():
                         break
                     is_last_segment = idx == (len(segments) - 1)
@@ -613,6 +619,7 @@ Output:
                             tail_padding=tail_padding,
                             show_bubble=item.show_bubble,
                             append_ui=item.append_ui,
+                            stream_id=item.stream_id,
                         )
                         await self._audio_q.put(audio_item)
                         if self.verbose:
@@ -632,6 +639,7 @@ Output:
                                 tail_padding=tail_padding,
                                 show_bubble=item.show_bubble,
                                 append_ui=item.append_ui,
+                                stream_id=item.stream_id,
                             )
                         )
 
@@ -647,6 +655,18 @@ Output:
             try:
                 # 获取下一个待播放的音频
                 item: AudioItem = await self._audio_q.get()
+
+                if item.stream_id and item.stream_id != self._current_stream_id:
+                    if item.audio_path:
+                        try:
+                            import os
+
+                            if os.path.exists(item.audio_path):
+                                os.remove(item.audio_path)
+                        except Exception:
+                            pass
+                    self._audio_q.task_done()
+                    continue
 
                 # 再次检查打断
                 if self._interrupt_event.is_set():

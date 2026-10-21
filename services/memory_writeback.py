@@ -25,6 +25,43 @@ from typing import Any, Callable, Dict, List, Optional, Sequence
 
 logger = logging.getLogger(__name__)
 
+
+def _content_fingerprint(text: str) -> str:
+    compact = re.sub(r"[\s\W_]+", "", str(text or "").lower(), flags=re.UNICODE)
+    if not compact:
+        return ""
+    return hashlib.sha256(compact.encode("utf-8")).hexdigest()[:20]
+
+
+def _job_to_payload(job: "WritebackJob") -> dict[str, Any]:
+    return {
+        "session_id": job.session_id,
+        "person_id": job.person_id,
+        "trigger_role": job.trigger_role,
+        "trigger_text": job.trigger_text,
+        "reason": job.reason,
+        "trigger_transcript_id": job.trigger_transcript_id,
+        "character_id": job.character_id,
+        "character_name": job.character_name,
+        "meta": job.meta,
+    }
+
+
+def _job_from_payload(payload: dict[str, Any]) -> Optional["WritebackJob"]:
+    if not isinstance(payload, dict):
+        return None
+    return WritebackJob(
+        session_id=str(payload.get("session_id") or ""),
+        person_id=str(payload.get("person_id") or "owner"),
+        trigger_role=str(payload.get("trigger_role") or "user"),
+        trigger_text=str(payload.get("trigger_text") or ""),
+        reason=str(payload.get("reason") or "user_statement"),
+        trigger_transcript_id=str(payload.get("trigger_transcript_id") or ""),
+        character_id=str(payload.get("character_id") or ""),
+        character_name=str(payload.get("character_name") or ""),
+        meta=dict(payload.get("meta") or {}),
+    )
+
 LLMCall = Callable[..., str]
 
 ALLOWED_KINDS = frozenset({"preference", "fact", "rule", "profile"})
@@ -144,6 +181,7 @@ class MemoryWritebackService:
         self._stopping = False
         self._start_lock = threading.Lock()
         self._last_job_at: dict[str, float] = {}
+        self._seen_fingerprints: set[str] = set()
         self._summary_counters: dict[str, int] = {}
         self._summary_last_window: dict[str, str] = {}
         self._stats_lock = threading.Lock()
@@ -256,9 +294,11 @@ class MemoryWritebackService:
 
         session_key = str(session_id or "global").strip() or "global"
         person = str(person_id or "owner").strip() or "owner"
-        self._summary_counters[session_key] = (
-            int(self._summary_counters.get(session_key, 0)) + 1
-        )
+        with self._stats_lock:
+            self._summary_counters[session_key] = (
+                int(self._summary_counters.get(session_key, 0)) + 1
+            )
+            summary_count = self._summary_counters[session_key]
 
         reasons: list[str] = []
         if role == "assistant" and self.person_fact_enabled:
@@ -271,9 +311,12 @@ class MemoryWritebackService:
             and self._has_writeback_signal(content)
         ):
             reasons.append("explicit_user")
+        if role == "user" and self.person_fact_enabled and "explicit_user" not in reasons:
+            if not self._looks_ephemeral(content):
+                reasons.append("user_statement")
         if (
             self.chat_summary_enabled
-            and self._summary_counters[session_key] >= self.summary_message_threshold
+            and summary_count >= self.summary_message_threshold
         ):
             reasons.append("chat_summary_window")
 
@@ -296,22 +339,29 @@ class MemoryWritebackService:
             if self.enqueue(job):
                 enqueued_any = True
                 if reason == "chat_summary_window":
-                    self._summary_counters[session_key] = 0
+                    with self._stats_lock:
+                        self._summary_counters[session_key] = 0
         return enqueued_any
 
     def enqueue(self, job: WritebackJob) -> bool:
         if not self.enabled:
             return False
         self.start()
-        cooldown_key = f"{job.session_id}:{job.person_id}:{job.reason}"
-        now = time.time()
-        last = float(self._last_job_at.get(cooldown_key, 0.0))
-        if self.session_cooldown_sec > 0 and (now - last) < self.session_cooldown_sec:
-            if job.reason != "explicit_user":
-                self._bump("dropped")
-                return False
+        fingerprint = _content_fingerprint(job.trigger_text)
+        fingerprint_key = f"{job.session_id}:{job.person_id}:{fingerprint}"
+        with self._stats_lock:
+            if fingerprint and fingerprint_key in self._seen_fingerprints:
+                duplicate = True
+            else:
+                duplicate = False
+                if fingerprint:
+                    self._seen_fingerprints.add(fingerprint_key)
+                    if len(self._seen_fingerprints) > 500:
+                        self._seen_fingerprints = set(list(self._seen_fingerprints)[-300:])
+        if duplicate:
+            self._bump("dropped")
+            return False
         if self.inline:
-            self._last_job_at[cooldown_key] = now
             self._bump("enqueued")
             try:
                 self.process_job(job)
@@ -324,12 +374,51 @@ class MemoryWritebackService:
         try:
             self._queue.put_nowait(job)
         except queue.Full:
+            if self._spill_job(job):
+                self._bump("spilled")
+                return True
             self._bump("dropped")
             logger.warning("memory writeback queue full; dropped job reason=%s", job.reason)
             return False
-        self._last_job_at[cooldown_key] = now
         self._bump("enqueued")
         return True
+
+    def _spill_job(self, job: WritebackJob) -> bool:
+        store = getattr(self.memory_core, "store", None)
+        spill = getattr(store, "spill_writeback_job", None)
+        if not callable(spill):
+            return False
+        try:
+            spill(_job_to_payload(job))
+            return True
+        except Exception as exc:
+            logger.warning("memory writeback spill failed: %s", exc)
+            return False
+
+    def drain_spilled_jobs(self, limit: int = 4) -> int:
+        store = getattr(self.memory_core, "store", None)
+        pop = getattr(store, "pop_writeback_jobs", None)
+        if not callable(pop):
+            return 0
+        try:
+            payloads = list(pop(limit=limit) or [])
+        except Exception as exc:
+            logger.warning("memory writeback spill read failed: %s", exc)
+            return 0
+        drained = 0
+        for payload in payloads:
+            job = _job_from_payload(payload)
+            if job is None:
+                continue
+            try:
+                self._queue.put_nowait(job)
+                drained += 1
+            except queue.Full:
+                spill = getattr(store, "spill_writeback_job", None)
+                if callable(spill):
+                    spill(payload)
+                break
+        return drained
 
     # ------------------------------------------------------------------ worker
     def _worker_loop(self) -> None:
@@ -337,6 +426,7 @@ class MemoryWritebackService:
             try:
                 job = self._queue.get(timeout=0.5)
             except queue.Empty:
+                self.drain_spilled_jobs(limit=4)
                 continue
             if job is None:
                 self._queue.task_done()
@@ -361,7 +451,10 @@ class MemoryWritebackService:
     def _is_trusted_source(meta: dict[str, Any]) -> bool:
         source = str(meta.get("source") or "").strip().lower()
         if source in {"qq_gateway", "napcat_qq"}:
-            return bool(meta.get("is_owner"))
+            if bool(meta.get("is_owner")):
+                return True
+            # 群友或私聊联系人的原话可以写入他们自己的画像，不能写进主人。
+            return bool(str(meta.get("user_id") or "").strip())
         return True
 
     @staticmethod

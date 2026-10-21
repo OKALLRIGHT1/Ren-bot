@@ -129,7 +129,7 @@ async def test_remote_qq_non_owner_is_denied_for_owner_only_plugin():
         _qq_ctx(owner=False),
     )
 
-    assert triggered is True
+    assert triggered is False
     assert clean == ""
     assert used == []
     assert len(plugin.calls) == 0
@@ -322,7 +322,7 @@ async def test_execute_invocations_uses_same_access_denial_as_commands():
         allowed_types={"react"},
     )
 
-    assert triggered is True
+    assert triggered is False
     assert used == []
     assert plugin.calls == []
     assert "不允许" in outputs[0]
@@ -374,7 +374,7 @@ async def test_execute_invocations_skips_missing_required_schema_fields():
         _local_ctx(),
         allowed_types={"react"},
     )
-    assert triggered is True
+    assert triggered is False
     assert plugin.calls == []
     assert "缺少必填参数" in outputs[0]
     assert "city" in outputs[0]

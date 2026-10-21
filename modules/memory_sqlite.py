@@ -52,6 +52,45 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _parse_activity_timestamp(ts_iso: str) -> float:
+    """Parse an activity timestamp. Unparseable values return 0."""
+    raw = str(ts_iso or "").strip()
+    if not raw:
+        return 0.0
+    normalized = raw.replace("Z", "+00:00")
+    match = re.match(
+        r"^(?P<head>\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2})(?:\.(?P<frac>\d+))?(?P<tz>.*)$",
+        normalized,
+    )
+    if match:
+        frac = (match.group("frac") or "")[:6]
+        normalized = match.group("head")
+        if frac:
+            normalized += f".{frac}"
+        tz = str(match.group("tz") or "").strip()
+        if tz:
+            normalized += tz
+    try:
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError:
+        return 0.0
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.timestamp()
+
+
+def _local_day_start_timestamp(day: str) -> float:
+    local_tz = datetime.now().astimezone().tzinfo
+    start = datetime.strptime(day, "%Y-%m-%d").replace(
+        tzinfo=local_tz,
+        hour=0,
+        minute=0,
+        second=0,
+        microsecond=0,
+    )
+    return start.timestamp()
+
+
 def _ensure_dir(path: str) -> None:
     os.makedirs(os.path.dirname(os.path.abspath(path)) or ".", exist_ok=True)
 
@@ -93,6 +132,7 @@ class MemorySQLite:
         self._init_db()
         self._bootstrap_from_legacy_if_empty()
         self.repair_known_transcript_mojibake()
+        self.compact_activity_history_if_due()
 
     def _connect(self) -> sqlite3.Connection:
         """获取连接（线程本地复用，性能优化）"""
@@ -130,6 +170,13 @@ class MemorySQLite:
     def _init_db(self) -> None:
         with self._connect() as conn:
             # transcript
+            conn.execute("""
+            CREATE TABLE IF NOT EXISTS memory_writeback_pending (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              payload_json TEXT NOT NULL,
+              created_at TEXT NOT NULL
+            )
+            """)
             conn.execute("""
             CREATE TABLE IF NOT EXISTS transcript (
               id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -778,6 +825,67 @@ class MemorySQLite:
         if historized:
             self.add_activity_event(event)
         return {"latest": True, "historized": historized}
+
+    def compact_activity_history_if_due(self) -> Dict[str, Any]:
+        """Once per local day, drop window-switch detail from earlier days."""
+        today = datetime.now().astimezone().strftime("%Y-%m-%d")
+        if getattr(self, "_activity_compact_date", "") == today:
+            return {"deleted_events": 0, "slimmed_days": 0, "skipped": True}
+        result = self.compact_activity_history(today=today)
+        self._activity_compact_date = today
+        return result
+
+    def compact_activity_history(self, *, today: str = "") -> Dict[str, Any]:
+        """Keep today's foreground switches. Older days stay as daily_screen_stats."""
+        today = str(today or datetime.now().astimezone().strftime("%Y-%m-%d")).strip()
+        cutoff = _local_day_start_timestamp(today)
+        with self._lock:
+            with self._connect() as conn:
+                rows = conn.execute(
+                    "SELECT event_id, ts_iso FROM activity_events "
+                    "WHERE lower(kind)=?",
+                    ("foreground_changed",),
+                ).fetchall()
+                stale_ids = [
+                    str(row["event_id"])
+                    for row in rows
+                    if 0 < _parse_activity_timestamp(row["ts_iso"]) < cutoff
+                ]
+                deleted = 0
+                if stale_ids:
+                    conn.executemany(
+                        "DELETE FROM activity_events WHERE event_id=?",
+                        [(event_id,) for event_id in stale_ids],
+                    )
+                    deleted = len(stale_ids)
+                slimmed = self._slim_past_daily_screen_stats(conn, today)
+                conn.commit()
+        return {"deleted_events": deleted, "slimmed_days": slimmed, "skipped": False}
+
+    @staticmethod
+    def _slim_past_daily_screen_stats(conn: sqlite3.Connection, today: str) -> int:
+        """Past days keep the daily totals, not the switch-by-switch segments."""
+        drop_keys = ("segments", "observations", "cache")
+        rows = conn.execute(
+            "SELECT date, summary_json FROM daily_screen_stats WHERE date < ?",
+            (today,),
+        ).fetchall()
+        slimmed = 0
+        for row in rows:
+            payload = _pj(row["summary_json"], {})
+            if not isinstance(payload, dict):
+                continue
+            if not any(key in payload for key in drop_keys):
+                continue
+            slim = dict(payload)
+            for key in drop_keys:
+                slim.pop(key, None)
+            conn.execute(
+                "UPDATE daily_screen_stats SET summary_json=? WHERE date=?",
+                (json.dumps(slim, ensure_ascii=False), row["date"]),
+            )
+            slimmed += 1
+        return slimmed
 
     def _activity_row_to_dict(self, r: sqlite3.Row) -> Dict[str, Any]:
         raw_payload = _pj(r["raw_json"], {})
@@ -2100,6 +2208,37 @@ class MemorySQLite:
         import json
 
         return json.dumps(stats, ensure_ascii=False, indent=2)
+
+    def spill_writeback_job(self, payload: Dict[str, Any]) -> None:
+        with self._lock:
+            with self._connect() as conn:
+                conn.execute(
+                    "INSERT INTO memory_writeback_pending(payload_json, created_at) VALUES(?, ?)",
+                    (_j(payload), _now_iso()),
+                )
+                conn.commit()
+
+    def pop_writeback_jobs(self, limit: int = 4) -> List[Dict[str, Any]]:
+        limit = max(1, min(50, int(limit or 4)))
+        with self._lock:
+            with self._connect() as conn:
+                rows = conn.execute(
+                    "SELECT id, payload_json FROM memory_writeback_pending ORDER BY id ASC LIMIT ?",
+                    (limit,),
+                ).fetchall()
+                ids = [int(row["id"]) for row in rows]
+                if ids:
+                    conn.executemany(
+                        "DELETE FROM memory_writeback_pending WHERE id=?",
+                        [(item,) for item in ids],
+                    )
+                    conn.commit()
+        payloads = []
+        for row in rows:
+            parsed = _pj(row["payload_json"], {})
+            if isinstance(parsed, dict):
+                payloads.append(parsed)
+        return payloads
 
 
 # -------- module-level singleton --------

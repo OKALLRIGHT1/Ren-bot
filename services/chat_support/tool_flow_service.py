@@ -172,6 +172,64 @@ def _assistant_tool_call_message(result: ChatCompletionResult) -> dict[str, Any]
     return message
 
 
+def _without_rejected_tools(tools: Optional[list], rejected_names: set[str]) -> Optional[list]:
+    if not tools or not rejected_names:
+        return tools
+    kept = []
+    for tool in tools:
+        function = tool.get("function") if isinstance(tool, dict) else None
+        name = str((function or {}).get("name") or "").strip()
+        if name and name in rejected_names:
+            continue
+        kept.append(tool)
+    return kept
+
+
+def _outputs_for_calls(calls: Sequence[ToolCallRequest], outputs: Sequence[Any]) -> list[tuple[ToolCallRequest, str]]:
+    packed = [str(item) for item in (outputs or [])]
+    paired: list[tuple[ToolCallRequest, str]] = []
+    for index, call in enumerate(calls):
+        if index < len(packed):
+            content = packed[index]
+        else:
+            content = f"【{call.name} 未执行】没有对应结果。"
+        paired.append((call, content))
+    return paired
+
+
+def _confirmation_pending_text(rows: Sequence[str]) -> str:
+    for row in rows:
+        text = str(row or "")
+        if "回复 确认" in text and "取消" in text:
+            return text
+    return ""
+
+
+def _pending_tool_block_reply(ctx: Dict[str, Any]) -> str:
+    try:
+        from services.security.pending_confirm import (
+            confirm_prompt,
+            get_pending_confirm_store,
+            session_key_from_ctx,
+        )
+    except Exception:
+        return ""
+    pending = get_pending_confirm_store().peek(session_key_from_ctx(ctx))
+    if pending is None:
+        return ""
+    return confirm_prompt(pending.summary) + "\n还有一个操作在等确认，这次没有执行新的工具。"
+
+
+def _command_names(plugin_manager: Any, text: str) -> set[str]:
+    extract = getattr(plugin_manager, "extract_commands", None)
+    if not callable(extract):
+        return set()
+    try:
+        return {str(trigger or "").strip() for trigger, _args in extract(text) if str(trigger or "").strip()}
+    except Exception:
+        return set()
+
+
 def _tool_result_message(call: ToolCallRequest, content: str) -> dict[str, Any]:
     return {
         "role": "tool",
@@ -306,6 +364,7 @@ async def run_tool_command_loop(
     fc_used = False
     cmd_used = False
     fc_skipped_reason = ""
+    rejected_names: set[str] = set()
     mode = str(invocation_mode or "cmd").strip().lower()
     if mode not in {"cmd", "dual", "function"}:
         mode = "cmd"
@@ -331,12 +390,13 @@ async def run_tool_command_loop(
 
     for index in range(max(1, int(max_iterations or 1))):
         iterations = index + 1
+        active_tools = _without_rejected_tools(request_tools, rejected_names)
         completion = await _call_chat_complete(
             chat_with_ai,
             messages,
             task_type=task_type,
             caller=caller_prefix if iterations == 1 else f"{caller_prefix}_{iterations}",
-            tools=request_tools,
+            tools=active_tools,
             request_context=request_context,
         )
         if completion.fc_skipped_reason:
@@ -344,6 +404,11 @@ async def run_tool_command_loop(
         final_reply = str(completion.text or "")
 
         if completion.tool_calls and mode in {"dual", "function"}:
+            pending_reply = _pending_tool_block_reply(ctx)
+            if pending_reply:
+                final_reply = pending_reply
+                clean_thought = pending_reply
+                break
             signature = _tool_call_signature(completion.tool_calls)
             if signature and signature == last_signature:
                 clean_thought = ""
@@ -372,24 +437,23 @@ async def run_tool_command_loop(
                 clean_thought = str(clean_text or "").strip()
             if used:
                 used_triggers.extend(str(trigger) for trigger in used)
-            rows = [_compact_loop_result(str(output)) for output in (outputs or [])]
+            packed = _outputs_for_calls(completion.tool_calls, outputs)
+            rows = [_compact_loop_result(content) for _call, content in packed]
+            for call, content in packed:
+                if "未执行" in content:
+                    rejected_names.add(str(call.name or "").strip())
             if rows:
                 tool_results.extend(rows)
                 observation_rounds.append(
                     f"Round {iterations} tool results:\n" + "\n".join(rows)
                 )
             messages.append(_assistant_tool_call_message(completion))
-            if not rows:
+            for call, content in packed:
+                messages.append(_tool_result_message(call, _compact_loop_result(content)))
+            if _confirmation_pending_text(rows):
+                final_reply = _confirmation_pending_text(rows)
+                clean_thought = final_reply
                 break
-            packed = list(outputs or [])
-            for index, call in enumerate(completion.tool_calls):
-                if index < len(packed):
-                    content = _compact_loop_result(str(packed[index]))
-                elif packed:
-                    content = _compact_loop_result(str(packed[-1]))
-                else:
-                    content = ""
-                messages.append(_tool_result_message(call, content))
             continue
 
         if mode != "function" and contains_cmd(final_reply):
@@ -398,8 +462,16 @@ async def run_tool_command_loop(
                 clean_thought = ""
                 break
             last_signature = signature
-
-            command_triggered, clean_text, outputs, used = await plugin_manager.execute_commands(
+            command_names = _command_names(plugin_manager, final_reply)
+            if command_names and command_names <= rejected_names:
+                command_triggered, clean_text, outputs, used = (
+                    False,
+                    "",
+                    [f"【{name} 未执行】本轮已拒绝过，不要再调用。" for name in sorted(command_names)],
+                    [],
+                )
+            else:
+                command_triggered, clean_text, outputs, used = await plugin_manager.execute_commands(
                 final_reply,
                 ctx,
                 allow_tools=True,
@@ -418,13 +490,19 @@ async def run_tool_command_loop(
                 clean_thought = str(clean_text or "").strip()
             if used:
                 used_triggers.extend(str(trigger) for trigger in used)
-            if outputs:
-                rows = [_compact_loop_result(str(output)) for output in outputs]
-                tool_results.extend(rows)
-                observation_rounds.append(
-                    f"Round {iterations} tool results:\n" + "\n".join(rows)
-                )
-            else:
+            rows = [_compact_loop_result(str(output)) for output in (outputs or [])]
+            if not rows:
+                rows = ["【未执行】没有返回结果。"]
+            for row in rows:
+                if "未执行" in row:
+                    rejected_names.update(_command_names(plugin_manager, final_reply))
+            tool_results.extend(rows)
+            observation_rounds.append(
+                f"Round {iterations} tool results:\n" + "\n".join(rows)
+            )
+            if _confirmation_pending_text(rows):
+                final_reply = _confirmation_pending_text(rows)
+                clean_thought = final_reply
                 break
 
             messages = _without_loop_observation(messages)

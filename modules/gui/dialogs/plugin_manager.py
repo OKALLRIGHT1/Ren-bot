@@ -356,6 +356,8 @@ class PluginManagerDialog(QtWidgets.QDialog):
         enabled = bool(info.get("enabled"))
         name = str(info.get("name") or trigger)
         summary = str(info.get("description") or "").strip() or f"触发词：{trigger}"
+        card_summary = str(info.get("card_summary") or "").strip()
+        visible = card_summary or summary
         access_summary = str(info.get("access_summary") or "").strip()
         group_label = capability_group_label(group)
 
@@ -452,7 +454,7 @@ class PluginManagerDialog(QtWidgets.QDialog):
         lbl_desc.setStyleSheet(f"font-size: 11px; color: {desc_color}; background: transparent;")
         lbl_desc.setWordWrap(False)
         fm = lbl_desc.fontMetrics()
-        lbl_desc.setText(fm.elidedText(summary.replace("\n", " "), QtCore.Qt.TextElideMode.ElideRight, 280))
+        lbl_desc.setText(fm.elidedText(visible.replace("\n", " "), QtCore.Qt.TextElideMode.ElideRight, 280))
         card_layout.addWidget(lbl_desc)
 
         # 第三行：底部元信息（触发词 + 权限简述）
@@ -469,7 +471,10 @@ class PluginManagerDialog(QtWidgets.QDialog):
         card_layout.addWidget(lbl_meta)
 
         tooltip_bits = [f"名称：{name}", f"分组：{group_label}", f"触发词：{trigger}"]
-        if summary:
+        if card_summary and card_summary != summary:
+            tooltip_bits.append(f"说明：{card_summary}")
+            tooltip_bits.append(summary)
+        elif summary:
             tooltip_bits.append(f"说明：{summary}")
         if access_summary:
             tooltip_bits.append(f"权限：{access_summary}")
@@ -511,6 +516,7 @@ class PluginManagerDialog(QtWidgets.QDialog):
                 [
                     str(info.get("name") or ""),
                     trigger,
+                    str(info.get("card_summary") or ""),
                     str(info.get("description") or ""),
                     capability_group_label(group),
                 ]
@@ -1498,7 +1504,7 @@ class PluginEditorDialog(QtWidgets.QDialog):
 
             self.desc_input.setPlainText(desc_text)
             self.example_input.setText(config.get("example_arg", ""))
-            self.timeout_input.setValue(config.get("timeout_sec", 6))
+            self.timeout_input.setValue(config.get("timeout_sec", 30))
 
             access_control = self._normalize_access_control(
                 config.get("access_control")

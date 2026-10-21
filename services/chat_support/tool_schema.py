@@ -80,6 +80,32 @@ def _plugin_type(plugin: Any) -> str:
     return str(getattr(plugin, "type", "react") or "react")
 
 
+def plugin_executable_in_pass(
+    plugin: Any,
+    *,
+    allowed_types: Optional[Set[str]] = None,
+    invoked_name: str = "",
+) -> bool:
+    """Schema exposure and execution share this allowlist.
+
+    A pass may run plugins of the allowed types. Extra command names on a
+    plugin (for example weather on the daily card) stay callable. A delegate
+    plugin is not offered or run just because a router mentioned its trigger.
+    """
+    allowed = {str(item).strip() for item in (allowed_types or set()) if str(item).strip()}
+    if not allowed:
+        return True
+    if _plugin_type(plugin) in allowed:
+        return True
+    extras = {
+        str(item).strip()
+        for item in (getattr(plugin, "llm_commands", None) or [])
+        if str(item).strip()
+    }
+    name = str(invoked_name or "").strip()
+    return bool(name) and name in extras
+
+
 def resolve_plugin(plugin_manager: Any, trigger: str) -> Any:
     key = str(trigger or "").strip()
     if not key or plugin_manager is None:
@@ -118,18 +144,19 @@ def build_openai_tools(
         schemas = iter_plugin_tool_schemas(plugin, llm_cmd)
         if not schemas:
             continue
-        plugin_type = _plugin_type(plugin)
-        extras = {
-            str(item).strip()
-            for item in (getattr(plugin, "llm_commands", None) or [])
-            if str(item).strip()
-        }
-        if allowed and plugin_type not in allowed:
-            wanted = str(trigger or "").strip()
+        if allowed and not plugin_executable_in_pass(
+            plugin,
+            allowed_types=allowed,
+            invoked_name=llm_cmd,
+        ):
             schemas = [
                 schema
                 for schema in schemas
-                if schema["name"] == wanted or schema["name"] in extras
+                if plugin_executable_in_pass(
+                    plugin,
+                    allowed_types=allowed,
+                    invoked_name=str(schema.get("name") or ""),
+                )
             ]
             if not schemas:
                 continue

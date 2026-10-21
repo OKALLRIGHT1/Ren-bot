@@ -7,12 +7,14 @@
 - Python 推荐入口：`main.py` 守护进程 → `boot.py` → `core/application.py`；`boot.py` 仅用于临时调试核心进程。
 - Windows 一键安装/启动：`setup_env.py`（`安装环境.bat` / `启动.bat` / `启动-无窗口.vbs`）；就绪标记 `.suzu-ready`。
 - 对话主链路：`services/chat_service.py`，辅助服务在 `services/chat_support/`。
-- 插件系统：`modules/plugin_manager.py` 和 `plugins/`。窄口：`knowledge` / `gateway` / `tts` / `app`；`brain` 仍在。**不再**注入 `ctx["chat_service"]`。Skill 是可选提示词层（`ctx["skills"]`），不是插件。
+- 插件系统：`modules/plugin_manager.py` 和 `plugins/`。窄口：`knowledge` / `gateway` / `tts` / `app`；`brain` 仍在。**不再**注入 `ctx["chat_service"]` 或 `ctx["skills"]`。
 - Qt 桌面设置中心：`modules/gui/`；记忆/知识页走 `services/gui_api/`。
 - GUI HTTP/WS：`integrations/gui_http.py` / `integrations/gui_ws.py`，领域逻辑优先 `services/gui_api/`。
 - Live2D 前端：独立仓库；本仓通过认证 GUI 通道通信。
 - 桌面活动与久坐：Tauri 上报 `/gui/activity-ingest`；主程序只消费 `source=live2d-tauri`。连上增强版后，弹窗由桌面端渲染后端模板（话术/表情包），LLM 口头提醒只走气泡；顶部文案为「工作了多久」。未连接时增强版可独立弹窗。稍后/关闭经 `POST /gui/sedentary/ack` 回告冷却。
-- 记忆：SQLite 为写入真相源；见 `docs/architecture/memory.md`。
+- 记忆：SQLite 为写入真相源。写回队列满了进 `memory_writeback_pending`，不在聊天线程里等待。
+- 工具：函数调用轮和执行共用 `plugin_executable_in_pass`。`delegate` 工具不在 react 轮暴露。确认按会话保存，5 分钟过期，挂起时只挡新的工具调用。
+- 插件默认超时 30 秒。超时回写是「结果未知，不要重试」，因为底层线程不一定已经停掉。
 
 ## 当前重点
 
@@ -41,7 +43,6 @@
 - `docs/architecture/project_slimdown.md`：瘦身门槛
 - `docs/architecture/coupling-and-overdesign-review.md`：审查原文（P0–P4b 已标落地）
 - `PLUGINS_GUIDE.md` / `docs/agent-runtime.md` / `docs/SECURITY_REMEDIATION_PLAN.md`
-- `skills/README.md`
 
 ### 仍进行中的计划 / 设计
 
