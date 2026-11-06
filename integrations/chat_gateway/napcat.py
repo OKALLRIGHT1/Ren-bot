@@ -10,6 +10,8 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
 from urllib import error, request
 
+from .tracking import onebot_action_success
+
 try:
     from config import (
         NAPCAT_ALLOW_GROUP,
@@ -545,12 +547,14 @@ class NapCatOneBotAdapter(BaseChatAdapter):
                 parsed = json.loads(body) if body else {}
             except Exception:
                 parsed = {"raw": body}
+            ok = onebot_action_success(parsed)
             return {
-                "ok": True,
+                "ok": ok,
                 "status": status,
                 "session_id": session_id,
                 "response": parsed,
                 "transport": "http",
+                "reason": "" if ok else f"onebot_action_failed:{parsed.get('retcode', 'invalid_response') if isinstance(parsed, dict) else 'invalid_response'}",
             }
 
         try:

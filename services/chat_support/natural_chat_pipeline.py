@@ -70,7 +70,7 @@ class NaturalChatConfig:
     character_thought_enabled: bool = True
     character_thought_scope: str = "desktop_and_qq_private"
     group_chat_natural_enabled: bool = False
-    character_thought_timeout_ms: int = 1200,
+    character_thought_timeout_ms: int = 1200
     character_thought_max_tokens: int = 220
     expression_inject_in_main_reply: bool = True
     expression_inject_max_items: int = 1

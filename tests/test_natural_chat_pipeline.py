@@ -41,6 +41,13 @@ def test_default_scope_desktop_and_qq_private():
     assert not scope_matches("napcat_qq", "group", cfg)
 
 
+def test_direct_config_default_timeout_matches_mapping():
+    direct = NaturalChatConfig()
+    mapped = NaturalChatConfig.from_mapping({})
+    assert type(direct.character_thought_timeout_ms) is int
+    assert direct.character_thought_timeout_ms == mapped.character_thought_timeout_ms == 1200
+
+
 def test_group_toggle():
     cfg_off = _default_cfg(group_chat_natural_enabled=False)
     cfg_on = _default_cfg(group_chat_natural_enabled=True)

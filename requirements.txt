@@ -5,7 +5,6 @@ aiohttp
 chromadb
 edge-tts
 jieba
-mcp
 networkx
 numpy<2
 openai

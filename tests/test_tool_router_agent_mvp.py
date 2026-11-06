@@ -1,3 +1,7 @@
+from tests.helpers.optional_plugins import require_optional_plugins
+
+require_optional_plugins('app_control', 'code_agent', 'mcp_tools', 'moegirl_wiki', 'qq_music', 'timer', 'user_files', 'workspace_ops')
+
 from modules.tool_router import ToolRouter
 from plugins.timer.plugin import Plugin as TimerPlugin
 from services.capability_manager import ToolCapabilityManager

@@ -16,6 +16,11 @@ PNG_BYTES = base64.b64decode(
 )
 
 
+@pytest.fixture(autouse=True)
+def isolated_user_data(tmp_path, monkeypatch):
+    monkeypatch.setenv("SUZU_DATA_DIR", str(tmp_path))
+
+
 def _catalog(root: Path) -> Path:
     data = root / "data"
     data.mkdir(parents=True)

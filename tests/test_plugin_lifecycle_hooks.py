@@ -5,6 +5,8 @@
 tasks without exposing `stop` leaks a loop per reload.
 """
 
+from tests.helpers.optional_plugins import require_optional_plugins
+
 import asyncio
 
 import pytest
@@ -13,6 +15,7 @@ import pytest
 @pytest.mark.asyncio
 async def test_system_monitor_exposes_lifecycle_stop():
     """Host reload path checks hasattr(plugin, "stop"); it must be there."""
+    require_optional_plugins('system_monitor')
     from plugins.system_monitor.plugin import Plugin
 
     plugin = Plugin()
@@ -24,6 +27,7 @@ async def test_system_monitor_exposes_lifecycle_stop():
 
 @pytest.mark.asyncio
 async def test_system_monitor_stop_cancels_running_monitor(monkeypatch):
+    require_optional_plugins('system_monitor')
     from plugins.system_monitor.plugin import Plugin
 
     plugin = Plugin()
@@ -45,6 +49,7 @@ async def test_system_monitor_stop_cancels_running_monitor(monkeypatch):
 @pytest.mark.asyncio
 async def test_system_monitor_user_stop_action_still_works(monkeypatch):
     """The action-map "stop" must keep returning its user-facing string."""
+    require_optional_plugins('system_monitor')
     from plugins.system_monitor.plugin import Plugin
 
     plugin = Plugin()
@@ -62,6 +67,7 @@ async def test_system_monitor_user_stop_action_still_works(monkeypatch):
 @pytest.mark.asyncio
 async def test_timer_keeps_reference_to_inflight_countdown():
     """Fire-and-forget tasks need a strong ref or they can be GC'd mid-await."""
+    require_optional_plugins('timer')
     from plugins.timer.plugin import Plugin
 
     plugin = Plugin()
@@ -75,6 +81,7 @@ async def test_timer_keeps_reference_to_inflight_countdown():
 
 @pytest.mark.asyncio
 async def test_timer_done_callback_clears_reference():
+    require_optional_plugins('timer')
     from plugins.timer.plugin import Plugin
 
     plugin = Plugin()
@@ -95,6 +102,7 @@ async def test_timer_done_callback_clears_reference():
 @pytest.mark.asyncio
 async def test_task_manager_check_urgent_does_not_block_event_loop():
     """Background tick runs sqlite; it must go through a thread."""
+    require_optional_plugins('task_manager')
     from plugins.task_manager.plugin import Plugin
 
     plugin = Plugin()
@@ -115,6 +123,7 @@ async def test_task_manager_check_urgent_does_not_block_event_loop():
 
 
 def test_task_manager_keeps_sync_helper_for_thread_offload():
+    require_optional_plugins('task_manager')
     from plugins.task_manager.plugin import Plugin
 
     plugin = Plugin()

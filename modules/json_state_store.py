@@ -7,10 +7,46 @@ load/save/history logic is not duplicated.
 from __future__ import annotations
 
 import json
+import logging
+import os
+import tempfile
 import threading
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+
+
+logger = logging.getLogger(__name__)
+
+
+def _save_json_atomic(path: Path, data: Any) -> bool:
+    """Keep the previous file intact until a complete replacement is ready."""
+    temp_path = None
+    try:
+        # Serialize before touching the filesystem: invalid metadata must not
+        # truncate an existing session or task history.
+        text = json.dumps(data, ensure_ascii=False, indent=2)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", dir=path.parent,
+            prefix=f".{path.name}.", suffix=".tmp", delete=False,
+        ) as fh:
+            temp_path = Path(fh.name)
+            fh.write(text)
+            fh.flush()
+            os.fsync(fh.fileno())
+        # Close first for Windows; same-directory replacement is atomic.
+        os.replace(temp_path, path)
+        return True
+    except Exception:
+        logger.exception("Failed to save JSON state: %s", path)
+        return False
+    finally:
+        if temp_path is not None:
+            try:
+                temp_path.unlink(missing_ok=True)
+            except OSError:
+                logger.warning("Failed to remove temporary state file: %s", temp_path)
 
 
 def now_iso() -> str:
@@ -36,13 +72,7 @@ class JsonListStore:
             return []
 
     def save(self, items: List[Dict[str, Any]]) -> bool:
-        try:
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            with self.path.open("w", encoding="utf-8") as fh:
-                json.dump(items[-self.max_items :], fh, ensure_ascii=False, indent=2)
-            return True
-        except Exception:
-            return False
+        return _save_json_atomic(self.path, items[-self.max_items :])
 
     def append(self, item: Dict[str, Any]) -> None:
         with self._lock:
@@ -91,7 +121,6 @@ class JsonTaskStore:
 
     def save(self, data: Dict[str, Any]) -> bool:
         try:
-            self.path.parent.mkdir(parents=True, exist_ok=True)
             tasks = data.get("tasks", {})
             if isinstance(tasks, dict) and len(tasks) > self.max_tasks:
                 sorted_items = sorted(
@@ -100,11 +129,10 @@ class JsonTaskStore:
                     reverse=True,
                 )
                 tasks = dict(sorted_items[: self.max_tasks])
-                data["tasks"] = tasks
-            with self.path.open("w", encoding="utf-8") as fh:
-                json.dump(data, fh, ensure_ascii=False, indent=2)
-            return True
+                data = {**data, "tasks": tasks}
+            return _save_json_atomic(self.path, data)
         except Exception:
+            logger.exception("Failed to prepare task state: %s", self.path)
             return False
 
     def set_task_state(

@@ -125,6 +125,7 @@ def _runtime_health_app(health):
     app.tts_enabled = False
     app.voice_sensor = None
     app.plugin_manager = None
+    app._napcat_gateway_is_listening = lambda: False
     return app
 
 
@@ -156,6 +157,7 @@ def test_initial_health_uses_enabled_runtime_qq_setting_instead_of_module_defaul
 def test_qq_gateway_health_becomes_healthy_after_listener_starts():
     health = RuntimeHealthCenter(clock=lambda: 300.0)
     app = _runtime_health_app(health)
+    app._napcat_gateway_is_listening = lambda: True
 
     app._report_qq_gateway_health(enabled=True, server_running=True)
 

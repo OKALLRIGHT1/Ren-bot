@@ -490,8 +490,11 @@ class ScreenSensor:
         self, now_ts: float, stale_threshold_sec: float
     ) -> None:
         last_seen = float(getattr(self, "_last_rust_event_seen_at", 0.0) or 0.0)
-        # 如果曾经接收过 Rust 事件，说明通道正常，只是用户当前未切换前台应用
-        state = "healthy" if last_seen > 0 else "degraded"
+        # Allow frontend startup without inventing a received event timestamp.
+        started = float(getattr(self, "_rust_events_wait_started_at", 0.0) or 0.0)
+        if not last_seen and started and now_ts - started < stale_threshold_sec:
+            return
+        state = "healthy" if last_seen > 0 and now_ts - last_seen <= stale_threshold_sec else "degraded"
         self._set_rust_activity_health(
             state=state,
             now_ts=now_ts,
@@ -1921,7 +1924,7 @@ class ScreenSensor:
     def _monitor_loop(self):
         # Consume Live2D/Tauri activity events; no local window polling fallback.
         rust_started_at = time.time()
-        self._last_rust_event_seen_at = self._last_rust_event_seen_at or rust_started_at
+        self._rust_events_wait_started_at = rust_started_at
         stale_threshold_sec = rust_activity_stale_threshold_sec()
         self.logger.info(
             "[Screen] Live2D activity source enabled; Python window polling disabled"

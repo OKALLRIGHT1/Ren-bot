@@ -4,6 +4,8 @@ Guards the start/stop contract the host relies on (`start_all_plugins` /
 `stop_all_plugins` in modules/plugin_manager.py), not the business logic.
 """
 
+from tests.helpers.optional_plugins import require_optional_plugins
+
 import asyncio
 
 import pytest
@@ -20,6 +22,7 @@ async def _wait_until(pred, timeout=2.0):
 
 @pytest.mark.asyncio
 async def test_qq_reminder_start_stop_and_idempotency(tmp_path, monkeypatch):
+    require_optional_plugins('qq_reminder')
     from plugins.qq_reminder.plugin import Plugin
 
     plugin = Plugin()
@@ -50,6 +53,7 @@ async def test_qq_reminder_start_stop_and_idempotency(tmp_path, monkeypatch):
 @pytest.mark.asyncio
 async def test_qq_reminder_interval_floor_still_applies():
     """Original code clamped scan_interval_sec to >= 5; keep that."""
+    require_optional_plugins('qq_reminder')
     from plugins.qq_reminder.plugin import Plugin
 
     plugin = Plugin()
@@ -61,6 +65,7 @@ async def test_qq_reminder_interval_floor_still_applies():
 
 @pytest.mark.asyncio
 async def test_life_manager_start_stop_sets_flag(monkeypatch, tmp_path):
+    require_optional_plugins('life_manager')
     from plugins.life_manager.plugin import Plugin
 
     plugin = Plugin()
@@ -86,6 +91,7 @@ async def test_life_manager_start_stop_sets_flag(monkeypatch, tmp_path):
 @pytest.mark.asyncio
 async def test_life_manager_stopping_flag_halts_loop(monkeypatch, tmp_path):
     """should_continue must honour _stopping even without cancellation."""
+    require_optional_plugins('life_manager')
     from plugins.life_manager.plugin import Plugin
 
     plugin = Plugin()
@@ -105,6 +111,7 @@ async def test_life_manager_stopping_flag_halts_loop(monkeypatch, tmp_path):
 @pytest.mark.asyncio
 async def test_task_manager_start_stop_return_messages(monkeypatch):
     """start/stop are user-facing actions; their strings are the contract."""
+    require_optional_plugins('task_manager')
     from plugins.task_manager.plugin import Plugin
 
     plugin = Plugin()
@@ -132,6 +139,7 @@ async def test_task_manager_start_stop_return_messages(monkeypatch):
 @pytest.mark.asyncio
 async def test_task_manager_sleeps_before_first_tick(monkeypatch):
     """tick_first=False preserved: no immediate tick on start."""
+    require_optional_plugins('task_manager')
     from plugins.task_manager.plugin import Plugin
 
     plugin = Plugin()

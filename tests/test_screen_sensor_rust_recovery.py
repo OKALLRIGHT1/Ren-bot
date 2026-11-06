@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 import logging
 import time
 import types
+import pytest
 
 import modules.screen_sensor as screen_sensor_module
 from modules.screen_sensor import ScreenSensor, rust_activity_stale_threshold_sec
@@ -255,6 +256,51 @@ def test_rust_only_stale_warning_is_rate_limited(monkeypatch):
         message for message in warnings if "Live2D activity events stale" in message
     ]
     assert len(stale_warnings) == 1
+
+
+@pytest.mark.parametrize("last_seen,now,expected", [(100.0, 220.0, "healthy"), (100.0, 221.0, "degraded"), (0.0, 221.0, "degraded")])
+def test_stale_health_uses_event_age_and_recovers(last_seen, now, expected, caplog):
+    sensor = ScreenSensor.__new__(ScreenSensor)
+    sensor.logger = logging.getLogger("rust-stale-age")
+    sensor.runtime_health = RuntimeHealthCenter(clock=lambda: now)
+    sensor._rust_health_state = ""
+    sensor._last_rust_event_seen_at = last_seen
+    with caplog.at_level(logging.INFO, logger="rust-stale-age"):
+        sensor._warn_rust_events_stale(now, 120)
+        sensor._warn_rust_events_stale(now + 0.1 if expected == "degraded" else now, 120)
+        assert sensor._rust_health_state == expected
+        sensor._last_rust_event_seen_at = now + 1
+        sensor._warn_rust_events_stale(now + 1, 120)
+        assert sensor._rust_health_state == "healthy"
+        sensor._warn_rust_events_stale(now + 122, 120)
+        assert sensor._rust_health_state == "degraded"
+    warnings = [r for r in caplog.records if "activity events stale" in r.message]
+    assert len(warnings) == (2 if expected == "degraded" else 1)
+
+
+def test_monitor_startup_grace_does_not_fabricate_received_event(monkeypatch):
+    sensor = ScreenSensor.__new__(ScreenSensor)
+    sensor.logger = logging.getLogger("rust-startup-grace")
+    sensor.runtime_health = RuntimeHealthCenter(clock=lambda: clock["now"])
+    sensor._rust_health_state = ""
+    sensor._last_rust_event_seen_at = 0.0
+    sensor.use_rust_events_only = True
+    sensor.running = True
+    sensor._recent_rust_events = lambda limit=1: []
+    sensor._check_daily_reset = lambda: None
+    states = []
+    sensor._save_stats = lambda: states.append(sensor._rust_health_state)
+    clock = {"now": 1000.0}
+    def sleep(seconds):
+        clock["now"] += 61
+        if states:
+            sensor.running = False
+    monkeypatch.setattr(screen_sensor_module.time, "time", lambda: clock["now"])
+    monkeypatch.setattr(screen_sensor_module.time, "sleep", sleep)
+    monkeypatch.setattr(screen_sensor_module, "rust_activity_stale_threshold_sec", lambda: 120)
+    sensor._monitor_loop()
+    assert states == ["", "degraded"]
+    assert sensor._last_rust_event_seen_at == 0.0
 
 
 def test_rust_only_ignores_idle_foreground_placeholder():

@@ -48,12 +48,13 @@ class MemoryVectorIndex:
     def content_hash(document: str) -> str:
         return hashlib.sha256(str(document).encode("utf-8")).hexdigest()
 
-    def _delete_record(self, record_id: str) -> None:
+    def _delete_record(self, record_id: str, generation: int) -> bool:
         self.collection.delete(ids=[record_id])
         status = dict(self.embedding_service.status() or {})
         dimension = self._optional_int(status.get("dimension")) or self.dimension or 0
-        self.repository.mark_vector_job_indexed(
+        return self.repository.mark_vector_job_indexed(
             record_id,
+            generation=generation,
             model=self.model,
             dimension=dimension,
             content_hash="",
@@ -75,15 +76,16 @@ class MemoryVectorIndex:
         result = {"indexed": 0, "deleted": 0, "failed": 0}
         if self._compatibility().get("rebuild_required"):
             return result
-        jobs = self.repository.list_vector_jobs(status="pending", limit=limit)
+        jobs = self.repository.list_due_vector_jobs(limit=limit)
         for job in jobs:
             record_id = str(job.get("record_id") or "").strip()
+            generation = int(job["generation"])
             try:
                 record = self.repository.get_record(record_id)
                 operation = str(job.get("operation") or "upsert")
                 if operation == "delete" or not record or record.get("status") != "active":
-                    self._delete_record(record_id)
-                    result["deleted"] += 1
+                    if self._delete_record(record_id, generation):
+                        result["deleted"] += 1
                     continue
 
                 document = self.canonical_document(record)
@@ -111,19 +113,21 @@ class MemoryVectorIndex:
                     embeddings=[vector],
                     metadatas=[metadata],
                 )
-                self.repository.mark_vector_job_indexed(
+                acknowledged = self.repository.mark_vector_job_indexed(
                     record_id,
+                    generation=generation,
                     model=self.model,
                     dimension=dimension,
                     content_hash=metadata["content_hash"],
                 )
-                result["indexed"] += 1
+                if acknowledged:
+                    result["indexed"] += 1
             except EmbeddingUnavailableError as exc:
-                self.repository.mark_vector_job_failed(record_id, str(exc))
+                self.repository.mark_vector_job_failed(record_id, str(exc), generation=generation)
                 result["failed"] += 1
                 break
             except Exception as exc:
-                self.repository.mark_vector_job_failed(record_id, str(exc))
+                self.repository.mark_vector_job_failed(record_id, str(exc), generation=generation)
                 result["failed"] += 1
         return result
 
@@ -162,9 +166,20 @@ class MemoryVectorIndex:
                 "嵌入模型已变化，请重建当前索引后再检索"
             )
         vector = self.embedding_service.embed([clean_text])[0]
+        person = str(person_id or "owner").strip() or "owner"
+        scope_filter = (
+            {"subject_id": {"$in": ["owner", ""]}}
+            if person == "owner" else {"subject_id": {"$eq": person}}
+        )
+        session = str(session_id or "").strip()
+        if session:
+            scope_filter = {"$and": [
+                scope_filter, {"session_id": {"$in": [session, ""]}},
+            ]}
         result = self.collection.query(
             query_embeddings=[vector],
             n_results=max(1, int(limit)) * 3,
+            where=scope_filter,
             include=["documents", "metadatas", "distances"],
         )
         ids = (result.get("ids") or [[]])[0]

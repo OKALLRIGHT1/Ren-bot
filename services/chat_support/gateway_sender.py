@@ -514,10 +514,10 @@ class GatewaySender:
     ):
         text = self.prepare_reply_for_output(text, ctx, scene="chat")
         if not text:
-            return
+            return False
         target = self.resolve_target(ctx, warning_label="reply")
         if target is None:
-            return
+            return False
         source = target["source"]
         channel_meta = target["channel_meta"]
         adapter_name = target["adapter_name"]
@@ -609,7 +609,7 @@ class GatewaySender:
                                 source=source,
                             )
                             if self.is_action_success(result):
-                                await self.send_text_parts(
+                                return await self.send_text_parts(
                                     adapter_name,
                                     session_id,
                                     text,
@@ -618,7 +618,6 @@ class GatewaySender:
                                     session_label=session_label,
                                     log_suffix="voice_sent_with_text",
                                 )
-                                return
                             self.logger.warning(
                                 f"Gateway voice send fallback to text: {result}"
                             )
@@ -630,7 +629,7 @@ class GatewaySender:
                             asyncio.create_task(
                                 self.cleanup_voice_file(voice_path)
                             )
-        await self.send_text_parts(
+        return await self.send_text_parts(
             adapter_name,
             session_id,
             text,

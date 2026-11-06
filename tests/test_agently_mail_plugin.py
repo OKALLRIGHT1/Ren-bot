@@ -1,3 +1,7 @@
+from tests.helpers.optional_plugins import require_optional_plugins
+
+require_optional_plugins('agently_mail')
+
 import asyncio
 import importlib.util
 import json

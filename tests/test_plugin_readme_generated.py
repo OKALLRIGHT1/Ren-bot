@@ -1,12 +1,8 @@
-"""Keeps plugins/<name>/README.md honest.
+"""Check public hand-written READMEs and optional local generated docs.
 
-The generated part of every plugin README comes from `config.json` plus the
-plugin.py AST. If a plugin changes and nobody re-runs the generator, the docs
-start describing behaviour the code no longer has — so this test fails instead.
-
-Fix a failure with:
-
-    python dev_scripts/gen_plugin_readme.py
+The five bundled plugins use MANUAL README markers. Generator unit tests run
+only in checkouts that contain dev_scripts/gen_plugin_readme.py; generated
+plugin documentation still requires that generator for freshness checks.
 """
 
 import importlib.util
@@ -18,9 +14,20 @@ import pytest
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 GEN = os.path.join(REPO, "dev_scripts", "gen_plugin_readme.py")
+PLUGIN_ROOT = os.path.join(REPO, "plugins")
+
+
+def _plugin_names():
+    return sorted(
+        name for name in os.listdir(PLUGIN_ROOT)
+        if os.path.isfile(os.path.join(PLUGIN_ROOT, name, "config.json"))
+        and os.path.isfile(os.path.join(PLUGIN_ROOT, name, "plugin.py"))
+    )
 
 
 def _load_gen():
+    if not os.path.isfile(GEN):
+        pytest.skip("Optional local README generator is not included in this checkout")
     spec = importlib.util.spec_from_file_location("gen_plugin_readme", GEN)
     mod = importlib.util.module_from_spec(spec)
     sys.modules["gen_plugin_readme"] = mod
@@ -29,11 +36,12 @@ def _load_gen():
 
 
 def test_every_plugin_has_a_readme():
-    gen = _load_gen()
+    names = _plugin_names()
+    assert names, "No bundled plugins found"
     missing = [
         name
-        for name in gen.plugin_names()
-        if not os.path.isfile(os.path.join(gen.PLUGIN_ROOT, name, "README.md"))
+        for name in names
+        if not os.path.isfile(os.path.join(PLUGIN_ROOT, name, "README.md"))
     ]
     assert missing == [], (
         f"这些插件缺 README：{missing}\n"
@@ -42,6 +50,21 @@ def test_every_plugin_has_a_readme():
 
 
 def test_generated_readmes_are_up_to_date():
+    generated = []
+    for name in _plugin_names():
+        path = os.path.join(PLUGIN_ROOT, name, "README.md")
+        with open(path, encoding="utf-8") as handle:
+            content = handle.read()
+        if "<!-- MANUAL README -->" in content:
+            assert "怎么用" in content, f"{name} 的用法说明被清空了"
+        else:
+            generated.append(name)
+    if not generated:
+        return  # Public core plugins use hand-written READMEs.
+    assert os.path.isfile(GEN), (
+        f"Generated READMEs require {GEN}: {generated}. "
+        "Restore the generator or maintain these READMEs manually."
+    )
     result = subprocess.run(
         [sys.executable, GEN, "--check"],
         cwd=REPO,
@@ -99,11 +122,11 @@ def test_security_and_gotcha_notes_survive(name):
     path = os.path.join(REPO, "plugins", name, "README.md")
     if not os.path.isfile(path):
         pytest.skip(f"{name} 不存在")
-    gen = _load_gen()
     content = open(path, encoding="utf-8").read()
-    if gen.is_manual_readme(content):
+    if "<!-- MANUAL README -->" in content:
         assert "怎么用" in content, f"{name} 的用法说明被清空了"
         return
+    gen = _load_gen()
     assert gen.KEEP_MARKER in content
     tail = content.split(gen.KEEP_MARKER, 1)[1]
     assert tail.strip(), f"{name} 的手写补充被清空了"

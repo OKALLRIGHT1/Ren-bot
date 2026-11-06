@@ -42,11 +42,11 @@ class ChatGatewayPort:
         ctx: Optional[Dict[str, Any]] = None,
         *,
         emotion: str = "neutral",
-    ) -> None:
+    ) -> Any:
         fn = self._send_text
         if not callable(fn):
             raise RuntimeError("gateway_unavailable")
-        await fn(text, ctx or {}, emotion=emotion)
+        return await fn(text, ctx or {}, emotion=emotion)
 
     async def send_image(
         self,

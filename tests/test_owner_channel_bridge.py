@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+from tests.helpers.optional_plugins import require_optional_plugins
+
+require_optional_plugins('owner_channel_bridge')
+
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 

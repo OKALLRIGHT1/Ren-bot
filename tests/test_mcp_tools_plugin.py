@@ -1,3 +1,7 @@
+from tests.helpers.optional_plugins import require_optional_plugins
+
+require_optional_plugins('mcp_tools')
+
 from plugins.mcp_tools.plugin import Plugin
 
 

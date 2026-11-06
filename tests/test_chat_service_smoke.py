@@ -1,3 +1,5 @@
+from tests.helpers.optional_plugins import require_optional_plugins
+
 import asyncio
 import inspect
 from datetime import datetime, timezone
@@ -960,6 +962,7 @@ async def test_info_gateway_route_executes_even_when_reasoning_omits_cmd(
 
 @pytest.mark.asyncio
 async def test_info_gateway_missing_city_does_not_force_execute(chat_env, monkeypatch):
+    require_optional_plugins('info_gateway')
     from plugins.info_gateway.plugin import Plugin as InfoGateway
 
     replies = iter(

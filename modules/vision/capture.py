@@ -13,10 +13,19 @@ try:
 except Exception:
     ImageGrab = None
 
-try:
-    import pyautogui
-except Exception:
-    pyautogui = None
+pyautogui = None
+
+
+def _load_pyautogui():
+    # PyAutoGUI imports PyScreeze, which eagerly imports OpenCV if installed.
+    global pyautogui
+    if pyautogui is None:
+        try:
+            import pyautogui as backend
+            pyautogui = backend
+        except Exception:
+            return None
+    return pyautogui
 
 try:
     import pygetwindow as gw
@@ -271,8 +280,8 @@ def get_display_regions() -> List[Dict[str, int]]:
         try:
             if ImageGrab is not None:
                 img = ImageGrab.grab()
-            elif pyautogui is not None:
-                img = pyautogui.screenshot()
+            elif (backend := _load_pyautogui()) is not None:
+                img = backend.screenshot()
             else:
                 return []
             width, height = img.size
@@ -414,8 +423,8 @@ def _grab_screenshot_image(
                 image = ImageGrab.grab(bbox=bbox, all_screens=(os.name == "nt"))
             return image, selected, displays
 
-        if pyautogui is not None:
-            image = pyautogui.screenshot()
+        if (backend := _load_pyautogui()) is not None:
+            image = backend.screenshot()
             return image, selected, displays
     except Exception as e:
         print(f"❌ [Vision] 截图失败: {e}")

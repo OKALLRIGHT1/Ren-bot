@@ -196,24 +196,34 @@ def _json_safe(value: Any, depth: int = 0) -> Any:
     return str(value)[:500]
 
 
+def onebot_action_success(response: Any) -> bool:
+    """HTTP success is not OneBot action success; explicit failures win."""
+    if not isinstance(response, dict):
+        return False
+    status = str(response.get("status") or "").strip().lower()
+    if status and status not in {"ok", "success"}:
+        return False
+    if "retcode" in response:
+        try:
+            code = response["retcode"]
+            if isinstance(code, bool) or str(code).strip() != "0":
+                return False
+        except Exception:
+            return False
+        return True
+    return status in {"ok", "success"}
+
+
 def is_send_success(result: Any) -> bool:
     if not isinstance(result, dict):
         return False
+    if "ok" in result and not result["ok"]:
+        return False
+    response = result.get("response")
+    if isinstance(response, dict) and ("status" in response or "retcode" in response):
+        return onebot_action_success(response)
+    if "retcode" in result:
+        return onebot_action_success(result)
     if bool(result.get("ok")):
         return True
-    if extract_message_id(result):
-        return True
-    response = result.get("response")
-    if isinstance(response, dict):
-        status = str(response.get("status") or "").strip().lower()
-        if status in {"ok", "success"}:
-            return True
-        try:
-            if int(response.get("retcode", 1) or 1) == 0:
-                return True
-        except Exception:
-            pass
-        data = response.get("data")
-        if data not in (None, "", [], {}):
-            return True
-    return False
+    return bool(extract_message_id(result))

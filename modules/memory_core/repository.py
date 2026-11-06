@@ -11,6 +11,10 @@ from pathlib import Path
 from typing import Any, Iterable, Optional
 
 
+VECTOR_MAX_ATTEMPTS = 5
+VECTOR_RETRY_BASE_SECONDS = 2.0
+VECTOR_RETRY_CAP_SECONDS = 60.0
+
 CURRENT_SCHEMA_VERSION = 1
 CHARACTER_SUBJECT_PREFIX = "character:"
 CHARACTER_PROFILE_REPAIR_KEY = "character_profile_repair_v1"
@@ -164,6 +168,12 @@ class MemoryCoreRepository:
                 )
                 """
             )
+            # Additive migration keeps existing indexed/failed jobs intact.
+            columns = {row[1] for row in conn.execute("PRAGMA table_info(memory_vector_jobs)")}
+            if "generation" not in columns:
+                conn.execute("ALTER TABLE memory_vector_jobs ADD COLUMN generation INTEGER NOT NULL DEFAULT 1")
+            if "retry_after" not in columns:
+                conn.execute("ALTER TABLE memory_vector_jobs ADD COLUMN retry_after REAL NOT NULL DEFAULT 0")
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_memory_vector_jobs_status "
                 "ON memory_vector_jobs(status, updated_at)"
@@ -1445,6 +1455,8 @@ class MemoryCoreRepository:
         session_id: str = "",
         kinds: Optional[Iterable[str]] = None,
         limit: int = 200,
+        current_at: Any = None,
+        query_terms: Optional[Iterable[str]] = None,
     ) -> list[dict[str, Any]]:
         where: list[str] = []
         args: list[Any] = []
@@ -1465,12 +1477,44 @@ class MemoryCoreRepository:
         if kind_list:
             where.append("kind IN (" + ",".join("?" for _ in kind_list) + ")")
             args.extend(kind_list)
-        sql = "SELECT * FROM memory_records"
+        conn = self._connect()
+        if current_at is not None:
+            now_ts = float(current_at) if isinstance(current_at, (int, float)) else parse_memory_time(current_at)
+            if now_ts is None:
+                now_ts = time.time()
+            # Use the same date semantics as is_current, including legacy dates.
+            conn.create_function("memory_time", 1, parse_memory_time, deterministic=True)
+            where.extend([
+                "(memory_time(valid_from) IS NULL OR memory_time(valid_from)<=?)",
+                "(memory_time(valid_until) IS NULL OR memory_time(valid_until)>?)",
+            ])
+            args.extend([now_ts, now_ts])
+        select = "*"
+        score_args: list[Any] = []
+        order = "manual_lock DESC, importance DESC, confidence DESC, updated_at DESC"
+        if query_terms is not None:
+            terms = sorted(
+                {str(term).strip().lower() for term in query_terms if str(term).strip()},
+                key=lambda term: (-len(term), term),
+            )[:96]
+            if not terms:
+                return []
+            # Literal substring matching handles Chinese and punctuation without
+            # FTS5 unicode61's whole-sentence Chinese tokenization or LIKE wildcards.
+            hits = " + ".join(
+                "CASE WHEN instr(lower(content || ' ' || key), ?) > 0 THEN 1 ELSE 0 END"
+                for _ in terms
+            )
+            select += f", ({hits}) AS lexical_hits"
+            score_args.extend(terms)
+            where.append("lexical_hits > 0")
+            order = "lexical_hits DESC, " + order
+        sql = f"SELECT {select} FROM memory_records"
         if where:
             sql += " WHERE " + " AND ".join(where)
-        sql += " ORDER BY manual_lock DESC, importance DESC, confidence DESC, updated_at DESC LIMIT ?"
+        sql += f" ORDER BY {order}, id LIMIT ?"
         args.append(max(1, min(2000, int(limit))))
-        rows = self._connect().execute(sql, args).fetchall()
+        rows = conn.execute(sql, [*score_args, *args]).fetchall()
         return [self._row_to_record(row) for row in rows]
 
     def list_current_records(
@@ -1488,8 +1532,20 @@ class MemoryCoreRepository:
             session_id=session_id,
             kinds=kinds,
             limit=max(1, min(2000, int(limit))),
+            current_at=now if now is not None else time.time(),
         )
         return [row for row in rows if is_current(row, now)]
+
+    def search_current_records(
+        self, *, query_terms: Iterable[str], subject_id: str,
+        session_id: str = "", kinds: Optional[Iterable[str]] = None,
+        limit: int = 300,
+    ) -> list[dict[str, Any]]:
+        """Find lexical matches across the visible corpus before applying LIMIT."""
+        return self.list_records(
+            subject_id=subject_id, session_id=session_id, kinds=kinds,
+            limit=limit, current_at=time.time(), query_terms=query_terms,
+        )
 
     def get_record(self, record_id: str) -> Optional[dict[str, Any]]:
         row = self._connect().execute(
@@ -1594,7 +1650,8 @@ class MemoryCoreRepository:
             "INSERT INTO memory_vector_jobs(record_id,operation,status,attempts,last_error,created_at,updated_at) "
             "VALUES(?,?,'pending',0,'',?,?) "
             "ON CONFLICT(record_id) DO UPDATE SET operation=excluded.operation, "
-            "status='pending', attempts=0, last_error='', updated_at=excluded.updated_at",
+            "status='pending', attempts=0, last_error='', retry_after=0, "
+            "generation=memory_vector_jobs.generation+1, updated_at=excluded.updated_at",
             (str(record_id), str(operation), timestamp, timestamp),
         )
 
@@ -1626,37 +1683,54 @@ class MemoryCoreRepository:
         rows = self._connect().execute(sql, args).fetchall()
         return [dict(row) for row in rows]
 
+    def list_due_vector_jobs(self, *, limit: int = 100) -> list[dict[str, Any]]:
+        rows = self._connect().execute(
+            "SELECT * FROM memory_vector_jobs WHERE status='pending' OR "
+            "(status='failed' AND attempts<? AND retry_after<=?) "
+            "ORDER BY updated_at, record_id LIMIT ?",
+            (VECTOR_MAX_ATTEMPTS, time.time(), max(1, min(2000, int(limit)))),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def next_vector_job_delay(self) -> Optional[float]:
+        row = self._connect().execute(
+            "SELECT MIN(CASE WHEN status='pending' THEN 0 ELSE retry_after END) AS due "
+            "FROM memory_vector_jobs WHERE status='pending' OR (status='failed' AND attempts<?)",
+            (VECTOR_MAX_ATTEMPTS,),
+        ).fetchone()
+        return None if row["due"] is None else max(0.0, float(row["due"]) - time.time())
+
     def mark_vector_job_indexed(
-        self,
-        record_id: str,
-        *,
-        model: str,
-        dimension: int,
-        content_hash: str,
+        self, record_id: str, *, model: str, dimension: int, content_hash: str,
+        generation: Optional[int] = None,
     ) -> bool:
+        condition = " AND generation=?" if generation is not None else ""
+        args = [str(model or ""), int(dimension), str(content_hash or ""), _now_iso(), str(record_id or "")]
+        if generation is not None:
+            args.append(generation)
         with self._connect() as conn:
             cursor = conn.execute(
                 "UPDATE memory_vector_jobs SET status='indexed', model=?, dimension=?, "
-                "content_hash=?, last_error='', updated_at=? WHERE record_id=?",
-                (
-                    str(model or ""),
-                    int(dimension),
-                    str(content_hash or ""),
-                    _now_iso(),
-                    str(record_id or ""),
-                ),
+                "content_hash=?, last_error='', retry_after=0, updated_at=? WHERE record_id=?" + condition,
+                args,
             )
-            conn.commit()
         return bool(cursor.rowcount)
 
-    def mark_vector_job_failed(self, record_id: str, error: str) -> bool:
+    def mark_vector_job_failed(
+        self, record_id: str, error: str, *, generation: Optional[int] = None,
+    ) -> bool:
+        condition = " AND generation=?" if generation is not None else ""
+        args = [time.time(), VECTOR_RETRY_CAP_SECONDS, VECTOR_RETRY_BASE_SECONDS,
+                str(error or "")[:500], _now_iso(), str(record_id or "")]
+        if generation is not None:
+            args.append(generation)
         with self._connect() as conn:
             cursor = conn.execute(
-                "UPDATE memory_vector_jobs SET status='failed', attempts=attempts+1, "
-                "last_error=?, updated_at=? WHERE record_id=?",
-                (str(error or "")[:500], _now_iso(), str(record_id or "")),
+                "UPDATE memory_vector_jobs SET status='failed', "
+                "retry_after=? + MIN(?, ? * (1 << MIN(attempts, 10))), attempts=attempts+1, "
+                "last_error=?, updated_at=? WHERE record_id=?" + condition,
+                args,
             )
-            conn.commit()
         return bool(cursor.rowcount)
 
     def vector_job_stats(self) -> dict[str, int]:
@@ -1710,12 +1784,13 @@ class MemoryCoreRepository:
                 "SELECT id,CASE WHEN status='active' THEN 'upsert' ELSE 'delete' END,"
                 "'pending',0,'',?,? FROM memory_records WHERE 1=1 "
                 "ON CONFLICT(record_id) DO UPDATE SET operation=excluded.operation, "
-                "status='pending', attempts=0, last_error='', updated_at=excluded.updated_at",
+                "status='pending', attempts=0, last_error='', retry_after=0, "
+                "generation=memory_vector_jobs.generation+1, updated_at=excluded.updated_at",
                 (now, now),
             )
             conn.execute(
                 "UPDATE memory_vector_jobs SET operation='delete', status='pending', "
-                "attempts=0, last_error='', updated_at=? "
+                "attempts=0, last_error='', retry_after=0, generation=generation+1, updated_at=? "
                 "WHERE record_id NOT IN (SELECT id FROM memory_records)",
                 (now,),
             )
@@ -1904,6 +1979,7 @@ class MemoryCoreRepository:
         entity_ids: Iterable[str],
         *,
         subject_id: str,
+        session_id: str = "",
         limit: int = 40,
     ) -> list[dict[str, Any]]:
         ids = [str(item or "").strip() for item in entity_ids if str(item or "").strip()]
@@ -1917,6 +1993,9 @@ class MemoryCoreRepository:
         else:
             subject_sql = "m.subject_id=?"
             subject_args = [subject]
+        if session_id:
+            subject_sql += " AND m.session_id IN (?, '')"
+            subject_args.append(session_id)
         sql = (
             "SELECT DISTINCT m.* FROM memory_records m "
             "JOIN memory_record_entities link ON link.record_id=m.id "

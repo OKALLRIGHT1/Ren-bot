@@ -10,6 +10,7 @@ from typing import Any, Dict, Optional
 from aiohttp import WSMsgType, web
 
 from .base import ChatGateway
+from .tracking import onebot_action_success
 
 
 class NapCatWebhookServer:
@@ -225,9 +226,8 @@ class NapCatWebhookServer:
         try:
             await ws.send_json(payload)
             response = await asyncio.wait_for(waiter, timeout=max(1.0, float(timeout or 8.0)))
-            status = str(response.get("status") or "").strip().lower()
-            retcode = int(response.get("retcode", 0) or 0)
-            ok = status in {"ok", "success"} or retcode == 0
+            ok = onebot_action_success(response)
+            retcode = response.get("retcode", "invalid_response")
             return {
                 "ok": ok,
                 "transport": "websocket",

@@ -82,6 +82,7 @@ class AdvancedMemorySystem:
         self._vector_executor = ThreadPoolExecutor(max_workers=1)
         self._vector_schedule_lock = threading.Lock()
         self._vector_sync_future = None
+        self._vector_retry_timer = None
 
         # 1. 数据库连接
         self.sqlite_store = get_memory_store()
@@ -446,7 +447,7 @@ class AdvancedMemorySystem:
         embedding_state = str(
             (self.embedding_service.status() or {}).get("state") or ""
         )
-        if embedding_state in {"disabled", "unconfigured", "error"}:
+        if embedding_state in {"disabled", "unconfigured"}:
             return False
         index_status = dict(self.memory_vector_index.status() or {})
         if index_status.get("rebuild_required"):
@@ -454,19 +455,48 @@ class AdvancedMemorySystem:
         with self._vector_schedule_lock:
             if self._vector_sync_future is not None and not self._vector_sync_future.done():
                 return False
+            timer = getattr(self, "_vector_retry_timer", None)
+            if timer is not None:
+                timer.cancel()
+                self._vector_retry_timer = None
             self._vector_sync_future = self._vector_executor.submit(
                 self.process_memory_vector_jobs,
                 limit=limit,
             )
+            future = self._vector_sync_future
+        # Register outside the lock: an already finished future calls back inline.
+        future.add_done_callback(self._on_memory_vector_sync_done)
         return True
 
+    def _on_memory_vector_sync_done(self, future) -> None:
+        try:
+            future.result()
+            with self._vector_schedule_lock:
+                if self._vector_sync_future is not future:
+                    return
+                if self.memory_vector_index.status().get("rebuild_required"):
+                    return
+                delay = self.memory_core.repository.next_vector_job_delay()
+                if delay is None:
+                    return
+                timer = threading.Timer(
+                    max(0.1, delay), self._schedule_memory_vector_sync
+                )
+                timer.daemon = True
+                self._vector_retry_timer = timer
+                timer.start()
+        except Exception as exc:
+            active_logger = getattr(self, "_logger", None)
+            if active_logger:
+                active_logger.warning("Memory vector worker could not schedule continuation: %s", exc)
+
     def _query_memory_vector(self, text: str, **kwargs) -> list[dict]:
+        self._schedule_memory_vector_sync(limit=10)
         embedding_status = dict(self.embedding_service.status() or {})
         if embedding_status.get("state") in {"disabled", "unconfigured", "error"}:
             raise EmbeddingUnavailableError(
                 str(embedding_status.get("last_error") or embedding_status.get("state"))
             )
-        self._schedule_memory_vector_sync(limit=10)
         with self._vector_lock:
             index = self.memory_vector_index
         return index.query(text, **kwargs)

@@ -1,3 +1,7 @@
+from tests.helpers.optional_plugins import require_optional_plugins
+
+require_optional_plugins('qq_reminder')
+
 import pytest
 
 from plugins.qq_reminder.plugin import Plugin

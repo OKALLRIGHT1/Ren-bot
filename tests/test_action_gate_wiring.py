@@ -1,6 +1,12 @@
 import pytest
 
 from modules.plugin_manager import PluginManager
+from services.security import pending_confirm
+
+
+@pytest.fixture(autouse=True)
+def isolated_pending_confirm_store(monkeypatch):
+    monkeypatch.setattr(pending_confirm, "_default_store", pending_confirm.PendingConfirmStore())
 
 
 class _GatedPlugin:

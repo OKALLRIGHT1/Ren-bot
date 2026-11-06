@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from tests.helpers.optional_plugins import require_optional_plugins
+
 import re
 from pathlib import Path
 
@@ -44,7 +46,7 @@ async def test_gateway_port_forwards_text_and_image():
     port = ChatGatewayPort.from_chat_service(chat)
     assert not hasattr(port, "_chat_service")
     assert port.available() is True
-    await port.send_text("hi", {"source": "qq_gateway"}, emotion="happy")
+    assert await port.send_text("hi", {"source": "qq_gateway"}, emotion="happy") is True
     await port.send_image("a.png", {"source": "qq_gateway"}, caption="")
     assert chat.replies[0][0] == "text"
     assert chat.replies[1][0] == "image"
@@ -71,6 +73,7 @@ def test_tts_port_and_resolve():
 
 
 def test_second_wave_schemas_encode_old_args():
+    require_optional_plugins('qq_draw', 'task_manager', 'timer')
     from plugins.timer.plugin import Plugin as Timer
     from plugins.task_manager.plugin import Plugin as Tasks
     from plugins.qq_draw.plugin import Plugin as Draw
@@ -87,6 +90,7 @@ def test_second_wave_schemas_encode_old_args():
 
 
 def test_third_wave_schemas_encode_old_args():
+    require_optional_plugins('diary_export', 'local_knowledge', 'music_player')
     from plugins.music_player.plugin import Plugin as Music
     from plugins.local_knowledge.plugin import Plugin as Knowledge
     from plugins.diary_export.plugin import Plugin as Diary

@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+from tests.helpers.optional_plugins import require_optional_plugins
+
 from pathlib import Path
 
 import pytest
 
-from plugins.local_knowledge.plugin import Plugin
 from services.plugin_ports.knowledge import BrainKnowledgePort
 
 
@@ -38,6 +39,9 @@ def test_port_forwards_three_methods():
 
 @pytest.mark.asyncio
 async def test_plugin_search_uses_knowledge_without_brain():
+    require_optional_plugins("local_knowledge")
+    from plugins.local_knowledge.plugin import Plugin
+
     plugin = Plugin()
     port = BrainKnowledgePort(FakeBrain())
     result = await plugin.run("search ||| 设定", {"knowledge": port})
@@ -46,6 +50,9 @@ async def test_plugin_search_uses_knowledge_without_brain():
 
 @pytest.mark.asyncio
 async def test_plugin_learn_falls_back_to_brain(tmp_path: Path):
+    require_optional_plugins("local_knowledge")
+    from plugins.local_knowledge.plugin import Plugin
+
     target = tmp_path / "note.md"
     target.write_text("设定", encoding="utf-8")
     plugin = Plugin()

@@ -1645,6 +1645,7 @@ class Live2DApplication:
     def _ensure_voice_sensor_loaded(self):
         if self.voice_sensor:
             return self.voice_sensor
+        self._configure_asr_settings()
         try:
             from modules.asr.adapter import build_voice_sensor
 
@@ -1663,7 +1664,7 @@ class Live2DApplication:
         self.voice_sensor = None
         return None
 
-    def _init_voice_sensor_if_configured(self):
+    def _configure_asr_settings(self):
         try:
             from modules.asr.adapter import (
                 project_character_provider,
@@ -1680,6 +1681,8 @@ class Live2DApplication:
         except Exception as exc:
             if self.logger:
                 self.logger.warning(f"ASR settings configure failed: {exc}")
+
+    def _init_voice_sensor_if_configured(self):
         if not getattr(config, "VOICE_SENSOR_ENABLED", False):
             self.voice_sensor = None
             if self.logger:
@@ -3100,6 +3103,13 @@ class Live2DApplication:
             except Exception as e:
                 print(f"关闭语音传感器出错: {e}")
 
+        if self.loop and self.loop.is_running():
+            try:
+                future = asyncio.run_coroutine_threadsafe(self._cancel_all_chat_tasks(), self.loop)
+                future.result(timeout=3)
+            except Exception as exc:
+                print(f"停止对话任务出错: {exc}")
+
         if self.plugin_manager and self.loop and self.loop.is_running():
             try:
                 future = asyncio.run_coroutine_threadsafe(
@@ -3464,13 +3474,38 @@ class Live2DApplication:
         t.start()
         self.logger.info("Async event loop started")
 
+    def _chat_task_key(self, ctx=None) -> str:
+        """Owner private QQ and desktop share a turn; QQ groups never do."""
+        from core.message_source import REMOTE_CHAT_SOURCES
+        import uuid
+
+        context = ctx if isinstance(ctx, dict) else {}
+        source = str(context.get("source") or "text_input").strip().lower()
+        if source not in REMOTE_CHAT_SOURCES:
+            return "owner_shared"
+        meta = context.get("channel_meta") or {}
+        session = str(meta.get("session_id") or "").strip()
+        is_group = (str(meta.get("message_type") or "").lower() == "group"
+                    or session.lower().startswith("group:") or bool(meta.get("group_id")))
+        if not is_group and bool(meta.get("is_owner")):
+            return "owner_shared"
+        if not session:
+            identity = meta.get("group_id") if is_group else meta.get("user_id")
+            session = f"{'group' if is_group else 'private'}:{identity or uuid.uuid4().hex}"
+        return f"qq:{session}"
+
     def on_gui_send(self, text: str, ctx: Optional[Dict[str, Any]] = None):
         # GUI send callback.
         if self.loop is None:
             print("[Application] loop is not initialized; ignoring input")
             return
 
-        async def _process():
+        task_key = self._chat_task_key(ctx)
+
+        async def _process(previous=None):
+            if previous is not None:
+                # Finish old output cleanup before the successor starts speaking.
+                await asyncio.shield(previous)
             # 默认来自文本输入，调用方可以覆盖 source。
             merged_ctx: Dict[str, Any] = {"source": "text_input"}
             if isinstance(ctx, dict):
@@ -3479,7 +3514,8 @@ class Live2DApplication:
             try:
                 await self.chat_service.process(text, ctx=merged_ctx)
             except asyncio.CancelledError:
-                await self._cleanup_cancelled_gui_chat()
+                if build_output_profile(merged_ctx["source"]).get("live2d_enabled", True):
+                    await self._cleanup_cancelled_gui_chat()
                 raise
             except Exception:
                 try:
@@ -3491,13 +3527,19 @@ class Live2DApplication:
                             "state.changed", state="idle", reason="process_error"
                         )
                         await self.event_bus.emit(Events.LIVE2D_GO_IDLE)
-                    await self.event_bus.emit(Events.UI_STATUS, text="Idle")
+                        await self.event_bus.emit(Events.UI_STATUS, text="Idle")
                 except Exception:
                     pass
                 raise
 
         def _start():
-            prev = getattr(self, "_gui_chat_task", None)
+            tasks = getattr(self, "_chat_tasks", None)
+            if tasks is None:
+                tasks = self._chat_tasks = {}
+            drains = getattr(self, "_chat_task_drains", None)
+            if drains is None:
+                drains = self._chat_task_drains = {}
+            prev = tasks.get(task_key)
             incoming = str(text or "").strip()
             hidden_command = incoming.startswith("[CMD:") or bool(
                 isinstance(ctx, dict) and ctx.get("hidden_command")
@@ -3507,10 +3549,28 @@ class Live2DApplication:
                     # Toolbar/dev commands must not abort an in-flight user turn.
                     return
                 prev.cancel()
-            task = self.loop.create_task(_process())
-            self._gui_chat_task = task
+            previous = drains.get(task_key)
+            task = self.loop.create_task(_process(previous))
+            # Build this chain before scheduling the coroutine: even a queued
+            # turn cancelled before it starts must retain earlier cleanup work.
+            pending = [previous, task] if previous is not None else [task]
+            drain = asyncio.gather(*pending, return_exceptions=True)
+            drains[task_key] = drain
+
+            def _drained(completed):
+                if drains.get(task_key) is completed:
+                    drains.pop(task_key, None)
+
+            drain.add_done_callback(_drained)
+            tasks[task_key] = task
+            if task_key == "owner_shared":
+                self._gui_chat_task = task
 
             def _done(t):
+                if tasks.get(task_key) is t:
+                    tasks.pop(task_key, None)
+                if getattr(self, "_gui_chat_task", None) is t:
+                    self._gui_chat_task = None
                 try:
                     t.result()
                 except asyncio.CancelledError:
@@ -3521,6 +3581,16 @@ class Live2DApplication:
             task.add_done_callback(_done)
 
         self.loop.call_soon_threadsafe(_start)
+
+    async def _cancel_all_chat_tasks(self) -> None:
+        tasks = list(getattr(self, "_chat_tasks", {}).values())
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        drains = list(getattr(self, "_chat_task_drains", {}).values())
+        if drains:
+            await asyncio.gather(*drains, return_exceptions=True)
 
     def cancel_gui_chat(self) -> None:
         if self.loop is None:

@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+from tests.helpers.optional_plugins import require_optional_plugins
+
+require_optional_plugins('Isuzu_news', 'desktop_hub', 'life_hub', 'owner_console', 'task_manager')
+
 import json
 from pathlib import Path
 

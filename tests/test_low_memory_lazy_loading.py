@@ -16,7 +16,7 @@ class _Logger:
 def test_voice_sensor_disabled_does_not_import_voice_module(monkeypatch):
     import core.application as app_module
 
-    sys.modules.pop("modules.asr.adapter", None)
+    monkeypatch.delitem(sys.modules, "modules.asr.adapter", raising=False)
     monkeypatch.setattr(app_module.config, "VOICE_SENSOR_ENABLED", False, raising=False)
 
     app = app_module.Live2DApplication()
@@ -61,12 +61,43 @@ def test_voice_sensor_enabled_imports_and_creates_sensor(monkeypatch):
 
 
 def test_vision_capture_import_does_not_import_cv2(monkeypatch):
-    sys.modules.pop("modules.vision.capture", None)
-    sys.modules.pop("cv2", None)
+    # A cached PyAutoGUI masks its transitive PyScreeze/OpenCV import.
+    result = subprocess.run(
+        [sys.executable, "-c", "import modules.vision.capture; import sys; assert 'cv2' not in sys.modules"],
+        capture_output=True, text=True, timeout=60,
+        cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    )
+    assert result.returncode == 0, result.stderr
 
-    importlib.import_module("modules.vision.capture")
 
-    assert "cv2" not in sys.modules
+def test_voice_settings_configured_only_on_first_on_demand_load(monkeypatch):
+    import core.application as app_module
+    import modules.asr.settings as settings
+
+    calls = []
+    adapter = types.ModuleType("modules.asr.adapter")
+    adapter.project_settings_store = lambda: "store"
+    adapter.project_character_provider = lambda: "characters"
+    adapter.project_logger = lambda: "logger"
+    sensor = object()
+
+    def build(chat):
+        assert calls == [{"settings_store": "store", "character_provider": "characters", "logger": "logger"}]
+        return sensor
+
+    adapter.build_voice_sensor = build
+    monkeypatch.setitem(sys.modules, "modules.asr.adapter", adapter)
+    monkeypatch.setattr(settings, "configure", lambda **kw: calls.append(kw))
+    monkeypatch.setattr(app_module.config, "VOICE_SENSOR_ENABLED", False)
+    app = app_module.Live2DApplication.__new__(app_module.Live2DApplication)
+    app.voice_sensor = None
+    app.chat_service = object()
+    app.logger = _Logger()
+    app._init_voice_sensor_if_configured()
+    assert calls == []
+    assert app._ensure_voice_sensor_loaded() is sensor
+    assert app._ensure_voice_sensor_loaded() is sensor
+    assert len(calls) == 1
 
 
 def test_tts_router_edge_default_does_not_import_gptsovits(monkeypatch):

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from tests.helpers.optional_plugins import require_optional_plugins
+
 import os
 from pathlib import Path
 from types import SimpleNamespace
@@ -12,7 +14,6 @@ from modules.gui.dialogs.knowledge_manager import (
     KnowledgeImportWorker,
     KnowledgeManagerDialog,
 )
-from plugins.local_knowledge.plugin import Plugin
 
 
 def _app():
@@ -126,6 +127,9 @@ def test_learn_dirs_starts_worker_instead_of_blocking_ingest(tmp_path, monkeypat
 
 
 def test_plugin_learn_callback_fires_once_per_file(tmp_path):
+    require_optional_plugins("local_knowledge")
+    from plugins.local_knowledge.plugin import Plugin
+
     first = tmp_path / "a.md"
     second = tmp_path / "b.md"
     first.write_text("a", encoding="utf-8")

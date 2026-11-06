@@ -1,3 +1,8 @@
+from tests.helpers.optional_plugins import require_optional_plugins
+
+require_optional_plugins('code_agent')
+
+import asyncio
 import importlib.util
 import json
 import sys
@@ -9,9 +14,14 @@ import pytest
 PLUGIN_DIR = Path("plugins/code_agent")
 
 
+@pytest.fixture(autouse=True)
+def isolated_agent_state(tmp_path, monkeypatch):
+    monkeypatch.setenv("SUZU_DATA_DIR", str(tmp_path / "data"))
+
+
 def load_plugin_class():
     spec = importlib.util.spec_from_file_location(
-        "test_code_agent_plugin", PLUGIN_DIR / "plugin.py"
+        "plugins.code_agent.plugin", PLUGIN_DIR / "plugin.py"
     )
     module = importlib.util.module_from_spec(spec)
     assert spec.loader is not None
@@ -56,6 +66,7 @@ def test_code_agent_declares_natural_capabilities():
 
     assert [cap.id for cap in capabilities] == [
         "code_agent.codex_task",
+        "code_agent.dsh_task",
         "code_agent.claude_task",
     ]
 
@@ -67,7 +78,7 @@ def test_code_agent_capability_matches_code_task_not_drawing():
 
     codex_match = capabilities[0].match("让 Codex 分析这个项目为什么启动失败", {})
     draw_match = capabilities[0].match("让 Codex 帮我画一张丰川祥子的图", {})
-    claude_match = capabilities[1].match("用 Claude Code 修改 README", {})
+    claude_match = capabilities[2].match("用 Claude Code 修改 README", {})
 
     assert codex_match is not None
     assert codex_match.plugin == "code_agent"
@@ -109,7 +120,9 @@ async def test_code_agent_analyze_runs_with_exec_permission(tmp_path):
         {"allow_exec": True},
     )
 
-    assert "analysis ok" in result
+    assert "已提交后台任务" in result
+    await asyncio.gather(*list(plugin._manager.tasks.values()))
+    assert next(iter(plugin._manager.jobs.values()))["result"] == "analysis ok"
     assert runner.calls[0].provider == "codex_cli"
     assert runner.calls[0].allow_write is False
     assert runner.calls[0].allow_exec is True
@@ -146,7 +159,8 @@ async def test_code_agent_modify_requires_confirmation(tmp_path):
 
     confirmed = await plugin.confirm_agent_action(result["payload"], {"allow_exec": True})
 
-    assert "analysis ok" in confirmed
+    assert "已提交后台任务" in confirmed
+    await asyncio.gather(*list(plugin._manager.tasks.values()))
     assert runner.calls[0].allow_write is True
 
 
@@ -162,7 +176,9 @@ async def test_code_agent_gate_confirmed_skips_plugin_confirm(tmp_path):
     )
 
     assert isinstance(result, str)
-    assert "analysis ok" in result
+    assert "已提交后台任务" in result
+    await asyncio.gather(*list(plugin._manager.tasks.values()))
+    assert next(iter(plugin._manager.jobs.values()))["result"] == "analysis ok"
     assert runner.calls[0].allow_write is True
 
 
@@ -183,6 +199,7 @@ async def test_code_agent_confirm_grants_exec_after_user_confirm(tmp_path):
     }
 
     await plugin.confirm_agent_action(payload, {})
+    await asyncio.gather(*list(plugin._manager.tasks.values()))
 
     assert runner.calls[0].allow_exec is True
 
@@ -198,7 +215,9 @@ async def test_code_agent_natural_language_defaults_to_analyze(tmp_path):
         {"allow_exec": True},
     )
 
-    assert "analysis ok" in result
+    assert "已提交后台任务" in result
+    await asyncio.gather(*list(plugin._manager.tasks.values()))
+    assert next(iter(plugin._manager.jobs.values()))["result"] == "analysis ok"
     assert runner.calls[0].provider == "codex_cli"
     assert runner.calls[0].cwd == str(tmp_path)
 
@@ -214,5 +233,7 @@ async def test_code_agent_defaults_cwd_to_context_app_root(tmp_path):
         {"allow_exec": True, "app_root": str(tmp_path)},
     )
 
-    assert "analysis ok" in result
+    assert "已提交后台任务" in result
+    await asyncio.gather(*list(plugin._manager.tasks.values()))
+    assert next(iter(plugin._manager.jobs.values()))["result"] == "analysis ok"
     assert runner.calls[0].cwd == str(tmp_path)

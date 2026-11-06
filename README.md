@@ -144,6 +144,36 @@ pip install -r requirements.txt
 
 ---
 
+## 🧪 运行测试
+
+使用 Python 3.10 或 3.11，在仓库根目录执行：
+
+```bash
+python -m venv .venv
+# Windows PowerShell：.\.venv\Scripts\Activate.ps1
+# Linux / macOS：source .venv/bin/activate
+python -m pip install -r requirements.txt -r requirements-test.txt
+python -m pytest -q -rs
+```
+
+无显示环境运行 Qt 测试时，请设置 `QT_QPA_PLATFORM=offscreen`。
+`requirements-test.txt` 固定测试工具版本；运行时依赖仍遵循 `requirements.txt`。
+
+公开仓库只包含五个核心插件。依赖其他插件的测试会在对应插件目录缺失时显示
+`Optional plugins not installed` 并跳过；安装相应插件后自动参与测试。
+已存在但损坏的插件不会被静默跳过，核心插件缺失也不会按可选插件处理。
+混合测试文件只跳过依赖扩展插件的用例。
+
+公开插件的手写 README 始终接受检查。只有本地文档生成器的单元测试会在
+`dev_scripts/gen_plugin_readme.py` 缺失时跳过；如果新增自动生成的 README，
+则必须一并提供生成器，才能通过文档一致性检查。
+
+状态保存与配置回归可单独执行：
+
+```bash
+python -m pytest -q -rs tests/test_json_state_store.py tests/test_optional_plugins.py tests/test_plugin_readme_generated.py tests/test_natural_chat_pipeline.py
+```
+
 ## 🖥️ 设置中心使用详解
 
 点击桌面角色右键菜单、悬浮球或任务栏托盘图标，选择 **「偏好设置」**，即可进入图形化设置中心。
@@ -261,6 +291,15 @@ pip install -r requirements.txt
 
 可选插件与社区扩展可在独立仓库查看：
 **https://github.com/OKALLRIGHT1/Ren-bot-plugin**
+
+其中 `code_agent` 支持 Codex / DeepSeek Harness 后台委派、查看进度、取消和按原会话继续，
+结果返回发起会话。主人的 QQ 私聊和桌面共用任务访问范围，群聊独立。
+任务记录存于数据目录，普通聊天不会打断后台任务；主程序退出后可显式继续已建立的外部会话。
+
+MCP 协议实现已迁入可选 `mcp_tools` 插件，主程序不再强制安装 Python `mcp`。
+旧的 `integrations.mcp` 导入路径仅作转发，需先安装该插件。
+安装后在主程序 Python 环境运行 `python -m pip install -r plugins/mcp_tools/requirements.txt`，
+再配置服务器及工具允许列表。代码代理插件不依赖 MCP。
 
 ### 2. 插件运行机制
 1. **`react`（模型自主触发）**：模型根据用户意图在输出中生成 `[CMD: tool_name args]` 工具指令，由系统拦截执行；

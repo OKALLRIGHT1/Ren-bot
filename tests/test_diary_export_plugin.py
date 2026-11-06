@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+from tests.helpers.optional_plugins import require_optional_plugins
+
+require_optional_plugins('diary_export')
+
 import asyncio
 
 from modules.memory_sqlite import MemorySQLite

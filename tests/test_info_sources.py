@@ -1,3 +1,5 @@
+from tests.helpers.optional_plugins import require_optional_plugins
+
 import json
 from datetime import date
 from pathlib import Path
@@ -404,6 +406,7 @@ async def test_info_source_service_loads_multiple_provider_categories(tmp_path):
 
 @pytest.mark.asyncio
 async def test_info_gateway_plugin_calls_service():
+    require_optional_plugins('info_gateway')
     from plugins.info_gateway.plugin import Plugin
 
     class Service:
@@ -432,6 +435,7 @@ async def test_info_gateway_plugin_calls_service():
 
 @pytest.mark.asyncio
 async def test_info_gateway_plugin_strips_command_alias_before_fetching():
+    require_optional_plugins('info_gateway')
     from plugins.info_gateway.plugin import Plugin
 
     class Service:
@@ -459,6 +463,7 @@ async def test_info_gateway_plugin_strips_command_alias_before_fetching():
 
 @pytest.mark.asyncio
 async def test_info_gateway_plugin_handles_natural_weather_query():
+    require_optional_plugins('info_gateway')
     from plugins.info_gateway.plugin import Plugin
 
     calls = []
@@ -488,6 +493,7 @@ async def test_info_gateway_plugin_handles_natural_weather_query():
 
 @pytest.mark.asyncio
 async def test_info_gateway_plugin_uses_runtime_secret_settings(monkeypatch):
+    require_optional_plugins('info_gateway')
     from plugins.info_gateway import plugin as info_gateway_plugin
     from plugins.info_gateway.plugin import Plugin
     from services.info_sources.models import InfoSourceResult
@@ -524,6 +530,7 @@ async def test_info_gateway_plugin_uses_runtime_secret_settings(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_info_gateway_plugin_uses_shared_alapi_secret_store(monkeypatch):
+    require_optional_plugins('info_gateway')
     from plugins.info_gateway import plugin as info_gateway_plugin
     from plugins.info_gateway.plugin import Plugin
     from services.info_sources.models import InfoSourceResult
@@ -562,6 +569,7 @@ async def test_info_gateway_plugin_uses_shared_alapi_secret_store(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_info_gateway_plugin_handles_forecast_weather_query():
+    require_optional_plugins('info_gateway')
     from plugins.info_gateway.plugin import Plugin
 
     calls = []
@@ -591,6 +599,7 @@ async def test_info_gateway_plugin_handles_forecast_weather_query():
 
 @pytest.mark.asyncio
 async def test_info_gateway_plugin_explains_empty_source_data():
+    require_optional_plugins('info_gateway')
     from plugins.info_gateway.plugin import Plugin
 
     class Service:
@@ -618,6 +627,7 @@ async def test_info_gateway_plugin_explains_empty_source_data():
 
 
 def test_info_gateway_is_react_tool_for_natural_weather_query():
+    require_optional_plugins('info_gateway')
     from modules.tool_router import ToolRouter
     from plugins.info_gateway.plugin import Plugin
 
@@ -637,6 +647,7 @@ def test_info_gateway_is_react_tool_for_natural_weather_query():
 
 
 def test_info_gateway_capability_does_not_match_weather_config_question():
+    require_optional_plugins('info_gateway')
     from modules.tool_router import ToolRouter
     from plugins.info_gateway.plugin import Plugin
 
@@ -653,6 +664,7 @@ def test_info_gateway_capability_does_not_match_weather_config_question():
 
 
 def test_info_gateway_capability_prefers_forecast_for_week_weather():
+    require_optional_plugins('info_gateway')
     from modules.tool_router import ToolRouter
     from plugins.info_gateway.plugin import Plugin
 
@@ -671,6 +683,7 @@ def test_info_gateway_capability_prefers_forecast_for_week_weather():
 
 
 def test_info_gateway_weather_city_extraction_strips_helper_phrase():
+    require_optional_plugins('info_gateway')
     from plugins.info_gateway.plugin import Plugin
 
     plugin = Plugin()
@@ -680,6 +693,7 @@ def test_info_gateway_weather_city_extraction_strips_helper_phrase():
 
 
 def test_info_gateway_weather_capability_reports_missing_token(monkeypatch):
+    require_optional_plugins('info_gateway')
     from pathlib import Path
 
     from plugins.info_gateway.plugin import Plugin
@@ -698,6 +712,7 @@ def test_info_gateway_weather_capability_reports_missing_token(monkeypatch):
 
 
 def test_info_gateway_weather_router_reports_unavailable_token(monkeypatch):
+    require_optional_plugins('info_gateway')
     from modules.tool_router import ToolRouter
     from plugins.info_gateway.plugin import Plugin
 
@@ -718,6 +733,7 @@ def test_info_gateway_weather_router_reports_unavailable_token(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_info_gateway_direct_manager_ignores_natural_weather_query():
+    require_optional_plugins('info_gateway')
     from modules.plugin_manager import PluginManager
     from plugins.info_gateway.plugin import Plugin
 
@@ -751,6 +767,7 @@ async def test_info_gateway_direct_manager_ignores_natural_weather_query():
 
 @pytest.mark.asyncio
 async def test_info_gateway_direct_manager_keeps_api_command_alias():
+    require_optional_plugins('info_gateway')
     from modules.plugin_manager import PluginManager
     from plugins.info_gateway.plugin import Plugin
 

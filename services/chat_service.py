@@ -1031,7 +1031,7 @@ class ChatService:
         ctx: Optional[Dict[str, Any]] = None,
         emotion: Optional[str] = None,
     ):
-        await self.gateway_sender.send_reply(text, ctx, emotion=emotion)
+        return await self.gateway_sender.send_reply(text, ctx, emotion=emotion)
 
     async def _send_gateway_image_reply(
         self, image_path: str, ctx: Optional[Dict[str, Any]] = None, caption: str = ""
@@ -3598,4 +3598,3 @@ class ChatService:
 
     def _load_day_transcript_rows(self, date_str: str) -> list[Dict[str, Any]]:
         return self.diary_service.load_day_transcript_rows(date_str)
-

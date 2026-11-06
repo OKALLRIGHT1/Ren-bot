@@ -1228,7 +1228,8 @@ class MemoryCoreService:
         )
         query_tokens = self._query_terms(token_text)
         records = self._with_entity_hits(
-            self.repository.list_current_records(
+            self.repository.search_current_records(
+                query_terms=query_tokens,
                 subject_id=person_id,
                 session_id=session_id,
                 kinds=kinds,
@@ -1236,6 +1237,8 @@ class MemoryCoreService:
             ),
             search_text=search_text,
             person_id=person_id,
+            session_id=session_id,
+            kinds=kinds,
         )
         if intent == "episode":
             records.extend(
@@ -1395,6 +1398,8 @@ class MemoryCoreService:
         *,
         search_text: str,
         person_id: str,
+        session_id: str,
+        kinds: Iterable[str],
     ) -> list[dict[str, Any]]:
         try:
             entities = self.repository.find_entities_mentioned(search_text)
@@ -1407,6 +1412,7 @@ class MemoryCoreService:
             linked = self.repository.records_for_entities(
                 entity_ids,
                 subject_id=person_id,
+                session_id=session_id,
             )
             degree = max(
                 self.repository.relation_degree(entity_id, subject_id=person_id)
@@ -1414,6 +1420,13 @@ class MemoryCoreService:
             )
         except Exception:
             return records
+        allowed_kinds = set(kinds)
+        linked = [
+            row for row in linked
+            if is_current(row)
+            and row.get("kind") in allowed_kinds
+            and self._record_matches_scope(row, person_id=person_id, session_id=session_id)
+        ]
         if degree > 50:
             linked = self._pagerank_rows(linked)
         linked_ids = {str(row.get("id") or "") for row in linked}
