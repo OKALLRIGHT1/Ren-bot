@@ -1,4 +1,4 @@
-# Python 3.10+ is the documented baseline for this project.
+# Python 3.10 or 3.11 is strongly recommended (precompiled wheels available for all dependencies).
 
 # Core runtime
 aiohttp
@@ -11,10 +11,12 @@ numpy<2
 openai
 opencv-python>=4.8.0,<4.11
 paho-mqtt
+pyserial
 Pillow
 psutil
 pypinyin
 pynput
+pystray>=0.19.5
 pyautogui
 PySide6
 python-dotenv
@@ -24,9 +26,9 @@ sherpa-onnx>=1.12.34
 websockets
 
 # Optional plugins / Windows integrations
-comtypes
+comtypes; sys_platform == 'win32'
 dateparser
 ddgs
 duckduckgo-search
-pycaw
+pycaw; sys_platform == 'win32'
 screen-brightness-control

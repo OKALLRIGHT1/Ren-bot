@@ -1,6 +1,7 @@
 import pytest
 
 from modules.llm_types import ChatCompletionResult, ToolCallRequest
+from services.chat_support.tool_schema import TOOL_SEARCH_SCHEMA
 from services.chat_support.tool_flow_service import (
     finalize_tool_reply,
     project_messages_for_finalize,
@@ -203,6 +204,73 @@ async def test_react_first_pass_replaces_tool_search_special_case_with_loop():
     assert result.used_triggers == ["tool_search", "workspace_ops"]
     assert len(plugin_manager.calls) == 2
     assert len(captured) == 3
+
+
+@pytest.mark.asyncio
+async def test_tool_search_admits_schema_on_the_next_request():
+    seen_tools = []
+
+    async def chat(messages, **kwargs):
+        seen_tools.append(kwargs.get("tools"))
+        if len(seen_tools) == 1:
+            return ChatCompletionResult(
+                text="",
+                tool_calls=(
+                    ToolCallRequest(id="s", name="tool_search", arguments={"query": "提醒"}),
+                ),
+            )
+        if len(seen_tools) == 2:
+            return ChatCompletionResult(
+                text="",
+                tool_calls=(
+                    ToolCallRequest(id="t", name="timer", arguments={"query": "10分钟"}),
+                ),
+            )
+        return ChatCompletionResult(text="好，记下了")
+
+    class Manager(_LoopPluginManager):
+        def tool_search_openai_tools(self, query, allowed_types, context=None):
+            assert "提醒" in query
+            return [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "timer",
+                        "description": "提醒",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"query": {"type": "string"}},
+                            "required": ["query"],
+                        },
+                    },
+                }
+            ]
+
+    result = await run_tool_command_loop(
+        context_messages=[{"role": "user", "content": "提醒我"}],
+        ctx={},
+        task_type="reasoning",
+        caller_prefix="test_loop",
+        plugin_manager=Manager(
+            [
+                (True, "", ["找到 timer"], ["tool_search"]),
+                (True, "", ["已设置"], ["timer"]),
+            ]
+        ),
+        chat_with_ai=chat,
+        allowed_types={"react"},
+        contains_cmd=_contains_cmd,
+        invocation_mode="function",
+        tools=[{"type": "function", "function": dict(TOOL_SEARCH_SCHEMA)}],
+        max_iterations=3,
+    )
+    assert result.used_triggers == ["tool_search", "timer"]
+    second_names = [
+        item["function"]["name"] for item in (seen_tools[1] or [])
+    ]
+    assert "timer" in second_names
+    assert "tool_search" in second_names
+    assert "timer" in result.sent_tool_names
 
 
 @pytest.mark.asyncio

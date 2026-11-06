@@ -42,7 +42,7 @@
 - 闲聊不再二次 polish；`qq_polish_mode` 与未接线的 `modules/memory/prompt_builder.py` 已删。传感器观察报告改写、工具直出软化仍在。
 - `VISION_MODE` 默认 `separate`；一次视觉+说话用环境变量 `VISION_MODE=direct`。
 - 设置 → 记忆 / 知识走 `MemoryGuiService` / `KnowledgeGuiService`，与聊天共用进程内 Memory Core；导入走 `ingest_knowledge_paths`。
-- `ctx["knowledge"]` = `BrainKnowledgePort`；另有 `gateway` / `tts` / `app`。`ctx["brain"]` 仍在。**已撤** `ctx["chat_service"]`。可选 `ctx["skills"]`（提示词，不是执行器）。架构 P5（拆闲聊编排）未做。
+- `ctx["knowledge"]` = `BrainKnowledgePort`；另有 `gateway` / `tts` / `app`。`ctx["brain"]` 仍在。**已撤** `ctx["chat_service"]`。提示词技能层已删除，不再注入 `ctx["skills"]`。架构 P5（拆闲聊编排）已做。
 
 ## 运行健康 + Rust 纯文本屏幕
 

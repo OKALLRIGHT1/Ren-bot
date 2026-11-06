@@ -34,6 +34,12 @@ def _read_import_text(path: Path) -> str:
     return raw.decode("latin1", errors="replace")
 
 
+def _format_id_text(value: Any) -> str:
+    if isinstance(value, list):
+        return ", ".join(str(item).strip() for item in value if str(item).strip())
+    return str(value or "").strip()
+
+
 def _parse_possible_list(value: Any) -> List[str]:
     if isinstance(value, list):
         items = [str(item).strip() for item in value if str(item).strip()]
@@ -292,7 +298,7 @@ class ExpressionLibraryManagerDialog(QtWidgets.QDialog):
         super().__init__(parent)
         self.main_app = main_app
         self.setWindowTitle("表达学习库")
-        self.resize(980, 640)
+        self.resize(980, 760)
         # 独立窗口可用下限；嵌入设置页时由 apply_embedded_mode 清零。
         self.setMinimumSize(720, 480)
         self._setup_ui()
@@ -369,6 +375,40 @@ class ExpressionLibraryManagerDialog(QtWidgets.QDialog):
         runtime_layout.addWidget(self.spin_runtime_max, 1, 1)
         runtime_layout.addWidget(self.btn_save_runtime, 1, 2)
         container_layout.addWidget(runtime_card)
+
+        learn_card = QtWidgets.QFrame()
+        learn_card.setObjectName("dialogSection")
+        learn_layout = QtWidgets.QGridLayout(learn_card)
+        learn_layout.setContentsMargins(14, 12, 14, 12)
+        learn_layout.setHorizontalSpacing(12)
+        learn_layout.setVerticalSpacing(8)
+
+        self.chk_learn_enabled = QtWidgets.QCheckBox("从对话里学习新表达")
+        self.chk_learn_local = QtWidgets.QCheckBox("学习本地聊天")
+        self.cmb_learn_intensity = QtWidgets.QComboBox()
+        self.cmb_learn_intensity.addItem("低：少学，新条目先停用", "low")
+        self.cmb_learn_intensity.addItem("中：正常学习并直接启用", "medium")
+        self.cmb_learn_intensity.addItem("高：学得更勤", "high")
+        self.inp_learn_accounts = QtWidgets.QLineEdit()
+        self.inp_learn_accounts.setPlaceholderText("QQ 号，多个用逗号，例如 123456789")
+        self.inp_learn_groups = QtWidgets.QLineEdit()
+        self.inp_learn_groups.setPlaceholderText("群号，多个用逗号。只学这些群里你自己的发言")
+        learn_hint = QtWidgets.QLabel(
+            "默认不学习。打开后，本地聊天看左边那个开关；QQ 只学你填的号的私聊，以及你填的群里你自己的话。屏幕吐槽、工具和群里其他人不会学。"
+        )
+        learn_hint.setWordWrap(True)
+        learn_hint.setStyleSheet("color: #64748B; font-size: 11px;")
+
+        learn_layout.addWidget(self.chk_learn_enabled, 0, 0, 1, 2)
+        learn_layout.addWidget(self.chk_learn_local, 0, 2, 1, 2)
+        learn_layout.addWidget(QtWidgets.QLabel("学习强度"), 1, 0)
+        learn_layout.addWidget(self.cmb_learn_intensity, 1, 1, 1, 3)
+        learn_layout.addWidget(QtWidgets.QLabel("学习的 QQ 号"), 2, 0)
+        learn_layout.addWidget(self.inp_learn_accounts, 2, 1, 1, 3)
+        learn_layout.addWidget(QtWidgets.QLabel("学习的群号"), 3, 0)
+        learn_layout.addWidget(self.inp_learn_groups, 3, 1, 1, 3)
+        learn_layout.addWidget(learn_hint, 4, 0, 1, 4)
+        container_layout.addWidget(learn_card)
 
         # 过滤工具栏：窄宽自动换行
         toolbar_wrap = QtWidgets.QWidget()
@@ -504,9 +544,7 @@ class ExpressionLibraryManagerDialog(QtWidgets.QDialog):
             local = getattr(brain, "sqlite_store", None)
             if local is not None:
                 return local
-        from modules.gui.remote_expression_store import RemoteExpressionStore
-
-        return RemoteExpressionStore()
+        return None
 
     def _load_runtime_controls(self):
         store = self._get_memory_store()
@@ -532,6 +570,21 @@ class ExpressionLibraryManagerDialog(QtWidgets.QDialog):
         except Exception:
             max_items = 4
         self.spin_runtime_max.setValue(max(1, min(8, max_items)))
+        self.chk_learn_enabled.setChecked(
+            bool(runtime.get("expression_learning_enabled", False))
+        )
+        self.chk_learn_local.setChecked(
+            bool(runtime.get("expression_learning_local_enabled", True))
+        )
+        intensity = str(runtime.get("expression_learning_intensity") or "low")
+        intensity_index = self.cmb_learn_intensity.findData(intensity)
+        self.cmb_learn_intensity.setCurrentIndex(max(0, intensity_index))
+        self.inp_learn_accounts.setText(
+            _format_id_text(runtime.get("expression_learning_qq_accounts"))
+        )
+        self.inp_learn_groups.setText(
+            _format_id_text(runtime.get("expression_learning_qq_groups"))
+        )
 
     def _save_runtime_controls(self):
         patch = {
@@ -539,6 +592,13 @@ class ExpressionLibraryManagerDialog(QtWidgets.QDialog):
             "expression_library_use_in_chat": self.chk_runtime_chat.isChecked(),
             "expression_library_use_in_screen": self.chk_runtime_sensor.isChecked(),
             "expression_library_max_prompt_items": int(self.spin_runtime_max.value()),
+            "expression_learning_enabled": self.chk_learn_enabled.isChecked(),
+            "expression_learning_local_enabled": self.chk_learn_local.isChecked(),
+            "expression_learning_intensity": str(
+                self.cmb_learn_intensity.currentData() or "low"
+            ),
+            "expression_learning_qq_accounts": self.inp_learn_accounts.text(),
+            "expression_learning_qq_groups": self.inp_learn_groups.text(),
         }
         store = self._get_memory_store()
         if hasattr(store, "save_runtime"):

@@ -53,7 +53,6 @@ def test_component_rows_use_effective_state_and_sort_attention_first():
     assert [row["component"] for row in rows] == [
         "live2d_ws",
         "rust_activity",
-        "brain",
         "tts",
     ]
     assert rows[1]["state"] == "degraded"
@@ -61,7 +60,7 @@ def test_component_rows_use_effective_state_and_sort_attention_first():
     assert rows[1]["summary"] == "事件已过期"
 
 
-def test_component_rows_hides_models_and_surfaces_brain():
+def test_component_rows_hides_models_and_hud_link():
     rows = component_rows(
         {
             "overall": "degraded",
@@ -87,11 +86,8 @@ def test_component_rows_hides_models_and_surfaces_brain():
     keys = [row["component"] for row in rows]
     assert "model:gpt-5.4" not in keys
     assert "hud_link" not in keys
-    assert "brain" in keys
+    assert "brain" not in keys
     assert "tts" in keys
-    brain = next(row for row in rows if row["component"] == "brain")
-    assert brain["component_label"] == "大脑"
-    assert brain["state"] == "offline"
 
 
 def test_component_rows_tolerate_invalid_snapshot():
@@ -126,7 +122,7 @@ def test_runtime_health_dialog_renders_overall_and_component_rows():
 
     assert dialog.overall_label.text() == "运行需注意"
     assert not (dialog.windowFlags() & QtCore.Qt.WindowType.WindowStaysOnTopHint)
-    assert dialog.component_table.rowCount() == 3
+    assert dialog.component_table.rowCount() == 2
     assert dialog.component_table.item(0, 0).text() == "桌面形象"
     assert dialog.component_table.item(0, 1).text() == "离线"
     assert dialog.component_table.item(0, 2).text() == "连接已断开"

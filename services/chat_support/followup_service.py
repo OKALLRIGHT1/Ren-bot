@@ -135,7 +135,7 @@ class FollowupService:
             "待办",
         ),
     }
-    CARE_FOLLOWUP_TOPICS = {"health", "sleep", "diet", "emotion"}
+    CARE_FOLLOWUP_TOPICS = {"health", "sleep", "diet", "emotion", "work_study", "plan"}
 
     def __init__(
         self,
@@ -385,8 +385,12 @@ class FollowupService:
 
     @staticmethod
     def build_task_followup_text(task_text: str) -> str:
-        del task_text
-        return "昨天那件事，今天还要继续吗？"
+        short = re.sub(r"\s+", " ", str(task_text or "")).strip()
+        if len(short) > 18:
+            short = short[:18].rstrip() + "…"
+        if not short:
+            return "昨天那件事，今天还要继续吗？"
+        return f"昨天说的「{short}」，今天还继续吗？"
 
     @staticmethod
     def is_short_life_task_text(text: str) -> bool:
@@ -475,42 +479,67 @@ class FollowupService:
         ]
         return any(hint in raw for hint in high_priority_hints)
 
-    def has_today_task_followup(self) -> bool:
-        store = self._store()
-        if not store:
-            return False
-        today = datetime.now().date()
+    def _dnd_blocks_followup(self) -> bool:
         try:
-            rows = store.list_transcript(role="assistant", limit=220, offset=0)
-            for row in rows:
-                ts = int(row.get("ts", 0) or 0)
-                if not ts or datetime.fromtimestamp(ts).date() != today:
-                    continue
-                meta = row.get("meta") or {}
-                if str(meta.get("path") or "").strip() == "task_followup":
-                    return True
+            import config
+
+            return bool(getattr(config, "DND_MODE", False))
         except Exception:
             return False
-        return False
+
+    def _mark_get(self, key: str) -> str:
+        store = self._store()
+        getter = getattr(store, "get_runtime_mark", None)
+        if not callable(getter):
+            return ""
+        try:
+            return str(getter(key) or "")
+        except Exception:
+            return ""
+
+    def _mark_set(self, key: str, value: str) -> None:
+        store = self._store()
+        setter = getattr(store, "set_runtime_mark", None)
+        if not callable(setter):
+            return
+        try:
+            setter(key, value)
+        except Exception:
+            return
+
+    def has_today_task_followup(self) -> bool:
+        today = datetime.now().strftime("%Y-%m-%d")
+        return self._mark_get(f"followup:task-day:{today}") == "1"
 
     def has_task_followup_for_item(self, item_id: str) -> bool:
         target = str(item_id or "").strip()
         if not target:
             return False
-        store = self._store()
-        if not store:
+        raw = self._mark_get("followup:task-items")
+        return target in {part.strip() for part in raw.split(",") if part.strip()}
+
+    def _remember_task_followup(self, item_id: str) -> None:
+        today = datetime.now().strftime("%Y-%m-%d")
+        self._mark_set(f"followup:task-day:{today}", "1")
+        target = str(item_id or "").strip()
+        if not target:
+            return
+        current = {part.strip() for part in self._mark_get("followup:task-items").split(",") if part.strip()}
+        current.add(target)
+        self._mark_set("followup:task-items", ",".join(sorted(current)))
+
+    def _topic_on_cooldown(self, topic: str, *, hours: int = 20) -> bool:
+        raw = self._mark_get(f"followup:topic:{topic}")
+        if not raw:
             return False
         try:
-            rows = store.list_transcript(role="assistant", limit=420, offset=0)
-            for row in rows:
-                meta = row.get("meta") or {}
-                if str(meta.get("path") or "").strip() != "task_followup":
-                    continue
-                if str(meta.get("item_id") or "").strip() == target:
-                    return True
+            last = datetime.fromisoformat(raw)
         except Exception:
             return False
-        return False
+        return datetime.now() - last < timedelta(hours=hours)
+
+    def _remember_topic_followup(self, topic: str) -> None:
+        self._mark_set(f"followup:topic:{topic}", datetime.now().isoformat(timespec="seconds"))
 
     def find_task_followup_candidate(self) -> Optional[Dict[str, Any]]:
         store = self._store()
@@ -557,6 +586,8 @@ class FollowupService:
             source = str((ctx or {}).get("source", ""))
             from core.message_source import is_hud_user_source
 
+            if self._dnd_blocks_followup():
+                return None
             if source and not is_hud_user_source(source):
                 return None
             if bool((ctx or {}).get("codex_mode", False)):
@@ -578,10 +609,12 @@ class FollowupService:
             if not task_text:
                 return None
             self.last_task_followup_day = today_str
+            item_id = str(candidate.get("id") or "")
+            self._remember_task_followup(item_id)
             return {
                 "text": self.build_task_followup_text(task_text),
                 "task": task_text,
-                "item_id": str(candidate.get("id") or ""),
+                "item_id": item_id,
             }
         except Exception as exc:
             self._warn(f"任务跟进触发失败: {exc}")
@@ -619,19 +652,21 @@ class FollowupService:
 
     @staticmethod
     def build_followup_text(topic: str, label: str) -> str:
-        del label
+        name = str(label or "").strip() or "那件事"
+        if len(name) > 16:
+            name = name[:16].rstrip() + "…"
         if topic == "health":
-            return "今天身体还行吗？"
+            return f"昨天的{name}，今天好一点了吗？"
         if topic == "sleep":
-            return "今天精神还撑得住吗？"
+            return f"昨天{name}，今天精神还撑得住吗？"
         if topic == "diet":
-            return "今天有好好吃点东西吗？"
+            return f"昨天说的{name}，今天有好好吃点东西吗？"
         if topic == "work_study":
-            return ""
+            return f"昨天的{name}，今天还要接着做吗？"
         if topic == "emotion":
-            return "今天状态缓过来一点了吗？"
+            return f"昨天那种{name}，今天缓过来一点了吗？"
         if topic == "plan":
-            return ""
+            return f"昨天说的{name}，今天还算数吗？"
         return ""
 
     async def record_proactive_followup(
@@ -744,27 +779,8 @@ class FollowupService:
         return "", "", ""
 
     def has_today_proactive_followup(self) -> bool:
-        store = self._store()
-        if not store:
-            return False
-        today = datetime.now().date()
-        try:
-            rows = store.list_transcript(role="assistant", limit=260, offset=0)
-            for row in rows:
-                ts = int(row.get("ts", 0) or 0)
-                if not ts:
-                    continue
-                if datetime.fromtimestamp(ts).date() != today:
-                    continue
-                content = str(row.get("content") or "")
-                meta = row.get("meta") or {}
-                if str(meta.get("path") or "").strip() == "proactive_followup":
-                    return True
-                if "[主动关心]" in content:
-                    return True
-        except Exception:
-            return False
-        return False
+        today = datetime.now().strftime("%Y-%m-%d")
+        return self._mark_get(f"followup:proactive-day:{today}") == "1"
 
     async def maybe_send_proactive_followup(
         self, user_text: str, ctx: Optional[Dict[str, Any]] = None
@@ -773,31 +789,31 @@ class FollowupService:
             source = str((ctx or {}).get("source", ""))
             from core.message_source import is_hud_user_source
 
+            if self._dnd_blocks_followup():
+                return None
             if source and not is_hud_user_source(source):
                 return None
             if bool((ctx or {}).get("codex_mode", False)):
                 return None
 
             today_str = datetime.now().strftime("%Y-%m-%d")
-            if self.last_proactive_followup_day == today_str:
-                return None
             if self.should_suppress_followup_preface(user_text or ""):
                 return None
-            if datetime.now().hour >= 12:
-                return None
             if self.match_followup_topic(user_text or ""):
-                return None
-            if self.has_today_proactive_followup():
-                self.last_proactive_followup_day = today_str
                 return None
 
             topic, label, snippet = self.find_yesterday_followup_note()
             if not topic:
                 return None
+            if self._topic_on_cooldown(topic):
+                return None
             followup_text = self.build_followup_text(topic, label)
             if not followup_text:
                 return None
+            today_str = datetime.now().strftime("%Y-%m-%d")
             self.last_proactive_followup_day = today_str
+            self._mark_set(f"followup:proactive-day:{today_str}", "1")
+            self._remember_topic_followup(topic)
             return {"text": followup_text, "topic": topic, "snippet": snippet}
         except Exception as exc:
             self._warn(f"主动关心触发失败: {exc}")

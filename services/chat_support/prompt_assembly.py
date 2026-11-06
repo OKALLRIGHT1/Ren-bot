@@ -12,6 +12,7 @@ from modules.prompt_parts import (
     join_section_list,
 )
 from services.chat_support.tool_invocation import (
+    _TOOL_RULES_BLOCK_RE,
     rewrite_system_tool_rules,
     should_rewrite_tool_rules,
 )
@@ -34,6 +35,8 @@ def make_chat_prompt_parts(
     mode = str(invocation_mode or "").strip()
     if should_rewrite_tool_rules(mode) and rules:
         rules = rewrite_system_tool_rules(rules, mode)
+    if rules and not join_section_list(tool_sections).strip():
+        rules = _TOOL_RULES_BLOCK_RE.sub("", rules).strip()
     return PromptParts(
         time_header=format_time_header(now),
         time_rule=TIME_CALENDAR_RULE,

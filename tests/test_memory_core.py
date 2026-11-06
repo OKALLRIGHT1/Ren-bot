@@ -695,7 +695,7 @@ def test_explicit_owner_profile_statement_is_learned(tmp_path):
     store = _store(tmp_path)
 
     def fake_llm(messages, *, task_type="summary", caller=""):
-        if caller == "profile_extract_v2":
+        if caller == "memory_writeback_extract":
             prompt = messages[-1]["content"]
             evidence_id = next(
                 line.split("id=", 1)[1].split()[0]
@@ -709,7 +709,14 @@ def test_explicit_owner_profile_statement_is_learned(tmp_path):
             )
         return '{"items":[]}'
 
-    core = MemoryCoreService(store, llm_call=fake_llm)
+    core = MemoryCoreService(
+        store,
+        llm_call=fake_llm,
+        settings={
+            "memory_writeback_inline": True,
+            "memory_writeback_session_cooldown_sec": 0,
+        },
+    )
     core.initialize()
     core.record_message(
         "user",
@@ -729,13 +736,16 @@ def test_meeting_weekday_correction_triggers_profile_learning(tmp_path):
 
     def fake_llm(messages, *, task_type="summary", caller=""):
         calls.append(caller)
-        if caller == "profile_extract_v2":
+        if caller == "memory_writeback_extract":
             prompt = messages[-1]["content"]
-            evidence_id = next(
+            evidence_lines = [
                 line.split("id=", 1)[1].split()[0]
                 for line in prompt.splitlines()
                 if line.startswith("id=") and "其实是周四" in line
-            )
+            ]
+            if not evidence_lines:
+                return '{"items":[]}'
+            evidence_id = evidence_lines[0]
             return (
                 '{"items":[{"kind":"fact","key":"habit.meeting_weekday",'
                 '"content":"用户固定周四开会","confidence":0.95,'
@@ -743,7 +753,14 @@ def test_meeting_weekday_correction_triggers_profile_learning(tmp_path):
             )
         return '{"items":[]}'
 
-    core = MemoryCoreService(store, llm_call=fake_llm)
+    core = MemoryCoreService(
+        store,
+        llm_call=fake_llm,
+        settings={
+            "memory_writeback_inline": True,
+            "memory_writeback_session_cooldown_sec": 0,
+        },
+    )
     core.initialize()
     assert MemoryCoreService._has_explicit_profile_signal("其实是周四哦")
     core.record_message(
@@ -768,7 +785,7 @@ def test_meeting_weekday_correction_triggers_profile_learning(tmp_path):
         meta={"source": "text_input"},
     )
 
-    assert "profile_extract_v2" in calls
+    assert "memory_writeback_extract" in calls
     hit = core.build_reply_context(
         "我平常都是周几开会",
         session_id="owner_shared",
@@ -787,7 +804,14 @@ def test_other_qq_users_are_not_automatic_learning_sources(tmp_path):
         calls.append(caller)
         return '{"items":[]}'
 
-    core = MemoryCoreService(store, llm_call=fake_llm)
+    core = MemoryCoreService(
+        store,
+        llm_call=fake_llm,
+        settings={
+            "memory_writeback_inline": True,
+            "memory_writeback_session_cooldown_sec": 0,
+        },
+    )
     core.initialize()
     core.record_message(
         "user",
@@ -798,8 +822,11 @@ def test_other_qq_users_are_not_automatic_learning_sources(tmp_path):
         meta={"source": "qq_gateway", "is_owner": False, "user_id": "42"},
     )
 
+    assert "expression_learner_v2" not in calls
     assert "profile_extract_v2" not in calls
-    assert core.get_person_profile("qq:42").text == ""
+    assert "memory_writeback_extract" in calls
+    assert any(item["person_id"] == "qq:42" for item in core.list_persons())
+    assert "很长" not in core.get_person_profile("owner").text
 
 
 def test_other_person_scope_cannot_recall_owner_or_global_memories(tmp_path):

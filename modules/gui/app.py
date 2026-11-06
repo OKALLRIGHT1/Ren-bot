@@ -34,9 +34,7 @@ from modules.gui.sedentary_popup import (
 try:
     from modules.character_manager import character_manager
 except ImportError:
-    # External-brain packaging: the brain-side modules.character_manager is
-    # not bundled. Provide a no-op stub so the client still boots and shows
-    # offline state — character/costume features simply report "未激活角色".
+    # character_manager 和本程序在同一仓库。导入失败时给空实现，避免窗口起不来。
     class _OfflineCharacterManager:
         data = {}
 
@@ -57,8 +55,7 @@ from modules.gui.user_ia import (
 try:
     from modules.runtime_settings import load_runtime_settings, update_runtime_settings
 except ImportError:
-    # External-brain packaging: runtime_settings lives in the brain.
-    # Provide passthrough stubs so imports and feature calls don't crash.
+    # runtime_settings 和本程序在同一仓库。导入失败时给空实现，避免窗口起不来。
     def load_runtime_settings(*_args, **_kwargs):
         return {}
 
@@ -76,10 +73,7 @@ try:
 except ImportError:
     BALL_CONFIG = DEFAULT_BALL_CONFIG
 
-# External-brain packaging: the brain's top-level config.py is not bundled.
-# Insert a benign placeholder into sys.modules so bare `import config`
-# statements later in this file (and in modules it pulls in) resolve to an
-# object with safe attribute defaults instead of raising ImportError.
+# config.py 和本程序在同一进程。导入失败时放一个空模块，避免后面的裸 import config 把窗口打崩。
 import sys as _sys
 import types as _types
 
@@ -159,7 +153,6 @@ class _Bridge(QtCore.QObject):
     sig_show_hud = QtCore.Signal()
     sig_toggle_show_hide = QtCore.Signal()
     sig_quit = QtCore.Signal()
-    sig_connection_state = QtCore.Signal(str, str)
 
 
 class QtChatTrayApp(QtCore.QObject):
@@ -182,9 +175,6 @@ class QtChatTrayApp(QtCore.QObject):
         on_display_state_callback: Optional[Callable[[dict], None]] = None,
         on_cancel_callback: Optional[Callable[[], None]] = None,
         on_new_topic_callback: Optional[Callable[[], None]] = None,
-        on_start_backend_callback: Optional[Callable[[], None]] = None,
-        on_stop_backend_callback: Optional[Callable[[], None]] = None,
-        on_stop_all_callback: Optional[Callable[[], None]] = None,
         plugin_manager: Optional[Any] = None,
         runtime_health: Optional[Any] = None,
         cfg: Optional[QtGuiConfig] = None,
@@ -206,14 +196,9 @@ class QtChatTrayApp(QtCore.QObject):
         self.on_display_state_callback = on_display_state_callback
         self.on_cancel_callback = on_cancel_callback
         self.on_new_topic_callback = on_new_topic_callback
-        self.on_start_backend_callback = on_start_backend_callback
-        self.on_stop_backend_callback = on_stop_backend_callback
-        self.on_stop_all_callback = on_stop_all_callback
         self.plugin_manager = plugin_manager
         self.runtime_health = runtime_health
         self.screen_sensor = None
-        self._remote_work_session = None
-        self.on_request_work_session_callback = None
         self._runtime_health_dialog = None
         self._last_health_rows = None  # 首次快照只记录基线，不补发历史故障
 
@@ -273,10 +258,7 @@ class QtChatTrayApp(QtCore.QObject):
         self._bridge.sig_quit.connect(self._quit)
         self._bridge.sig_show_hud.connect(self._show_hud_ui)
         self._bridge.sig_toggle_show_hide.connect(self.toggle_show_hide)
-        self._bridge.sig_connection_state.connect(self._apply_connection_state_ui)
         self._frontend_suppressed = False
-        self._connection_state = "connecting"
-        self._connection_detail = ""
 
         # --- 构建 UI ---
         self._win = self._build_window()
@@ -314,12 +296,6 @@ class QtChatTrayApp(QtCore.QObject):
         self._start_global_listeners()
 
         self.set_status("就绪")
-        # 显示初始连接状态：连接中（WS 尚未拨通）/ 未连接 / 已连接，与
-        # set_status 的"就绪"分开维护，避免 WS 未连通时状态栏还显示"就绪"。
-        try:
-            self._apply_connection_state_ui(self._connection_state, self._connection_detail)
-        except Exception:
-            pass
         self.refresh_work_session_status()
         self.refresh_runtime_health_status()
         self._maybe_hint_setup()
@@ -419,10 +395,7 @@ class QtChatTrayApp(QtCore.QObject):
         if enable_image and img_path:
             p = Path(img_path)
             if not p.is_absolute():
-                # Relative paths are resolved against the client root, the
-                # install root, and the brain root (where assets/ lives in
-                # dev mode) — never against Path.cwd(), which for a packaged
-                # build may be unrelated to the EXE directory.
+                # 相对路径按本仓库和打包数据目录解析，不用进程 cwd。
                 p = self._resolve_resource_path(p)
             if p is not None and p.exists():
                 icon = QtGui.QIcon(str(p))
@@ -697,36 +670,21 @@ class QtChatTrayApp(QtCore.QObject):
 
     @staticmethod
     def _resolve_resource_path(p: Path) -> Optional[Path]:
-        """Resolve a relative resource path against stable roots, never cwd.
-
-        Order: PyInstaller data root (sys._MEIPASS, where bundled assets/
-        live in onedir) → client repo root → install root (EXE dir) →
-        external brain root. Returns the first existing absolute path, else
-        the client-root join (so callers can report a clear missing-file path).
-        """
+        """相对资源路径：打包数据目录、本仓库根、冻结后的 EXE 目录。不用 cwd。"""
         try:
-            from paths import CLIENT_ROOT, resolve_install_root
-
             candidates: list[Path] = []
-            # Frozen onedir: datas land under _MEIPASS (= _internal/).
             meipass = getattr(_sys, "_MEIPASS", None)
             if meipass:
                 candidates.append(Path(meipass))
-            candidates.append(CLIENT_ROOT)
-            candidates.append(resolve_install_root())
-            try:
-                from paths import BRAIN_ROOT
-
-                candidates.append(BRAIN_ROOT)
-            except Exception:
-                pass
+            repo_root = Path(__file__).resolve().parents[2]
+            candidates.append(repo_root)
+            if getattr(_sys, "frozen", False):
+                candidates.append(Path(_sys.executable).resolve().parent)
             for base in candidates:
-                if base is None:
-                    continue
-                full = (base / p)
+                full = base / p
                 if full.exists():
                     return full
-            return (CLIENT_ROOT / p)
+            return repo_root / p
         except Exception:
             return p
 
@@ -1016,19 +974,7 @@ class QtChatTrayApp(QtCore.QObject):
                 session = sensor.get_current_work_session()
                 label, tooltip = self._work_session_presentation(session)
             else:
-                # 遥控窗远程模式：数据在大脑内存里。用最近一次 WS 推送渲染，
-                # 并顺手向大脑再拉一次（apply_remote_work_session 回来更新）。
-                callback = getattr(self, "on_request_work_session_callback", None)
-                if callable(callback):
-                    try:
-                        callback()
-                    except Exception:
-                        pass
-                label, tooltip = self._work_session_presentation(
-                    getattr(self, "_remote_work_session", None)
-                )
-                if not getattr(self, "_remote_work_session", None):
-                    tooltip = "还没收到大脑的工作时长数据（已发起拉取）"
+                tooltip = "屏幕采集还没接上"
         except Exception as exc:
             label = WORK_SESSION_EMPTY_LABEL
             tooltip = f"工作时长数据读取失败: {exc}"
@@ -1047,11 +993,6 @@ class QtChatTrayApp(QtCore.QObject):
         ):
             return label, "工作满 1 分钟后显示工作时长"
         return label, label
-
-    def apply_remote_work_session(self, session) -> None:
-        self._remote_work_session = session if isinstance(session, dict) else None
-        label, tooltip = self._work_session_presentation(self._remote_work_session)
-        self._render_work_session(label, tooltip)
 
     def _render_work_session(self, label: str, tooltip: str) -> None:
         if not hasattr(self, "_lbl_work_session"):
@@ -1078,9 +1019,6 @@ class QtChatTrayApp(QtCore.QObject):
         menu.addSeparator()
         menu.addAction("语音").triggered.connect(self._on_asr_clicked)
         menu.addAction("QQ").triggered.connect(self._on_qq_clicked)
-        menu.addAction("运行健康").triggered.connect(self._on_runtime_health_clicked)
-        if callable(getattr(self, "on_start_backend_callback", None)):
-            menu.addAction("启动本机后端").triggered.connect(self._on_start_backend)
         if is_developer_mode():
             menu.addSeparator()
             dev_menu = menu.addMenu("开发者")
@@ -1102,16 +1040,6 @@ class QtChatTrayApp(QtCore.QObject):
         callback = getattr(self, "on_toggle_live2d_callback", None)
         if callable(callback):
             callback()
-
-    def _on_start_backend(self):
-        callback = getattr(self, "on_start_backend_callback", None)
-        if not callable(callback):
-            return
-        self.append("system", "正在启动本机后端…")
-        try:
-            callback()
-        except Exception as exc:
-            self.append("system", f"启动本机后端失败：{exc}")
 
     def _toggle_tts(self):
         import config
@@ -2195,58 +2123,10 @@ class QtChatTrayApp(QtCore.QObject):
             if "already deleted" not in str(exc):
                 raise
 
-    def apply_connection_state(self, state: str, detail: str = "") -> None:
-        """Thread-safe entry: bridge calls this from the WS thread."""
-        try:
-            self._bridge.sig_connection_state.emit(str(state or ""), str(detail or ""))
-        except RuntimeError as exc:
-            if "already deleted" not in str(exc):
-                raise
-
-    @QtCore.Slot(str, str)
-    def _apply_connection_state_ui(self, state: str, detail: str) -> None:
-        """Update status dot/tooltip/ball and the display state on the Qt thread.
-
-        Mirrors the existing set_status protocol but is driven by the local
-        WebSocket lifecycle, so the user can tell "connecting / online /
-        offline" apart even before the brain sends its own status events.
-        """
-        normalized = (state or "").strip().lower()
-        self._connection_state = normalized or "connecting"
-        self._connection_detail = detail or ""
-        if normalized == "connected":
-            label = "已连接"
-            dot = "ok"
-            tooltip = "大脑在线，遥控窗已连接。"
-        elif normalized == "offline":
-            label = "未连接"
-            dot = "err"
-            tooltip = "大脑未连接："
-            if detail:
-                tooltip += detail
-            else:
-                tooltip += "点击 ⋯ →「启动本机后端」重试。"
-        else:  # connecting
-            label = "连接中…"
-            dot = "busy"
-            tooltip = "正在连接大脑…"
-        try:
-            self._lbl_status.setText(label)
-            set_dot_status(self._dot, dot)
-            if hasattr(self, "_btn_runtime_health"):
-                current = str(self._btn_runtime_health.toolTip() or "")
-                if "点击查看组件详情" not in current and "运行健康状态读取失败" not in current:
-                    self._btn_runtime_health.setToolTip(tooltip)
-            # Re-publish the connection-aware state so display callbacks see it.
-            self._publish_display_state()
-        except RuntimeError:
-            pass
-
     def _apply_frontend_suppressed(self, suppressed: bool) -> None:
         self._frontend_suppressed = bool(suppressed)
         if self._frontend_suppressed:
-            # Enhanced owns the tray and global hotkeys. Qt often starts
-            # minimized-to-tray; with that tray gone the remote must be shown.
+            # 桌面形象占着托盘和全局热键时，把设置窗本身显示出来。
             self._stop_global_listeners()
             tray = getattr(self, "_tray", None)
             if tray is not None:
@@ -2477,10 +2357,6 @@ class QtChatTrayApp(QtCore.QObject):
         menu.addSeparator()
         if self.on_restart_callback:
             menu.addAction("重启程序").triggered.connect(self._handle_restart)
-        if callable(self.on_stop_backend_callback):
-            menu.addAction("停止本机后端").triggered.connect(self._on_stop_backend)
-        if callable(self.on_stop_all_callback):
-            menu.addAction("退出并停止所有服务").triggered.connect(self._on_stop_all)
         menu.addAction("退出").triggered.connect(self._quit)
 
     def _on_tray_activated(self, reason):
@@ -2509,36 +2385,8 @@ class QtChatTrayApp(QtCore.QObject):
                 QtWidgets.QApplication.processEvents()
                 self.on_restart_callback()
 
-    def _on_stop_backend(self):
-        """「停止本机后端」：只停 Brain，桌面形象和外部服务策略不受影响。"""
-        reply = QtWidgets.QMessageBox.question(
-            None,
-            "停止本机后端",
-            "确定要停止本机大脑吗？\n聊天和 QQ 消息将暂停，桌面形象窗口保持运行。",
-            QtWidgets.QMessageBox.StandardButton.Yes
-            | QtWidgets.QMessageBox.StandardButton.No,
-        )
-        if reply == QtWidgets.QMessageBox.StandardButton.Yes:
-            callback = self.on_stop_backend_callback
-            if callable(callback):
-                callback()
-
-    def _on_stop_all(self):
-        """「退出并停止所有服务」：停 Live2D + 优雅停 Brain 后退出客户端。"""
-        reply = QtWidgets.QMessageBox.question(
-            None,
-            "退出并停止所有服务",
-            "确定要停止桌面形象、大脑和由大脑管理的外部服务（Ollama/GPT-SoVITS/NapCat 按其自停配置）吗？",
-            QtWidgets.QMessageBox.StandardButton.Yes
-            | QtWidgets.QMessageBox.StandardButton.No,
-        )
-        if reply == QtWidgets.QMessageBox.StandardButton.Yes:
-            callback = self.on_stop_all_callback
-            if callable(callback):
-                callback()
-
     def request_quit(self):
-        """Thread-safe quit request (e.g. from a stop-all worker thread)."""
+        """从工作线程请求退出。"""
         self._emit_bridge_signal("sig_quit")
 
     def _quit(self):

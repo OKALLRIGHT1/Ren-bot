@@ -1,4 +1,4 @@
-"""Client connection and renderer settings for Live2D-Suzu."""
+"""本进程的桌面形象设置。只记 Live2D 程序路径和是否随启动打开。"""
 
 from __future__ import annotations
 
@@ -15,9 +15,6 @@ CONFIG_PATH = Path(
 )
 
 _DEFAULTS: Dict[str, Any] = {
-    "backend_ws_url": "ws://127.0.0.1:8096/gui",
-    "backend_http_url": "http://127.0.0.1:8097/gui",
-    "backend_token": "",
     "live2d_exe": "",
     "auto_start_live2d": True,
 }
@@ -82,18 +79,7 @@ def save(patch: Dict[str, Any]) -> Dict[str, Any]:
 
 def effective() -> Dict[str, Any]:
     cfg = load()
-    ws_env = os.environ.get("GUI_WS_URL", "").strip()
-    http_env = os.environ.get("GUI_HTTP_URL", "").strip()
-    token_env = (
-        os.environ.get("GUI_TOKEN", "") or os.environ.get("GUI_ACCESS_TOKEN", "")
-    ).strip()
     live2d_exe_env = os.environ.get("SUZU_LIVE2D_EXE", "").strip()
-    if ws_env:
-        cfg["backend_ws_url"] = ws_env
-    if http_env:
-        cfg["backend_http_url"] = http_env
-    if token_env:
-        cfg["backend_token"] = token_env
     if live2d_exe_env:
         cfg["live2d_exe"] = live2d_exe_env
     return cfg

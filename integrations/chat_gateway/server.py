@@ -20,6 +20,7 @@ class NapCatWebhookServer:
         loop: asyncio.AbstractEventLoop,
         host: str = "127.0.0.1",
         port: int = 8095,
+        extra_ports: Optional[list[int]] = None,
         path: str = "/chat/napcat",
         adapter_name: str = "napcat_qq",
         access_token: str = "",
@@ -29,6 +30,15 @@ class NapCatWebhookServer:
         self.loop = loop
         self.host = str(host or "127.0.0.1").strip() or "127.0.0.1"
         self.port = int(port)
+        extra = []
+        for item in list(extra_ports or []):
+            try:
+                value = int(item)
+            except (TypeError, ValueError):
+                continue
+            if value > 0 and value not in extra and value != self.port:
+                extra.append(value)
+        self.extra_ports = extra
         self.path = self._normalize_path(path)
         self.adapter_name = str(adapter_name or "napcat_qq").strip() or "napcat_qq"
         self.access_token = str(access_token or "").strip()
@@ -38,6 +48,8 @@ class NapCatWebhookServer:
         self._server_loop: Optional[asyncio.AbstractEventLoop] = None
         self._runner: Optional[web.AppRunner] = None
         self._site: Optional[web.TCPSite] = None
+        self._extra_sites: list[web.TCPSite] = []
+        self.bound_ports: list[int] = []
         self._ready = threading.Event()
         self._start_error: Optional[BaseException] = None
 
@@ -260,13 +272,39 @@ class NapCatWebhookServer:
 
         self._runner = web.AppRunner(app, access_log=None)
         await self._runner.setup()
-        self._site = web.TCPSite(self._runner, self.host, self.port)
-        await self._site.start()
+        self._extra_sites = []
+        self.bound_ports = []
+        bind_errors: list[str] = []
+        for port in [self.port, *self.extra_ports]:
+            site = web.TCPSite(self._runner, self.host, int(port))
+            try:
+                await site.start()
+            except OSError as exc:
+                bind_errors.append(f"{self.host}:{port} ({exc})")
+                if self.logger:
+                    self.logger.warning(
+                        f"NapCat gateway could not bind {self.host}:{port}: {exc}"
+                    )
+                continue
+            self.bound_ports.append(int(port))
+            if self._site is None:
+                self._site = site
+                self.port = int(port)
+            else:
+                self._extra_sites.append(site)
+        if not self.bound_ports:
+            raise RuntimeError(
+                "NapCat gateway bind failed: " + "; ".join(bind_errors) or "no ports"
+            )
 
         if self.logger:
+            listeners = ", ".join(
+                f"ws://{self.host}:{port}{'' if self.path == '/' else self.path}"
+                for port in self.bound_ports
+            )
             self.logger.info(
                 "NapCat gateway listening on "
-                f"HTTP {self._http_url()} | WS {self._ws_url(self.path)} | WS(root) {self._ws_url('/')}"
+                f"HTTP {self._http_url()} | WS {listeners}"
             )
 
     async def _async_shutdown(self) -> None:
@@ -288,6 +326,29 @@ class NapCatWebhookServer:
             finally:
                 self._runner = None
                 self._site = None
+                self._extra_sites = []
+                self.bound_ports = []
+
+    def is_listening(self) -> bool:
+        thread = self._thread
+        loop = self._server_loop
+        if thread is None or not thread.is_alive() or loop is None or loop.is_closed():
+            return False
+        try:
+            import socket
+
+            ports = list(self.bound_ports) or [int(self.port), *self.extra_ports]
+            for port in ports:
+                probe = socket.socket()
+                probe.settimeout(0.2)
+                try:
+                    if probe.connect_ex((self.host, int(port))) == 0:
+                        return True
+                finally:
+                    probe.close()
+            return False
+        except Exception:
+            return False
 
     def start(self) -> None:
         if self._thread is not None:

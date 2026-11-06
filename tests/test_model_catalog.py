@@ -102,6 +102,7 @@ def test_normalize_purposes_accepts_web_search_aliases():
 
 def test_get_model_purposes_from_purpose_or_purposes():
     assert get_model_purposes({"purpose": "画图"}) == ["image_gen"]
+    assert get_model_purposes({"purposes": ["chat", "code", "代码"]}) == ["chat"]
     assert get_model_purposes({"purposes": ["chat", "vision"]}) == ["chat", "vision"]
     assert get_model_purposes({}) == []
 

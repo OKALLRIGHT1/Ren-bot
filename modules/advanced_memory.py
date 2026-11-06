@@ -1685,8 +1685,6 @@ Output ONLY "YES" or "NO".
         conversation_scope=None,
         prompt_parts: Optional[PromptParts] = None,
     ):
-        print("🔍 [系统] 正在构建统一记忆上下文.")
-
         active_char = character_manager.get_active_character()
         active_character_id = str(
             getattr(character_manager, "data", {}).get("active_id") or ""
@@ -1722,13 +1720,16 @@ Output ONLY "YES" or "NO".
                     tool_desc = "【工具】" + parts[1]
             rules = SYSTEM_RULES_PROMPT
 
+        # Tool catalog is its own system message when the caller passed
+        # PromptParts, so a tool-list change does not rewrite the persona.
+        split_tool_message = prompt_parts is not None
         final_system = join_prompt_sections(
             time_header,
             time_rule,
             core_persona,
             rules,
             runtime_additions,
-            tool_desc,
+            "" if split_tool_message else tool_desc,
         )
 
         raw_user = (current_user_text or "").strip()
@@ -1809,7 +1810,8 @@ Output ONLY "YES" or "NO".
         if profile_text:
             final_system += (
                 "\n\n【当前用户画像】\n"
-                "只把这些信息作为理解用户的背景；当前消息与画像冲突时，以当前消息为准。\n"
+                "用得上再自然说出。当前消息与画像冲突时，以当前消息为准。"
+                "不要主动说「我记得」。\n"
                 + profile_text
             )
 
@@ -1882,7 +1884,9 @@ Output ONLY "YES" or "NO".
         if resolved_memory_block:
             final_system += (
                 "\n\n【经筛选的长期记忆】\n"
-                "这些记录只用于回答当前问题，不要逐条复述，也不要补全记录中没有的事实。"
+                "这些记录是已知要点，用得上再自然说出。不要逐条复述，也不要说成「你说过」，"
+                "不要主动说「我记得」。不要补全记录中没有的事实。"
+                "当前消息与这些记录冲突时，以当前消息为准。"
                 "若记录里没有明确的周几、日期或次数，就直说没查到可靠依据，禁止猜测。"
                 "\n"
                 + resolved_memory_block
@@ -1899,6 +1903,8 @@ Output ONLY "YES" or "NO".
             final_system += "\n\n【工具使用记录】:\n" + tool_ctx
 
         messages = [{"role": "system", "content": final_system}]
+        if prompt_parts is not None and str(tool_desc or "").strip():
+            messages.append({"role": "system", "content": str(tool_desc).strip()})
         if memory_intent in {"episode", "profile"}:
             short_ctx = [
                 m for m in short_ctx if (m.get("role") or "").strip() == "user"

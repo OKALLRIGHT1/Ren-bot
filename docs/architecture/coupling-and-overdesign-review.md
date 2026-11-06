@@ -15,7 +15,7 @@
 | P2 GUI | 已做 | 设置注入 live `memory_core` + `MemoryGuiService` / `KnowledgeGuiService`；`ingest_knowledge_paths` |
 | P3 删双轨 | 已做 | 闲聊不再 polish；已删 `prompt_builder.py` 与 `qq_polish_mode` |
 | P4a 知识端口 | 已做 | `ctx["knowledge"]=BrainKnowledgePort`；`local_knowledge` 优先端口、回退 `brain`。**未删** `brain` |
-| P4b | 已做 | 窄口 + 已撤 `ctx["chat_service"]`。Skill 可选，不为撤键开 skill 端口 |
+| P4b | 已做 | 窄口 + 已撤 `ctx["chat_service"]`。提示词技能层后来已整层删除 |
 | P5 | 已做 | 见 README；计划 `docs/superpowers/plans/2026-09-07-chat-service-p5-natural-chat.md` |
 
 ---
@@ -412,7 +412,7 @@ Thought 还在 `character_thought.py:218` 把这些行再格式化一遍。
 - **5a（可跟知识 GUI 一起做）：** 只给 `local_knowledge` 一个 `KnowledgePort`（import / search / stats / rebuild）。
 - **5b（独立项目）：** `GatewayPort` / `PresenterPort` / `AppPort` 齐了，再从 ctx 拿掉 `chat_service`。
 
-**落地（P4b）：** 窄口已齐，`process()` 不再写 `ctx["chat_service"]`。Skill 走可选 `ctx["skills"]`，**不开 skill 端口**。`brain` 仍在。审查原文「必须留着 chat_service」已过期。
+**落地（P4b）：** 窄口已齐，`process()` 不再写 `ctx["chat_service"]`。当时 Skill 走可选 `ctx["skills"]`，不开 skill 端口；这层提示词后来已整层删除。`brain` 仍在。审查原文「必须留着 chat_service」已过期。
 
 ### 7.6 第 6 步：删死代码 —— 步骤太靠后，且漏了更小的止血
 

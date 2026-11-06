@@ -78,15 +78,11 @@ async def run_stream_turn(
     full_reply = ""
 
     if preface_text:
-        first = True
-        proactive_chunk = reply_flow_service.build_stream_preface_chunk(preface_text)
-        full_reply += proactive_chunk
         await hooks.event_bus.emit(
-            "assistant.stream.feed",
-            chunk=proactive_chunk,
+            "ui.bubble",
+            text=str(preface_text).strip(),
             emotion=curr_emo,
-            speak=output_profile.get("speak", True),
-            show_bubble=output_profile.get("show_bubble", True),
+            duration_ms=1600,
         )
 
     try:

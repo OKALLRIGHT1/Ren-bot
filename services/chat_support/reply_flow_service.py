@@ -11,6 +11,7 @@ class PreparedReply:
     text: str = ""
     emotion: str = "neutral"
     model_emo_seen: bool = False
+    preface: str = ""
 
 
 @dataclass(frozen=True)
@@ -244,10 +245,12 @@ async def prepare_final_reply(
     text = clean_text_for_tts(
         strip_internal_tags(strip_cmd_anywhere(strip_emo_tags_anywhere(final_reply)))
     )
+    preface = ""
     if should_suppress_followup_preface(user_text or ""):
         text = text or preface_text
-    else:
-        text = merge_preface_texts(preface_text, text)
+    elif preface_text:
+        preface = str(preface_text or "").strip()
+    del merge_preface_texts
 
     text = apply_character_catchphrase(text)
     text = prepare_reply_for_output(text, ctx, scene="chat")
@@ -262,4 +265,4 @@ async def prepare_final_reply(
         if inferred_emo:
             emotion = inferred_emo
 
-    return PreparedReply(text=text, emotion=emotion, model_emo_seen=seen)
+    return PreparedReply(text=text, emotion=emotion, model_emo_seen=seen, preface=preface)

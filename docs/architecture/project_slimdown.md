@@ -72,13 +72,28 @@ Current critical/high files:
 - `integrations/gui_http.py`: HTTP surface only; no business rules.
 - `config.py`: boot defaults only; runtime changes flow through `modules.runtime_settings` and injected snapshots.
 
+## State writers
+
+Each kind of state has one writer. New work calls that writer. It does not add another write path inside `modules/gui/dialogs/settings.py`, `core/application.py`, `services/chat_service.py`, or `integrations/gui_http.py`.
+
+| State | Writer |
+| --- | --- |
+| Transcript and memory rows | `modules/memory_sqlite.py` through Memory Core |
+| Writeback jobs | `services/memory_writeback.py` |
+| Pending confirmation | `services/security/pending_confirm.py` |
+| Runtime settings | the existing runtime-settings save path |
+| Plugin configuration | that plugin's own config file |
+| One chat turn's control flow | `ChatService.process` |
+
+A behavior change belongs in the writer, or in a narrow module that already owns that behavior. Those four large files stay as shell, startup, orchestration entry, and HTTP surface.
+
 ## Mandatory Gates
 
 - **Settings gate:** any new settings page or major settings option must not add more page-specific save/load logic to `modules/gui/dialogs/settings.py` unless a matching extraction is already scheduled.
 - **ScreenSensor gate:** 久坐提醒 and 屏幕吐槽 remain separate paths. Sedentary state extraction must not change screen commentary trigger behavior.
 - **Flow gate:** do not broaden `OutputCoordinator` until at least one flow returns `ChatFlowResult` and `tests/test_chat_service_smoke.py` covers that path.
 - **Gateway gate:** do not delete `_send_gateway_*` wrappers until `rg` shows plugins no longer call them directly. Ports wrap them; plugins must use `ctx["gateway"]`.
-- **Plugin ctx gate:** do not re-inject `ctx["chat_service"]`. Plugins use `gateway` / `tts` / `app` / `knowledge` plus injected runtime keys. `resolve_*` may wrap a test double. Skill is optional prompt injection (`ctx["skills"]`), not a port.
+- **Plugin ctx gate:** do not re-inject `ctx["chat_service"]` or `ctx["skills"]`. The skill prompt layer is gone. Plugins use `gateway` / `tts` / `app` / `knowledge` plus injected runtime keys. `resolve_*` may wrap a test double.
 - **PluginManager gate:** do not split child modules until dependencies are proven one-way.
 - **Runtime config gate:** touched code should not add new direct mutable reads from `config.py`; use a value object or runtime snapshot.
 

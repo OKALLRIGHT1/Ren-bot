@@ -34,7 +34,12 @@ from services.chat_support.reply_flow_service import (
     finalize_model_reply,
     prepare_final_reply,
 )
+from services.chat_support.chat_callable_tools import (
+    chat_self_callable_available,
+    run_chat_model_pass,
+)
 from services.chat_support.search_flow_service import choose_forced_search_query
+from services.chat_support.text_utils import is_casual_chat_text
 from services.chat_support.tool_flow_service import (
     ReactFirstPassResult,
     run_react_first_pass,
@@ -65,7 +70,7 @@ class NaturalChatConfig:
     character_thought_enabled: bool = True
     character_thought_scope: str = "desktop_and_qq_private"
     group_chat_natural_enabled: bool = False
-    character_thought_timeout_ms: int = 4000,
+    character_thought_timeout_ms: int = 1200,
     character_thought_max_tokens: int = 220
     expression_inject_in_main_reply: bool = True
     expression_inject_max_items: int = 1
@@ -88,7 +93,7 @@ class NaturalChatConfig:
                 raw.get("group_chat_natural_enabled", False)
             ),
             character_thought_timeout_ms=int(
-                raw.get("character_thought_timeout_ms") or 4000
+                raw.get("character_thought_timeout_ms") or 1200
             ),
             character_thought_max_tokens=int(
                 raw.get("character_thought_max_tokens") or 220
@@ -248,6 +253,14 @@ def decide_thought_gate(
         )
 
     text = str(user_text or "").strip()
+    if text and (len(text) <= 4 or text in {"你好", "嗨", "在吗", "早", "早安", "晚安", "嗯", "哦"}):
+        return ThoughtGateDecision(
+            should_run=False,
+            scope_matched=True,
+            reason="short",
+            short_shell=short_shell,
+            detail_intent=detail,
+        )
     if not text:
         return ThoughtGateDecision(
             should_run=False,
@@ -610,7 +623,6 @@ class PlainChatHooks:
     contains_cmd: Callable[[str], bool]
     looks_like_uncertain_answer: Callable[[str], bool]
     is_searchworthy_question: Callable[[str], bool]
-    skill_manager: Any = None
     personality: Any = None
     logger: Any = None
     record_tool_execution: Optional[Callable[..., Any]] = None
@@ -751,13 +763,13 @@ async def assemble_chat_context_messages(
             )
         except Exception:
             pass
-    skill_prompt = ""
-    if hooks.skill_manager is not None:
-        try:
-            skill_prompt = hooks.skill_manager.build_prompt_addition()
-        except Exception as exc:
-            if hooks.logger:
-                hooks.logger.warning(f"Skill prompt build failed: {exc}")
+    desk_context = ""
+    try:
+        from plugins.smart_desk.plugin import latest_desk_context_block
+
+        desk_context = latest_desk_context_block()
+    except Exception:
+        desk_context = ""
     prompt_parts = make_chat_prompt_parts(
         invocation_mode=invocation_mode,
         runtime_sections=(
@@ -767,7 +779,7 @@ async def assemble_chat_context_messages(
             thought_block,
             expression_block,
             hooks.build_live2d_self_awareness_hint(ctx),
-            skill_prompt,
+            desk_context,
             *tuple(extra_runtime_sections or ()),
         ),
         tool_sections=tool_sections,
@@ -788,12 +800,15 @@ async def assemble_chat_context_messages(
     context_messages = await _clean_prompt_messages(list(context_messages or []))
 
     # --- snapshot_payload: lengths and section names only, no raw content ---
-    system_text = ""
+    system_parts = []
     if context_messages:
         for msg in context_messages:
-            if isinstance(msg, dict) and msg.get("role") == "system":
-                system_text = str(msg.get("content", ""))
-                break
+            if not isinstance(msg, dict) or msg.get("role") != "system":
+                if system_parts:
+                    break
+                continue
+            system_parts.append(str(msg.get("content", "")))
+    system_text = "\n\n".join(part for part in system_parts if part)
     history_msgs = [
         m for m in context_messages if isinstance(m, dict) and m.get("role") != "system"
     ]
@@ -924,23 +939,63 @@ async def run_plain_chat(
                 return None
             return hooks.record_tool_execution(event_state=tool_event_state, **event)
 
-        react_first_pass = await run_react_first_pass(
-            context_messages=context_messages,
-            ctx=ctx,
-            need_tools=False,
-            deferred_tool_flow=False,
-            task_reasoning=task_reasoning,
-            task_default=task_default,
-            plugin_manager=hooks.plugin_manager,
-            chat_with_ai=hooks.chat_with_ai,
-            contains_cmd=hooks.contains_cmd,
-            strip_cmd_anywhere=hooks.strip_cmd_anywhere,
-            record_tool_execution=_record_tool_execution,
-            invocation_mode=invocation_mode,
-            tool_triggers=[],
-            request_context=req_ctx,
-        )
+        discover_tools = False
+        decider = getattr(hooks.plugin_manager, "should_use_deferred_tool_flow", None)
+        if callable(decider):
+            try:
+                discover_tools = bool(decider(user_text))
+            except Exception:
+                discover_tools = False
+        self_callable = False
+        try:
+            self_callable = chat_self_callable_available(hooks.plugin_manager)
+        except Exception:
+            self_callable = False
+        # Greetings stay a persona reply with no schemas. Task-shaped lines
+        # let the same model call tagged tools or discover from the catalog.
+        attach_chat_tools = bool(discover_tools)
+        if self_callable and not is_casual_chat_text(user_text):
+            attach_chat_tools = True
+        if attach_chat_tools:
+            react_first_pass = await run_chat_model_pass(
+                context_messages=context_messages,
+                ctx=ctx,
+                task_default=task_default,
+                plugin_manager=hooks.plugin_manager,
+                chat_with_ai=hooks.chat_with_ai,
+                invocation_mode=invocation_mode,
+                request_context=req_ctx,
+                record_tool_execution=_record_tool_execution,
+                discover_tools=discover_tools,
+            )
+        else:
+            react_first_pass = await run_react_first_pass(
+                context_messages=context_messages,
+                ctx=ctx,
+                need_tools=False,
+                deferred_tool_flow=False,
+                task_reasoning=task_reasoning,
+                task_default=task_default,
+                plugin_manager=hooks.plugin_manager,
+                chat_with_ai=hooks.chat_with_ai,
+                contains_cmd=hooks.contains_cmd,
+                strip_cmd_anywhere=hooks.strip_cmd_anywhere,
+                record_tool_execution=_record_tool_execution,
+                invocation_mode=invocation_mode,
+                tool_triggers=[],
+                request_context=req_ctx,
+            )
         context_messages = list(react_first_pass.context_messages or context_messages)
+        if hooks.trace_process:
+            try:
+                hooks.trace_process(
+                    "tool_schemas",
+                    route_reason=str(route_reason or ""),
+                    tool_triggers=list(getattr(react_first_pass, "offered_triggers", []) or []),
+                    schema_names=list(getattr(react_first_pass, "sent_tool_names", []) or []),
+                )
+            except Exception:
+                pass
         continue_outcome = PlainChatOutcome(
             flow=ChatFlowResult(status=STATUS_CONTINUE, source=source_key),
             react_first_pass=react_first_pass,

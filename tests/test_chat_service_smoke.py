@@ -449,7 +449,7 @@ async def test_process_injects_knowledge_without_removing_brain(chat_env, monkey
     injected = manager.direct_calls[0][1]
     assert injected["brain"] is service.brain
     assert "chat_service" not in injected
-    assert injected.get("skills") is getattr(service, "skill_manager", None)
+    assert "skills" not in injected
     assert hasattr(injected["knowledge"], "search_knowledge")
     assert hasattr(injected["knowledge"], "import_knowledge_from_file")
     assert hasattr(injected["gateway"], "send_text")

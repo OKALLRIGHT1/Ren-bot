@@ -12,10 +12,7 @@ from typing import Any, Dict, Iterable, List, Optional
 try:
     from modules.runtime_settings import load_runtime_settings, update_runtime_settings
 except ImportError:
-    # External-brain packaging: runtime_settings lives in the brain, which may
-    # not be on sys.path at first boot. Provide passthrough stubs so this
-    # module still imports; the real functions are used once the user picks a
-    # brain directory and restarts.
+    # runtime_settings 和本程序在同一仓库。导入失败时给空实现，避免设置页起不来。
     def load_runtime_settings(*_args, **_kwargs):
         return {}
 
@@ -142,7 +139,7 @@ SETTINGS_PAGES: List[Dict[str, Any]] = [
         "group": "companion",
         "nav": "外部服务",
         "title": "外部服务",
-        "desc": "大脑依赖的本机服务（Ollama / GPT-SoVITS / NapCat）的状态查看与启动停止。操作通过大脑完成。",
+        "desc": "本机的 Ollama、GPT-SoVITS、NapCat。在这里看状态、改启动项、开关。",
         "init_label": "外部服务",
     },
     {
@@ -163,10 +160,11 @@ SETTINGS_PAGES: List[Dict[str, Any]] = [
     },
     {
         "id": "mcp",
-        "group": "connect",
+        "group": "developer",
         "nav": "MCP",
         "title": "MCP",
         "desc": "外接 MCP 服务器。大多数人用不到，需要接外部工具时再填。",
+        "developer": True,
     },
     {
         "id": "providers",

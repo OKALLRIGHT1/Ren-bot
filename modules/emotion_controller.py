@@ -76,10 +76,18 @@ class EmotionController:
         if self.current_emotion in NEUTRAL_LABELS:
             return
 
-        # 如果超过 5 分钟没互动
-        if now - self.last_activity > EMO_DECAY_TIMEOUT:
-            print(f"📉 [Emotion] 情绪自然衰减: {self.current_emotion} -> neutral")
-            await self._apply_emotion("neutral", 0.3, prefer_motion=False)
+        quiet_for = now - self.last_activity
+        if quiet_for < 90:
+            return
+        if quiet_for < EMO_DECAY_TIMEOUT and self.current_intensity > 0.28:
+            await self._apply_emotion(
+                self.current_emotion,
+                max(0.22, self.current_intensity - 0.12),
+                prefer_motion=False,
+            )
+            return
+        if quiet_for >= EMO_DECAY_TIMEOUT:
+            await self._apply_emotion("neutral", 0.25, prefer_motion=False)
 
     async def _idle_random_loop(self):
         """Play occasional idle-only motions without changing the current emotion."""
@@ -107,10 +115,10 @@ class EmotionController:
         return_delay = max(0.0, return_delay)
 
         while True:
-            await asyncio.sleep(random.uniform(min_seconds, max_seconds))
+            await asyncio.sleep(random.triangular(min_seconds, max_seconds, max_seconds * 0.8))
             if self.agent_state != AgentState.IDLE:
                 continue
-            if time.time() - self.last_activity < min_idle:
+            if time.time() - self.last_activity < max(min_idle, 90.0):
                 continue
             await self.play_idle_random_once(
                 emotion=emotion,

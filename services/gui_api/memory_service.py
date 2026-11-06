@@ -16,6 +16,24 @@ def _as_dict(value: Any) -> Dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
+def merge_conflicted_records(core: Any, rows: List[Dict[str, Any]], *, limit: int) -> List[Dict[str, Any]]:
+    """Active lists hide conflicted rows. The memory page still needs to show them."""
+    if not hasattr(core, "list_memory_records"):
+        return rows
+    try:
+        extra = core.list_memory_records(status="conflicted", limit=int(limit or 500))
+    except Exception:
+        return rows
+    seen = {str(row.get("id") or "") for row in rows}
+    merged = list(rows)
+    for row in extra or []:
+        token = str(row.get("id") or "")
+        if token and token not in seen:
+            merged.append(row)
+            seen.add(token)
+    return merged
+
+
 def _client_record(row: Dict[str, Any]) -> Dict[str, Any]:
     data = dict(row or {})
     metadata = _as_dict(data.get("metadata"))
@@ -105,6 +123,7 @@ class MemoryGuiService:
             status_text = str(status or "")
             if status_text == "active" and hasattr(core, "list_current_memory_records"):
                 rows = core.list_current_memory_records(limit=int(limit or 500))
+                rows = merge_conflicted_records(core, rows, limit=int(limit or 500))
             else:
                 rows = core.list_memory_records(status=status_text, limit=int(limit or 500))
         except Exception as exc:

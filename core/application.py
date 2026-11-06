@@ -7,6 +7,7 @@ import json
 import os
 import re
 import secrets
+import socket
 import sys
 import threading
 import time
@@ -49,12 +50,154 @@ def _read_existing_napcat_token() -> str:
                 if not isinstance(client, dict):
                     continue
                 url = str(client.get("url") or "")
-                if "8095" not in url:
+                name = str(client.get("name") or "").strip().lower()
+                if (
+                    "8095" not in url
+                    and "18095" not in url
+                    and name not in {"suzu", "live2d-suzu", "live2d"}
+                ):
                     continue
                 token = str(client.get("token") or "").strip()
                 if token:
                     return token
     return ""
+
+
+def _port_is_bindable(host: str, port: int) -> bool:
+    try:
+        probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            probe.bind((str(host or "127.0.0.1"), int(port)))
+            return True
+        finally:
+            probe.close()
+    except OSError:
+        return False
+
+
+def _pick_bindable_port(host: str, preferred: int, extras: list[int] | None = None) -> int:
+    host = str(host or "127.0.0.1")
+    preferred = int(preferred or 8095)
+    candidates = [preferred]
+    for extra in list(extras or []) + [18095, 28095, 8094, 8098, 18096]:
+        if extra not in candidates:
+            candidates.append(int(extra))
+    for port in candidates:
+        if _port_is_bindable(host, port):
+            return port
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+        probe.bind((host, 0))
+        return int(probe.getsockname()[1])
+
+
+def _napcat_onebot_config_paths() -> list[Path]:
+    roots: list[Path] = []
+    env_config = os.getenv("NAPCAT_ONEBOT_CONFIG", "").strip()
+    if env_config:
+        roots.append(Path(env_config))
+    napcat_dir = os.getenv("NAPCAT_DIR", "").strip()
+    if napcat_dir:
+        roots.append(Path(napcat_dir))
+    roots.append(
+        Path(
+            r"D:\tools\napcat\NapCat.Shell.Windows.OneKey\NapCat.44498.Shell\versions\9.9.26-44498\resources\app\napcat\config"
+        )
+    )
+    paths: list[Path] = []
+    seen: set[str] = set()
+    for root in roots:
+        try:
+            matches = [root] if root.is_file() else list(root.rglob("onebot11_*.json"))
+        except Exception:
+            continue
+        for path in matches:
+            key = str(path.resolve()) if path.exists() else str(path)
+            if key in seen:
+                continue
+            seen.add(key)
+            paths.append(path)
+    return paths
+
+
+def _sync_napcat_reverse_ws(
+    host: str,
+    primary_port: int,
+    fallback_port: int | None = None,
+    token: str = "",
+) -> list[str]:
+    """Keep both the default 8095 client and an optional fallback client."""
+    host = str(host or "127.0.0.1").strip() or "127.0.0.1"
+    if host in {"0.0.0.0", "::", "[::]"}:
+        host = "127.0.0.1"
+    primary_port = int(primary_port or 8095)
+    fallback_port = int(fallback_port) if fallback_port else None
+    primary_url = f"ws://{host}:{primary_port}"
+    fallback_url = f"ws://{host}:{fallback_port}" if fallback_port else ""
+    updated: list[str] = []
+    for path in _napcat_onebot_config_paths():
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        network = payload.get("network")
+        if not isinstance(network, dict):
+            continue
+        clients = network.get("websocketClients")
+        if not isinstance(clients, list):
+            clients = []
+            network["websocketClients"] = clients
+        changed = False
+
+        def _upsert(name: str, url: str, enable: bool) -> None:
+            nonlocal changed
+            match = None
+            for client in clients:
+                if not isinstance(client, dict):
+                    continue
+                client_name = str(client.get("name") or "").strip().lower()
+                client_url = str(client.get("url") or "")
+                if client_name == name or url in client_url:
+                    match = client
+                    break
+            if match is None:
+                match = {
+                    "enable": enable,
+                    "name": name,
+                    "url": url,
+                    "reportSelfMessage": False,
+                    "messagePostFormat": "array",
+                    "token": token,
+                    "debug": False,
+                    "heartInterval": 30000,
+                    "reconnectInterval": 30000,
+                }
+                clients.append(match)
+                changed = True
+            if str(match.get("url") or "") != url:
+                match["url"] = url
+                changed = True
+            if bool(match.get("enable")) != bool(enable):
+                match["enable"] = bool(enable)
+                changed = True
+            if token and str(match.get("token") or "").strip() != token:
+                match["token"] = token
+                changed = True
+
+        _upsert("suzu", primary_url, True)
+        if fallback_url and fallback_port != primary_port:
+            _upsert("suzu-fallback", fallback_url, True)
+        if not changed:
+            continue
+        try:
+            path.write_text(
+                json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            updated.append(str(path))
+        except Exception:
+            continue
+    return updated
+
 
 try:
     import psutil
@@ -116,7 +259,6 @@ from modules.advanced_memory import AdvancedMemorySystem
 from modules.memory_sqlite import get_memory_store
 from modules.emotion_controller import EmotionController
 from modules.plugin_manager import PluginManager
-from modules.skill_manager import SkillManager
 from modules.tool_router import ToolRouter
 from modules.tts import TTSRouter
 from modules.state_machine import AgentStateMachine, AgentState
@@ -200,6 +342,17 @@ def split_local_bubble_text_parts(text: str) -> list[str]:
     return split_chat_text_parts(text, max_len=TTS_CHUNK_CHARS)
 
 
+def _sedentary_line(app_name: str, active_minutes: int) -> str:
+    app = str(app_name or "电脑").strip() or "电脑"
+    minutes = int(active_minutes or 0)
+    lines = (
+        f"你已经盯着{app} {minutes} 分钟了，起来动一下。",
+        f"{app}用了 {minutes} 分钟，眼睛歇一会。",
+        f"连续 {minutes} 分钟都在{app}，站起来走两步。",
+    )
+    return lines[minutes % len(lines)]
+
+
 class Live2DApplication:
     # Live2D application.
 
@@ -219,7 +372,6 @@ class Live2DApplication:
         self.memory_store = None
         self.emotion_controller = None
         self.plugin_manager = None
-        self.skill_manager = None
         self.tool_router = None
         self.tts = None
         self.presenter = None
@@ -228,6 +380,7 @@ class Live2DApplication:
         self.chat_gateway_server = None
         self._napcat_enabled = bool(NAPCAT_ENABLED)
         self._napcat_server_running = False
+        self._napcat_watchdog_task = None
         self._silent_bubble_seq = 0
 
         # [新增] 屏幕感知与语音组件
@@ -514,27 +667,12 @@ class Live2DApplication:
                 return [str(item).strip() for item in value if str(item).strip()]
             return []
 
-        def _parse_text_list(value):
-            if isinstance(value, str):
-                return [
-                    item.strip()
-                    for item in re.split(r"[,锛?\n]+", value)
-                    if item.strip()
-                ]
-            if isinstance(value, list):
-                return [str(item).strip() for item in value if str(item).strip()]
-            return []
-
         owner_ids_raw = settings.get("napcat_owner_user_ids", [])
         owner_ids = _parse_id_list(owner_ids_raw)
         user_whitelist = _parse_id_list(settings.get("napcat_user_whitelist", []))
         user_blacklist = _parse_id_list(settings.get("napcat_user_blacklist", []))
         group_whitelist = _parse_id_list(settings.get("napcat_group_whitelist", []))
         group_blacklist = _parse_id_list(settings.get("napcat_group_blacklist", []))
-        skill_search_paths = _parse_text_list(
-            settings.get("skill_search_paths", ["./skills", "~/.codex/skills"])
-        )
-        active_skills = _parse_text_list(settings.get("active_skills", []))
         image_prompt = str(settings.get("napcat_image_prompt", "") or "").strip()
         voice_probability_raw = settings.get(
             "napcat_voice_reply_probability", NAPCAT_VOICE_REPLY_PROBABILITY
@@ -629,10 +767,6 @@ class Live2DApplication:
             )
             .strip()
             .lower(),
-            "skill_enabled": bool(settings.get("skill_enabled", True)),
-            "skill_search_paths": skill_search_paths
-            or ["./skills", "~/.codex/skills"],
-            "active_skills": active_skills,
             "napcat_user_whitelist": user_whitelist,
             "napcat_user_blacklist": user_blacklist,
             "napcat_group_whitelist": group_whitelist,
@@ -742,8 +876,7 @@ class Live2DApplication:
             return ""
         result = await plugin.select_meme_image_path(
             user_text=(
-                f"久坐提醒：连续使用 {app_name} {active_minutes} 分钟；"
-                "标签：久坐、休息、提醒、伸展、护眼"
+                _sedentary_line(app_name, active_minutes)
             ),
             reply_text="起来活动一下吧",
             emotion="提醒",
@@ -763,8 +896,7 @@ class Live2DApplication:
             "active_minutes": int(active_minutes or 0),
         }
         sedentary_user_text = (
-            f"久坐提醒：连续使用 {app_name} {active_minutes} 分钟；"
-            "标签：久坐、休息、提醒、伸展、护眼"
+            _sedentary_line(app_name, active_minutes)
         )
         plugins = getattr(self.plugin_manager, "plugins", {}) or {}
         for plugin in plugins.values():
@@ -1081,12 +1213,8 @@ class Live2DApplication:
             self.notify_activity_config_changed(activity_revision)
         result = {
             "napcat_enabled": bool(external_settings["napcat_enabled"]),
-            "skill_enabled": bool(external_settings["skill_enabled"]),
             "napcat_live_applied": False,
-            "skill_live_applied": False,
             "napcat_server_running": False,
-            "skill_count": 0,
-            "active_skills": [],
             "sedentary_live_applied": False,
         }
         self._napcat_enabled = bool(external_settings["napcat_enabled"])
@@ -1136,16 +1264,6 @@ class Live2DApplication:
             )
         result["sedentary_live_applied"] = True
 
-        if self.skill_manager is not None:
-            self.skill_manager.configure(
-                enabled=external_settings.get("skill_enabled", True),
-                search_paths=external_settings.get("skill_search_paths") or None,
-                active_skills=external_settings.get("active_skills") or [],
-            )
-            result["skill_live_applied"] = True
-            result["skill_count"] = len(self.skill_manager.skills)
-            result["active_skills"] = list(self.skill_manager.active_skills)
-
         napcat_adapter = None
         group_no_at_keywords = []
         if self.plugin_manager is not None:
@@ -1186,11 +1304,38 @@ class Live2DApplication:
 
         if external_settings["napcat_enabled"] and self.chat_gateway and self.loop:
             try:
+                host = str(external_settings["napcat_webhook_host"] or "127.0.0.1")
+                preferred_port = int(external_settings["napcat_webhook_port"] or 8095)
+                fallback_port = _pick_bindable_port(host, 18095, extras=[28095])
+                if fallback_port == preferred_port:
+                    fallback_port = _pick_bindable_port(
+                        host, 18095, extras=[28095, 18096]
+                    )
+                extra_ports = []
+                if fallback_port and fallback_port != preferred_port:
+                    extra_ports.append(fallback_port)
+                synced = _sync_napcat_reverse_ws(
+                    host,
+                    preferred_port,
+                    fallback_port=extra_ports[0] if extra_ports else None,
+                    token=external_settings.get("napcat_access_token") or "",
+                )
+                if synced and self.logger:
+                    self.logger.info(
+                        "NapCat reverse WS clients synced: "
+                        f"ws://{host}:{preferred_port}"
+                        + (
+                            f" + ws://{host}:{extra_ports[0]}"
+                            if extra_ports
+                            else ""
+                        )
+                    )
                 self.chat_gateway_server = NapCatWebhookServer(
                     gateway=self.chat_gateway,
                     loop=self.loop,
-                    host=external_settings["napcat_webhook_host"],
-                    port=external_settings["napcat_webhook_port"],
+                    host=host,
+                    port=preferred_port,
+                    extra_ports=extra_ports,
                     path=external_settings["napcat_webhook_path"],
                     access_token=external_settings["napcat_access_token"],
                     logger=self.logger,
@@ -1213,11 +1358,17 @@ class Live2DApplication:
             enabled=self._napcat_enabled,
             server_running=self._napcat_server_running,
         )
+        if self.loop and self._napcat_watchdog_task is None:
+            try:
+                self._napcat_watchdog_task = self.loop.create_task(
+                    self._napcat_gateway_watchdog()
+                )
+            except Exception:
+                self._napcat_watchdog_task = None
 
         if self.logger:
             self.logger.info(
                 "External settings applied: "
-                f"skills={external_settings['skill_enabled']} active={len(result['active_skills'])} loaded={result['skill_count']}, "
                 f"napcat={external_settings['napcat_enabled']} server_running={result['napcat_server_running']}"
             )
         if self.chat_service is not None:
@@ -1271,7 +1422,6 @@ class Live2DApplication:
 
         # 2. 初始化事件日志
         self.event_logger = EventLogger(data_path("events.sqlite"))
-        self.skill_manager = SkillManager(logger=self.logger)
 
         # 3. 初始化核心组件
         self.brain = AdvancedMemorySystem()
@@ -1322,12 +1472,14 @@ class Live2DApplication:
             rhubarb_abs = os.path.abspath(RHUBARB_PATH)
             if os.path.exists(rhubarb_abs):
                 self.logger.info(
-                    f"口型同步已启用 (Rhubarb: {rhubarb_abs}, 平滑窗口: {LIP_SYNC_SMOOTH_WINDOW})"
+                    f"[LipSync] Enabled / 口型同步已启用 (Rhubarb: {rhubarb_abs}, window: {LIP_SYNC_SMOOTH_WINDOW})"
                 )
             else:
-                self.logger.warning(f"口型同步已开启但 Rhubarb 不存在: {rhubarb_abs}")
+                self.logger.warning(
+                    f"[LipSync] Enabled but Rhubarb binary not found / 口型同步已开启但 Rhubarb 文件不存在: {rhubarb_abs}"
+                )
         else:
-            self.logger.info("口型同步未启用 (LIP_SYNC_ENABLED=0)")
+            self.logger.info("[LipSync] Disabled / 口型同步未启用 (LIP_SYNC_ENABLED=0)")
 
         async def _bubble_to_event(
             text: str, emo: Optional[str], duration_ms: Optional[int]
@@ -1389,7 +1541,6 @@ class Live2DApplication:
             logger=self.logger,
             chat_gateway=self.chat_gateway,
         )
-        self.chat_service.skill_manager = self.skill_manager
         self.chat_service.app = self
         self._init_display_mqtt()
         self.chat_service.configure_gateway_voice_reply(
@@ -1441,9 +1592,20 @@ class Live2DApplication:
                 and self.gui_ws_server.has_capable_client("live2d.performance.v1")
             )
         )
+        desired_http_port = initial_external_settings.get("gui_http_port", GUI_HTTP_PORT)
+        std_http_port = int(getattr(config, "GUI_HTTP_PORT", 8097) or 8097)
+        if desired_http_port != std_http_port:
+            import socket
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe_sock:
+                probe_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                try:
+                    probe_sock.bind((str(initial_external_settings.get("gui_http_host", GUI_HTTP_HOST) or "127.0.0.1"), std_http_port))
+                    desired_http_port = std_http_port
+                except Exception:
+                    pass
         self.gui_http_server = GuiHttpServer(
             host=initial_external_settings.get("gui_http_host", GUI_HTTP_HOST),
-            port=initial_external_settings.get("gui_http_port", GUI_HTTP_PORT),
+            port=desired_http_port,
             path_prefix=initial_external_settings.get("gui_http_prefix", GUI_HTTP_PREFIX),
             logger=self.logger,
             app_ref=self,
@@ -1611,13 +1773,74 @@ class Live2DApplication:
             server_running=napcat_server_running,
         )
 
+    def _napcat_gateway_is_listening(self) -> bool:
+        server = getattr(self, "chat_gateway_server", None)
+        checker = getattr(server, "is_listening", None)
+        if callable(checker):
+            try:
+                return bool(checker())
+            except Exception:
+                return False
+        return False
+
+    def _ensure_napcat_gateway_listening(self, *, reason: str = "watchdog") -> bool:
+        if not bool(getattr(self, "_napcat_enabled", False)):
+            return False
+        if self._napcat_gateway_is_listening():
+            self._napcat_server_running = True
+            return True
+        if self.logger:
+            self.logger.warning(
+                f"NapCat gateway not listening, restarting ({reason})"
+            )
+        try:
+            self.apply_external_settings()
+        except Exception as exc:
+            if self.logger:
+                self.logger.error(f"NapCat gateway restart failed: {exc}")
+            self._napcat_server_running = False
+            self._report_qq_gateway_health(
+                enabled=True, server_running=False
+            )
+            return False
+        listening = self._napcat_gateway_is_listening()
+        self._napcat_server_running = listening
+        self._report_qq_gateway_health(
+            enabled=True, server_running=listening
+        )
+        return listening
+
+    async def _napcat_gateway_watchdog(self) -> None:
+        await asyncio.sleep(8)
+        delay = 15
+        while True:
+            try:
+                if bool(getattr(self, "_napcat_enabled", False)):
+                    ok = await asyncio.to_thread(
+                        self._ensure_napcat_gateway_listening, reason="watchdog"
+                    )
+                    delay = 15 if ok else min(120, max(30, delay * 2))
+                else:
+                    delay = 30
+            except asyncio.CancelledError:
+                raise
+            except Exception as cop:
+                if self.logger:
+                    self.logger.warning(f"NapCat gateway watchdog error: {cop}")
+                delay = min(120, max(30, delay * 2))
+            await asyncio.sleep(delay)
+
     def _report_qq_gateway_health(
         self, *, enabled: bool, server_running: bool
     ) -> None:
+        listening = self._napcat_gateway_is_listening() if enabled else False
         if not enabled:
             state, summary = "disabled", "QQ 网关未启用"
-        elif server_running:
+        elif listening:
             state, summary = "healthy", "QQ 网关已启动"
+            server_running = True
+        elif server_running:
+            state, summary = "degraded", "QQ 网关标记已启动，但 8095 未在监听"
         else:
             state, summary = "offline", "QQ 网关等待启动"
         try:
@@ -1983,7 +2206,7 @@ class Live2DApplication:
             await self._send_gui_snapshot(ws)
             return
         if name == "work_session_status":
-            # 遥控窗没有本地 ScreenSensor，工作时长按需拉取。
+            # 工作时长在本进程的 ScreenSensor 上，按请求回一帧。
             session = None
             sensor = getattr(self, "screen_sensor", None)
             if sensor is not None and hasattr(sensor, "get_current_work_session"):
@@ -2265,6 +2488,7 @@ class Live2DApplication:
 
             # 标记活动（退出空闲模式）
             self.emotion_controller.mark_activity(reason or "emotion_request")
+            emo, intensity = self._blend_live2d_emotion(emo, intensity)
 
             # 通过 EmotionController 处理情绪请求
             await self.emotion_controller.request_emotion(
@@ -2278,6 +2502,21 @@ class Live2DApplication:
 
         except Exception as e:
             self.logger.error(f"❌[Emotion] 处理失败: {e}", exc_info=True)
+
+    def _blend_live2d_emotion(self, label: str, intensity: Optional[float]):
+        personality = None
+        chat = getattr(self, "chat_service", None)
+        if chat is not None:
+            personality = getattr(chat, "personality", None)
+        adjust = getattr(personality, "adjust_emotion", None)
+        base = 0.5 if intensity is None else float(intensity)
+        if not callable(adjust):
+            return label, base
+        try:
+            emo, level = adjust(str(label or "neutral"), base)
+            return str(emo or label), float(level)
+        except Exception:
+            return label, base
 
     async def _on_live2d_motion(self, payload: Dict[str, Any]):
         # Handle Live2D motion events.
@@ -2426,7 +2665,7 @@ class Live2DApplication:
                     # 发 13701 也无害（前端不认就忽略），但漏发会导致纯文本回复永远不动嘴。
                     try:
                         total_ms = sum(
-                            max(2200, int(estimate_text_speech_duration(p) * 1000 + 450))
+                            max(1000, int(estimate_text_speech_duration(p) * 1000 + 450))
                             for p in parts
                         )
                         await send_speech_lifecycle(
@@ -2443,9 +2682,9 @@ class Live2DApplication:
                         # 无音频：按字数估时长（与前端 text.length*150 同量级）
                         duration_ms = estimate_bubble_display_ms(part, pace="silent")
                         duration_ms = max(
-                            int(speech_sec * 1000) + 450,
+                            int(speech_sec * 1000) + 200,
                             int(duration_ms),
-                            2200,
+                            1000,
                         )
                         duration_ms = min(duration_ms, 12000)
                         try:
@@ -3160,6 +3399,10 @@ class Live2DApplication:
 
             # 4. 启动定时调度器
             self.loop.create_task(self._scheduler_loop())
+            if self._napcat_watchdog_task is None:
+                self._napcat_watchdog_task = self.loop.create_task(
+                    self._napcat_gateway_watchdog()
+                )
 
             # 6. 启动音乐感知
             if self.music_sensor:
@@ -3754,28 +3997,62 @@ class Live2DApplication:
                 configured = ""
         if configured:
             candidates.append(Path(configured))
+
+        if os.name == "nt":
+            # 1. Query Windows Uninstall registry for installed Live2D Suzu Enhanced
+            try:
+                import winreg
+                for hive in (winreg.HKEY_CURRENT_USER, winreg.HKEY_LOCAL_MACHINE):
+                    try:
+                        with winreg.OpenKey(hive, r"Software\Microsoft\Windows\CurrentVersion\Uninstall") as root_key:
+                            count = winreg.QueryInfoKey(root_key)[0]
+                            for i in range(count):
+                                try:
+                                    sub_name = winreg.EnumKey(root_key, i)
+                                    with winreg.OpenKey(root_key, sub_name) as sub_key:
+                                        display_name = str(winreg.QueryValueEx(sub_key, "DisplayName")[0] or "").lower()
+                                        if "live2d" in display_name and "suzu" in display_name:
+                                            loc = winreg.QueryValueEx(sub_key, "InstallLocation")[0]
+                                            clean_loc = str(loc or "").strip().strip('"').strip("'")
+                                            if clean_loc:
+                                                candidates.append(Path(clean_loc) / "live2d-enhanced.exe")
+                                except Exception:
+                                    pass
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
+            # 2. Check all active drive roots (D:\Live2D Suzu Enhanced, C:\...)
+            import string
+            for drive in string.ascii_uppercase:
+                drive_root = Path(f"{drive}:\\")
+                if drive_root.exists():
+                    candidates.append(drive_root / "Live2D Suzu Enhanced" / "live2d-enhanced.exe")
+                    candidates.append(drive_root / "Live2D-Suzu" / "live2d-enhanced.exe")
+
+        for env_key in ("LOCALAPPDATA", "PROGRAMFILES", "ProgramFiles(x86)"):
+            base = os.environ.get(env_key)
+            if base:
+                candidates.append(Path(base) / "Live2D Suzu Enhanced" / "live2d-enhanced.exe")
+                candidates.append(Path(base) / "Live2D-Suzu" / "live2d-enhanced.exe")
+
         root = Path(__file__).resolve().parents[1]
         candidates.extend(
             [
+                root / "frontend" / "live2d-enhanced.exe",
+                root / "live2d-enhanced.exe",
+                root / "bin" / "live2d-enhanced.exe",
+                root.parent / "frontend" / "live2d-enhanced.exe",
+                root.parent / "live2d-enhanced.exe",
                 root.parent
                 / "live2d-enhanced-connection-profiles"
                 / "src-tauri"
                 / "target"
                 / "release"
                 / "live2d-enhanced.exe",
-                root / "frontend" / "live2d-enhanced.exe",
-                root / "live2d-enhanced.exe",
-                root / "bin" / "live2d-enhanced.exe",
-                root.parent / "frontend" / "live2d-enhanced.exe",
-                root.parent / "live2d-enhanced.exe",
-                Path(r"D:\Live2D Suzu Enhanced\live2d-enhanced.exe"),
             ]
         )
-        for env_key in ("LOCALAPPDATA", "PROGRAMFILES", "ProgramFiles(x86)"):
-            base = os.environ.get(env_key)
-            if base:
-                candidates.append(Path(base) / "Live2D Suzu Enhanced" / "live2d-enhanced.exe")
-                candidates.append(Path(base) / "Live2D-Suzu" / "live2d-enhanced.exe")
         return candidates
 
     def _resolve_live2d_exe(self) -> Optional[Path]:
@@ -3816,9 +4093,21 @@ class Live2DApplication:
     def _wait_local_health(self, timeout: float = 20.0) -> bool:
         import urllib.request
 
-        prefix = str(getattr(config, "GUI_HTTP_PREFIX", "/gui") or "/gui").rstrip("/") or "/gui"
-        port = int(getattr(config, "GUI_HTTP_PORT", 8097) or 8097)
-        url = f"http://127.0.0.1:{port}{prefix}/health"
+        server = getattr(self, "gui_http_server", None)
+        if server is not None and getattr(server, "port", None):
+            port = int(server.port)
+            prefix = str(getattr(server, "path_prefix", "/gui") or "/gui").rstrip("/")
+            host = str(getattr(server, "host", "127.0.0.1") or "127.0.0.1")
+        else:
+            settings = self._load_runtime_settings() if hasattr(self, "_load_runtime_settings") else {}
+            port = int(settings.get("gui_http_port") or getattr(config, "GUI_HTTP_PORT", 8097) or 8097)
+            prefix = str(settings.get("gui_http_prefix") or getattr(config, "GUI_HTTP_PREFIX", "/gui") or "/gui").rstrip("/")
+            host = str(settings.get("gui_http_host") or "127.0.0.1")
+
+        if host in {"0.0.0.0", "::", ""}:
+            host = "127.0.0.1"
+        url = f"http://{host}:{port}{prefix}/health"
+
         opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
         deadline = time.time() + timeout
         while time.time() < deadline:
@@ -3827,7 +4116,7 @@ class Live2DApplication:
                     if 200 <= int(response.status) < 300:
                         return True
             except Exception:
-                time.sleep(0.3)
+                time.sleep(0.2)
         return False
 
     def start_live2d_renderer(self, force: bool = False) -> None:
@@ -3858,7 +4147,9 @@ class Live2DApplication:
             exe = self._resolve_live2d_exe()
             if exe is None:
                 if self.logger:
-                    self.logger.warning("Live2D renderer exe not found; skip spawn")
+                    self.logger.info(
+                        "Live2D 渲染器 exe 未找到，跳过桌面角色拉起 (可将 live2d-enhanced.exe 放置于根目录或通过 SUZU_LIVE2D_EXE 指定)"
+                    )
                 return
             env = os.environ.copy()
             env["SUZU_ROLE"] = "renderer"
@@ -3914,7 +4205,7 @@ class Live2DApplication:
         self.start_live2d_renderer(force=False)
 
     def _stop_owned_live2d_renderer(self) -> None:
-        proc = self._live2d_process
+        proc = getattr(self, "_live2d_process", None)
         self._live2d_process = None
         if proc is None or proc.poll() is not None:
             return
@@ -4009,7 +4300,8 @@ class Live2DApplication:
         try:
             self.logger.info("[RoleSync] syncing active character visual on startup")
             if hasattr(self.qt_ui, "sync_active_character_visual"):
-                self.qt_ui.sync_active_character_visual()
+                from PySide6 import QtCore
+                QtCore.QTimer.singleShot(400, self.qt_ui.sync_active_character_visual)
             else:
                 self.sync_active_character_live2d()
         except Exception:

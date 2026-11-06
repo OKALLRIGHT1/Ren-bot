@@ -8,8 +8,7 @@
 - 当前插件以 `plugins/<plugin_name>/config.json + plugin.py` 为标准结构。
 - 插件配置优先在 GUI 的 `设置 -> 插件管理` 中编辑；敏感字段会按 `secret/api_key/token/password` 等字段名遮挡。
 - 新增插件时，先写清楚 `name/trigger/llm_command/aliases/description/type/access_control/settings`；需要自然语言触发时，优先补 `get_capabilities()`。希望进工具推理轮时再补 `get_tool_schema()`。
-- 插件禁止读 `ctx["chat_service"]`（主路径已不注入）。发 QQ 用 `ctx["gateway"]`（或 `resolve_gateway(ctx)`），TTS 用 `ctx["tts"]`，换角/点歌事件用 `ctx["app"]`，知识用 `ctx["knowledge"]`。运行时键：`plugin_manager` / `agent_runtime`。`brain` 仍在。MCP 服务器由 `plugins/mcp_tools` 自己持有。
-- Skill（`skills/SKILL.md`）只是可选提示词注入，不是插件，也没有独立端口。不放 Skill 时插件工具仍然完整。需要执行能力时写 `plugins/`。
+- 插件禁止读 `ctx["chat_service"]`（主路径已不注入）。发 QQ 用 `ctx["gateway"]`（或 `resolve_gateway(ctx)`），TTS 用 `ctx["tts"]`，换角/点歌事件用 `ctx["app"]`，知识用 `ctx["knowledge"]`。运行时键：`plugin_manager` / `agent_runtime`。`brain` 仍在。MCP 服务器由 `plugins/mcp_tools` 自己持有。需要执行能力时写 `plugins/`。
 - QQ 侧插件必须认真设置权限，默认不要允许非主人触发截图、文件、系统控制、代码执行等能力。
 
 ## 1. 当前结构
@@ -96,7 +95,7 @@ def _match_weather_now(self, text, ctx):
 
 - `life_hub`（生活提醒）：记账、提醒、待办、番茄钟、QQ 周期提醒
 - `magic_daily`（日报）：图片日报 + 天气，需填写 ALAPI Token
-- `owner_console`（主人控制台）：`/帮助`、`/重启`（仅主人）、Agent 自检、副脑任务、模型监控
+- `owner_console`（主人控制台）：`/帮助`、`/重启`（仅主人）。Agent 自检、副脑任务、模型监控要打开「显示开发者选项」
 - `vision`（屏幕）：看屏幕/摄像头分析；QQ 里「截图发我」发回主人
 - `desktop_hub`（桌面）：打开信任列表里的软件，以及 CPU/内存/音量/亮度/锁屏
 
@@ -125,9 +124,10 @@ def _match_weather_now(self, text, ctx):
 
 - `qq_draw`：QQ `/画图`，模型来自「模型与路由」的画图用途
 - `qq_music`：QQ 搜歌发语音（和本地音乐播放器分开）
-- `qq_watermark`：QQ `/去水印`，需填解析服务 API Key
+- `qq_watermark`：QQ `/去水印`。解析地址是自己的服务，只留在主程序里，不放进插件市场。
 - `qq_role_switch`：QQ 角色切换
 - `meme_pack`：表情包库
+- `smart_desk`：ESP32-S3 桌面终端（NFC 刷卡、取消/PTT 按键、台灯风扇；环境数据静默注入）
 - 其它娱乐向：`what_to_eat`、`egg_search`、`xinsanguo_voice`
 
 `qq_role_switch` 支持：`/角色列表`、`/角色 当前`、`/角色 角色名`，切换时会同步角色 TTS 和默认服装。

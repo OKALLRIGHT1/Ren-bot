@@ -73,19 +73,15 @@ class StartSettingsPage(QtWidgets.QWidget):
         self._btn_model = QtWidgets.QPushButton("去填聊天模型")
         self._btn_talk = QtWidgets.QPushButton("说「你好」试一下")
         self._btn_talk.setObjectName("primaryAction")
-        self._btn_health = QtWidgets.QPushButton("运行健康")
-        self._btn_health.setToolTip("查看各组件运行健康状态")
-        for btn in (self._btn_character, self._btn_model, self._btn_talk, self._btn_health):
+        for btn in (self._btn_character, self._btn_model, self._btn_talk):
             btn.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
             btn.setFixedHeight(32)
         self._btn_character.clicked.connect(lambda: self._open("character"))
         self._btn_model.clicked.connect(lambda: self._open("llm"))
         self._btn_talk.clicked.connect(self._try_hello)
-        self._btn_health.clicked.connect(self._open_runtime_health)
         actions.addWidget(self._btn_character)
         actions.addWidget(self._btn_model)
         actions.addWidget(self._btn_talk)
-        actions.addWidget(self._btn_health)
         actions.addStretch(1)
         layout.addLayout(actions)
 
@@ -173,14 +169,6 @@ class StartSettingsPage(QtWidgets.QWidget):
         if callable(self._on_open_page):
             self._on_open_page(page_id)
 
-    def _open_runtime_health(self):
-        app = self.main_app
-        if app is not None and hasattr(app, "_on_runtime_health_clicked"):
-            app._on_runtime_health_clicked()
-            return
-        if callable(self._on_open_page):
-            self._on_open_page("runtime_health")
-
     def _browse_exe(self):
         start = (self._exe_edit.text() or "").strip()
         path, _ = QtWidgets.QFileDialog.getOpenFileName(
@@ -218,31 +206,6 @@ class StartSettingsPage(QtWidgets.QWidget):
             callback()
         except Exception as exc:
             QtWidgets.QMessageBox.warning(self, "桌面形象", f"启动失败：{exc}")
-
-    def _start_backend(self):
-        app = self.main_app
-        callback = getattr(app, "on_start_backend_callback", None)
-        if not callable(callback):
-            QtWidgets.QMessageBox.information(
-                self, "启动本机后端", "这个入口还没接上（独立模式外启动的窗口）。"
-            )
-            return
-        try:
-            callback()
-        except Exception as exc:
-            QtWidgets.QMessageBox.warning(self, "启动本机后端", f"没能发起启动：{exc}")
-            return
-
-    def _backend_alive(self) -> bool:
-        app = self.main_app
-        if app is not None and getattr(app, "brain", None) is not None:
-            return True
-        try:
-            from runtime import backend_alive
-
-            return backend_alive(timeout=0.2)
-        except Exception:
-            return False
 
     def _live2d_state(self, fallback: str) -> str:
         app = self.main_app

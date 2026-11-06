@@ -172,3 +172,30 @@ def test_voice_sensor_feed_audio_uses_engine_without_sounddevice(monkeypatch):
     assert engine.chunks == [3]
     sensor.stop()
     assert sensor.running is False
+
+def test_voice_sensor_handles_missing_sounddevice(monkeypatch):
+    from modules.asr import sensor as sensor_mod
+    from modules.asr.sensor import VoiceSensor
+    from modules.asr.config import AsrConfig
+
+    class FakeEngine:
+        name = "fake"
+        ready = True
+        samples_per_read = 1600
+
+        def set_hotwords(self, words):
+            pass
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(sensor_mod, "sd", None)
+    sensor = VoiceSensor(
+        chat_service=object(),
+        config=AsrConfig(),
+        engine=FakeEngine(),
+    )
+    sensor.start(loop=None, capture=True)
+    assert sensor.running is False
+    assert sensor._thread is None
+

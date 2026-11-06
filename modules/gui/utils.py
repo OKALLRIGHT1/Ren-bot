@@ -43,14 +43,6 @@ def resolve_icon(path_str) -> QtGui.QIcon:
             root = Path(__file__).resolve().parent.parent.parent
             p = (root / p).resolve()
 
-    if not p.exists():
-        # 过渡期 assets（图标、头像）仍在 live2d-llm 里
-        from paths import BRAIN_ROOT
-
-        brain_asset = (BRAIN_ROOT / Path(path_str)).resolve()
-        if brain_asset.exists():
-            p = brain_asset
-
     if p.exists():
         icon = QtGui.QIcon(str(p))
         if not icon.isNull():

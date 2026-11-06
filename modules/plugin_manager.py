@@ -38,6 +38,21 @@ DEFAULT_ACCESS_CONTROL = {
 }
 
 
+def coerce_config_bool(value: Any, default: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    if isinstance(value, (int, float)):
+        return bool(value)
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "on", "是"}:
+        return True
+    if text in {"0", "false", "no", "off", "否"}:
+        return False
+    return default
+
+
 def plugin_public_description(plugin: Any) -> str:
     """Description shown to people and to the model. Plugins may hide parts."""
     getter = getattr(plugin, "public_description", None)
@@ -627,6 +642,7 @@ class PluginManager:
                     inst.timeout_sec = (
                         config.get("timeout_sec") or self.default_timeout_sec
                     )
+                inst.self_callable = coerce_config_bool(config.get("self_callable", False))
 
                 if hasattr(inst, "reload_config") and callable(inst.reload_config):
                     try:
@@ -763,6 +779,10 @@ class PluginManager:
             config["llm_commands"] = existing.get("llm_commands")
         if not config.get("direct_command_aliases") and existing.get("direct_command_aliases"):
             config["direct_command_aliases"] = existing.get("direct_command_aliases")
+        if "self_callable" not in config:
+            config["self_callable"] = coerce_config_bool(existing.get("self_callable", False))
+        else:
+            config["self_callable"] = coerce_config_bool(config.get("self_callable"))
         config["access_control"] = self._normalize_access_control(
             config.get("access_control")
         )
@@ -853,6 +873,9 @@ class PluginManager:
             plugin.tool_examples = effective_config.get("tool_examples", [])
             if not isinstance(plugin.tool_examples, list):
                 plugin.tool_examples = [str(plugin.tool_examples)]
+            plugin.self_callable = coerce_config_bool(
+                effective_config.get("self_callable", False)
+            )
 
             # 调用插件的 reload_config 方法（如果存在）
             if hasattr(plugin, "reload_config") and callable(plugin.reload_config):
@@ -1043,16 +1066,22 @@ class PluginManager:
         return self.get_deferred_tool_prompt(invocation_mode=invocation_mode)
 
     def get_deferred_tool_prompt(
-        self, max_tools: int = 18, invocation_mode: str = ""
+        self,
+        max_tools: int = 18,
+        invocation_mode: str = "",
+        allowed_types: Optional[set] = None,
     ) -> str:
+        allowed = {"react"} if allowed_types is None else set(allowed_types)
         rows = []
         seen = set()
         for trigger, plugin in self.plugins.items():
-            p_type = str(getattr(plugin, "type", "react") or "react")
-            if p_type not in {"react", "delegate", "direct"}:
+            if trigger in self.disabled_plugins:
                 continue
             pid = id(plugin)
             if pid in seen:
+                continue
+            schemas = self._schemas_executable_in_pass(plugin, allowed)
+            if not schemas:
                 continue
             seen.add(pid)
             name = str(getattr(plugin, "name", trigger) or trigger).strip()
@@ -1061,22 +1090,27 @@ class PluginManager:
             desc = re.sub(r"\s+", " ", desc).strip()
             if len(desc) > 42:
                 desc = desc[:42] + "…"
-            rows.append(f"- {name}({trigger}): {desc or p_type}")
+            shown = str(schemas[0].get("name") or trigger)
+            rows.append(f"- {shown}: {desc or name}")
             if len(rows) >= max_tools:
                 break
         if not rows:
             return ""
         mode = self._normalize_invocation_mode(invocation_mode)
+        summary_rule = "上面每一行只是名称和摘要，不是参数，也不是步骤。\n"
         if mode in {"dual", "function"}:
             discover = (
-                "当前不直接暴露完整工具参数。若必须用工具，先调用 tool_search。"
-                "不要在闲聊时使用。\n"
+                "当前不直接暴露完整工具参数。若必须用工具，先调用 tool_search。\n"
+                + summary_rule
+                + "问候、情绪、看法不要调用。\n"
             )
         else:
             discover = (
                 "当前不直接暴露完整工具参数。若你判断必须用工具，但本轮没有列出具体命令，先单独输出：\n"
                 "[CMD: tool_search | 你需要的能力或关键词]\n"
-                "系统会返回匹配工具，再继续执行真实工具。不要在闲聊时使用。\n"
+                "系统会返回匹配工具，再继续执行真实工具。\n"
+                + summary_rule
+                + "问候、情绪、看法不要调用。\n"
             )
         return (
             "\n\n【可延迟发现的工具】\n"
@@ -1086,15 +1120,134 @@ class PluginManager:
         )
 
     def should_use_deferred_tool_flow(self, user_text: str) -> bool:
-        text = str(user_text or "").strip().lower()
-        if not text:
+        """Task-shaped text may discover tools. Casual lines do not.
+
+        Direct chat still stays on the plain-chat pass. This flag no longer
+        matches a second keyword list, and it does not by itself leave chat.
+        """
+        from services.chat_support.text_utils import is_casual_chat_text
+
+        text = str(user_text or "").strip()
+        if not text or is_casual_chat_text(text):
             return False
-        keywords = (
-            "查", "搜", "搜索", "联网", "新闻", "金价", "天气", "汇率",
-            "生成", "画", "生图", "图生图", "点歌", "播放", "语音",
-            "打开", "读取", "总结", "链接", "下载", "翻译", "计算", "wiki",
+        return True
+
+    def _allowed_type_set(self, allowed_types: Optional[set]) -> set:
+        return {
+            str(item).strip()
+            for item in (allowed_types or set())
+            if str(item).strip()
+        }
+
+    def _schemas_executable_in_pass(self, plugin: Any, allowed_types: Optional[set]) -> List[Dict[str, Any]]:
+        from services.chat_support.tool_schema import (
+            iter_plugin_tool_schemas,
+            plugin_executable_in_pass,
+            plugin_hidden_from_model_discovery,
         )
-        return any(word in text for word in keywords)
+
+        if plugin is None or plugin_hidden_from_model_discovery(plugin):
+            return []
+        allowed = self._allowed_type_set(allowed_types)
+        fallback = str(
+            getattr(plugin, "llm_command", "")
+            or getattr(plugin, "plugin_trigger", "")
+            or ""
+        ).strip()
+        kept: List[Dict[str, Any]] = []
+        for schema in iter_plugin_tool_schemas(plugin, fallback):
+            name = str(schema.get("name") or fallback).strip()
+            if plugin_executable_in_pass(
+                plugin,
+                allowed_types=allowed,
+                invoked_name=name,
+            ):
+                kept.append(schema)
+        return kept
+
+    def _plugin_for_search_row(self, row: Dict[str, Any]) -> Any:
+        trigger = str(row.get("trigger") or "").strip()
+        command = str(row.get("command") or "").strip()
+        for mapping in (self.plugins, self.react_map, self.delegate_map, self.direct_map):
+            plugin = mapping.get(trigger) or mapping.get(command)
+            if plugin is not None:
+                return plugin
+        return None
+
+    def classify_tool_search(
+        self,
+        query: str,
+        allowed_types: Optional[set] = None,
+        *,
+        invocation_mode: str = "cmd",
+        context: Optional[dict] = None,
+    ) -> Dict[str, Any]:
+        """Split a tool_search hit list into callable schemas and prose."""
+        from services.chat_support.tool_schema import plugin_hidden_from_model_discovery
+
+        allowed = self._allowed_type_set(allowed_types)
+        mode = str(invocation_mode or "cmd").strip().lower()
+        tools: List[Dict[str, Any]] = []
+        commands: List[str] = []
+        callable_lines: List[str] = []
+        uncallable_lines: List[str] = []
+        seen_schema: set = set()
+        for row in self.search_tools(query, context=context):
+            p_type = str(row.get("type") or "react")
+            if allowed and p_type not in allowed:
+                continue
+            plugin = self._plugin_for_search_row(row)
+            if plugin is None or plugin_hidden_from_model_discovery(plugin):
+                continue
+            schemas = self._schemas_executable_in_pass(plugin, allowed)
+            command = str(row.get("command") or row.get("trigger") or "").strip()
+            name = str(row.get("name") or command or row.get("trigger") or "工具")
+            desc = str(row.get("description") or "").replace("\n", " ").strip()
+            if len(desc) > 80:
+                desc = desc[:80] + "…"
+            if schemas:
+                for schema in schemas:
+                    schema_name = str(schema.get("name") or "").strip()
+                    if not schema_name or schema_name in seen_schema:
+                        continue
+                    seen_schema.add(schema_name)
+                    tools.append({"type": "function", "function": schema})
+                    if schema_name not in commands:
+                        commands.append(schema_name)
+                shown = str(schemas[0].get("name") or command)
+                if mode == "function":
+                    callable_lines.append(f"- {name}：function `{shown}`；类型={p_type}；{desc}")
+                else:
+                    example = row.get("example_arg") or "参数"
+                    callable_lines.append(
+                        f"- {name}：命令 [CMD: {command} | {example}]；"
+                        f"function `{shown}`；类型={p_type}；{desc}"
+                    )
+                if command and command not in commands:
+                    commands.append(command)
+                continue
+            uncallable_lines.append(f"- {name}：不能作为函数调用。")
+            if mode == "cmd" and command and command not in commands:
+                commands.append(command)
+        return {
+            "tools": tools,
+            "commands": commands,
+            "callable_lines": callable_lines,
+            "uncallable_lines": uncallable_lines,
+        }
+
+    def tool_search_openai_tools(
+        self,
+        query: str,
+        allowed_types: Optional[set] = None,
+        context: Optional[dict] = None,
+    ) -> List[Dict[str, Any]]:
+        classified = self.classify_tool_search(
+            query,
+            allowed_types,
+            context=context,
+        )
+        return list(classified.get("tools") or [])
 
     def search_tools(
         self, query: str, limit: int = 8, context: Optional[dict] = None
@@ -1498,38 +1651,26 @@ class PluginManager:
         *,
         invocation_mode: str = "cmd",
     ) -> str:
-        matches_rows = [
-            row
-            for row in self.search_tools(query, context=context)
-            if str(row.get("type") or "react") in allowed_types
-        ]
-        if not matches_rows:
+        classified = self.classify_tool_search(
+            query,
+            allowed_types,
+            invocation_mode=invocation_mode,
+            context=context,
+        )
+        lines = list(classified.get("callable_lines") or []) + list(
+            classified.get("uncallable_lines") or []
+        )
+        if not lines:
             self._record_deferred_tool_stat("tool_search", "empty")
             return f"【tool_search 结果】没有找到和“{query}”匹配的工具。"
-        lines = []
-        function_mode = str(invocation_mode or "cmd").strip().lower() == "function"
-        for row in matches_rows:
-            example = row.get("example_arg") or "参数"
-            desc = str(row.get("description") or "").replace("\n", " ").strip()
-            if len(desc) > 80:
-                desc = desc[:80] + "…"
-            command = str(row.get("command") or row.get("trigger") or "")
-            if function_mode:
-                lines.append(
-                    f"- {row.get('name')}：function `{command}`；类型={row.get('type')}；{desc}"
-                )
-            else:
-                lines.append(
-                    f"- {row.get('name')}：命令 [CMD: {command} | {example}]；"
-                    f"function `{command}`；类型={row.get('type')}；{desc}"
-                )
-            self._record_deferred_tool_stat(str(row.get("trigger") or ""), "suggested")
+        for command in classified.get("commands") or []:
+            self._record_deferred_tool_stat(str(command or ""), "suggested")
         self._record_deferred_tool_stat("tool_search", "matched")
-        suffix = (
-            "若需要执行，请下一步调用其中一个真实工具。"
-            if function_mode
-            else "若需要执行，请下一步只输出其中一个真实工具命令。"
-        )
+        mode = str(invocation_mode or "cmd").strip().lower()
+        if mode in {"dual", "function"}:
+            suffix = "有函数的可以下一步直接调用。标成不能作为函数调用的，不要用函数去调。"
+        else:
+            suffix = "若需要执行，请下一步只输出其中一个真实工具命令。"
         return "【tool_search 结果】匹配到这些工具。" + suffix + "\n" + "\n".join(lines)
 
     def _plugin_result_text(self, trigger: str, result: Any) -> Any:
@@ -1898,6 +2039,7 @@ class PluginManager:
                     "author": config.get("author", ""),
                     "access_control": access_control,
                     "access_summary": self._build_access_summary(access_control),
+                    "self_callable": bool(getattr(plugin, "self_callable", False)),
                 }
             )
         return info
@@ -2129,6 +2271,7 @@ class PluginManager:
                 inst.aliases = config.get("aliases", [trigger])
             if not hasattr(inst, "timeout_sec"):
                 inst.timeout_sec = config.get("timeout_sec") or self.default_timeout_sec
+            inst.self_callable = coerce_config_bool(config.get("self_callable", False))
 
             if hasattr(inst, "reload_config") and callable(inst.reload_config):
                 try:

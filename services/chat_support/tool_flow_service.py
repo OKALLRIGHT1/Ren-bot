@@ -57,6 +57,8 @@ class ReactFirstPassResult:
     fc_used: bool = False
     cmd_used: bool = False
     fc_skipped_reason: str = ""
+    sent_tool_names: list[str] = field(default_factory=list)
+    offered_triggers: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -80,6 +82,80 @@ class ToolCommandLoopResult:
     fc_used: bool = False
     cmd_used: bool = False
     fc_skipped_reason: str = ""
+    sent_tool_names: list[str] = field(default_factory=list)
+    offered_triggers: list[str] = field(default_factory=list)
+
+
+_TOOL_SEARCH_CMD_RE = re.compile(
+    r"\[CMD:\s*tool_search\s*(?:[\|／/]\s*|\s+)(.*?)\]",
+    flags=re.IGNORECASE | re.DOTALL,
+)
+
+
+def _remember_tool_names(seen: list[str], tools: Optional[list]) -> None:
+    from services.chat_support.tool_schema import openai_tool_names
+
+    for name in openai_tool_names(tools):
+        if name not in seen:
+            seen.append(name)
+
+
+def _tool_search_queries_from_calls(calls: Sequence[Any]) -> list[str]:
+    queries: list[str] = []
+    for call in calls or []:
+        name = str(getattr(call, "name", "") or "").strip().lower()
+        if name != "tool_search":
+            continue
+        arguments = getattr(call, "arguments", None) or {}
+        query = str(arguments.get("query") or "").strip() if isinstance(arguments, dict) else ""
+        if query and query not in queries:
+            queries.append(query)
+    return queries
+
+
+def _tool_search_queries_from_text(text: str) -> list[str]:
+    queries: list[str] = []
+    for match in _TOOL_SEARCH_CMD_RE.findall(text or ""):
+        query = re.sub(r"\s+", " ", str(match or "")).strip()
+        if query and query not in queries:
+            queries.append(query)
+    return queries
+
+
+def _admit_tool_search_schemas(
+    request_tools: Optional[list],
+    plugin_manager: Any,
+    queries: Sequence[str],
+    allowed_types: set[str],
+    mode: str,
+    ctx: Optional[Dict[str, Any]] = None,
+) -> Optional[list]:
+    """Add schemas for tool_search hits that this pass can actually call."""
+    if mode not in {"dual", "function"} or not queries:
+        return request_tools
+    admit = getattr(plugin_manager, "tool_search_openai_tools", None)
+    if not callable(admit):
+        return request_tools
+    from services.chat_support.tool_schema import TOOL_SEARCH_SCHEMA, merge_openai_tools, openai_tool_names
+
+    extra: list = []
+    for query in queries:
+        try:
+            found = admit(query, set(allowed_types or set()), context=ctx)
+        except TypeError:
+            try:
+                found = admit(query, set(allowed_types or set()))
+            except Exception:
+                found = []
+        except Exception:
+            found = []
+        extra.extend(list(found or []))
+    if not extra:
+        return request_tools
+    merged = merge_openai_tools(request_tools or [], extra)
+    if "tool_search" not in openai_tool_names(merged):
+        merged.append({"type": "function", "function": dict(TOOL_SEARCH_SCHEMA)})
+    return merged
 
 
 async def _call_chat_with_ai(
@@ -365,6 +441,7 @@ async def run_tool_command_loop(
     cmd_used = False
     fc_skipped_reason = ""
     rejected_names: set[str] = set()
+    sent_tool_names: list[str] = []
     mode = str(invocation_mode or "cmd").strip().lower()
     if mode not in {"cmd", "dual", "function"}:
         mode = "cmd"
@@ -391,6 +468,7 @@ async def run_tool_command_loop(
     for index in range(max(1, int(max_iterations or 1))):
         iterations = index + 1
         active_tools = _without_rejected_tools(request_tools, rejected_names)
+        _remember_tool_names(sent_tool_names, active_tools)
         completion = await _call_chat_complete(
             chat_with_ai,
             messages,
@@ -454,6 +532,15 @@ async def run_tool_command_loop(
                 final_reply = _confirmation_pending_text(rows)
                 clean_thought = final_reply
                 break
+            if "tool_search" in {str(item) for item in (used or [])}:
+                request_tools = _admit_tool_search_schemas(
+                    request_tools,
+                    plugin_manager,
+                    _tool_search_queries_from_calls(completion.tool_calls),
+                    set(allowed_types or set()),
+                    mode,
+                    ctx,
+                )
             continue
 
         if mode != "function" and contains_cmd(final_reply):
@@ -535,6 +622,15 @@ async def run_tool_command_loop(
                     ),
                 }
             )
+            if "tool_search" in {str(item) for item in (used or [])}:
+                request_tools = _admit_tool_search_schemas(
+                    request_tools,
+                    plugin_manager,
+                    _tool_search_queries_from_text(final_reply),
+                    set(allowed_types or set()),
+                    mode,
+                    ctx,
+                )
             continue
 
         clean_thought = final_reply.strip()
@@ -552,6 +648,12 @@ async def run_tool_command_loop(
         fc_used=bool(fc_used),
         cmd_used=bool(cmd_used),
         fc_skipped_reason=str(fc_skipped_reason or ""),
+        sent_tool_names=list(sent_tool_names),
+        offered_triggers=[
+            str(item).strip()
+            for item in (tool_triggers or [])
+            if str(item).strip()
+        ],
     )
 
 
@@ -607,6 +709,8 @@ async def run_react_first_pass(
         fc_used=bool(loop_result.fc_used),
         cmd_used=bool(loop_result.cmd_used),
         fc_skipped_reason=str(loop_result.fc_skipped_reason or ""),
+        sent_tool_names=list(loop_result.sent_tool_names or []),
+        offered_triggers=list(loop_result.offered_triggers or []),
     )
 
 

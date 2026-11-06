@@ -9,13 +9,14 @@ import os
 import sys
 import time
 
-# Force standard streams to use UTF-8 encoding on Windows to prevent UnicodeEncodeError with emojis
-if sys.platform.startswith('win'):
-    try:
-        sys.stdout.reconfigure(encoding='utf-8')
-        sys.stderr.reconfigure(encoding='utf-8')
-    except Exception:
-        pass
+# Force standard streams to use UTF-8 encoding on all platforms to prevent UnicodeEncodeError
+try:
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    if hasattr(sys.stderr, "reconfigure"):
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass
 
 import config
 from core.single_instance import SingleInstanceLock
@@ -24,22 +25,23 @@ from core.single_instance import SingleInstanceLock
 ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
 CORE_ALREADY_RUNNING_EXIT_CODE = 101
 
-# 设置Qt插件路径（必须在导入任何Qt模块之前）
-pyside6_path = os.path.join(
-    os.path.dirname(__file__),
-    "..",
-    "..",
-    "envs",
-    "live2d-llm",
-    "lib",
-    "site-packages",
-    "PySide6",
-)
-if not os.path.exists(pyside6_path):
-    # 如果相对路径不行，尝试使用sys.prefix
-    import site
+# 设置Qt插件路径（动态探测当前 Python 环境中的 PySide6）
+pyside6_path = ""
+try:
+    import importlib.util
+    spec = importlib.util.find_spec("PySide6")
+    if spec and spec.origin:
+        pyside6_path = os.path.dirname(spec.origin)
+except Exception:
+    pass
 
-    for site_dir in site.getsitepackages():
+if not pyside6_path or not os.path.exists(pyside6_path):
+    import site
+    try:
+        site_dirs = site.getsitepackages()
+    except Exception:
+        site_dirs = []
+    for site_dir in site_dirs:
         test_path = os.path.join(site_dir, "PySide6")
         if os.path.exists(test_path):
             pyside6_path = test_path
@@ -90,8 +92,8 @@ def main():
                 flush=True,
             )
     except Exception as exc:
-        # 迁移失败不阻断启动：Brain 以全新配置起（token 重生成），
-        # 旧数据原样保留在 brain/data/。
+        # 迁移失败不阻断启动：程序以全新配置起（token 重生成），
+        # 旧数据留在原目录的 data/。
         print(f"⚠️ [首启迁移] 跳过（{exc}）", flush=True)
 
     config.load_custom_models()

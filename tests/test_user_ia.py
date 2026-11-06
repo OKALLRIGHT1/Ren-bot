@@ -28,11 +28,13 @@ def test_visible_pages_hide_developer_items():
     assert "plugins" in normal
     assert "qq" in normal
     assert "providers" not in normal
+    assert "mcp" not in normal
     assert "dependency" not in normal
     assert "status_screen" not in normal
     assert "info_sources" not in normal
     assert full > normal
     assert "providers" in full
+    assert "mcp" in full
     assert "dependency" in full
 
 

@@ -1130,6 +1130,9 @@ class MemoryEditorDialog(QtWidgets.QDialog):
         status = "" if status_text == "全部状态" else status_text
         if status == "active" and hasattr(self.memory_core, "list_current_memory_records"):
             rows = self.memory_core.list_current_memory_records(limit=1000)
+            from services.gui_api.memory_service import merge_conflicted_records
+
+            rows = merge_conflicted_records(self.memory_core, rows, limit=1000)
         else:
             rows = self.memory_core.list_memory_records(
                 status=status,

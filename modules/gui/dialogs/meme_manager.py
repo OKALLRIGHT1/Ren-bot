@@ -33,11 +33,6 @@ class MemeManagerDialog(QtWidgets.QDialog):
         plugin = self._plugin()
         if plugin is not None and hasattr(plugin, "_store_obj"):
             return plugin._store_obj()
-        # 遥控窗远程模式：meme_pack 插件在大脑进程里，走 /gui HTTP。
-        if self.main_app is not None:
-            from modules.gui.remote_meme_store import RemoteMemeStore
-
-            return RemoteMemeStore()
         return None
 
     def _setup_ui(self):

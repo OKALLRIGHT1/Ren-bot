@@ -24,6 +24,10 @@ from plugins.qq_watermark.xdownload import (
 ROOT = Path(__file__).resolve().parents[1]
 
 
+async def _instant_sleep(_delay):
+    return None
+
+
 def _public_dns(monkeypatch):
     def fake_getaddrinfo(host, port, *args, **kwargs):
         return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("1.1.1.1", 0))]
@@ -80,7 +84,54 @@ def test_error_messages_hide_internals():
     assert "super-secret" not in text
     assert "超时" in user_message_for_error(XDownloadError("timeout", "timeout"))
     assert "连不上" in user_message_for_error(XDownloadError("network", "network"))
+    assert "下载超时" in user_message_for_error(XDownloadError("download_timeout", "timeout"))
+    assert "媒体下载失败" in user_message_for_error(XDownloadError("download_network", "network"))
     assert "平台解析失败" in user_message_for_error(XDownloadError("upstream", "stack", status=502))
+
+
+@pytest.mark.asyncio
+async def test_transient_retry_recovers_then_gives_up(monkeypatch):
+    from plugins.qq_watermark import xdownload
+
+    monkeypatch.setattr(xdownload.asyncio, "sleep", _instant_sleep)
+    hits = {"n": 0}
+
+    async def flaky():
+        hits["n"] += 1
+        if hits["n"] < 2:
+            raise XDownloadError("download_network", "ClientConnectorError: reset")
+        return "ok"
+
+    assert await xdownload.with_transient_retry(flaky) == "ok"
+    assert hits["n"] == 2
+
+    hits["n"] = 0
+
+    async def always_down():
+        hits["n"] += 1
+        raise XDownloadError("network", "ClientConnectorError: reset")
+
+    with pytest.raises(XDownloadError) as failed:
+        await xdownload.with_transient_retry(always_down)
+    assert failed.value.code == "network"
+    assert hits["n"] == 2
+
+
+@pytest.mark.asyncio
+async def test_transient_retry_skips_auth_errors(monkeypatch):
+    from plugins.qq_watermark import xdownload
+
+    monkeypatch.setattr(xdownload.asyncio, "sleep", _instant_sleep)
+    hits = {"n": 0}
+
+    async def unauthorized():
+        hits["n"] += 1
+        raise XDownloadError("auth", "unauthorized", status=401)
+
+    with pytest.raises(XDownloadError) as failed:
+        await xdownload.with_transient_retry(unauthorized)
+    assert failed.value.code == "auth"
+    assert hits["n"] == 1
 
 
 @pytest.mark.asyncio
@@ -95,8 +146,73 @@ async def test_parse_session_uses_happy_eyeballs():
         if delay is None:
             delay = getattr(session.connector, "happy_eyeballs_delay", None)
         assert delay is not None
+        force_close = getattr(session.connector, "_force_close", None)
+        if force_close is None:
+            force_close = getattr(session.connector, "force_close", None)
+        assert force_close is True
     finally:
         await session.close()
+
+
+@pytest.mark.asyncio
+async def test_execute_reparses_after_truncated_download(monkeypatch, tmp_path):
+    from types import SimpleNamespace
+
+    plugin = Plugin()
+    plugin._settings["api_key"] = "x"
+    monkeypatch.setattr("plugins.qq_watermark.plugin.asyncio.sleep", _instant_sleep)
+    dirs = {"n": 0}
+
+    def fake_work_dir():
+        dirs["n"] += 1
+        path = tmp_path / str(dirs["n"])
+        path.mkdir()
+        return path
+
+    monkeypatch.setattr("plugins.qq_watermark.plugin._work_dir", fake_work_dir)
+    monkeypatch.setattr("plugins.qq_watermark.plugin._cleanup_dir", lambda path: None)
+    hits = {"parse": 0, "deliver": 0}
+
+    async def fake_parse(_url):
+        hits["parse"] += 1
+        return SimpleNamespace(media_type="image", title="t")
+
+    async def fake_deliver(_client, _parsed, _url, _context, _work):
+        hits["deliver"] += 1
+        if hits["deliver"] == 1:
+            raise XDownloadError(
+                "download_network",
+                "ClientPayloadError: Response payload is not completed",
+            )
+        return ""
+
+    plugin._client = lambda: SimpleNamespace(parse=fake_parse)
+    plugin._deliver = fake_deliver
+    result = await plugin._execute("https://xhslink.cn/o/abc", {"source": "qq_gateway"})
+    assert result == ""
+    assert hits["parse"] == 2
+    assert hits["deliver"] == 2
+
+
+@pytest.mark.asyncio
+async def test_execute_does_not_reparse_auth_errors(monkeypatch, tmp_path):
+    from types import SimpleNamespace
+
+    plugin = Plugin()
+    plugin._settings["api_key"] = "x"
+    monkeypatch.setattr("plugins.qq_watermark.plugin.asyncio.sleep", _instant_sleep)
+    monkeypatch.setattr("plugins.qq_watermark.plugin._work_dir", lambda: tmp_path)
+    monkeypatch.setattr("plugins.qq_watermark.plugin._cleanup_dir", lambda path: None)
+    hits = {"n": 0}
+
+    async def fake_parse(_url):
+        hits["n"] += 1
+        raise XDownloadError("auth", "unauthorized", status=401)
+
+    plugin._client = lambda: SimpleNamespace(parse=fake_parse)
+    result = await plugin._execute("https://xhslink.cn/o/abc", {"source": "qq_gateway"})
+    assert "密钥" in result or "鉴权" in result
+    assert hits["n"] == 1
 
 
 def test_interpret_video_and_gallery():
@@ -246,4 +362,4 @@ def test_config_secret_is_not_committed():
     secret = config["settings"]["api_key"]
     assert secret["type"] == "secret"
     assert secret["default"] == ""
-    assert config["settings"]["base_url"]["default"].rstrip("/") == "https://dl.example.com"
+    assert config["settings"]["base_url"]["default"].rstrip("/") == "https://dl.tomori.de5.net"

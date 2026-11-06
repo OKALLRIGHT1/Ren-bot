@@ -215,6 +215,44 @@ def sanitize_sensor_open_count_reply(text: str) -> tuple[str, list[str]]:
     return cleaned, hits
 
 
+_BARE_EMO_TAG_RE = re.compile(
+    r"</?(?:happy|sad|angry|shy|flustered|confused|think|neutral)\b[^>]*>",
+    re.IGNORECASE,
+)
+_PROMPT_DRAFT_MARKERS = (
+    "let me ",
+    "this could work",
+    "count character",
+    "too clingy",
+    "maybe referencing",
+    "we need to",
+    "your task",
+    "up to 20 character",
+    "up to 36 character",
+    "using the ",
+    "or:",
+    "直接对他说话进行吐槽",
+    "结合用户屏幕上的主要内容",
+)
+
+
+def strip_bare_emotion_tags(text: str) -> str:
+    """去掉模型随口写出的 <neutral> 这类简写，避免被念出来。"""
+    return _BARE_EMO_TAG_RE.sub("", str(text or "")).strip()
+
+
+def looks_like_prompt_draft(text: str) -> bool:
+    """屏幕吐槽如果把英文草稿或提示要求念出来，就整句丢掉。"""
+    raw = str(text or "").strip()
+    if not raw:
+        return False
+    lowered = raw.lower()
+    if any(marker in lowered for marker in _PROMPT_DRAFT_MARKERS):
+        return True
+    letters = re.findall(r"[A-Za-z]", raw)
+    return len(letters) >= 40
+
+
 def looks_like_sensor_template_reply(
     text: str, *, clean_text_fn: Callable[[str], str] = text_utils.clean_text_for_tts
 ) -> bool:

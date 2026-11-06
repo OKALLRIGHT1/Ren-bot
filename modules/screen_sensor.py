@@ -1786,6 +1786,8 @@ class ScreenSensor:
                 }
 
                 store.save_daily_screen_stats(stats_date, data_to_save)
+                if hasattr(store, "compact_activity_history_if_due"):
+                    store.compact_activity_history_if_due()
         except Exception as e:
             self.logger.error(f"❌ 屏幕数据同步 DB 失败: {e}")
 

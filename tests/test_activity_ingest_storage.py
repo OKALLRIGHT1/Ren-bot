@@ -159,6 +159,76 @@ def test_activity_sample_updates_latest_without_growing_history():
             _close_store(store)
 
 
+def test_compact_activity_history_keeps_today_switches_and_daily_summary(tmp_path):
+    store = _new_store(tmp_path)
+    try:
+        store.add_activity_event(
+            {
+                "event_id": "old-switch",
+                "ts": "2026-10-19T12:00:00+00:00",
+                "kind": "foreground_changed",
+                "source": "live2d-tauri",
+                "app": {"name": "Code.exe"},
+            }
+        )
+        store.add_activity_event(
+            {
+                "event_id": "today-switch",
+                "ts": "2026-10-20T01:00:00+00:00",
+                "kind": "foreground_changed",
+                "source": "live2d-tauri",
+                "app": {"name": "Chrome.exe"},
+            }
+        )
+        store.add_activity_event(
+            {
+                "event_id": "old-alert",
+                "ts": "2026-10-19T10:00:00+00:00",
+                "kind": "sedentary_alert",
+                "source": "live2d-tauri",
+                "app": {"name": "Code.exe"},
+            }
+        )
+        store.save_daily_screen_stats(
+            "2026-10-19",
+            {
+                "date": "2026-10-19",
+                "summary_text": "昨天主要在写代码",
+                "counts": {"Code.exe": 3},
+                "durations": {"Code.exe": 3600},
+                "segments": [{"app": "Code.exe"}],
+                "observations": ["切到浏览器"],
+                "cache": {"k": ["Code.exe", "work"]},
+                "diary_done": True,
+            },
+        )
+        store.save_daily_screen_stats(
+            "2026-10-20",
+            {
+                "date": "2026-10-20",
+                "summary_text": "今天",
+                "segments": [{"app": "Chrome.exe"}],
+            },
+        )
+
+        result = store.compact_activity_history(today="2026-10-20")
+
+        assert result["deleted_events"] == 1
+        assert result["slimmed_days"] == 1
+        kept = {row["event_id"] for row in store.list_activity_events(limit=20)}
+        assert kept == {"today-switch", "old-alert"}
+        yesterday = store.get_daily_screen_stats("2026-10-19")
+        assert yesterday["summary_text"] == "昨天主要在写代码"
+        assert yesterday["counts"]["Code.exe"] == 3
+        assert yesterday["diary_done"] is True
+        assert "segments" not in yesterday
+        assert "observations" not in yesterday
+        assert "cache" not in yesterday
+        assert "segments" in store.get_daily_screen_stats("2026-10-20")
+    finally:
+        _close_store(store)
+
+
 def test_activity_ingest_keeps_meaningful_events_in_history_and_latest():
     with tempfile.TemporaryDirectory(prefix="activity_events_") as tmp:
         store = _new_store(Path(tmp))

@@ -14,16 +14,19 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-import queue
 import re
 import threading
 import time
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Dict, List, Optional, Sequence
 
 
 logger = logging.getLogger(__name__)
+
+_MAX_ATTEMPTS = 5
+_BACKOFF_CAP_SEC = 60.0
+_FAILED_RETENTION_DAYS = 7
 
 
 def _content_fingerprint(text: str) -> str:
@@ -66,6 +69,9 @@ LLMCall = Callable[..., str]
 
 ALLOWED_KINDS = frozenset({"preference", "fact", "rule", "profile"})
 WEEKDAY_TERMS = ("周一", "周二", "周三", "周四", "周五", "周六", "周日")
+_ENTITY_STOPWORDS = frozenset(
+    {"这个", "那个", "什么", "怎么", "我们", "你们", "他们", "自己", "用户", "主人"}
+)
 EPHEMERAL_MARKERS = (
     "哈哈",
     "好的",
@@ -112,6 +118,26 @@ class ExtractedFact:
     supersede_keys: tuple[str, ...] = ()
     category_override: str = ""
     reason: str = ""
+    fact_id: str = ""
+    cardinality: str = "single"
+    stability: str = "stable"
+
+
+@dataclass(frozen=True)
+class ExtractedRelation:
+    subject: str
+    predicate: str
+    object_name: str
+    fact_id: str
+    confidence: float = 0.8
+
+
+@dataclass(frozen=True)
+class Extraction:
+    facts: list[ExtractedFact] = field(default_factory=list)
+    entities: list[str] = field(default_factory=list)
+    relations: list[ExtractedRelation] = field(default_factory=list)
+    summary: str = ""
 
 
 @dataclass(frozen=True)
@@ -125,7 +151,7 @@ class WritebackResult:
 
 
 class MemoryWritebackService:
-    """Async long-term memory writeback worker (thread queue, non-blocking chat)."""
+    """Async long-term memory writeback. Chat inserts a SQLite row and returns."""
 
     def __init__(
         self,
@@ -144,6 +170,7 @@ class MemoryWritebackService:
         self.chat_summary_enabled = self._setting_bool(
             "memory_writeback_chat_summary_enabled", True
         )
+        # Kept so old settings still parse. Durability no longer drops on a full queue.
         self.queue_maxsize = self._setting_int(
             "memory_writeback_queue_maxsize", 256, minimum=8, maximum=2000
         )
@@ -174,9 +201,7 @@ class MemoryWritebackService:
             self.settings.get("memory_writeback_task_type") or "gatekeeper"
         ).strip() or "gatekeeper"
 
-        self._queue: queue.Queue[Optional[WritebackJob]] = queue.Queue(
-            maxsize=self.queue_maxsize
-        )
+        self._wake = threading.Event()
         self._worker: Optional[threading.Thread] = None
         self._stopping = False
         self._start_lock = threading.Lock()
@@ -192,6 +217,7 @@ class MemoryWritebackService:
             "facts_written": 0,
             "summaries_written": 0,
             "errors": 0,
+            "failed_explicit": 0,
         }
 
     # ------------------------------------------------------------------ config
@@ -237,29 +263,29 @@ class MemoryWritebackService:
 
     def stop(self, *, timeout: float = 2.0) -> None:
         self._stopping = True
-        try:
-            self._queue.put_nowait(None)
-        except queue.Full:
-            pass
+        self._wake.set()
         worker = self._worker
         if worker is not None and worker.is_alive():
             worker.join(timeout=timeout)
-        self._worker = None
+        if worker is None or not worker.is_alive():
+            self._worker = None
 
     def stats(self) -> dict[str, int]:
         with self._stats_lock:
             return dict(self._stats)
 
     def flush(self, *, timeout: float = 5.0) -> bool:
-        """Wait until the queue is drained (tests / graceful shutdown helpers)."""
+        """Wait until no pending or running writeback row remains."""
         if self.inline:
             return True
+        self._wake.set()
         deadline = time.time() + max(0.05, float(timeout))
         while time.time() < deadline:
-            if self._queue.unfinished_tasks == 0:
+            if not self._has_open_jobs():
                 return True
+            self._wake.set()
             time.sleep(0.02)
-        return self._queue.unfinished_tasks == 0
+        return not self._has_open_jobs()
 
     def _bump(self, key: str, amount: int = 1) -> None:
         with self._stats_lock:
@@ -346,99 +372,177 @@ class MemoryWritebackService:
     def enqueue(self, job: WritebackJob) -> bool:
         if not self.enabled:
             return False
-        self.start()
         fingerprint = _content_fingerprint(job.trigger_text)
         fingerprint_key = f"{job.session_id}:{job.person_id}:{fingerprint}"
         with self._stats_lock:
-            if fingerprint and fingerprint_key in self._seen_fingerprints:
-                duplicate = True
-            else:
-                duplicate = False
-                if fingerprint:
-                    self._seen_fingerprints.add(fingerprint_key)
-                    if len(self._seen_fingerprints) > 500:
-                        self._seen_fingerprints = set(list(self._seen_fingerprints)[-300:])
+            duplicate = bool(fingerprint and fingerprint_key in self._seen_fingerprints)
         if duplicate:
             self._bump("dropped")
             return False
-        if self.inline:
-            self._bump("enqueued")
-            try:
-                self.process_job(job)
-            except Exception as exc:
-                self._bump("errors")
-                logger.warning("inline memory writeback failed: %s", exc, exc_info=True)
-                return False
-            self._bump("processed")
-            return True
-        try:
-            self._queue.put_nowait(job)
-        except queue.Full:
-            if self._spill_job(job):
-                self._bump("spilled")
-                return True
+        row_id = self._insert_job(job, status="running" if self.inline else "pending")
+        if row_id is None:
             self._bump("dropped")
-            logger.warning("memory writeback queue full; dropped job reason=%s", job.reason)
             return False
+        if fingerprint:
+            with self._stats_lock:
+                self._seen_fingerprints.add(fingerprint_key)
+                if len(self._seen_fingerprints) > 500:
+                    self._seen_fingerprints = set(list(self._seen_fingerprints)[-300:])
         self._bump("enqueued")
+        if self.inline:
+            return self._finish_inline(row_id, job)
+        self.start()
+        self._wake.set()
         return True
 
-    def _spill_job(self, job: WritebackJob) -> bool:
-        store = getattr(self.memory_core, "store", None)
-        spill = getattr(store, "spill_writeback_job", None)
-        if not callable(spill):
+    def _store(self) -> Any:
+        return getattr(self.memory_core, "store", None)
+
+    def _now_iso(self) -> str:
+        return datetime.now(timezone.utc).isoformat()
+
+    def _due_after(self, seconds: float) -> str:
+        current = datetime.fromisoformat(self._now_iso())
+        if current.tzinfo is None:
+            current = current.replace(tzinfo=timezone.utc)
+        return (current + timedelta(seconds=seconds)).isoformat()
+
+    def _insert_job(self, job: WritebackJob, *, status: str) -> Optional[int]:
+        store = self._store()
+        insert = getattr(store, "insert_writeback_job", None)
+        if not callable(insert):
+            logger.warning("memory writeback has no durable store")
+            return None
+        try:
+            payload = json.loads(
+                json.dumps(_job_to_payload(job), ensure_ascii=False, default=str)
+            )
+            return int(insert(payload, status=status))
+        except Exception as exc:
+            logger.warning("memory writeback insert failed: %s", exc)
+            return None
+
+    def _has_open_jobs(self) -> bool:
+        store = self._store()
+        probe = getattr(store, "has_open_writeback_jobs", None)
+        if not callable(probe):
             return False
         try:
-            spill(_job_to_payload(job))
-            return True
+            return bool(probe())
         except Exception as exc:
-            logger.warning("memory writeback spill failed: %s", exc)
+            logger.warning("memory writeback open-job check failed: %s", exc)
             return False
 
-    def drain_spilled_jobs(self, limit: int = 4) -> int:
-        store = getattr(self.memory_core, "store", None)
-        pop = getattr(store, "pop_writeback_jobs", None)
-        if not callable(pop):
-            return 0
+    def _recover(self) -> None:
+        store = self._store()
+        recover = getattr(store, "recover_writeback_jobs", None)
+        if not callable(recover):
+            return
+        cutoff = datetime.now(timezone.utc) - timedelta(days=_FAILED_RETENTION_DAYS)
         try:
-            payloads = list(pop(limit=limit) or [])
+            recover(failed_before_iso=cutoff.isoformat())
         except Exception as exc:
-            logger.warning("memory writeback spill read failed: %s", exc)
-            return 0
-        drained = 0
-        for payload in payloads:
-            job = _job_from_payload(payload)
-            if job is None:
-                continue
-            try:
-                self._queue.put_nowait(job)
-                drained += 1
-            except queue.Full:
-                spill = getattr(store, "spill_writeback_job", None)
-                if callable(spill):
-                    spill(payload)
-                break
-        return drained
+            logger.warning("memory writeback recover failed: %s", exc)
+
+    def _finish_inline(self, row_id: int, job: WritebackJob) -> bool:
+        try:
+            self.process_job(job)
+        except Exception as exc:
+            self._bump("errors")
+            logger.warning("inline memory writeback failed: %s", exc, exc_info=True)
+            self._record_failure(row_id, 0, job, exc)
+            return False
+        self._delete_job(row_id)
+        self._bump("processed")
+        return True
+
+    def _delete_job(self, row_id: int) -> None:
+        store = self._store()
+        delete = getattr(store, "delete_writeback_job", None)
+        if not callable(delete):
+            return
+        try:
+            delete(row_id)
+        except Exception as exc:
+            logger.warning("memory writeback delete failed: %s", exc)
+
+    def _record_failure(
+        self, row_id: int, attempts: int, job: WritebackJob, exc: BaseException
+    ) -> None:
+        store = self._store()
+        reschedule = getattr(store, "reschedule_writeback_job", None)
+        if not callable(reschedule):
+            return
+        next_attempts = int(attempts) + 1
+        message = str(exc or "").strip() or exc.__class__.__name__
+        if next_attempts >= _MAX_ATTEMPTS:
+            status = "failed"
+            due_at = ""
+            if job.reason == "explicit_user":
+                self._bump("failed_explicit")
+                logger.warning(
+                    "memory writeback gave up on explicit_user after %s attempts: %s",
+                    next_attempts,
+                    str(job.trigger_text or "")[:80],
+                )
+        else:
+            status = "pending"
+            delay = min(_BACKOFF_CAP_SEC, float(2 ** next_attempts))
+            due_at = self._due_after(delay)
+        try:
+            reschedule(
+                row_id,
+                status=status,
+                attempts=next_attempts,
+                due_at=due_at,
+                last_error=message,
+            )
+        except Exception as write_exc:
+            logger.warning("memory writeback reschedule failed: %s", write_exc)
+
+    def _process_one_due_job(self) -> bool:
+        store = self._store()
+        claim = getattr(store, "claim_due_writeback_job", None)
+        if not callable(claim):
+            return False
+        try:
+            claimed = claim(self._now_iso())
+        except Exception as exc:
+            logger.warning("memory writeback claim failed: %s", exc)
+            return False
+        if not claimed:
+            return False
+        row_id = int(claimed.get("id") or 0)
+        attempts = int(claimed.get("attempts") or 0)
+        job = _job_from_payload(dict(claimed.get("payload") or {}))
+        if job is None or row_id <= 0:
+            if row_id > 0:
+                self._delete_job(row_id)
+            return True
+        try:
+            self.process_job(job)
+        except Exception as exc:
+            self._bump("errors")
+            logger.warning("memory writeback job failed: %s", exc, exc_info=True)
+            self._record_failure(row_id, attempts, job, exc)
+        else:
+            self._delete_job(row_id)
+        self._bump("processed")
+        return True
 
     # ------------------------------------------------------------------ worker
     def _worker_loop(self) -> None:
+        self._recover()
         while not self._stopping:
+            worked = False
             try:
-                job = self._queue.get(timeout=0.5)
-            except queue.Empty:
-                self.drain_spilled_jobs(limit=4)
-                continue
-            if job is None:
-                self._queue.task_done()
-                break
-            try:
-                self.process_job(job)
+                worked = self._process_one_due_job()
             except Exception as exc:
-                self._bump("errors")
-                logger.warning("memory writeback job failed: %s", exc, exc_info=True)
-            finally:
-                self._queue.task_done()
-                self._bump("processed")
+                logger.warning("memory writeback worker step failed: %s", exc, exc_info=True)
+            if worked:
+                continue
+            self._wake.wait(timeout=0.5)
+            self._wake.clear()
 
     def process_job(self, job: WritebackJob) -> WritebackResult:
         """Process one job synchronously (used by worker and tests)."""
@@ -684,7 +788,7 @@ class MemoryWritebackService:
             if str(m.get("id") or "").strip()
         }
         user_id_set = set(user_ids)
-        facts = self._extract_person_facts(
+        extraction = self._extract_person_facts(
             person_id=job.person_id,
             user_evidence=user_block,
             context_block=context_block,
@@ -692,11 +796,16 @@ class MemoryWritebackService:
             allowed_evidence_ids=allowed_ids,
             preferred_user_evidence_ids=user_id_set,
         )
-        if not facts:
+        facts = extraction.facts
+        if not facts and not extraction.relations and not extraction.summary:
+            self._note_checkpoint(job)
             return WritebackResult(job_reason=job.reason, detail="no_facts")
 
         source_map = {str(m.get("id") or ""): m for m in messages if m.get("id")}
         written_ids: list[str] = []
+        written_facts: dict[str, ExtractedFact] = {}
+        fact_records: dict[str, str] = {}
+        written_pairs: list[tuple[ExtractedFact, str]] = []
         skipped = 0
         for fact in facts[: self.max_facts_per_job]:
             # Hard gate: at least one evidence must be user-supported when user
@@ -710,8 +819,26 @@ class MemoryWritebackService:
             record_id = self._upsert_fact(job, fact, source_map)
             if record_id:
                 written_ids.append(record_id)
+                written_pairs.append((fact, record_id))
+                if fact.fact_id:
+                    written_facts[fact.fact_id] = fact
+                    fact_records[fact.fact_id] = record_id
+                self._store_paragraph(job, fact.content, record_id)
             else:
                 skipped += 1
+        relation_ids = self._apply_world(
+            job,
+            extraction,
+            written_facts=written_facts,
+            fact_records=fact_records,
+            written_pairs=written_pairs,
+        )
+        written_ids.extend(relation_ids)
+        if extraction.summary:
+            summary_id = self._store_summary(job, extraction.summary)
+            if summary_id:
+                written_ids.append(summary_id)
+        self._note_checkpoint(job)
         self._bump("facts_written", len(written_ids))
         return WritebackResult(
             job_reason=job.reason,
@@ -730,27 +857,30 @@ class MemoryWritebackService:
         assistant_text: str,
         allowed_evidence_ids: set[str],
         preferred_user_evidence_ids: Optional[set[str]] = None,
-    ) -> list[ExtractedFact]:
+    ) -> Extraction:
         preferred_user_evidence_ids = set(preferred_user_evidence_ids or set())
         prompt = (
-            "你是长期记忆写回器。只从目标用户原始发言中提取可长期保存的稳定事实。\n"
-            "事实值必须能被用户原话直接支持；邻近上下文只用于补全省略/指代；"
-            "机器人回复不能单独作为事实来源。\n"
-            "用户纠正助手错误时，以用户最新纠正为准，并标记 is_correction=true，"
-            "并在 supersede_keys 中放入被纠正的旧 key（若 key 相同可留空）。\n"
-            "不要提取：闲聊客套、玩笑、猜测、反问、一次性临时安排、机器人情绪/承诺、"
-            "没有用户确认的推测、把问句本身当事实。\n"
-            "evidence_ids 必须引用「目标用户原始发言证据」里的 id，至少一条用户消息 id。\n"
-            "没有可写事实时输出 {\"items\":[]}。\n"
-            "只有用户原话明确给出起点或终点时才填 valid_from / valid_until；"
-            "稳定事实和习惯不要填，也不要输出 valid_days。\n"
+            "你是长期记忆写回器。只根据目标用户原话，抽出以后还有用的增量。\n"
+            "邻近上下文只用于还原「这个」「那个」这类指代。还原不了的关系不要写。\n"
+            "机器人回复不能单独作为事实来源。同群出现不推断人际关系。\n"
+            "临时安排不要写成长期偏好、身份或健康状况。更正只写最终状态，"
+            "并标记 is_correction=true。\n"
+            "不要提取闲聊、客套、玩笑、猜测、问句本身、只有机器人说过的话。\n"
+            "目录里的人必须沿用给定 person_id，不要把昵称并成另一个人。"
+            "目录外的真实对象保留原名。\n"
+            "relations 里的每条边必须给出支撑它的 fact_id。两个名字一起出现不等于有关系。\n"
+            "evidence_ids 必须引用下面以 id= 开头的用户消息。\n"
+            "没有增量时返回空的 summary、entities、relations、facts。\n"
+            "cardinality：称呼、星期、唯一身份用 single；喜好和可以并存的关系用 set。\n"
             "严格只输出 JSON：\n"
-            '{"items":[{"kind":"preference|fact|rule|profile","key":"稳定英文或点分键",'
-            '"content":"简短中文事实陈述","confidence":0.0,"valid_from":"",'
-            '"valid_until":"","evidence_ids":["用户消息id"],"is_correction":false,'
-            '"supersede_keys":[],"category_override":"","reason":""}]}\n'
-            "key 示例：preferred_address, habit.meeting_weekday, likes.food, "
-            "dislikes.xxx, status.recent, interaction.rule\n"
+            '{"summary":"","entities":["名字"],'
+            '"relations":[{"subject":"","predicate":"","object":"","fact_id":"f1"}],'
+            '"facts":[{"fact_id":"f1","kind":"preference|fact|rule|profile",'
+            '"key":"稳定英文或点分键","content":"简短中文","confidence":0.0,'
+            '"cardinality":"single|set","stability":"stable|temporal",'
+            '"valid_from":"","valid_until":"","evidence_ids":["用户消息id"],'
+            '"is_correction":false,"supersede_keys":[],"category_override":"","reason":""}]}\n'
+            "key 示例：preferred_address, habit.meeting_weekday, likes.food。\n"
             "habit/周几类事实 category_override 填 habits。\n\n"
             f"目标人物 person_id={person_id}\n"
             f"目标用户原始发言证据：\n{user_evidence}\n\n"
@@ -765,11 +895,15 @@ class MemoryWritebackService:
             )
         except Exception as exc:
             logger.warning("memory writeback extract failed: %s", exc)
-            return []
+            return Extraction()
         payload = self._parse_json_object(raw)
-        raw_items = payload.get("items") if isinstance(payload, dict) else None
+        if not isinstance(payload, dict):
+            return Extraction()
+        raw_items = payload.get("facts")
         if not isinstance(raw_items, list):
-            return []
+            raw_items = payload.get("items")
+        if not isinstance(raw_items, list):
+            raw_items = []
 
         facts: list[ExtractedFact] = []
         seen_keys: set[str] = set()
@@ -837,6 +971,12 @@ class MemoryWritebackService:
             if dedupe in seen_keys:
                 continue
             seen_keys.add(dedupe)
+            cardinality = str(item.get("cardinality") or "single").strip().lower()
+            if cardinality not in {"single", "set"}:
+                cardinality = "single"
+            stability = str(item.get("stability") or "stable").strip().lower()
+            if stability not in {"stable", "temporal"}:
+                stability = "stable"
             facts.append(
                 ExtractedFact(
                     kind=kind,
@@ -850,9 +990,54 @@ class MemoryWritebackService:
                     supersede_keys=supersede_keys,
                     category_override=category,
                     reason=reason_text[:200],
+                    fact_id=str(item.get("fact_id") or "").strip(),
+                    cardinality=cardinality,
+                    stability=stability,
                 )
             )
-        return facts
+        entities = []
+        raw_entities = payload.get("entities")
+        if isinstance(raw_entities, list):
+            for name in raw_entities:
+                clean_name = self._clean_text(name)[:40]
+                if len(clean_name) >= 2 and clean_name not in _ENTITY_STOPWORDS:
+                    entities.append(clean_name)
+        relations: list[ExtractedRelation] = []
+        raw_relations = payload.get("relations") if isinstance(payload, dict) else None
+        if isinstance(raw_relations, list):
+            known_facts = {fact.fact_id for fact in facts if fact.fact_id}
+            for item in raw_relations:
+                if not isinstance(item, dict):
+                    continue
+                fact_id = str(item.get("fact_id") or "").strip()
+                if not fact_id or fact_id not in known_facts:
+                    continue
+                subject = self._clean_text(item.get("subject"))[:40]
+                predicate = self._clean_text(item.get("predicate"))[:20]
+                object_name = self._clean_text(item.get("object"))[:40]
+                if (
+                    len(subject) < 2
+                    or len(object_name) < 2
+                    or not predicate
+                    or subject in _ENTITY_STOPWORDS
+                    or object_name in _ENTITY_STOPWORDS
+                ):
+                    continue
+                relations.append(
+                    ExtractedRelation(
+                        subject=subject,
+                        predicate=predicate,
+                        object_name=object_name,
+                        fact_id=fact_id,
+                    )
+                )
+        summary = self._clean_text(payload.get("summary") if isinstance(payload, dict) else "")[:300]
+        return Extraction(
+            facts=facts,
+            entities=entities,
+            relations=relations,
+            summary=summary,
+        )
 
     def _upsert_fact(
         self,
@@ -865,12 +1050,27 @@ class MemoryWritebackService:
         ).hexdigest()[:20]
         source_id = f"person_fact:{job.person_id}:{fingerprint}"
 
+        key = fact.key
+        status = "active"
+        supersede_keys = fact.supersede_keys
+        if fact.cardinality == "set" and not fact.is_correction:
+            digest = hashlib.sha256(self._normalize_key(fact.content).encode("utf-8")).hexdigest()[:8]
+            key = f"{fact.key}.{digest}"
+        elif not fact.is_correction:
+            finder = getattr(getattr(self.memory_core, "repository", None), "find_active_persona", None)
+            existing = finder(subject_id=job.person_id, kind=fact.kind, key=fact.key) if callable(finder) else None
+            if existing and str(existing.get("content") or "").strip() != fact.content:
+                status = "conflicted"
+                supersede_keys = ()
         metadata: dict[str, Any] = {
             "writeback_source": "memory_writeback",
             "writeback_reason": job.reason,
             "evidence_source": "user_supported",
             "is_correction": bool(fact.is_correction),
             "extract_reason": fact.reason,
+            "cardinality": fact.cardinality,
+            "stability": fact.stability,
+            "fact_key": fact.key,
         }
         if fact.category_override:
             metadata["category_override"] = fact.category_override
@@ -901,7 +1101,7 @@ class MemoryWritebackService:
         try:
             record_id = self.memory_core.upsert_memory_record(
                 kind=fact.kind,
-                key=fact.key,
+                key=key,
                 content=fact.content,
                 subject_id=job.person_id,
                 session_id="",
@@ -909,11 +1109,12 @@ class MemoryWritebackService:
                 source_id=source_id,
                 confidence=fact.confidence,
                 importance=importance,
+                status=status,
                 valid_from=fact.valid_from or None,
                 valid_until=fact.valid_until or None,
                 metadata=metadata,
                 evidence=evidence,
-                supersede_keys=fact.supersede_keys,
+                supersede_keys=supersede_keys,
                 observed_at=observed_at or None,
             )
             return str(record_id or "")
@@ -927,6 +1128,178 @@ class MemoryWritebackService:
         if not text or text.lower() in {"0", "null", "none", "undefined"}:
             return ""
         return text
+
+    def _store_paragraph(self, job: WritebackJob, content: str, record_id: str) -> str:
+        repo = getattr(self.memory_core, "repository", None)
+        upsert = getattr(repo, "upsert_paragraph", None)
+        if not callable(upsert):
+            return ""
+        return str(
+            upsert(
+                external_id=f"person_fact:{record_id}",
+                content=content,
+                source_type="person_fact_writeback",
+                session_id=job.session_id,
+                subject_id=job.person_id,
+            )
+            or ""
+        )
+
+    def _note_checkpoint(self, job: WritebackJob) -> None:
+        trigger_id = str(job.trigger_transcript_id or "").strip()
+        if not trigger_id:
+            return
+        repo = getattr(self.memory_core, "repository", None)
+        setter = getattr(repo, "set_meta", None)
+        if not callable(setter):
+            return
+        setter(
+            f"writeback_cursor:{job.session_id}:{job.person_id}",
+            trigger_id,
+        )
+
+    def _store_summary(self, job: WritebackJob, summary: str) -> str:
+        text = self._clean_text(summary)[:300]
+        if len(text) < 4:
+            return ""
+        session_id = "" if job.session_id == "global" else job.session_id
+        try:
+            record_id = self.memory_core.upsert_memory_record(
+                kind="summary",
+                key=f"chat_window:{job.session_id or 'global'}",
+                content=text,
+                subject_id=job.person_id,
+                session_id=session_id,
+                source_type="chat_window_writeback",
+                source_id=f"chat_window:{job.session_id}:{job.person_id}",
+                confidence=0.7,
+                importance=0.5,
+                metadata={
+                    "writeback_source": "memory_writeback",
+                    "writeback_reason": job.reason,
+                },
+            )
+        except Exception as exc:
+            logger.warning("writeback window summary failed: %s", exc)
+            return ""
+        return str(record_id or "")
+
+    def _apply_world(
+        self,
+        job: WritebackJob,
+        extraction: Extraction,
+        *,
+        written_facts: dict[str, ExtractedFact],
+        fact_records: dict[str, str],
+        written_pairs: list[tuple[ExtractedFact, str]],
+    ) -> list[str]:
+        repo = getattr(self.memory_core, "repository", None)
+        if repo is None or not hasattr(repo, "upsert_entity"):
+            return []
+        cache: dict[str, str] = {}
+        names = list(extraction.entities)
+        for relation in extraction.relations:
+            names.extend((relation.subject, relation.object_name))
+        for name in names:
+            self._entity_id(repo, cache, name)
+        for fact, record_id in written_pairs:
+            content_norm = repo.normalize_entity_name(fact.content)
+            hits = [
+                entity_id
+                for norm, entity_id in cache.items()
+                if norm and norm in content_norm
+            ]
+            if hits:
+                repo.link_record_entities(record_id, hits)
+        written: list[str] = []
+        for relation in extraction.relations:
+            fact = written_facts.get(relation.fact_id)
+            fact_record = fact_records.get(relation.fact_id)
+            if fact is None or not fact_record:
+                continue
+            subject_id = self._entity_id(repo, cache, relation.subject)
+            object_id = self._entity_id(repo, cache, relation.object_name)
+            predicate = self._clean_text(relation.predicate)[:20]
+            subject_norm = repo.normalize_entity_name(relation.subject)
+            object_norm = repo.normalize_entity_name(relation.object_name)
+            predicate_norm = repo.normalize_entity_name(predicate)
+            if not subject_id or not object_id or not predicate_norm:
+                continue
+            key = f"rel.{subject_norm}.{predicate_norm}.{object_norm}"[:180]
+            content = (
+                f"{self._clean_text(relation.subject)}{predicate}"
+                f"{self._clean_text(relation.object_name)}"
+            )[:300]
+            supersede: list[str] = []
+            if fact.is_correction and hasattr(self.memory_core, "list_memory_records"):
+                current = self.memory_core.list_memory_records(
+                    status="active",
+                    subject_id=job.person_id,
+                    kinds=("relation",),
+                    limit=200,
+                )
+                for row in current:
+                    meta = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+                    old_key = str(row.get("key") or "")
+                    if (
+                        str(meta.get("subject_entity_id") or "") == subject_id
+                        and str(meta.get("predicate") or "") == predicate
+                        and str(meta.get("object_entity_id") or "") != object_id
+                        and old_key
+                        and old_key != key
+                    ):
+                        supersede.append(old_key)
+            evidence = [
+                {"type": "transcript", "id": eid, "quote": fact.content[:500]}
+                for eid in fact.evidence_ids
+            ]
+            source_id = (
+                "relation:"
+                + hashlib.sha256(f"{job.person_id}|{key}".encode("utf-8")).hexdigest()[:20]
+            )
+            record_id = self.memory_core.upsert_memory_record(
+                kind="relation",
+                key=key,
+                content=content,
+                subject_id=job.person_id,
+                session_id="",
+                source_type="relation_writeback",
+                source_id=source_id,
+                confidence=fact.confidence,
+                importance=0.7,
+                status="active",
+                metadata={
+                    "writeback_source": "memory_writeback",
+                    "writeback_reason": job.reason,
+                    "subject_entity_id": subject_id,
+                    "predicate": predicate,
+                    "object_entity_id": object_id,
+                    "supporting_fact_id": fact_record,
+                    "cardinality": "single",
+                },
+                evidence=evidence,
+                supersede_keys=tuple(supersede),
+            )
+            if not record_id:
+                continue
+            written.append(str(record_id))
+            repo.link_record_entities(record_id, [subject_id, object_id])
+        return written
+
+    def _entity_id(self, repo: Any, cache: dict[str, str], name: str) -> str:
+        clean = self._clean_text(name)[:40]
+        if len(clean) < 2 or clean in _ENTITY_STOPWORDS:
+            return ""
+        norm = repo.normalize_entity_name(clean)
+        if len(norm) < 2:
+            return ""
+        cached = cache.get(norm)
+        if cached:
+            return cached
+        entity_id = str(repo.upsert_entity(clean) or "")
+        if entity_id:
+            cache[norm] = entity_id
+        return entity_id
 
     # ------------------------------------------------------------------ chat summary
     def _process_chat_summary(self, job: WritebackJob) -> WritebackResult:

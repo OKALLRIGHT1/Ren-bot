@@ -395,6 +395,63 @@ def is_direct_fact_search_question(text: str) -> bool:
     return False
 
 
+# Task-shaped sentences may open the short tool catalog. Greetings and
+# feelings stay a normal reply. This is not the old discovery keyword gate.
+_DISCOVERY_MARKS = (
+    "?",
+    "？",
+    "什么",
+    "谁",
+    "哪",
+    "多少",
+    "怎么",
+    "如何",
+    "为什么",
+    "为何",
+    "搜索",
+    "查一下",
+    "查查",
+    "搜一下",
+    "帮我",
+    "给我",
+    "翻译",
+    "总结",
+    "播放",
+    "打开",
+    "生成",
+    "画一",
+    "画个",
+    "画张",
+    "提醒我",
+    "新闻",
+    "价格",
+    "金价",
+    "汇率",
+    "链接",
+    "下载",
+    "计算",
+    "wiki",
+    "点歌",
+)
+_PRESENCE_CHECKS = ("在吗", "还在吗", "醒着吗")
+
+
+def is_casual_chat_text(text: str) -> bool:
+    """Greeting, feeling, or opinion. Task-shaped lines return False."""
+    raw = str(text or "").strip()
+    if not raw:
+        return True
+    compact = re.sub(r"\s+", "", raw).lower()
+    marks = [mark for mark in _DISCOVERY_MARKS if mark.lower() in compact]
+    if not marks:
+        return True
+    if any(token in compact for token in _PRESENCE_CHECKS) and set(
+        mark.lower() for mark in marks
+    ) <= {"?", "？"}:
+        return True
+    return False
+
+
 def looks_like_uncertain_answer(text: str) -> bool:
     raw = str(text or "").strip()
     if not raw:

@@ -3,6 +3,21 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional, Sequence, Set
 
 
+# Router and slash commands still reach these. The model catalog and
+# tool_search do not advertise them unless a pass already named them.
+MODEL_DISCOVERY_DENY_TRIGGERS = frozenset(
+    {
+        "agently_mail",
+        "app_control",
+        "code_agent",
+        "owner_console",
+        "qq_file_browser",
+        "user_files",
+        "workspace_ops",
+    }
+)
+
+
 TOOL_SEARCH_SCHEMA = {
     "name": "tool_search",
     "description": "当候选工具不够时，按关键词检索可用工具。不要在闲聊时调用。",
@@ -78,6 +93,52 @@ def schema_for_tool(plugin: Any, tool_name: str) -> Optional[Dict[str, Any]]:
 
 def _plugin_type(plugin: Any) -> str:
     return str(getattr(plugin, "type", "react") or "react")
+
+
+def plugin_trigger_name(plugin: Any) -> str:
+    return str(
+        getattr(plugin, "plugin_trigger", "")
+        or getattr(plugin, "trigger", "")
+        or ""
+    ).strip()
+
+
+def plugin_is_self_callable(plugin: Any) -> bool:
+    """True when this plugin may be called from chat without a keyword route."""
+    return bool(getattr(plugin, "self_callable", False))
+
+
+def plugin_hidden_from_model_discovery(plugin: Any) -> bool:
+    """Mail, files, code, and restart stay off the model discovery list."""
+    return plugin_trigger_name(plugin) in MODEL_DISCOVERY_DENY_TRIGGERS
+
+
+def openai_tool_names(tools: Optional[Sequence[Any]]) -> List[str]:
+    names: List[str] = []
+    for item in tools or []:
+        if not isinstance(item, dict):
+            continue
+        function = item.get("function") if isinstance(item.get("function"), dict) else item
+        name = str((function or {}).get("name") or "").strip()
+        if name and name not in names:
+            names.append(name)
+    return names
+
+
+def merge_openai_tools(*groups: Optional[Sequence[Any]]) -> List[Dict[str, Any]]:
+    merged: List[Dict[str, Any]] = []
+    seen: Set[str] = set()
+    for group in groups:
+        for item in group or []:
+            if not isinstance(item, dict):
+                continue
+            function = item.get("function") if isinstance(item.get("function"), dict) else None
+            name = str((function or {}).get("name") or "").strip()
+            if not name or name in seen:
+                continue
+            seen.add(name)
+            merged.append(item)
+    return merged
 
 
 def plugin_executable_in_pass(

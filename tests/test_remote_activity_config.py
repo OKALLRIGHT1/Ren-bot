@@ -31,7 +31,6 @@ class FakeApp:
         self._settings = dict(runtime_settings or {})
         self.gui_ws_server = FakeGuiWs()
         self.logger = None
-        self.skill_manager = None
         self.plugin_manager = None
         self.mcp_bridge = None
         self.chat_gateway = None

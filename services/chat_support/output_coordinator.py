@@ -17,6 +17,18 @@ async def emit_assistant_ui_parts(event_bus: Any, text: str) -> list[str]:
     return parts
 
 
+def _followup_preface_text(*items: Any) -> str:
+    parts = []
+    for item in items:
+        if isinstance(item, dict):
+            text = str(item.get("text") or "").strip()
+        else:
+            text = str(item or "").strip()
+        if text and text not in parts:
+            parts.append(text)
+    return "\n".join(parts)
+
+
 def should_pace_assistant_ui(output_profile: Optional[Dict[str, Any]]) -> bool:
     profile = output_profile or {}
     return bool(profile.get("ui_append", True)) and (
@@ -258,6 +270,17 @@ async def emit_non_stream_reply(
             meta=assistant_log_meta,
         )
         pace_ui = should_pace_assistant_ui(output_profile)
+        preface = _followup_preface_text(proactive_followup, task_followup)
+        if preface and preface not in str(final_reply or ""):
+            await presenter.present(
+                preface,
+                "gentle",
+                speak=output_profile.get("speak", True),
+                show_bubble=output_profile.get("show_bubble", True),
+                append_ui=False,
+                interrupt=True,
+            )
+            await send_gateway_reply(preface, ctx, emotion="gentle")
         if output_profile.get("ui_append", True) and not pace_ui:
             await emit_assistant_ui_parts(event_bus, final_reply)
         if live2d_enabled:
@@ -282,6 +305,7 @@ async def emit_non_stream_reply(
             speak=output_profile.get("speak", True),
             show_bubble=output_profile.get("show_bubble", True),
             append_ui=pace_ui,
+            interrupt=not bool(preface),
         )
         await send_gateway_reply(final_reply, ctx, emotion=final_emo)
         await maybe_send_auto_meme_reply(

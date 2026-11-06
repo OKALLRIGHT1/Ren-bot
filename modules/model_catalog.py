@@ -15,7 +15,6 @@ MODEL_PURPOSE_OPTIONS: List[tuple[str, str]] = [
     ("vision", "视觉理解"),
     ("image_gen", "画图"),
     ("image_edit", "图生图"),
-    ("code", "代码"),
     ("translation", "翻译"),
     ("embedding", "向量"),
 ]
@@ -135,9 +134,6 @@ _PURPOSE_ALIASES: Dict[str, str] = {
     "img2img": "image_edit",
     "图生图": "image_edit",
     "修图": "image_edit",
-    "code": "code",
-    "codex": "code",
-    "代码": "code",
     "translation": "translation",
     "translate": "translation",
     "翻译": "translation",
@@ -230,17 +226,20 @@ def get_model_purposes(model_cfg: Any) -> List[str]:
     if not isinstance(model_cfg, dict):
         return []
     if "purposes" in model_cfg:
-        return normalize_purposes(model_cfg.get("purposes"))
+        return _known_purposes(model_cfg.get("purposes"))
     if "purpose" in model_cfg:
-        return normalize_purposes(model_cfg.get("purpose"))
+        return _known_purposes(model_cfg.get("purpose"))
     if "用途" in model_cfg:
-        return normalize_purposes(model_cfg.get("用途"))
+        return _known_purposes(model_cfg.get("用途"))
     tags = model_cfg.get("tags")
     if isinstance(tags, (list, tuple, set, str)):
-        # Only treat tags as purposes when they normalize to known ids.
-        normalized = normalize_purposes(tags)
-        return [p for p in normalized if p in MODEL_PURPOSE_IDS]
+        return _known_purposes(tags)
     return []
+
+
+def _known_purposes(values: Any) -> List[str]:
+    """Drop retired tags such as the old 代码 purpose."""
+    return [item for item in normalize_purposes(values) if item in MODEL_PURPOSE_IDS]
 
 
 def model_has_purpose(

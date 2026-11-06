@@ -8,6 +8,11 @@ RUNTIME_KEYS = (
     "expression_library_use_in_chat",
     "expression_library_use_in_screen",
     "expression_library_max_prompt_items",
+    "expression_learning_enabled",
+    "expression_learning_local_enabled",
+    "expression_learning_intensity",
+    "expression_learning_qq_accounts",
+    "expression_learning_qq_groups",
 )
 
 DEFAULT_RUNTIME = {
@@ -15,6 +20,11 @@ DEFAULT_RUNTIME = {
     "expression_library_use_in_chat": True,
     "expression_library_use_in_screen": True,
     "expression_library_max_prompt_items": 4,
+    "expression_learning_enabled": False,
+    "expression_learning_local_enabled": True,
+    "expression_learning_intensity": "low",
+    "expression_learning_qq_accounts": [],
+    "expression_learning_qq_groups": [],
 }
 
 
@@ -80,7 +90,14 @@ class ExpressionLibraryGuiService:
                 raw = _as_dict(self._load_runtime())
             except Exception:
                 raw = {}
+        from modules.memory_core.expression_learning_policy import (
+            normalize_expression_learning_policy,
+            parse_id_list,
+        )
+
         max_items = int(raw.get("expression_library_max_prompt_items", DEFAULT_RUNTIME["expression_library_max_prompt_items"]) or 4)
+        learning = normalize_expression_learning_policy(raw)
+        intensity = str(raw.get("expression_learning_intensity") or learning["intensity"])
         return {
             "expression_library_enabled": bool(
                 raw.get("expression_library_enabled", DEFAULT_RUNTIME["expression_library_enabled"])
@@ -92,6 +109,15 @@ class ExpressionLibraryGuiService:
                 raw.get("expression_library_use_in_screen", DEFAULT_RUNTIME["expression_library_use_in_screen"])
             ),
             "expression_library_max_prompt_items": max(1, min(8, max_items)),
+            "expression_learning_enabled": bool(learning["enabled"]),
+            "expression_learning_local_enabled": bool(learning["local"]),
+            "expression_learning_intensity": intensity if intensity in {"low", "medium", "high"} else "low",
+            "expression_learning_qq_accounts": parse_id_list(
+                raw.get("expression_learning_qq_accounts", DEFAULT_RUNTIME["expression_learning_qq_accounts"])
+            ),
+            "expression_learning_qq_groups": parse_id_list(
+                raw.get("expression_learning_qq_groups", DEFAULT_RUNTIME["expression_learning_qq_groups"])
+            ),
         }
 
     def list_patterns(
@@ -226,8 +252,22 @@ class ExpressionLibraryGuiService:
             "expression_library_enabled",
             "expression_library_use_in_chat",
             "expression_library_use_in_screen",
+            "expression_learning_enabled",
+            "expression_learning_local_enabled",
         ):
             patch[key] = bool(patch.get(key))
+        intensity = str(patch.get("expression_learning_intensity") or "low").strip().lower()
+        patch["expression_learning_intensity"] = (
+            intensity if intensity in {"low", "medium", "high"} else "low"
+        )
+        from modules.memory_core.expression_learning_policy import parse_id_list
+
+        patch["expression_learning_qq_accounts"] = parse_id_list(
+            patch.get("expression_learning_qq_accounts")
+        )
+        patch["expression_learning_qq_groups"] = parse_id_list(
+            patch.get("expression_learning_qq_groups")
+        )
         if self._update_runtime is None:
             return {"ok": False, "error": "runtime_store_unavailable"}
         try:

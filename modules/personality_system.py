@@ -242,7 +242,8 @@ class EmotionContinuity:
         emotion_groups = {
             "positive": ["happy", "excited"],
             "negative": ["sad", "angry", "worried"],
-            "neutral": ["neutral", "calm", "gentle", "flustered", "confused", "think"]
+            "soft": ["shy", "flustered", "gentle"],
+            "neutral": ["neutral", "calm", "confused", "think"],
         }
         
         # 找到两个情绪所属的组
@@ -254,12 +255,18 @@ class EmotionContinuity:
             if new_emotion in emotions:
                 new_group = group
         
-        # 如果跨组切换，需要过渡
-        if current_group and new_group and current_group != new_group:
-            # 使用当前情绪作为过渡，降低强度
-            _get_logger().debug(f"情绪过渡: {self.current_emotion} -> {new_emotion} (通过{self.current_emotion})")
-            self.current_emotion = new_emotion
-            return self.current_emotion, intensity * 0.7
+        # 已经有情绪时，不要立刻跳回平静；从平静切到新情绪可以马上变。
+        if (
+            current_group
+            and new_group
+            and current_group != new_group
+            and self.current_emotion not in {"neutral", "calm", "idle"}
+        ):
+            holds = int(getattr(self, "_hold_steps", 0) or 0) + 1
+            self._hold_steps = holds
+            if holds < 2:
+                return self.current_emotion, max(0.25, intensity * 0.55)
+        self._hold_steps = 0
         
         # 同组切换，可以较快切换
         self.current_emotion = new_emotion

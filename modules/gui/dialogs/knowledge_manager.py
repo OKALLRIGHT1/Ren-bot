@@ -219,17 +219,13 @@ class KnowledgeManagerDialog(QtWidgets.QDialog):
         self.plugin_manager = getattr(main_app, "plugin_manager", None)
         if knowledge_gui is not None:
             self.knowledge_gui = knowledge_gui
-        elif self.plugin_manager is not None or self._brain() is not None:
+        else:
             from services.gui_api.knowledge_service import KnowledgeGuiService
 
             self.knowledge_gui = KnowledgeGuiService(
                 plugin_manager=self.plugin_manager,
                 brain=self._brain(),
             )
-        else:
-            from modules.gui.remote_knowledge import RemoteKnowledgeGui
-
-            self.knowledge_gui = RemoteKnowledgeGui()
         self._knowledge_import_progress = None
         self._knowledge_job_kind = ""
         self.setWindowTitle("知识库管理")

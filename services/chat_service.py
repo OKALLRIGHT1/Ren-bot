@@ -265,7 +265,6 @@ class ChatService:
         self.event_bus = event_bus
         self.logger = logger
         self.chat_gateway = chat_gateway
-        self.skill_manager = None
         self._app_ref = None
         self.debug_enabled = bool(CHAT_DEBUG_PRINTS)
         self.personality = get_personality_system()
@@ -773,7 +772,6 @@ class ChatService:
             contains_cmd=self._contains_cmd,
             looks_like_uncertain_answer=self._looks_like_uncertain_answer,
             is_searchworthy_question=self._is_searchworthy_question,
-            skill_manager=getattr(self, "skill_manager", None),
             personality=self.personality,
             logger=self.logger,
             record_tool_execution=lambda event_state, **event: self._record_tool_execution_events(
@@ -2666,7 +2664,6 @@ class ChatService:
         ctx["app"] = getattr(self, "app_port", None) or AppPort.from_chat_service(self)
         ctx["plugin_manager"] = self.plugin_manager
         ctx["agent_runtime"] = self.agent_runtime
-        ctx["skills"] = getattr(self, "skill_manager", None)
         # Explicit for on-demand tools (e.g. owner_channel_bridge); keeps hard isolation elsewhere.
         if getattr(self, "conversation_event_service", None) is not None:
             ctx["conversation_event_service"] = self.conversation_event_service
@@ -3171,7 +3168,11 @@ class ChatService:
             return
 
         deferred_tool_flow = False
-        if not need_tools:
+        # Direct chat keeps the plain-chat pass. Task-shaped lines discover
+        # tools inside that pass. Sensor turns stay tool-free. This flag only
+        # opens the catalog when the turn was never a plain chat candidate.
+        sensor_turn = source_key == "screen_sensor" or bool((ctx or {}).get("sensor_category"))
+        if not need_tools and not plain_direct_chat_candidate and not sensor_turn:
             try:
                 deferred_tool_flow = bool(
                     self.plugin_manager.should_use_deferred_tool_flow(user_text)

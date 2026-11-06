@@ -24,7 +24,6 @@ STATE_LABELS = {
 }
 
 COMPONENT_LABELS = {
-    "brain": "大脑",
     "live2d_ws": "桌面形象",
     "rust_activity": "活动感知",
     "qq_gateway": "QQ 网关",
@@ -53,11 +52,6 @@ def overall_presentation(snapshot: Any) -> Dict[str, str]:
     return {"state": state, "label": label, "color": color}
 
 
-def _derived_brain_record(snapshot: Dict[str, Any], components: Dict[str, Any]) -> Dict[str, Any] | None:
-    # 运行健康中心当前处于大脑主进程的原生 Qt 窗口中，无需展示虚拟的“大脑”行以防误导
-    return None
-
-
 def component_rows(snapshot: Any) -> List[Dict[str, str]]:
     if not isinstance(snapshot, dict):
         return []
@@ -66,10 +60,7 @@ def component_rows(snapshot: Any) -> List[Dict[str, str]]:
         return []
 
     derived = dict(components)
-    brain = _derived_brain_record(snapshot, derived)
     derived.pop("hud_link", None)
-    if brain is not None:
-        derived["brain"] = brain
 
     rows = []
     for component, record in derived.items():

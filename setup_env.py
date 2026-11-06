@@ -41,6 +41,7 @@ PROBE_MODULES = (
     "pypinyin",
     "psutil",
     "websockets",
+    "pystray",
 )
 LogFn = Callable[[str], None]
 

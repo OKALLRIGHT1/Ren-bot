@@ -158,6 +158,8 @@ class MemoryCoreService:
         self._initialized = False
         self._pending_replies: dict[str, _PendingReply] = {}
         self._learning_buffers: dict[str, list[dict[str, Any]]] = {}
+        self._expression_learning_buffers: dict[str, list[dict[str, Any]]] = {}
+        self._speaker_profile_buffers: dict[str, list[dict[str, Any]]] = {}
         self._selected_expression_ids: dict[str, tuple[str, ...]] = {}
         self._writeback_service: Any = None
 
@@ -370,6 +372,18 @@ class MemoryCoreService:
         if not self._is_real_learning_message(role, content, safe_meta):
             return transcript_id
 
+        self._register_qq_speaker(person_id=person_id, meta=safe_meta)
+        self._maybe_learn_expressions(
+            safe_meta,
+            transcript_id=transcript_id,
+            role=role,
+            content=content,
+            session_id=str(session_id or "global").strip() or "global",
+            person_id=person_id,
+            character_id=character_id,
+            character_name=character_name,
+        )
+
         writeback_enabled = self._setting_bool("memory_writeback_enabled", True)
         learning_enabled = bool(self.enabled) and (
             self.profile_learning_enabled or self.expression_learning_enabled
@@ -405,43 +419,40 @@ class MemoryCoreService:
         if len(buffer) > buffer_limit:
             del buffer[:-buffer_limit]
         trusted = self._is_trusted_learning_source(safe_meta)
+        other_speaker = self._is_other_qq_speaker(safe_meta)
 
-        if learning_enabled and trusted:
-            if (
-                self.profile_learning_enabled
-                and role == "user"
-                and self._has_explicit_profile_signal(content)
-            ):
-                self._learn_profile_from_messages(buffer[-6:], person_id=person_id)
-            if len(buffer) >= self.learning_batch_messages:
-                batch = list(buffer[-self.learning_batch_messages :])
-                if self.profile_learning_enabled:
-                    self._learn_profile_from_messages(batch, person_id=person_id)
-                if self.expression_learning_enabled:
-                    self._learn_expressions_from_messages(
-                        batch,
-                        session_id=session_key,
-                        person_id=person_id,
-                        character_id=character_id,
-                        character_name=character_name,
-                    )
-                # Do not clear the whole buffer: writeback still needs recent turns.
-                # Keep a trailing window after batch learning.
-                keep = max(
-                    self.learning_batch_messages,
-                    self._setting_int(
-                        "memory_writeback_context_messages",
-                        12,
-                        minimum=2,
-                        maximum=40,
-                    ),
-                )
-                if len(buffer) > keep:
-                    del buffer[:-keep]
+        if learning_enabled and trusted and len(buffer) >= self.learning_batch_messages:
+            # Expression learning has its own source list. Profile facts are
+            # written only by memory writeback, so this no longer starts a
+            # second extractor. Keep a trailing window for writeback evidence.
+            keep = max(
+                self.learning_batch_messages,
+                self._setting_int(
+                    "memory_writeback_context_messages",
+                    12,
+                    minimum=2,
+                    maximum=40,
+                ),
+            )
+            if len(buffer) > keep:
+                del buffer[:-keep]
+
+        if other_speaker and role == "user":
+            bucket = self._speaker_profile_buffers.setdefault(person_id, [])
+            bucket.append(
+                {
+                    "id": str(transcript_id or ""),
+                    "role": role,
+                    "content": content,
+                }
+            )
+            if len(bucket) > 24:
+                del bucket[:-24]
 
         # MaiBot-style long-term writeback: extract stable user-supported facts
         # asynchronously. Transcript is already stored above; empty extract = no write.
-        if bool(self.enabled) and writeback_enabled and trusted and role in {
+        writeback_for_other = other_speaker and role == "user"
+        if bool(self.enabled) and writeback_enabled and (trusted or writeback_for_other) and role in {
             "user",
             "assistant",
         }:
@@ -454,6 +465,12 @@ class MemoryCoreService:
                         minimum=2,
                         maximum=40,
                     )
+                    if writeback_for_other:
+                        recent_messages = list(
+                            self._speaker_profile_buffers.get(person_id, [])[-context_n:]
+                        )
+                    else:
+                        recent_messages = list(buffer[-context_n:])
                     writeback.observe_message(
                         role,
                         content,
@@ -463,7 +480,7 @@ class MemoryCoreService:
                         character_name=character_name,
                         transcript_id=transcript_id,
                         meta=safe_meta,
-                        recent_messages=list(buffer[-context_n:]),
+                        recent_messages=recent_messages,
                     )
                 except Exception as exc:
                     logger.warning("memory writeback observe failed: %s", exc)
@@ -499,6 +516,74 @@ class MemoryCoreService:
         return True
 
     @staticmethod
+    def _is_other_qq_speaker(meta: dict[str, Any]) -> bool:
+        source = str(meta.get("source") or "").strip().lower()
+        user_id = re.sub(r"\D", "", str(meta.get("user_id") or ""))
+        return source in {"qq_gateway", "napcat_qq"} and not bool(meta.get("is_owner")) and bool(user_id)
+
+    def _register_qq_speaker(self, *, person_id: str, meta: dict[str, Any]) -> None:
+        """群里或私聊里出现的 QQ 号都记成人物，否则画像列表里根本没有这个人。"""
+        if not self._is_other_qq_speaker(meta) and not (
+            str(meta.get("source") or "").strip().lower() in {"qq_gateway", "napcat_qq"}
+            and bool(meta.get("is_owner"))
+        ):
+            return
+        user_id = re.sub(r"\D", "", str(meta.get("user_id") or ""))
+        if not user_id:
+            return
+        is_owner = bool(meta.get("is_owner"))
+        group_id = re.sub(r"\D", "", str(meta.get("group_id") or ""))
+        display_name = str(meta.get("sender_name") or "").strip()
+        try:
+            self.repository.upsert_person(
+                person_id="owner" if is_owner else f"qq:{user_id}",
+                platform="qq",
+                user_id=user_id,
+                display_name=display_name,
+                relationship="主人" if is_owner else ("群友" if group_id else "QQ联系人"),
+                memory_scope="owner_shared" if is_owner else "private",
+            )
+        except Exception as exc:
+            logger.warning("register qq speaker failed: %s", exc)
+
+    def _remember_other_speaker(
+        self,
+        message: dict[str, Any],
+        *,
+        person_id: str,
+        meta: dict[str, Any],
+    ) -> None:
+        """别人的话只写入这个人自己的画像，不进主人档案，也不进她的表达习惯。"""
+        speaker_id = str(person_id or "").strip()
+        if not speaker_id.startswith("qq:"):
+            user_id = re.sub(r"\D", "", str(meta.get("user_id") or ""))
+            speaker_id = f"qq:{user_id}" if user_id else ""
+        if not speaker_id:
+            return
+        bucket = self._speaker_profile_buffers.setdefault(speaker_id, [])
+        bucket.append(message)
+        if len(bucket) > 24:
+            del bucket[:-24]
+        display_name = str(meta.get("sender_name") or speaker_id).strip()
+        note = (
+            f"这些话的说话人是 QQ 联系人「{display_name}」，person_id={speaker_id}，不是主人。\n"
+            "只提取这个人自己明确说出的事实、偏好或习惯。不要写成主人的资料，也不要推测。\n"
+        )
+        if self._has_explicit_profile_signal(str(message.get("content") or "")):
+            self._learn_profile_from_messages(
+                bucket[-6:],
+                person_id=speaker_id,
+                speaker_note=note,
+            )
+        elif len(bucket) >= self.learning_batch_messages:
+            self._learn_profile_from_messages(
+                bucket[-self.learning_batch_messages :],
+                person_id=speaker_id,
+                speaker_note=note,
+            )
+            del bucket[: -self.learning_batch_messages]
+
+    @staticmethod
     def _has_explicit_profile_signal(text: str) -> bool:
         clean = str(text or "").strip().lower()
         signals = (
@@ -529,7 +614,13 @@ class MemoryCoreService:
         )
         return any(signal in clean for signal in signals)
 
-    def _learn_profile_from_messages(self, messages: list[dict[str, Any]], *, person_id: str) -> int:
+    def _learn_profile_from_messages(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        person_id: str,
+        speaker_note: str = "",
+    ) -> int:
         if not self.llm_call or not messages:
             return 0
         lines = [
@@ -540,7 +631,8 @@ class MemoryCoreService:
         if not lines:
             return 0
         prompt = (
-            "从真实聊天中提取关于用户的稳定事实、偏好、习惯、雷区、互动要求或临时状态。\n"
+            f"{speaker_note}"
+            "从真实聊天中提取关于当前说话人的稳定事实、偏好、习惯、雷区、互动要求或临时状态。\n"
             "不要推测；只有消息有明确证据时才提取。称呼、固定偏好、习惯（如周几开会）和明确纠正应优先。\n"
             "用户纠正助手错误时，以用户最新纠正为准，写入纠正后的事实。\n"
             "只有用户原话明确给出起点或终点时才填 valid_from / valid_until；稳定事实和习惯不要填。\n"
@@ -618,6 +710,104 @@ class MemoryCoreService:
                 self._notify_vector_worker()
         return inserted
 
+    def _expression_learning_policy(self) -> dict[str, Any]:
+        from modules.memory_core.expression_learning_policy import (
+            normalize_expression_learning_policy,
+        )
+
+        loader = getattr(self, "_expression_policy_loader", None)
+        runtime: dict[str, Any] = {}
+        if callable(loader):
+            try:
+                loaded = loader()
+                if isinstance(loaded, dict):
+                    runtime = loaded
+            except Exception:
+                runtime = {}
+        else:
+            try:
+                from modules.runtime_settings import load_runtime_settings
+
+                loaded = load_runtime_settings()
+                if isinstance(loaded, dict):
+                    runtime = loaded
+            except Exception:
+                runtime = {}
+        return normalize_expression_learning_policy(runtime)
+
+    def _expression_learned_today(self, today: str) -> int:
+        key = f"expression_learn_count:{today}"
+        try:
+            return max(0, int(self.repository.get_meta(key) or 0))
+        except Exception:
+            return 0
+
+    def _set_expression_learned_today(self, today: str, count: int) -> None:
+        try:
+            self.repository.set_meta(f"expression_learn_count:{today}", str(max(0, int(count))))
+        except Exception:
+            return
+
+    def _maybe_learn_expressions(
+        self,
+        meta: dict[str, Any],
+        *,
+        transcript_id: Any,
+        role: str,
+        content: str,
+        session_id: str,
+        person_id: str,
+        character_id: str,
+        character_name: str,
+    ) -> None:
+        from modules.memory_core.expression_learning_policy import expression_source_allowed
+
+        policy = self._expression_learning_policy()
+        if not expression_source_allowed(meta, policy):
+            return
+        if not character_name:
+            return
+        session_key = str(session_id or "global").strip() or "global"
+        buffer = self._expression_learning_buffers.setdefault(session_key, [])
+        buffer.append(
+            {
+                "id": str(transcript_id or ""),
+                "role": role,
+                "content": content,
+                "person_id": person_id,
+                "character_id": character_id,
+                "character_name": character_name,
+                "meta": dict(meta or {}),
+            }
+        )
+        batch_size = max(2, int(policy.get("batch") or 20))
+        if len(buffer) > batch_size * 2:
+            del buffer[: -batch_size * 2]
+        if len(buffer) < batch_size:
+            return
+        from datetime import date
+
+        today = date.today().isoformat()
+        already = self._expression_learned_today(today)
+        remaining = int(policy.get("daily_cap") or 0) - already
+        if remaining <= 0:
+            del buffer[:-batch_size]
+            return
+        batch = list(buffer[-batch_size:])
+        inserted = self._learn_expressions_from_messages(
+            batch,
+            session_id=session_key,
+            person_id=person_id,
+            character_id=character_id,
+            character_name=character_name,
+            min_quality=float(policy.get("min_quality") or 5.5),
+            enable_new=bool(policy.get("enable_new")),
+            max_items=remaining,
+        )
+        if inserted:
+            self._set_expression_learned_today(today, already + inserted)
+        del buffer[:-batch_size]
+
     def _learn_expressions_from_messages(
         self,
         messages: list[dict[str, Any]],
@@ -626,20 +816,28 @@ class MemoryCoreService:
         person_id: str,
         character_id: str,
         character_name: str,
+        min_quality: float = 5.5,
+        enable_new: bool = True,
+        max_items: int = 6,
     ) -> int:
         if not self.llm_call or not character_name:
             return 0
+        # MaiBot 不把机器人自己的发言再学成新习惯，只从对方原话提炼说法。
+        source_messages = [
+            item for item in messages if str(item.get("role") or "").strip().lower() == "user"
+        ]
         lines = [
             f"id={item['id']} {item['role']}: {self._clean_context_text(item['content'])[:220]}"
-            for item in messages
+            for item in source_messages
             if self._clean_context_text(item.get("content"))
         ]
-        if len(lines) < 6:
+        if len(lines) < min(6, max(2, len(source_messages))):
             return 0
         prompt = (
             "从这些真实聊天中提炼可复用的自然表达习惯。\n"
-            "只提取场景与表达方式，不提取事实，不复制隐私，不学习代码、命令或工具文本。\n"
-            "表达方式应描述语气和句式，不能要求覆盖角色核心人设。\n"
+            "只看用户发言，不要把助手自己说过的话再学一遍。\n"
+            "只提取场景与表达方式，不提取事实，不写具体人名，不复制隐私，不学习代码、命令或工具文本。\n"
+            "situation 和 style 各不超过 20 个字。表达方式应描述语气和句式，不能要求覆盖角色核心人设。\n"
             "严格只输出 JSON："
             '{"items":[{"situation":"使用场景","style":"自然表达方式",'
             '"examples":["短例句"],"quality":0.0,"source_ids":["1"]}]}\n\n'
@@ -660,11 +858,12 @@ class MemoryCoreService:
             return 0
         known_ids = {str(item["id"]) for item in messages}
         inserted = 0
-        for item in raw_items[:6]:
+        room = max(0, int(max_items))
+        for item in raw_items[:room]:
             if not isinstance(item, dict):
                 continue
-            situation = self._clean_context_text(item.get("situation"))[:120]
-            style = self._clean_context_text(item.get("style"))[:180]
+            situation = self._clean_context_text(item.get("situation"))[:20]
+            style = self._clean_context_text(item.get("style"))[:20]
             examples = [
                 self._clean_context_text(value)[:120]
                 for value in (item.get("examples") or [])
@@ -679,7 +878,7 @@ class MemoryCoreService:
                 quality = max(0.0, min(10.0, float(item.get("quality", 6.0))))
             except Exception:
                 quality = 6.0
-            if not situation or not style or not source_ids or quality < 5.5:
+            if not situation or not style or not source_ids or quality < float(min_quality):
                 continue
             self.upsert_expression_pattern(
                 character_id=character_id,
@@ -694,6 +893,7 @@ class MemoryCoreService:
                 person_id=person_id,
                 confidence=min(1.0, quality / 10.0),
                 evidence=source_ids,
+                enabled=bool(enable_new),
             )
             inserted += 1
         return inserted
@@ -879,20 +1079,17 @@ class MemoryCoreService:
             if include_profile
             else MemoryProfile(person_id)
         )
-        if intent in {"none", "activity"}:
-            return ReplyMemoryContext(intent=intent, profile_text=profile.text)
-
-        impression = (
-            self._build_chat_impression(clean_text, recent_messages or [])
-            if use_llm
-            else clean_text
-        )
+        query_text = self._recall_query(clean_text, recent_messages or [])
+        profile_text = self._profile_text_for_turn(profile, intent, query_text)
+        # Intent only changes ranking. Casual turns still search, and the
+        # reply path does not call an impression model.
+        impression = query_text
         candidates = self._collect_candidates(
-            impression or clean_text,
+            query_text,
             session_id=session_id,
             person_id=person_id,
             intent=intent,
-            allow_llm=use_llm,
+            allow_llm=False,
         )
         lexical_candidate_count = len(candidates)
         vector_status = "disabled"
@@ -924,17 +1121,19 @@ class MemoryCoreService:
                 for item in candidates
                 if not self._is_unreliable_recall_candidate(item, clean_text)
             ]
+        candidates.sort(key=lambda item: float(item.get("score") or 0.0), reverse=True)
+        want = min(8, max(1, int(self.final_limit or 1)))
         selected = self._select_memories(
             clean_text,
             impression,
             candidates,
-            want=self.final_limit,
-            use_llm=use_llm,
+            want=want,
+            use_llm=False,
         )
         selected_ids = [str(item["id"]) for item in selected]
         memory_text = self._format_memory_reference(
             selected,
-            max_chars=self.context_max_chars,
+            max_chars=min(400, int(self.context_max_chars or 400)),
         )
         self.repository.save_query_log(
             session_id=session_id,
@@ -948,7 +1147,7 @@ class MemoryCoreService:
         return ReplyMemoryContext(
             intent=intent,
             impression=impression,
-            profile_text=profile.text,
+            profile_text=profile_text,
             memory_text=memory_text,
             selected_ids=tuple(selected_ids),
             diagnostics={
@@ -959,6 +1158,21 @@ class MemoryCoreService:
                 "vector_error": vector_error,
             },
         )
+
+    @staticmethod
+    def _recall_query(user_text: str, recent_messages: list[dict[str, Any]]) -> str:
+        assistant = ""
+        for item in reversed(recent_messages or []):
+            if not isinstance(item, dict):
+                continue
+            if str(item.get("role") or "").strip().lower() != "assistant":
+                continue
+            assistant = MemoryCoreService._clean_context_text(item.get("content"))
+            if assistant:
+                break
+        if not assistant:
+            return user_text
+        return f"{user_text}\n{assistant}"[:800]
 
     def _build_chat_impression(self, user_text: str, recent_messages: list[dict[str, Any]]) -> str:
         lines: list[str] = []
@@ -1006,24 +1220,22 @@ class MemoryCoreService:
         intent: str,
         allow_llm: bool = True,
     ) -> list[dict[str, Any]]:
-        kinds = ("profile", "fact", "preference", "rule") if intent == "profile" else (
-            "episode",
-            "fact",
-            "preference",
-            "summary",
-            "other",
-        )
+        kinds = self._candidate_kinds(intent)
         token_text = (
             self._episode_search_text(search_text)
             if intent == "episode"
             else search_text
         )
-        query_tokens = self._tokens(token_text)
-        records = self.repository.list_current_records(
-            subject_id=person_id,
-            session_id=session_id,
-            kinds=kinds,
-            limit=300,
+        query_tokens = self._query_terms(token_text)
+        records = self._with_entity_hits(
+            self.repository.list_current_records(
+                subject_id=person_id,
+                session_id=session_id,
+                kinds=kinds,
+                limit=300,
+            ),
+            search_text=search_text,
+            person_id=person_id,
         )
         if intent == "episode":
             records.extend(
@@ -1043,8 +1255,9 @@ class MemoryCoreService:
                 item, search_text
             ):
                 continue
-            item_tokens = self._tokens(content + " " + str(item.get("key") or ""))
-            overlap = len(query_tokens & item_tokens) / max(1, len(query_tokens))
+            item_tokens = self._query_terms(content + " " + str(item.get("key") or ""))
+            overlap_terms = query_tokens & item_tokens
+            overlap = len(overlap_terms) / max(1, len(query_tokens))
             substring_bonus = 0.0
             compact_query = re.sub(r"\s+", "", token_text)
             if compact_query and len(compact_query) >= 4 and compact_query in re.sub(r"\s+", "", content):
@@ -1052,6 +1265,15 @@ class MemoryCoreService:
             recency = self._recency_score(item.get("updated_at"), now)
             metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
             query_context_bonus = 0.7 if metadata.get("query_context_match") else 0.0
+            distinctive = query_tokens - self._GENERIC_RECALL_TOKENS
+            if (
+                distinctive
+                and not (overlap_terms - self._GENERIC_RECALL_TOKENS)
+                and substring_bonus <= 0
+                and query_context_bonus <= 0
+                and not item.get("entity_hit")
+            ):
+                continue
             habit_bonus = 0.0
             key_text = str(item.get("key") or "").strip().lower()
             habit_query = any(
@@ -1072,6 +1294,14 @@ class MemoryCoreService:
                     "summary",
                 }:
                     habit_bonus -= 0.35
+            entity_bonus = 0.85 if item.get("entity_hit") else 0.0
+            if intent == "profile" and str(item.get("kind") or "") in {
+                "profile",
+                "preference",
+                "fact",
+                "rule",
+            }:
+                entity_bonus += 0.15
             score = (
                 overlap * 0.55
                 + substring_bonus
@@ -1080,12 +1310,14 @@ class MemoryCoreService:
                 + recency * 0.15
                 + query_context_bonus
                 + habit_bonus
+                + entity_bonus
+                + float(item.get("pagerank") or 0) * 0.4
             )
             if (
                 overlap <= 0
                 and substring_bonus <= 0
                 and query_context_bonus <= 0
-                and (not self.llm_call or not allow_llm)
+                and not item.get("entity_hit")
             ):
                 continue
             candidate = dict(item)
@@ -1139,9 +1371,86 @@ class MemoryCoreService:
 
     @staticmethod
     def _candidate_kinds(intent: str) -> tuple[str, ...]:
+        persona = ("profile", "fact", "preference", "rule", "relation")
         if intent == "profile":
-            return ("profile", "fact", "preference", "rule")
-        return ("episode", "fact", "preference", "summary", "other")
+            return persona
+        return persona + ("episode", "summary", "other")
+
+    def _query_terms(self, text: str) -> set[str]:
+        terms = set(self._tokens(text))
+        try:
+            import jieba
+
+            for word in jieba.lcut(str(text or "")):
+                token = str(word or "").strip().lower()
+                if len(token) >= 2:
+                    terms.add(token)
+        except Exception:
+            pass
+        return terms
+
+    def _with_entity_hits(
+        self,
+        records: list[dict[str, Any]],
+        *,
+        search_text: str,
+        person_id: str,
+    ) -> list[dict[str, Any]]:
+        try:
+            entities = self.repository.find_entities_mentioned(search_text)
+        except Exception:
+            return records
+        if not entities:
+            return records
+        entity_ids = [str(item.get("id") or "") for item in entities if item.get("id")]
+        try:
+            linked = self.repository.records_for_entities(
+                entity_ids,
+                subject_id=person_id,
+            )
+            degree = max(
+                self.repository.relation_degree(entity_id, subject_id=person_id)
+                for entity_id in entity_ids
+            )
+        except Exception:
+            return records
+        if degree > 50:
+            linked = self._pagerank_rows(linked)
+        linked_ids = {str(row.get("id") or "") for row in linked}
+        for item in records:
+            if str(item.get("id") or "") in linked_ids:
+                item["entity_hit"] = True
+        seen = {str(item.get("id") or "") for item in records}
+        for row in linked:
+            row["entity_hit"] = True
+            if str(row.get("id") or "") not in seen:
+                records.append(row)
+        return records
+
+    @staticmethod
+    def _pagerank_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        try:
+            import networkx as nx
+        except Exception:
+            return rows
+        graph = nx.Graph()
+        for row in rows:
+            metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+            left = str(metadata.get("subject_entity_id") or "")
+            right = str(metadata.get("object_entity_id") or "")
+            if left and right and left != right:
+                graph.add_edge(left, right)
+        if graph.number_of_nodes() < 2:
+            return rows
+        ranks = nx.pagerank(graph, max_iter=50, tol=1e-6)
+        for row in rows:
+            metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+            row["pagerank"] = max(
+                float(ranks.get(str(metadata.get("subject_entity_id") or ""), 0.0)),
+                float(ranks.get(str(metadata.get("object_entity_id") or ""), 0.0)),
+            )
+        rows.sort(key=lambda row: float(row.get("pagerank") or 0.0), reverse=True)
+        return rows
 
     @staticmethod
     def _record_matches_scope(
@@ -1238,6 +1547,74 @@ class MemoryCoreService:
         days = max(0.0, (now - timestamp) / 86400.0)
         return math.exp(-days / 90.0)
 
+    _GENERIC_RECALL_TOKENS = frozenset(
+        {
+            "上次",
+            "之前",
+            "以前",
+            "今天",
+            "昨天",
+            "那个",
+            "这个",
+            "什么",
+            "一下",
+            "然后",
+            "已经",
+            "还是",
+            "就是",
+            "可以",
+            "没有",
+            "知道",
+            "现在",
+            "时候",
+            "一个",
+            "怎么",
+            "我们",
+            "他们",
+        }
+    )
+
+    def _episode_shortlist_is_clean(
+        self,
+        query: str,
+        candidates: list[dict[str, Any]],
+        *,
+        intent: str,
+        want: int,
+    ) -> bool:
+        if intent != "episode" or not candidates:
+            return False
+        ranked = sorted(
+            candidates,
+            key=lambda item: float(item.get("score") or 0.0),
+            reverse=True,
+        )
+        if float(ranked[0].get("score") or 0.0) < 0.45:
+            return False
+        query_tokens = self._distinctive_recall_tokens(query)
+        if not query_tokens:
+            return False
+        above = [
+            item for item in ranked if float(item.get("score") or 0.0) >= 0.28
+        ]
+        if not above or len(above) > max(1, int(want)):
+            return False
+        return all(self._recall_overlap(item, query_tokens) for item in above)
+
+    def _distinctive_recall_tokens(self, text: str) -> set[str]:
+        return {
+            token
+            for token in self._tokens(self._episode_search_text(text))
+            if token not in self._GENERIC_RECALL_TOKENS
+        }
+
+    @staticmethod
+    def _recall_overlap(item: dict[str, Any], query_tokens: set[str]) -> bool:
+        if not query_tokens:
+            return False
+        content_tokens = MemoryCoreService._tokens(str(item.get("content") or ""))
+        return bool(query_tokens & content_tokens)
+
     def _select_memories(
         self,
         query: str,
@@ -1317,11 +1694,27 @@ class MemoryCoreService:
             meta = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
             timestamp = str(meta.get("ts") or item.get("updated_at") or "")[:10]
             prefix = f"[{timestamp}] " if timestamp else ""
-            lines.append(f"- {prefix}{content}")
+            lines.append(f"- {prefix}要点：{content}")
         text = "\n".join(lines)
         if len(text) > max_chars:
             text = text[: max_chars - 3].rstrip() + "..."
         return text
+
+    def _profile_text_for_turn(self, profile: MemoryProfile, intent: str, query: str = "") -> str:
+        terms = self._query_terms(query) if query else set()
+        standing = {"preferred_address", "reply_style", "name", "identity_summary"}
+        lines: list[str] = []
+        for row in profile.records:
+            key = str(row.get("key") or "")
+            content = str(row.get("content") or "")
+            hit = bool(terms and (terms & self._query_terms(content + " " + key)))
+            if key == "preferred_address" or hit or (intent == "profile" and key in standing):
+                line = self._format_profile_record(row)
+                if line:
+                    lines.append(f"- {line}")
+            if len(lines) >= 6:
+                break
+        return "\n".join(lines)
 
     def upsert_expression_pattern(
         self,
@@ -1338,6 +1731,7 @@ class MemoryCoreService:
         person_id: str = "",
         confidence: float = 0.5,
         evidence: Optional[list[str]] = None,
+        enabled: bool = True,
     ) -> str:
         self._ensure_initialized()
         identity = str(character_id or "").strip() or str(character_name or "").strip()
@@ -1353,7 +1747,7 @@ class MemoryCoreService:
             "content_list": examples or [],
             "source": source,
             "quality_score": quality_score,
-            "enabled": True,
+            "enabled": bool(enabled),
             "meta": {
                 "session_id": session_id,
                 "person_id": person_id,
@@ -1395,7 +1789,17 @@ class MemoryCoreService:
         )
         if not rows:
             return []
-        rows = rows[:16]
+        current_session = str(session_id or "").strip()
+
+        def _session_rank(row: dict[str, Any]) -> int:
+            row_session = str(row.get("session_id") or "").strip()
+            if current_session and row_session == current_session:
+                return 0
+            if not row_session:
+                return 1
+            return 2
+
+        rows = sorted(rows, key=_session_rank)[:16]
         query = self._clean_context_text(user_text)
         if recent_messages:
             recent = [

@@ -119,18 +119,10 @@ class SensorReplyService:
     ) -> bool:
         extracted_emo, clean_text = self.extract_emo_tag(reply)
         clean_text = self.strip_wrapping_quotes(clean_text)
+        clean_text = sensor_utils.strip_bare_emotion_tags(clean_text)
         original_clean_text = clean_text
 
-        lowered = str(clean_text or "").lower()
-        bad_patterns = [
-            "we need to",
-            "your task",
-            "up to 20 characters",
-            "up to 36 characters",
-            "直接对他说话进行吐槽",
-            "结合用户屏幕上的主要内容",
-        ]
-        if any(pattern in lowered for pattern in bad_patterns):
+        if sensor_utils.looks_like_prompt_draft(clean_text):
             self.logger.warning("⚠️ [Sensor] 视觉吐槽输出疑似复述提示词，已丢弃")
             return False
 
@@ -142,6 +134,10 @@ class SensorReplyService:
             ctx={"source": "desktop"},
             scene="sensor",
         )
+        clean_text = sensor_utils.strip_bare_emotion_tags(clean_text)
+        if sensor_utils.looks_like_prompt_draft(clean_text):
+            self.logger.warning("⚠️ [Sensor] 改写后仍像提示词草稿，已丢弃")
+            return False
         clean_text = self.apply_character_catchphrase(clean_text)
         post_emo, post_clean = self.extract_emo_tag(clean_text)
         if post_emo:

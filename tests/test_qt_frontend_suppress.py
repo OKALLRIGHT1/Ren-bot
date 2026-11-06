@@ -4,7 +4,7 @@ from core.application import Live2DApplication
 from modules.gui.app import QtChatTrayApp
 
 
-def test_enhanced_hello_hides_qt_gui():
+def test_live2d_connection_does_not_hide_settings_window():
     calls = []
     app = Live2DApplication.__new__(Live2DApplication)
     app.qt_ui = SimpleNamespace(set_frontend_suppressed=lambda value: calls.append(value))
@@ -13,7 +13,7 @@ def test_enhanced_hello_hides_qt_gui():
 
     app._sync_qt_gui_visibility()
 
-    assert calls == [True]
+    assert calls == []
 
 
 def test_keep_qt_gui_skips_hide():
@@ -46,7 +46,7 @@ def test_live2d_health_follows_enhanced_protocol_client():
     assert reports[-1][0][:2] == ("live2d_ws", "offline")
 
 
-def test_disconnect_unsuppresses_qt_when_no_enhanced_client():
+def test_live2d_disconnect_does_not_toggle_settings_window():
     calls = []
     app = Live2DApplication.__new__(Live2DApplication)
     app.qt_ui = SimpleNamespace(set_frontend_suppressed=lambda value: calls.append(value))
@@ -55,10 +55,10 @@ def test_disconnect_unsuppresses_qt_when_no_enhanced_client():
 
     app._sync_qt_gui_visibility()
 
-    assert calls == [False]
+    assert calls == []
 
 
-def test_apply_frontend_suppressed_hides_tray_keeps_remote_window():
+def test_apply_frontend_suppressed_hides_tray_keeps_settings_window():
     hidden = []
     tray = SimpleNamespace(
         hide=lambda: hidden.append("tray"),

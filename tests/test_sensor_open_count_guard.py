@@ -2,8 +2,10 @@
 
 from services.chat_support.sensor_utils import (
     find_sensor_open_count_phrases,
+    looks_like_prompt_draft,
     looks_like_sensor_template_reply,
     sanitize_sensor_open_count_reply,
+    strip_bare_emotion_tags,
     strip_sensor_open_count_phrases,
 )
 
@@ -31,6 +33,29 @@ def test_sanitize_drops_empty_after_strip():
     cleaned, hits = sanitize_sensor_open_count_reply("打开了12次")
     assert hits
     assert cleaned == ""
+
+
+def test_prompt_draft_is_not_spoken():
+    leaked = (
+        '"- using the stone metaphor for browsing a community forum...\n\n'
+        'Or: "<neutral>这里……也是你藏心事的地方吗？</neutral>"\n\n'
+        'Let me count characters... "你对这里……比对我还上心呢。" '
+        "- this could work but might be too clingy."
+    )
+    assert looks_like_prompt_draft(leaked)
+    assert looks_like_prompt_draft("We need to answer in up to 36 characters.")
+    assert not looks_like_prompt_draft("又在测网络……下一次连接，也会稳吗？")
+    assert not looks_like_prompt_draft("……pythonw，是我的窗口。")
+    assert not looks_like_prompt_draft("saki的名字……亮起来了呢。")
+
+
+def test_bare_emotion_tag_is_removed_before_speech():
+    assert strip_bare_emotion_tags("<neutral>这里……也是你藏心事的地方吗？</neutral>") == (
+        "这里……也是你藏心事的地方吗？"
+    )
+    assert not looks_like_prompt_draft(
+        strip_bare_emotion_tags("<neutral>你终于来看我了。</neutral>")
+    )
 
 
 def test_sanitize_passthrough_ok_lines():

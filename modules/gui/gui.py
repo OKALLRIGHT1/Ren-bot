@@ -5,7 +5,10 @@ import re
 import time
 from typing import Optional
 
-import sounddevice as sd
+try:
+    import sounddevice as sd
+except Exception:
+    sd = None
 import sherpa_onnx
 import numpy as np
 from pypinyin import lazy_pinyin

@@ -24,6 +24,36 @@ def _is_secret_setting(key: str, value: Any) -> bool:
     return bool(field.get("secret"))
 
 
+def _is_status_setting(value: Any) -> bool:
+    if not isinstance(value, dict):
+        return False
+    return str(value.get("type") or "").strip().lower() in {"status", "readonly"}
+
+
+def _overlay_runtime_status(manager: Any, trigger: str, settings: Dict[str, Any]) -> Dict[str, Any]:
+    plugins = getattr(manager, "plugins", None)
+    plugin = plugins.get(trigger) if isinstance(plugins, dict) else None
+    getter = getattr(plugin, "runtime_status", None)
+    if not callable(getter):
+        return settings
+    try:
+        live = getter() or {}
+    except Exception:
+        return settings
+    if not isinstance(live, dict) or not live:
+        return settings
+    copied = {
+        key: (dict(value) if isinstance(value, dict) else value)
+        for key, value in settings.items()
+    }
+    for key, value in live.items():
+        row = copied.get(key)
+        if isinstance(row, dict) and _is_status_setting(row):
+            row["default"] = value
+            copied[key] = row
+    return copied
+
+
 def _mask_settings(settings: Dict[str, Any]) -> Dict[str, Any]:
     out: Dict[str, Any] = {}
     for key, value in (settings or {}).items():
@@ -108,7 +138,9 @@ class PluginsGuiService:
             return {"ok": False, "error": str(exc)}
         if not isinstance(config, dict):
             return {"ok": False, "error": "not_found"}
-        settings = _as_dict(config.get("settings"))
+        settings = _overlay_runtime_status(
+            manager, trigger, _as_dict(config.get("settings"))
+        )
         client_config = dict(config)
         client_config["settings"] = _mask_settings(settings)
         if hasattr(manager, "get_plugin_config_schema"):
@@ -131,6 +163,9 @@ class PluginsGuiService:
                 current = _setting_default(settings.get(name))
                 row["has_value"] = bool(str(current or "").strip())
                 row["default"] = MASKED if row["has_value"] else ""
+            elif _is_status_setting(settings.get(name)):
+                row["default"] = _setting_default(settings.get(name))
+                row["readonly"] = True
             fields.append(row)
         schema = dict(schema)
         schema["fields"] = fields
@@ -177,6 +212,8 @@ class PluginsGuiService:
         secret_values: Dict[str, str] = {}
         for key, raw in settings.items():
             if key not in body:
+                continue
+            if _is_status_setting(raw):
                 continue
             if _is_secret_setting(str(key), raw):
                 secret = SecretUpdate.parse(body.get(key))

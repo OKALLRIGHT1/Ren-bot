@@ -27,7 +27,6 @@ class DummyGuiHttpServer:
 def _make_app(tmp_path):
     app = Live2DApplication.__new__(Live2DApplication)
     app.runtime_settings_path = Path(tmp_path) / "runtime_settings.json"
-    app.skill_manager = None
     app.plugin_manager = None
     app.mcp_bridge = None
     app.chat_gateway = None

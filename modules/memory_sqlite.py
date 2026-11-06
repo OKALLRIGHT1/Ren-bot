@@ -171,12 +171,58 @@ class MemorySQLite:
         with self._connect() as conn:
             # transcript
             conn.execute("""
+            CREATE TABLE IF NOT EXISTS runtime_marks (
+              key TEXT PRIMARY KEY,
+              value TEXT NOT NULL,
+              updated_at TEXT NOT NULL
+            )
+            """)
+            conn.execute("""
             CREATE TABLE IF NOT EXISTS memory_writeback_pending (
               id INTEGER PRIMARY KEY AUTOINCREMENT,
               payload_json TEXT NOT NULL,
-              created_at TEXT NOT NULL
+              created_at TEXT NOT NULL,
+              status TEXT NOT NULL DEFAULT 'pending',
+              attempts INTEGER NOT NULL DEFAULT 0,
+              due_at TEXT,
+              last_error TEXT NOT NULL DEFAULT '',
+              updated_at TEXT
             )
             """)
+            self._ensure_column(
+                conn,
+                "memory_writeback_pending",
+                "status",
+                "status TEXT NOT NULL DEFAULT 'pending'",
+            )
+            self._ensure_column(
+                conn,
+                "memory_writeback_pending",
+                "attempts",
+                "attempts INTEGER NOT NULL DEFAULT 0",
+            )
+            self._ensure_column(
+                conn,
+                "memory_writeback_pending",
+                "due_at",
+                "due_at TEXT",
+            )
+            self._ensure_column(
+                conn,
+                "memory_writeback_pending",
+                "last_error",
+                "last_error TEXT NOT NULL DEFAULT ''",
+            )
+            self._ensure_column(
+                conn,
+                "memory_writeback_pending",
+                "updated_at",
+                "updated_at TEXT",
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_writeback_pending_due "
+                "ON memory_writeback_pending(status, due_at)"
+            )
             conn.execute("""
             CREATE TABLE IF NOT EXISTS transcript (
               id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -2209,36 +2255,188 @@ class MemorySQLite:
 
         return json.dumps(stats, ensure_ascii=False, indent=2)
 
-    def spill_writeback_job(self, payload: Dict[str, Any]) -> None:
+    def get_runtime_mark(self, key: str) -> str:
+        name = str(key or "").strip()
+        if not name:
+            return ""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT value FROM runtime_marks WHERE key=?",
+                (name,),
+            ).fetchone()
+        return str(row[0] or "") if row else ""
+
+    def set_runtime_mark(self, key: str, value: str) -> None:
+        name = str(key or "").strip()
+        if not name:
+            return
         with self._lock:
             with self._connect() as conn:
                 conn.execute(
-                    "INSERT INTO memory_writeback_pending(payload_json, created_at) VALUES(?, ?)",
-                    (_j(payload), _now_iso()),
+                    """
+                    INSERT INTO runtime_marks(key, value, updated_at) VALUES(?,?,?)
+                    ON CONFLICT(key) DO UPDATE SET
+                      value=excluded.value,
+                      updated_at=excluded.updated_at
+                    """,
+                    (name, str(value or ""), _now_iso()),
                 )
                 conn.commit()
 
-    def pop_writeback_jobs(self, limit: int = 4) -> List[Dict[str, Any]]:
-        limit = max(1, min(50, int(limit or 4)))
+    def insert_writeback_job(
+        self, payload: Dict[str, Any], *, status: str = "pending"
+    ) -> int:
+        now = _now_iso()
+        state = str(status or "pending").strip() or "pending"
+        with self._lock:
+            with self._connect() as conn:
+                cursor = conn.execute(
+                    """
+                    INSERT INTO memory_writeback_pending(
+                      payload_json, created_at, status, attempts, due_at, last_error, updated_at
+                    ) VALUES(?, ?, ?, 0, ?, '', ?)
+                    """,
+                    (_j(payload), now, state, now, now),
+                )
+                conn.commit()
+                return int(cursor.lastrowid)
+
+    def claim_due_writeback_job(self, now_iso: str) -> Optional[Dict[str, Any]]:
+        """Mark one due pending row running and return it. None when nothing is due."""
+        due = str(now_iso or "").strip()
+        with self._lock:
+            with self._connect() as conn:
+                row = conn.execute(
+                    """
+                    SELECT id, payload_json, attempts
+                    FROM memory_writeback_pending
+                    WHERE status='pending' AND (due_at IS NULL OR due_at <= ?)
+                    ORDER BY id ASC
+                    LIMIT 1
+                    """,
+                    (due,),
+                ).fetchone()
+                if row is None:
+                    return None
+                job_id = int(row["id"])
+                conn.execute(
+                    """
+                    UPDATE memory_writeback_pending
+                    SET status='running', updated_at=?
+                    WHERE id=?
+                    """,
+                    (due, job_id),
+                )
+                conn.commit()
+                attempts = int(row["attempts"] or 0)
+                payload_json = row["payload_json"]
+        payload = _pj(payload_json, {})
+        if not isinstance(payload, dict):
+            payload = {}
+        return {"id": job_id, "attempts": attempts, "payload": payload}
+
+    def delete_writeback_job(self, job_id: int) -> None:
+        with self._lock:
+            with self._connect() as conn:
+                conn.execute(
+                    "DELETE FROM memory_writeback_pending WHERE id=?",
+                    (int(job_id),),
+                )
+                conn.commit()
+
+    def reschedule_writeback_job(
+        self,
+        job_id: int,
+        *,
+        status: str,
+        attempts: int,
+        due_at: str,
+        last_error: str,
+    ) -> None:
+        now = _now_iso()
+        with self._lock:
+            with self._connect() as conn:
+                conn.execute(
+                    """
+                    UPDATE memory_writeback_pending
+                    SET status=?, attempts=?, due_at=?, last_error=?, updated_at=?
+                    WHERE id=?
+                    """,
+                    (
+                        str(status or "pending"),
+                        int(attempts),
+                        str(due_at or ""),
+                        str(last_error or "")[:500],
+                        now,
+                        int(job_id),
+                    ),
+                )
+                conn.commit()
+
+    def recover_writeback_jobs(self, *, failed_before_iso: str) -> None:
+        """Return crashed running rows to pending, and drop old failed rows."""
+        cutoff = str(failed_before_iso or "").strip()
+        now = _now_iso()
+        with self._lock:
+            with self._connect() as conn:
+                conn.execute(
+                    """
+                    UPDATE memory_writeback_pending
+                    SET status='pending', updated_at=?
+                    WHERE status='running'
+                    """,
+                    (now,),
+                )
+                if cutoff:
+                    conn.execute(
+                        """
+                        DELETE FROM memory_writeback_pending
+                        WHERE status='failed'
+                          AND COALESCE(updated_at, created_at) < ?
+                        """,
+                        (cutoff,),
+                    )
+                conn.commit()
+
+    def list_writeback_jobs(self) -> List[Dict[str, Any]]:
         with self._lock:
             with self._connect() as conn:
                 rows = conn.execute(
-                    "SELECT id, payload_json FROM memory_writeback_pending ORDER BY id ASC LIMIT ?",
-                    (limit,),
+                    """
+                    SELECT id, payload_json, created_at, status, attempts, due_at,
+                           last_error, updated_at
+                    FROM memory_writeback_pending
+                    ORDER BY id ASC
+                    """
                 ).fetchall()
-                ids = [int(row["id"]) for row in rows]
-                if ids:
-                    conn.executemany(
-                        "DELETE FROM memory_writeback_pending WHERE id=?",
-                        [(item,) for item in ids],
-                    )
-                    conn.commit()
-        payloads = []
+        listed: List[Dict[str, Any]] = []
         for row in rows:
-            parsed = _pj(row["payload_json"], {})
-            if isinstance(parsed, dict):
-                payloads.append(parsed)
-        return payloads
+            payload = _pj(row["payload_json"], {})
+            listed.append(
+                {
+                    "id": int(row["id"]),
+                    "status": str(row["status"] or ""),
+                    "attempts": int(row["attempts"] or 0),
+                    "due_at": str(row["due_at"] or ""),
+                    "last_error": str(row["last_error"] or ""),
+                    "created_at": str(row["created_at"] or ""),
+                    "updated_at": str(row["updated_at"] or ""),
+                    "payload": payload if isinstance(payload, dict) else {},
+                }
+            )
+        return listed
+
+    def has_open_writeback_jobs(self) -> bool:
+        with self._lock:
+            with self._connect() as conn:
+                row = conn.execute(
+                    """
+                    SELECT 1 FROM memory_writeback_pending
+                    WHERE status IN ('pending', 'running')
+                    LIMIT 1
+                    """
+                ).fetchone()
+        return row is not None
 
 
 # -------- module-level singleton --------

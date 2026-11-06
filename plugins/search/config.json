@@ -25,6 +25,7 @@
     "description": "联网搜索插件。优先 Tavily，失败后再用主程序联网模型、Grok 或 Exa，最后可回退 DDG。",
     "example_arg": "今天有什么新闻",
     "timeout_sec": 60,
+    "self_callable": true,
     "settings": {
         "model_queue": {
             "type": "model_queue",

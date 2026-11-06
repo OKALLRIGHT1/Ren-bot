@@ -1,13 +1,10 @@
-"""Centralized writable-path resolution for the brain.
+"""本进程的可写路径。
 
-打包（docs/部分重构.md §13.1 问题 1）前的路径锚定改造：
-所有运行时可写数据（data/、memory/、memory_db/、logs/）统一从这里解析。
+data/、memory/、memory_db/、logs/ 都从这里解析。没有另一台机器上的大脑目录。
 
 解析顺序：
-1. ``SUZU_DATA_DIR`` / ``SUZU_USER_DIR`` 环境变量（安装版客户端注入
-   ``%APPDATA%\Suzu``，开发版客户端注入外部 Brain 根目录）；
-2. Brain 独立运行且未注入时，返回与历史行为完全相同的相对路径，
-   此时启动器负责让 cwd 指向 Brain 根目录。
+1. ``SUZU_DATA_DIR`` / ``SUZU_USER_DIR``（安装版指向用户数据目录，例如 ``%APPDATA%\\Suzu``）；
+2. 没注入时用相对路径，启动器负责让 cwd 指向本仓库。
 
 
 注意：plugins/ 特殊——代码插件属于程序文件，跟安装目录走，不进用户数据

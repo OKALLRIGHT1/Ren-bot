@@ -6,6 +6,7 @@
   "aliases": ["/memory", "/记忆"],
   "direct_command_aliases": ["/memory", "/记忆"],
   "description": "查询长期记忆、人物画像和本地活动统计。参数：query/profile/activity ||| 自然语言问题",
+  "card_summary": "和设置里的记忆是同一份，这里是让她查。",
   "example_arg": "query ||| 我上次提过的项目是什么",
   "timeout_sec": 30,
   "version": "1.0.0",

@@ -17,6 +17,7 @@ def test_external_process_restores_frozen_dll_search_path(monkeypatch):
 
 def test_launcher_skips_start_when_setup_fails(monkeypatch):
     started = []
+    monkeypatch.setattr(launcher, "_is_core_already_running", lambda: False)
     monkeypatch.setattr(launcher, "_ensure_runtime", lambda: False)
     monkeypatch.setattr(launcher, "_show_error", lambda msg: None)
     monkeypatch.setattr(launcher, "_start_process", lambda: started.append("start") or (None, "x"))
@@ -52,3 +53,34 @@ def test_candidate_commands_prefer_ready_python(monkeypatch, tmp_path):
     commands = launcher._candidate_commands()
     assert commands[0][0] == str(ready)
     assert commands[0][1] == str(launcher.APP_ENTRY)
+
+def test_is_backend_ready_uses_runtime_settings(monkeypatch, tmp_path):
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    settings_file = data_dir / "runtime_settings.json"
+    settings_file.write_text('{"gui_http_port": 12345, "gui_http_prefix": "/custom"}', encoding="utf-8")
+
+    polled_urls = []
+
+    class FakeResp:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+    class FakeOpener:
+        def open(self, url, timeout=0.3):
+            polled_urls.append(url)
+            if "12345" in url:
+                return FakeResp()
+            raise Exception("not ready")
+
+    import urllib.request
+
+    monkeypatch.setattr(urllib.request, "build_opener", lambda *args: FakeOpener())
+    assert launcher._is_backend_ready(tmp_path) is True
+    assert "http://127.0.0.1:12345/custom/health" in polled_urls
+

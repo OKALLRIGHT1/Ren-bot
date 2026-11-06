@@ -249,6 +249,37 @@ def _monitor_startup(proc: subprocess.Popen) -> None:
         time.sleep(0.2)
 
 
+def _is_backend_ready(root: Path | None = None) -> bool:
+    base_root = root or ROOT
+    urls = []
+    settings_path = base_root / "data" / "runtime_settings.json"
+    if settings_path.is_file():
+        try:
+            import json
+            data = json.loads(settings_path.read_text(encoding="utf-8"))
+            host = str(data.get("gui_http_host") or "127.0.0.1")
+            if host in {"0.0.0.0", "::", ""}:
+                host = "127.0.0.1"
+            port = data.get("gui_http_port")
+            prefix = str(data.get("gui_http_prefix") or "/gui").rstrip("/")
+            if port:
+                urls.append(f"http://{host}:{port}{prefix}/health")
+        except Exception:
+            pass
+    urls.append("http://127.0.0.1:8097/gui/health")
+
+    import urllib.request
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    for url in urls:
+        try:
+            with opener.open(url, timeout=0.3) as resp:
+                if 200 <= int(resp.status) < 300:
+                    return True
+        except Exception:
+            pass
+    return False
+
+
 def _run_splash(proc: subprocess.Popen) -> None:
     _log("entering _run_splash")
     try:
@@ -310,18 +341,6 @@ def _run_splash(proc: subprocess.Popen) -> None:
 
     started_at = time.time()
 
-    def _is_backend_ready() -> bool:
-        try:
-            import urllib.request
-
-            opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-            with opener.open("http://127.0.0.1:8097/gui/health", timeout=0.3) as resp:
-                if 200 <= int(resp.status) < 300:
-                    return True
-        except Exception:
-            pass
-        return False
-
     def tick():
         code = proc.poll()
         elapsed = time.time() - started_at
@@ -335,15 +354,15 @@ def _run_splash(proc: subprocess.Popen) -> None:
                 f"安装日志：{setup_env.log_path(ROOT)}"
             )
             return
-        # 后端健康检查就绪且展示满至少 2.0 秒，让用户能看清进度过渡
-        if elapsed >= 2.0 and _is_backend_ready():
+        # 后端健康检查就绪且展示满至少 1.0 秒，平滑过渡并立即关闭
+        if elapsed >= 1.0 and _is_backend_ready():
             _log(f"backend ready after {elapsed:.2f}s, closing splash")
             root.destroy()
             return
         if elapsed >= 8.0:
             label.configure(text="启动指令已发出，主窗口仍在加载中。")
             hint.configure(text="如果没有出现窗口，请查看 logs\\launcher.log。")
-        if elapsed >= 15.0:
+        if elapsed >= 25.0:
             _log(f"splash timeout after {elapsed:.2f}s, closing splash")
             root.destroy()
             return
@@ -424,6 +443,34 @@ def _ensure_runtime() -> bool:
     return setup_env.ensure_environment(ROOT)
 
 
+def _is_core_already_running() -> bool:
+    if os.name != "nt":
+        return False
+    try:
+        import ctypes
+        import hashlib
+        normalized_root = str(ROOT.resolve()).lower()
+        digest = hashlib.sha1(normalized_root.encode("utf-8")).hexdigest()
+        lock_name = f"Local\\Live2D_Suzu_core_{digest}"
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.CreateMutexW.argtypes = (ctypes.c_void_p, ctypes.c_bool, ctypes.c_wchar_p)
+        kernel32.CreateMutexW.restype = ctypes.c_void_p
+        kernel32.CloseHandle.argtypes = (ctypes.c_void_p,)
+        kernel32.CloseHandle.restype = ctypes.c_bool
+        kernel32.GetLastError.argtypes = ()
+        kernel32.GetLastError.restype = ctypes.c_ulong
+
+        handle = kernel32.CreateMutexW(None, False, lock_name)
+        if not handle:
+            return False
+        last_err = kernel32.GetLastError()
+        kernel32.CloseHandle(handle)
+        return last_err == 183
+    except Exception as exc:
+        _log(f"mutex check error: {exc}")
+        return False
+
+
 def main() -> int:
     os.chdir(ROOT)
     _log(f"launcher main() started. frozen={getattr(sys, 'frozen', False)} exe={sys.executable}")
@@ -432,33 +479,6 @@ def main() -> int:
         _log(msg)
         _show_error(msg)
         return 1
-
-    def _is_core_already_running() -> bool:
-        if os.name != "nt":
-            return False
-        try:
-            import ctypes
-            import hashlib
-            normalized_root = str(ROOT.resolve()).lower()
-            digest = hashlib.sha1(normalized_root.encode("utf-8")).hexdigest()
-            lock_name = f"Local\\Live2D_Suzu_core_{digest}"
-            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-            kernel32.CreateMutexW.argtypes = (ctypes.c_void_p, ctypes.c_bool, ctypes.c_wchar_p)
-            kernel32.CreateMutexW.restype = ctypes.c_void_p
-            kernel32.CloseHandle.argtypes = (ctypes.c_void_p,)
-            kernel32.CloseHandle.restype = ctypes.c_bool
-            kernel32.GetLastError.argtypes = ()
-            kernel32.GetLastError.restype = ctypes.c_ulong
-
-            handle = kernel32.CreateMutexW(None, False, lock_name)
-            if not handle:
-                return False
-            last_err = kernel32.GetLastError()
-            kernel32.CloseHandle(handle)
-            return last_err == 183
-        except Exception as exc:
-            _log(f"mutex check error: {exc}")
-            return False
 
     if _is_core_already_running():
         _log("an instance of Live2D-Suzu is already running, exiting duplicate launcher")
@@ -484,7 +504,10 @@ def main() -> int:
         )
         return 1
 
-    _run_splash(proc)
+    if "--headless" in sys.argv:
+        _monitor_startup(proc)
+    else:
+        _run_splash(proc)
     return 0
 
 

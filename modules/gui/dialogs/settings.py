@@ -142,7 +142,6 @@ except Exception:
         ("vision", "视觉理解"),
         ("image_gen", "画图"),
         ("image_edit", "图生图"),
-        ("code", "代码"),
         ("translation", "翻译"),
         ("embedding", "向量"),
     ]
@@ -5100,11 +5099,6 @@ class SettingsDialog(QtWidgets.QDialog):
         plugin_manager = (
             getattr(self.main_app, "plugin_manager", None) if self.main_app else None
         )
-        if plugin_manager is None and self.main_app is not None:
-            # 遥控窗远程模式：大脑的插件管理器不在本进程，走 /gui HTTP。
-            from modules.gui.remote_plugin_manager import RemotePluginManager
-
-            plugin_manager = RemotePluginManager()
         if plugin_manager is None:
             layout.addWidget(QtWidgets.QLabel("当前上下文还不能管理能力。"))
         else:

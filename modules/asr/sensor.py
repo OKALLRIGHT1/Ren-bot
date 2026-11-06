@@ -16,7 +16,10 @@ import time
 from typing import Any, Optional
 
 import numpy as np
-import sounddevice as sd
+try:
+    import sounddevice as sd
+except Exception:
+    sd = None
 
 from .config import AsrConfig
 from .corrector import AsrCorrector
@@ -213,6 +216,12 @@ class VoiceSensor:
         self._loop = loop
         self.running = True
         if self.use_local_capture:
+            if sd is None:
+                self.logger.warning(
+                    "🎤 [Voice] 麦克风录音库 (sounddevice / PortAudio) 未安装或不可用，本地麦克风监听已自动禁用，切换为纯文本对话模式。"
+                )
+                self.running = False
+                return
             self._thread = threading.Thread(target=self._monitor_loop, daemon=True)
             self._thread.start()
             self.logger.info("🎤 [Voice] 监听线程已启动")
@@ -236,36 +245,44 @@ class VoiceSensor:
             self._thread = None
 
     def _monitor_loop(self):
+        if sd is None:
+            self.logger.warning("🎤 [Voice] sounddevice 不可用，退出音频捕获线程。")
+            self.running = False
+            return
         try:
             device_name = sd.query_devices(kind="input")["name"]
         except Exception:
             device_name = "default"
         self.logger.info(f"🎤 [Voice] 正在使用设备: {device_name}")
 
-        with sd.InputStream(
-            channels=1,
-            dtype="float32",
-            samplerate=SAMPLE_RATE,
-            latency="high",
-        ) as stream:
-            while self.running:
-                if self._rebuild_requested:
-                    self._rebuild_requested = False
-                    self._init_engine()
-                    if self.engine is None or not self.engine.ready:
+        try:
+            with sd.InputStream(
+                channels=1,
+                dtype="float32",
+                samplerate=SAMPLE_RATE,
+                latency="high",
+            ) as stream:
+                while self.running:
+                    if self._rebuild_requested:
+                        self._rebuild_requested = False
+                        self._init_engine()
+                        if self.engine is None or not self.engine.ready:
+                            time.sleep(0.2)
+                            continue
+
+                    with self._engine_lock:
+                        engine = self.engine
+                    if engine is None or not engine.ready:
                         time.sleep(0.2)
                         continue
 
-                with self._engine_lock:
-                    engine = self.engine
-                if engine is None or not engine.ready:
-                    time.sleep(0.2)
-                    continue
-
-                chunk = int(engine.samples_per_read or ZIPFORMER_SAMPLES_PER_READ)
-                samples, _ = stream.read(chunk)
-                samples = samples.reshape(-1)
-                self._ingest_samples(samples)
+                    chunk = int(engine.samples_per_read or ZIPFORMER_SAMPLES_PER_READ)
+                    samples, _ = stream.read(chunk)
+                    samples = samples.reshape(-1)
+                    self._ingest_samples(samples)
+        except Exception as e:
+            self.logger.warning(f"🎤 [Voice] 音频输入流异常中断或麦克风无法打开 ({e})，语音监听已停止。")
+            self.running = False
 
     def _ingest_samples(self, samples) -> None:
         audio = np.asarray(samples, dtype=np.float32).reshape(-1)

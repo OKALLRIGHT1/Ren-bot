@@ -70,9 +70,13 @@ def test_build_prompt_prefers_prompt_parts_over_string_surgery(monkeypatch):
     assert "【人设】核心角色" in content
     assert "【系统规则】structured" in content
     assert "【运行时】来源=desktop" in content
-    assert "【可用工具能力】search" in content
+    assert "【可用工具能力】search" not in content
     assert "IGNORE" not in content
     assert "wrong-tool" not in content
+    tool_message = messages[1]["content"]
+    assert messages[1]["role"] == "system"
+    assert tool_message == "【可用工具能力】search"
+    assert "【人设】" not in tool_message
 
 
 def test_legacy_system_persona_still_extracts_tools(monkeypatch):

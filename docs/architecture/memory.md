@@ -64,9 +64,9 @@
 1. 文本候选
 2. 向量候选（可用时）
 3. 按 `record_id` 合并后重排
-4. 交给既有 `memory_selector`
+4. 按意图和重合打分。回复路径不再调用 `memory_selector`
 
-人物 / 会话范围必须先过滤再重排。向量不可用时只走文本，并在 diagnostics 说明原因。
+每轮都检索，闲聊和问候也不提前返回。查询文本是当前用户这句话加上上一句助手回复。称呼始终可以注入；其它画像行只有问到，或这次意图就是画像时才带上。查询里有具体词、而候选只重合「这个 / 什么」这类泛词、又没有实体或原文命中时，丢掉该候选。没有精排模型时，分数低于 0.28 不注入。人物 / 会话范围必须先过滤再重排。向量不可用时只走文本，并在 diagnostics 说明原因。
 
 ## 近史与中期会话连续性
 
@@ -102,23 +102,24 @@ is_current(record, now) =
 - 人设身份不含会话号：habit / preference / profile / rule 默认 `session_id=''`。desktop / QQ 只隔离近史。
 - 不支持预约人设：禁止写入未来才生效的第二条 `valid_from`。
 - 普通聊天不召回 `superseded`。问「以前 / 改之前」要等 B3，现在还不会自动带旧值。
-- 关系三元组（B1）和钉日期经历（B2）尚未落地；不要把知识库文档抽成人生关系。
+- 关系三元组已落地：写成 `memory_records` 的 `kind=relation`，键用实体名规范化，点名可以召回。钉日期经历（B2）仍未做。不要把知识库文档抽成人生关系。
+- 单值事实内容变了、又不是明确纠正时，新条标 `conflicted`，不废止旧条。明确纠正才废止。记忆页在「当前有效」列表后附上 conflicted；档案概览仍只看 active。
 
 ## 长期记忆写回（Person Fact / Chat Summary）
 
 实现：`services/memory_writeback.py`，由 `MemoryCoreService.record_message` 在写入 transcript 后触发。
 
-- 生产：后台线程队列（不阻塞聊天主路径）。
-- 测试 / 调试：`memory_writeback_inline=1` 同步处理。
+- 生产：聊天线程只把任务插入 `memory_writeback_pending` 后返回。这张表是耐久账本，不是队列满了才溢出的旁路。成功处理就删掉该行；失败按次数退避，五次后标 `failed`。
+- 测试 / 调试：`memory_writeback_inline=1` 同步处理。需要「记完立刻能读到」的测试必须打开它。
 - 与 profile / expression 学习开关**解耦**：关闭画像学习时写回仍可运行（只要 `memory_core_enabled` 与 `memory_writeback_enabled` 开启）。
 - 进程退出：`Application.cleanup` → `MemoryCoreService.stop_writeback()` 停 worker。
 
 原则（对齐 MaiBot PersonFactWriteback，不整包搬 A_memorix）：
 
 1. **transcript 总是保留**（原始证据）。
-2. **`memory_records` 仅在模型抽出稳定、可被用户原话支持的事实时写入**；空结果 `items:[]` = 不记。
+2. **`memory_records` 仅在模型抽出稳定、可被用户原话支持的事实时写入**。抽不到事实也算成功，并推进该会话的写回游标，避免同一窗口反复抽取。
 3. 事实值不得只来自助手回复；邻近上下文只补指代/短答；`evidence_ids` 必须能落到窗口内用户消息（或 `trigger:` 合成 id）。
-4. 用户纠正优先：同一 `subject_id + kind + key` 内容变化时旧记录 `superseded`；`supersede_keys` 可主动废止其它 key。
+4. 明确纠正才废止同键旧条。单值事实内容变了但不是纠正时，新条标 `conflicted`，旧条保持 active。
 5. 触发：
    - `assistant_reply`：助手非客套回复后，用最近用户证据抽取；
    - `explicit_user`：用户明确习惯/纠正/「记住」类信号时立刻抽取（含「其实是周四」）；
@@ -126,7 +127,7 @@ is_current(record, now) =
 6. 模型任务：`memory_writeback`（默认与看门链一致：云端 flash 优先，`local` 垫底）；摘要用 `summary`。
 7. 调用方：`memory_writeback_extract` / `memory_writeback_summary`（见 `task_registry`）。
 8. 配置键：`MEMORY_SETTINGS` 中 `memory_writeback_*`（可用环境变量 `MEMORY_WRITEBACK_*` 覆盖）。
-9. 来源门禁：QQ / NapCat 仅 `is_owner=true` 写回；隐藏/工具/传感器 path 不入写回。
+9. 来源门禁：主人的事实写到主人画像。其他 QQ 发言人有用户号时，事实写到他自己的画像，不写到主人。隐藏/工具/传感器 path 不入写回。
 
 禁止：
 
@@ -145,9 +146,9 @@ is_current(record, now) =
 - **检索后：** 向量先多取再按 `entity_name / aliases` 词面加分，并按 id / 包含关系去重。别名不加宽自动门。
 - **导入：** `data/knowledge_import_manifest.json` 记 sha256、chunk IDs 和 `chunker_version`。未改文件且版本一致才 skip；旧清单没有版本号、集合里还留着按行碎片、或点了 force，都会按新段落分块重导。改过则先写齐新块再删该文件旧块。失败不推进清单。删除源文件不会自动清库。
 - **GUI：** 知识库管理走 `KnowledgeGuiService`（统计 / 搜索 / 重建 / 按目录删除 / 导入）。不要在对话框里直调 `brain.import_knowledge_from_file`。
-- **插件：** 聊天回合 `ctx["knowledge"]` 是 `BrainKnowledgePort`（转发导入 / 检索 / 统计）。`local_knowledge` 优先用它，没有则回退 `ctx["brain"]`。`ctx["brain"]` 与 `ctx["chat_service"]` 仍在，其它插件还要用。
+- **插件：** 聊天回合 `ctx["knowledge"]` 是 `BrainKnowledgePort`（转发导入 / 检索 / 统计）。`local_knowledge` 优先用它，没有则回退 `ctx["brain"]`。`ctx["brain"]` 仍在。主路径不再注入 `ctx["chat_service"]`。
 - **共用 ingest：** `ingest_knowledge_paths()` 给 GUI worker、插件 `learn` / `gui_ingest`、门面 `learn_configured_dirs`。慢导入参数仍由插件配置提供。
-- **未做：** chunk 尚未进 SQLite（A5）；插件 BM25（A6）未开。Chroma 知识库换 embedding 仍可能要清空重导。Gateway / Presenter 端口未做，禁止先撤整颗 `chat_service`。
+- **未做：** chunk 尚未进 SQLite（A5）；插件 BM25（A6）未开。Chroma 知识库换 embedding 仍可能要清空重导。主路径已经撤掉 `ctx["chat_service"]`。
 
 ## 过渡态提醒
 

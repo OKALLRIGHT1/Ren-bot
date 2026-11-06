@@ -42,7 +42,6 @@ class ContractApp:
         self.tts_enabled = True
         self.qt_ui = None
         self.plugin_manager = None
-        self.skill_manager = None
         self.mcp_bridge = None
         self.chat_gateway = None
         self.chat_service = None

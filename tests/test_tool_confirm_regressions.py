@@ -165,26 +165,16 @@ def test_duplicate_writeback_fingerprint_is_dropped(tmp_path):
     assert service.enqueue(again) is False
 
 
-def test_full_writeback_queue_spills_to_sqlite(tmp_path):
+def test_writeback_enqueue_persists_before_worker(tmp_path):
     store = MemorySQLite(str(tmp_path / "memory.sqlite"))
     core = type("Core", (), {"store": store, "llm_call": None, "settings": {}})()
     service = MemoryWritebackService(
         core,
         llm_call=lambda *a, **k: "{}",
-        settings={"memory_writeback_queue_maxsize": 8, "memory_writeback_inline": False},
+        settings={"memory_writeback_inline": False},
     )
     service.start = lambda: None
-    for index in range(8):
-        assert service.enqueue(
-            WritebackJob(
-                session_id="s",
-                person_id="owner",
-                trigger_role="user",
-                trigger_text=f"事实 {index}",
-                reason="user_statement",
-            )
-        )
-    spilled = service.enqueue(
+    assert service.enqueue(
         WritebackJob(
             session_id="s",
             person_id="owner",
@@ -193,9 +183,10 @@ def test_full_writeback_queue_spills_to_sqlite(tmp_path):
             reason="user_statement",
         )
     )
-    assert spilled is True
-    rows = store.pop_writeback_jobs(limit=5)
-    assert rows[0]["trigger_text"] == "多出来的事实"
+    rows = store.list_writeback_jobs()
+    assert len(rows) == 1
+    assert rows[0]["status"] == "pending"
+    assert rows[0]["payload"]["trigger_text"] == "多出来的事实"
 
 
 def test_restored_short_term_keeps_legacy_event_id(tmp_path):

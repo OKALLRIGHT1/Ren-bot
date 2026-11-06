@@ -47,6 +47,7 @@ def test_settings_nav_groups_and_hides_developer(monkeypatch):
     assert "记忆与资料" in texts
     assert "依赖体检" not in texts
     assert "提供商" not in texts
+    assert "MCP" not in texts
     assert "状态屏" not in texts
     assert dialog._current_page_id == "start"
     assert set(dialog._page_stack_index) == {page["id"] for page in SETTINGS_PAGES}
@@ -63,12 +64,14 @@ def test_settings_nav_developer_toggle(monkeypatch):
     _stub_pages(monkeypatch)
     dialog = SettingsDialog(parent=None, main_app=None)
     assert "依赖体检" not in _nav_texts(dialog)
+    assert "MCP" not in _nav_texts(dialog)
     monkeypatch.setattr("modules.gui.dialogs.settings.is_developer_mode", lambda: True)
     dialog._rebuild_nav(select_id="start")
     texts = _nav_texts(dialog)
     assert "开发者" in texts
     assert "依赖体检" in texts
     assert "提供商" in texts
+    assert "MCP" in texts
     dialog.close()
 
 

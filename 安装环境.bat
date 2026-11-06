@@ -1,25 +1,34 @@
 @echo off
+chcp 65001 >nul
 setlocal
 cd /d "%~dp0"
-title Ren-bot »·¾³°²×°
+title Ren-bot çŽ¯å¢ƒå®‰è£…å‘å¯¼
 
 echo ========================================================
-echo               Ren-bot ÔËÐÐ»·¾³°²×°Ïòµ¼
+echo               Ren-bot çŽ¯å¢ƒå®‰è£…ä¸Žæ£€æŸ¥å‘å¯¼
 echo ========================================================
 echo.
-echo ÕýÔÚ¼ì²é²¢ÅäÖÃÔËÐÐ»·¾³£¬Ê×´Î°²×°¿ÉÄÜÐèÒª¼¸·ÖÖÓ£¬ÇëÄÍÐÄµÈ´ý...
+echo æ­£åœ¨æ£€æŸ¥å¹¶å‡†å¤‡ Python è¿è¡Œæ—¶çŽ¯å¢ƒï¼Œè¯·ç¨å€™...
 echo.
 
-call "%~dp0setup_env.cmd" --ensure --console
-set "ERR=%ERRORLEVEL%"
+if exist "%~dp0setup_env.cmd" (
+    call "%~dp0setup_env.cmd" --ensure --console
+    set "ERR=%ERRORLEVEL%"
+) else (
+    py -3 "%~dp0setup_env.py" --ensure --console
+    if errorlevel 1 python "%~dp0setup_env.py" --ensure --console
+    set "ERR=%ERRORLEVEL%"
+)
+
 echo.
 if "%ERR%"=="0" (
-    echo [³É¹¦] Ren-bot ÔËÐÐ»·¾³ÒÑ¾ÍÐ÷£¡
-    echo ½ÓÏÂÀ´Äú¿ÉÒÔÖ±½ÓË«»÷ "ren-bot.exe" »ò "Æô¶¯.bat" Æô¶¯³ÌÐò¡£
+    echo [æˆåŠŸ] Ren-bot è¿è¡ŒçŽ¯å¢ƒå·²å‡†å¤‡å°±ç»ªï¼
+    echo æŽ¥ä¸‹æ¥æ‚¨å¯ä»¥ç›´æŽ¥åŒå‡» "å¯åŠ¨.bat" æˆ– "ren-bot.exe" å¯åŠ¨ç¨‹åºã€‚
 ) else (
-    echo [Ê§°Ü] »·¾³°²×°Óöµ½ÎÊÌâ£¬ÍË³öÂë£º%ERR%
-    echo Çë²é¿´ÈÕÖ¾ÎÄ¼þ£ºlogs\setup_env.log
-    echo ÌáÊ¾£ºÈôÎ´°²×° Python£¬ÇëÇ°Íù https://www.python.org/ ÏÂÔØ°²×° Python 3.10+£¬²¢¹´Ñ¡ "Add python.exe to PATH"¡£
+    echo [æç¤º] çŽ¯å¢ƒåˆå§‹åŒ–é‡åˆ°é—®é¢˜ï¼ˆé€€å‡ºç ï¼š%ERR%ï¼‰ã€‚
+    echo 1. è‹¥å°šæœªå®‰è£… Pythonï¼Œè¯·è®¿é—® https://www.python.org/ ä¸‹è½½ Python 3.10 æˆ– 3.11ã€‚
+    echo    å®‰è£…æ—¶åŠ¡å¿…å‹¾é€‰ "Add python.exe to PATH"ã€‚
+    echo 2. æ‚¨ä¹Ÿå¯ä»¥æŸ¥çœ‹ logs\setup_env.log èŽ·å–è¯¦ç»†æ—¥å¿—ã€‚
 )
 echo.
 pause

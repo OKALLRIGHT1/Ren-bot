@@ -4,6 +4,7 @@
 
 | 文档 | 用途 |
 | --- | --- |
+| [dsh-tool-awareness.md](dsh-tool-awareness.md) | DSH 的对话回合、工具自知和插件披露；对照任的路由，列出可借鉴的点 |
 | [memory.md](memory.md) | 记忆 / 知识库契约：谁是事实源、GUI 页、召回、写回、知识门控 |
 | [shipped-features.md](shipped-features.md) | 已落地行为摘要（搜索确认、徽章、知识门控、自然聊、GUI 接线、久坐弹窗） |
 | [project_slimdown.md](project_slimdown.md) | 瘦身规则；不要一次重写 `ChatService` / Settings |
@@ -50,13 +51,12 @@
 | `agent_runtime` | AgentRuntime | `/agent` 自检 |
 | `mcp_bridge` | MCP 桥 | `mcp_tools` 优先用它 |
 | `knowledge` | `BrainKnowledgePort` | 窄口：导入 / 检索 / 统计 |
-| `skills` | `SkillManager` 或 `None` | **可选**。只给 `SKILL.md` 提示词注入；不是插件执行层。不用 Skill 可忽略 |
 | `brain` | AdvancedMemory 门面 | **否**。`search` 跟进话题、`memory_tools`、跨通道回退仍靠它 |
 | `chat_service` | 整颗 ChatService | **已撤。** 插件不得再读此键 |
 
 入口：`services/plugin_ports/`。生产 `process()` 注入 `gateway` / `tts` / `app`。`resolve_*` 仍可从测试里的 `chat_service` 拼端口，主路径不注入该键。
 
-**Skill 不是插件。** 执行能力一律 `plugins/`。`skills/` 只注入提示词；没有 `SKILL.md` 时 `skill_runtime` 显示未初始化即可，不为它开第二套端口。
+提示词技能层已删除。`modules/skill_manager.py` 和 `skills/` 不再存在，聊天不再注入 `ctx["skills"]`。执行能力一律写在 `plugins/`。
 
 ---
 
@@ -69,8 +69,8 @@
 | P2 | 已做 | 记忆/知识对话框接 `gui_api`；共用 ingest |
 | P3 | 已做 | 删闲聊 polish 双轨；删未接线的 `modules/memory/prompt_builder.py` |
 | P4a | 已做 | 加 `ctx["knowledge"]`，不删旧键 |
-| P4b | 已做 | 窄口齐；`process()` **不再**写入 `ctx["chat_service"]`。Skill 可选，不为此开端口 |
-| P5 | 已做 | 普通直聊 / Direct / 非流式工具 / 流式残留已有完整编排入口；Prompt 走 `PromptParts`；插件端口与 `AgentRuntime` 不再包整颗 `ChatService`。计划：`docs/superpowers/plans/2026-09-07-chat-service-p5-natural-chat.md` |
+| P4b | 已做 | 窄口齐；`process()` **不再**写入 `ctx["chat_service"]`。提示词技能层后来已整层删除 |
+| P5 | 已做 | 普通直聊 / Direct / 非流式工具 / 流式残留已有完整编排入口；Prompt 走 `PromptParts`；插件端口与 `AgentRuntime` 不再包整颗 `ChatService`。勾选表只留在本地，不再当进行中计划 |
 
 审查稿 7.5 的「按字面立刻删键会破发」是当时的风险；P4b 已经先补端口再撤键。`brain` 仍在。P5 已做：普通直聊走 `run_plain_chat()`；Direct 走 `run_direct_turn()`；非流式工具走 `run_non_stream_tool_turn()`；流式残留走 `run_stream_turn()`；闲聊与工具路径 Prompt 共用 `assemble_chat_context_messages()`；任务跟进 / 主动关心走 `FollowupService`；后台委托走 `run_background_delegate_task()`；屏幕/点歌走 `SensorEventService` / `run_music_event`；QQ 发送者/资料走 `GatewayContextService`；日记回填走 `DiaryService`；回复门控走 `reply_gatekeeper.should_reply`；插件端口不再保存整颗 `ChatService`；`AgentRuntime` 不再持有 `ChatService`。
 

@@ -236,6 +236,7 @@ class MemoryCoreRepository:
                 )
                 """
             )
+            self._ensure_world_memory_tables(conn)
             try:
                 conn.execute(
                     "CREATE VIRTUAL TABLE IF NOT EXISTS memory_records_fts "
@@ -338,6 +339,62 @@ class MemoryCoreRepository:
                 conn.execute(f"ALTER TABLE expression_patterns ADD COLUMN {ddl}")
 
     @staticmethod
+    def _ensure_world_memory_tables(conn: sqlite3.Connection) -> None:
+        """段落、实体和名字索引。FTS5 的 unicode61 会把一整段中文当成一个词，
+        所以按词查找走 LIKE，不把 jieba 装进 SQLite 扩展。
+        """
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS memory_paragraphs (
+                id TEXT PRIMARY KEY,
+                external_id TEXT NOT NULL UNIQUE,
+                content TEXT NOT NULL,
+                source_type TEXT NOT NULL DEFAULT '',
+                session_id TEXT NOT NULL DEFAULT '',
+                subject_id TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'active',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS memory_entities (
+                id TEXT PRIMARY KEY,
+                name_normalized TEXT NOT NULL UNIQUE,
+                display_name TEXT NOT NULL,
+                kind TEXT NOT NULL DEFAULT 'other',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS memory_entity_aliases (
+                entity_id TEXT NOT NULL,
+                alias_normalized TEXT NOT NULL,
+                alias TEXT NOT NULL,
+                PRIMARY KEY(entity_id, alias_normalized)
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS memory_record_entities (
+                record_id TEXT NOT NULL,
+                entity_id TEXT NOT NULL,
+                PRIMARY KEY(record_id, entity_id)
+            )
+            """
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_record_entities_entity "
+            "ON memory_record_entities(entity_id, record_id)"
+        )
+
+    @staticmethod
     def _ensure_evidence_observed_at(conn: sqlite3.Connection) -> None:
         rows = conn.execute("PRAGMA table_info(memory_evidence)").fetchall()
         columns = {str(row[1]) for row in rows}
@@ -350,6 +407,14 @@ class MemoryCoreRepository:
             (key,),
         ).fetchone()
         return str(row["value"] if row else "")
+
+    def get_meta(self, key: str) -> str:
+        return self._meta_value(self._connect(), str(key or ""))
+
+    def set_meta(self, key: str, value: str) -> None:
+        with self._connect() as conn:
+            self._set_meta_value(conn, str(key or ""), str(value or ""))
+            conn.commit()
 
     def _set_meta_value(self, conn: sqlite3.Connection, key: str, value: str) -> None:
         conn.execute(
@@ -1682,6 +1747,217 @@ class MemoryCoreRepository:
             "updated_at": row["updated_at"],
             "last_confirmed_at": row["last_confirmed_at"] if "last_confirmed_at" in row.keys() else None,
         }
+
+    @staticmethod
+    def normalize_entity_name(name: str) -> str:
+        return re.sub(r"\s+", "", str(name or "")).strip().lower()
+
+    def upsert_entity(
+        self,
+        display_name: str,
+        *,
+        kind: str = "other",
+        aliases: Optional[Iterable[str]] = None,
+    ) -> str:
+        normalized = self.normalize_entity_name(display_name)
+        if len(normalized) < 2:
+            return ""
+        now = _now_iso()
+        conn = self._connect()
+        row = conn.execute(
+            "SELECT id FROM memory_entities WHERE name_normalized=?",
+            (normalized,),
+        ).fetchone()
+        if row is None:
+            entity_id = f"ent_{uuid.uuid4().hex[:16]}"
+            conn.execute(
+                "INSERT INTO memory_entities(id,name_normalized,display_name,kind,created_at,updated_at) "
+                "VALUES(?,?,?,?,?,?)",
+                (entity_id, normalized, str(display_name).strip()[:80], str(kind or "other"), now, now),
+            )
+        else:
+            entity_id = str(row["id"])
+            conn.execute(
+                "UPDATE memory_entities SET display_name=?, updated_at=? WHERE id=?",
+                (str(display_name).strip()[:80], now, entity_id),
+            )
+        for alias in aliases or []:
+            alias_norm = self.normalize_entity_name(alias)
+            if len(alias_norm) < 2:
+                continue
+            conn.execute(
+                "INSERT OR IGNORE INTO memory_entity_aliases(entity_id,alias_normalized,alias) "
+                "VALUES(?,?,?)",
+                (entity_id, alias_norm, str(alias).strip()[:80]),
+            )
+        conn.commit()
+        return entity_id
+
+    def link_record_entities(self, record_id: str, entity_ids: Iterable[str]) -> None:
+        record_id = str(record_id or "").strip()
+        if not record_id:
+            return
+        conn = self._connect()
+        for entity_id in entity_ids:
+            token = str(entity_id or "").strip()
+            if not token:
+                continue
+            conn.execute(
+                "INSERT OR IGNORE INTO memory_record_entities(record_id,entity_id) VALUES(?,?)",
+                (record_id, token),
+            )
+        conn.commit()
+
+    def upsert_paragraph(
+        self,
+        *,
+        external_id: str,
+        content: str,
+        source_type: str = "",
+        session_id: str = "",
+        subject_id: str = "",
+    ) -> str:
+        external_id = str(external_id or "").strip()
+        content = str(content or "").strip()
+        if not external_id or not content:
+            return ""
+        now = _now_iso()
+        conn = self._connect()
+        row = conn.execute(
+            "SELECT id FROM memory_paragraphs WHERE external_id=?",
+            (external_id,),
+        ).fetchone()
+        if row is not None:
+            conn.execute(
+                "UPDATE memory_paragraphs SET content=?, updated_at=? WHERE id=?",
+                (content[:500], now, str(row["id"])),
+            )
+            conn.commit()
+            return str(row["id"])
+        paragraph_id = f"mp_{uuid.uuid4().hex[:16]}"
+        conn.execute(
+            "INSERT INTO memory_paragraphs("
+            "id,external_id,content,source_type,session_id,subject_id,status,created_at,updated_at"
+            ") VALUES(?,?,?,?,?,?,?,?,?)",
+            (
+                paragraph_id,
+                external_id,
+                content[:500],
+                str(source_type or ""),
+                str(session_id or ""),
+                str(subject_id or ""),
+                "active",
+                now,
+                now,
+            ),
+        )
+        conn.commit()
+        return paragraph_id
+
+    def find_entities_mentioned(self, text: str, *, limit: int = 20) -> list[dict[str, Any]]:
+        query = self.normalize_entity_name(text)
+        if len(query) < 2:
+            return []
+        rows = self._connect().execute(
+            "SELECT id,name_normalized,display_name,kind FROM memory_entities "
+            "WHERE length(name_normalized)>=2 AND instr(?, name_normalized)>0 "
+            "ORDER BY length(name_normalized) DESC LIMIT ?",
+            (query, max(1, min(50, int(limit)))),
+        ).fetchall()
+        found = [
+            {
+                "id": str(row["id"]),
+                "name_normalized": str(row["name_normalized"]),
+                "display_name": str(row["display_name"]),
+                "kind": str(row["kind"] or "other"),
+            }
+            for row in rows
+        ]
+        if len(found) >= limit:
+            return found
+        alias_rows = self._connect().execute(
+            "SELECT e.id,e.name_normalized,e.display_name,e.kind "
+            "FROM memory_entity_aliases a JOIN memory_entities e ON e.id=a.entity_id "
+            "WHERE length(a.alias_normalized)>=2 AND instr(?, a.alias_normalized)>0 "
+            "LIMIT ?",
+            (query, max(1, min(50, int(limit)))),
+        ).fetchall()
+        seen = {item["id"] for item in found}
+        for row in alias_rows:
+            entity_id = str(row["id"])
+            if entity_id in seen:
+                continue
+            found.append(
+                {
+                    "id": entity_id,
+                    "name_normalized": str(row["name_normalized"]),
+                    "display_name": str(row["display_name"]),
+                    "kind": str(row["kind"] or "other"),
+                }
+            )
+            if len(found) >= limit:
+                break
+        return found
+
+    def records_for_entities(
+        self,
+        entity_ids: Iterable[str],
+        *,
+        subject_id: str,
+        limit: int = 40,
+    ) -> list[dict[str, Any]]:
+        ids = [str(item or "").strip() for item in entity_ids if str(item or "").strip()]
+        if not ids:
+            return []
+        placeholders = ",".join("?" for _ in ids)
+        subject = str(subject_id or "owner").strip() or "owner"
+        if subject == "owner":
+            subject_sql = "m.subject_id IN (?, '')"
+            subject_args: list[Any] = [subject]
+        else:
+            subject_sql = "m.subject_id=?"
+            subject_args = [subject]
+        sql = (
+            "SELECT DISTINCT m.* FROM memory_records m "
+            "JOIN memory_record_entities link ON link.record_id=m.id "
+            f"WHERE link.entity_id IN ({placeholders}) AND m.status='active' AND {subject_sql} "
+            "ORDER BY m.last_confirmed_at DESC LIMIT ?"
+        )
+        rows = self._connect().execute(
+            sql,
+            [*ids, *subject_args, max(1, min(80, int(limit)))],
+        ).fetchall()
+        return [self._row_to_record(row) for row in rows]
+
+    def relation_degree(self, entity_id: str, *, subject_id: str) -> int:
+        entity_id = str(entity_id or "").strip()
+        if not entity_id:
+            return 0
+        subject = str(subject_id or "owner").strip() or "owner"
+        if subject == "owner":
+            subject_sql = "m.subject_id IN (?, '')"
+            subject_args: list[Any] = [subject]
+        else:
+            subject_sql = "m.subject_id=?"
+            subject_args = [subject]
+        row = self._connect().execute(
+            "SELECT COUNT(*) AS n FROM memory_records m "
+            "JOIN memory_record_entities link ON link.record_id=m.id "
+            f"WHERE link.entity_id=? AND m.kind='relation' AND m.status='active' AND {subject_sql}",
+            [entity_id, *subject_args],
+        ).fetchone()
+        return int(row["n"] if row else 0)
+
+    def find_active_persona(self, *, subject_id: str, kind: str, key: str) -> Optional[dict[str, Any]]:
+        row = self._find_active_identity(
+            subject_id=str(subject_id or ""),
+            kind=str(kind or ""),
+            key=str(key or ""),
+            session_id="",
+        )
+        if row is None:
+            return None
+        return self._row_to_record(row)
 
     def list_transcript_candidates(
         self,

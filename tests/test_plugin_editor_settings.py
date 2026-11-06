@@ -63,6 +63,50 @@ class _FakePluginManager:
         return True
 
 
+def test_status_setting_is_readonly_and_not_saved(monkeypatch):
+    _app()
+    monkeypatch.setattr(QtWidgets.QMessageBox, "information", lambda *a, **k: None)
+    monkeypatch.setattr(QtWidgets.QMessageBox, "warning", lambda *a, **k: None)
+    raw = {
+        "name": "桌面终端",
+        "trigger": "smart_desk",
+        "type": "react",
+        "description": "status fixture",
+        "timeout_sec": 8,
+        "settings": {
+            "mqtt_host": {
+                "type": "string",
+                "label": "MQTT 主机",
+                "default": "127.0.0.1",
+                "placeholder": "127.0.0.1",
+            },
+            "last_nfc_uid": {
+                "type": "status",
+                "label": "最近 UID",
+                "default": "尚未刷卡",
+            },
+        },
+    }
+
+    class Live:
+        def runtime_status(self):
+            return {"last_nfc_uid": "04:AA:BB:CC"}
+
+    manager = _FakePluginManager(raw)
+    manager.plugins = {"smart_desk": Live()}
+    dialog = PluginEditorDialog(plugin_manager=manager, trigger="smart_desk")
+    field_type, widget = dialog.config_fields["last_nfc_uid"]
+    assert field_type == "status"
+    assert widget.isReadOnly()
+    assert widget.text() == "04:AA:BB:CC"
+    widget.setText("HACK")
+    dialog._save_config()
+    saved = manager.saved["settings"]["last_nfc_uid"]["default"]
+    assert saved == "尚未刷卡"
+    assert manager.saved["settings"]["mqtt_host"]["default"] == "127.0.0.1"
+    dialog.close()
+
+
 def test_plugin_editor_hides_hidden_settings_and_keeps_them_on_save(monkeypatch):
     _app()
     monkeypatch.setattr(QtWidgets.QMessageBox, "information", lambda *a, **k: None)

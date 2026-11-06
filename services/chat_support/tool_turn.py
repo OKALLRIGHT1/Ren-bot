@@ -229,6 +229,9 @@ async def run_non_stream_tool_turn(
             fc_used=bool(getattr(react_first_pass, "fc_used", False)),
             cmd_used=bool(getattr(react_first_pass, "cmd_used", False)),
             fc_skipped_reason=str(getattr(react_first_pass, "fc_skipped_reason", "") or ""),
+            route_reason=str(getattr(route, "reason", "") or ""),
+            tool_triggers=list(normal_triggers or []),
+            schema_names=list(getattr(react_first_pass, "sent_tool_names", []) or []),
         )
 
     if should_force_capability_route(

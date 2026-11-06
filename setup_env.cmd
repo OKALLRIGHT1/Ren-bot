@@ -1,10 +1,11 @@
 @echo off
+chcp 65001 >nul
 setlocal EnableExtensions
 cd /d "%~dp0"
 
 set "SETUP_PY=%~dp0setup_env.py"
 if not exist "%SETUP_PY%" (
-    echo [Ren-bot] �Ҳ��� setup_env.py
+    echo [Ren-bot] 未找到 setup_env.py
     exit /b 1
 )
 
@@ -42,7 +43,7 @@ if exist "%LOCALAPPDATA%\Programs\Python\Python310\python.exe" (
     exit /b %ERRORLEVEL%
 )
 
-echo [Ren-bot] δ��⵽ Python 3.10+������ͨ�� winget ��װ Python 3.12...
+echo [Ren-bot] 未检测到 Python 3.10+，尝试通过 winget 安装 Python 3.12...
 where winget >nul 2>&1
 if errorlevel 1 goto :no_python
 
@@ -65,11 +66,11 @@ if not errorlevel 1 (
     exit /b %ERRORLEVEL%
 )
 
-echo [Ren-bot] Python �Ѱ�װ����ǰ���ڻ�������δˢ�¡�������˫������װ����.bat����
-echo �����޷�ʹ�ã���ǰ�� https://www.python.org/downloads/ ��װ Python 3.10+������ع�ѡ "Add python.exe to PATH"��
+echo [Ren-bot] Python 已安装，但当前环境 PATH 未刷新，请重新运行“安装环境.bat”。
+echo 若仍无法使用，请前往 https://www.python.org/downloads/ 手动安装 Python 3.10+，并务必勾选 "Add python.exe to PATH"。
 exit /b 1
 
 :no_python
-echo [Ren-bot] ϵͳδ��װ winget����ǰ�� https://www.python.org/downloads/ ���ز���װ Python 3.10 ����߰汾��
-echo ��װʱ��ع�ѡ "Add python.exe to PATH"��
+echo [Ren-bot] 系统未安装 winget。请前往 https://www.python.org/downloads/ 下载并安装 Python 3.10 或更高版本。
+echo 安装时务必勾选 "Add python.exe to PATH"。
 exit /b 1

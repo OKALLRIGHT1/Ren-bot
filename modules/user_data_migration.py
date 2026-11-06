@@ -1,14 +1,13 @@
-"""First-launch migration of user data into SUZU_DATA_DIR (install builds).
+"""安装版首启：把本程序目录里的旧数据迁到 SUZU_DATA_DIR。
 
-安装版首启语义（docs/部分重构.md §13/§18）：
-- 客户端注入 ``SUZU_DATA_DIR=%APPDATA%\\Suzu`` 后，Brain 的 data/、
-  memory/、memory_db/ 都指向用户数据目录；
-- 用户数据目录里还没有 runtime_settings.json 时，从旧开发位置
-  ``<brain>/data/`` 迁移**配置类**文件（白名单，不是全量拷贝——日志、
-  备份、临时文件不迁）；
+- 注入了 ``SUZU_DATA_DIR``（例如 ``%APPDATA%\\Suzu``）后，data/、
+  memory/、memory_db/ 指向用户数据目录；
+- 用户数据目录里还没有 runtime_settings.json 时，从本程序目录的
+  ``data/`` 迁移配置类文件（白名单，不是全量拷贝——日志、备份、临时文件不迁）；
 - 一次性：迁移成功后写迁移标记，不再重复；
-- 失败不致命：保留旧数据，Brain 以全新配置启动（token 会重新生成，
+- 失败不致命：旧数据留在原处，程序以全新配置启动（token 会重新生成，
   外部服务需要重新配置——但绝不删除或覆盖用户旧数据）。
+  ``brain_root`` 参数就是本程序目录，不是另一台机器。
 
 目录类（memory/、memory_db/、data/ 下的子目录）跟随迁移；绝对路径字段
 （外部服务 command 等）按 §13 规则：旧路径存在则保留，失效则由
@@ -68,7 +67,7 @@ MIGRATION_MARKER = "migration_from_legacy_data.done.json"
 
 
 def migrate_legacy_data(brain_root: Path, user_root: Path) -> Optional[dict]:
-    """把旧 ``<brain_root>/data`` 的配置迁到 ``<user_root>/data``。
+    """把本程序目录 ``data/`` 里的旧配置迁到 ``<user_root>/data``。
 
     返回迁移报告 dict；不需要迁移（未注入/已迁移/无旧数据）返回 None。
     只在 ``user_root/data/runtime_settings.json`` 缺失时执行——它既是

@@ -1,8 +1,7 @@
-"""External services management page (Ollama / GPT-SoVITS / NapCat).
+"""本进程里的外部服务页（Ollama / GPT-SoVITS / NapCat）。
 
-计划 §4（docs/部分重构.md）：薄适配页 —— 状态展示与启动/停止/重启操作
-全部走 Brain 的 /external-services* API；客户端不直接扫描或启动本机服务。
-远程模式下这些服务由远程 Brain 所在机器管理，页面对远程同样适用。
+状态和启动、停止、保存都走进程内的 ExternalServicesGuiService。
+这些服务跑在这台机器上，没有另一台「远程大脑」代管。
 
 线程→UI 传递用 Qt Signal(object)（后台线程 emit，主线程槽处理）。
 不要用 QMetaObject.invokeMethod + Q_ARG(list, ...)：Python 对象经元对象
@@ -16,14 +15,9 @@ from typing import Any, Dict, List, Optional
 
 from PySide6 import QtCore, QtWidgets
 
-try:
-    from modules.gui.remote_external_services import RemoteExternalServicesStore
-except Exception:
-    RemoteExternalServicesStore = None
-
 
 class LocalExternalServicesStore:
-    """In-process store for the brain GUI. Avoids HTTP + client_config."""
+    """本进程里的外部服务读写，不经过 HTTP。"""
 
     def __init__(self) -> None:
         self.last_error = ""
@@ -104,8 +98,8 @@ class ExternalServicesPage(QtWidgets.QWidget):
         layout.setSpacing(12)
 
         intro = QtWidgets.QLabel(
-            "大脑依赖的本机服务在这里查看、编辑和开关（Ollama、GPT-SoVITS、NapCat）。"
-            "启动位置和「随大脑启动」写在大脑配置里；连远程大脑时，路径是远程机器上的路径。"
+            "Ollama、GPT-SoVITS、NapCat 在这台机器上查看、编辑和开关。"
+            "启动命令和「随本程序启动」写在本机配置里。"
         )
         intro.setObjectName("settingsPageDesc")
         intro.setWordWrap(True)

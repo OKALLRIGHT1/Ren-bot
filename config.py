@@ -160,10 +160,9 @@ MQTT_DISPLAY_TOPIC = os.getenv("MQTT_DISPLAY_TOPIC", "suzu/display/status")
 # "tk"：使用 Tk 版 GUI（modules/gui.py）
 # "qt"：使用 Qt 版 GUI（modules/qt_gui.py，需要 pip install PySide6）
 # "auto"：优先 Qt，失败自动回退 Tk
-# "headless"：不创建桌面 GUI，由外部控制中心接管
+# "headless"：不创建桌面窗口，本进程继续跑聊天、QQ 和本地 HTTP
 GUI_BACKEND = os.getenv("GUI_BACKEND", "qt").strip().lower() or "qt"
-# When the enhanced frontend is connected, Qt HUD/settings are hidden.
-# Set KEEP_QT_GUI=1 to keep both for side-by-side comparison.
+# 桌面形象连上后，设置窗仍留在本进程里，不会被藏起来。
 KEEP_QT_GUI = get_env_bool("KEEP_QT_GUI", "0")
 START_MINIMIZED_TO_TRAY = get_env_bool("START_MINIMIZED_TO_TRAY", "0")
 GUI_WS_HOST = os.getenv("GUI_WS_HOST", "127.0.0.1")
@@ -195,7 +194,7 @@ IDLE_RANDOM_MOTION_EMO = os.getenv("IDLE_RANDOM_MOTION_EMO", "idle_random")
 IDLE_RANDOM_MIN_SECONDS = get_env_float("IDLE_RANDOM_MIN_SECONDS", 90.0, 5.0)
 IDLE_RANDOM_MAX_SECONDS = get_env_float("IDLE_RANDOM_MAX_SECONDS", 240.0, 5.0)
 IDLE_RANDOM_MIN_IDLE_SECONDS = get_env_float(
-    "IDLE_RANDOM_MIN_IDLE_SECONDS", 30.0, 0.0
+    "IDLE_RANDOM_MIN_IDLE_SECONDS", 90.0, 0.0
 )
 IDLE_RANDOM_RETURN_IDLE_SECONDS = get_env_float(
     "IDLE_RANDOM_RETURN_IDLE_SECONDS", 7.0, 0.0
@@ -681,7 +680,7 @@ _CHARACTER_NATURAL_CHAT_DEFAULT = {
     "character_thought_scope": "desktop_and_qq_private",
     # 群聊产品未开放测试时默认关；打开后与桌面/私聊同一 pipeline
     "group_chat_natural_enabled": False,
-    "character_thought_timeout_ms": 4000,
+    "character_thought_timeout_ms": 1200,
     "character_thought_max_tokens": 220,
     "expression_inject_in_main_reply": True,
     # 默认 1 条：多了会变成「背参考答案」

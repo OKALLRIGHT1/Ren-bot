@@ -390,6 +390,16 @@ class PluginManagerDialog(QtWidgets.QDialog):
         lbl_group.setFixedHeight(18)
         top_row.addWidget(lbl_group)
 
+        if bool(info.get("self_callable")):
+            lbl_self = QtWidgets.QLabel("可自调用")
+            lbl_self.setFixedHeight(18)
+            lbl_self.setToolTip("闲聊里她可以自己调用，不必等关键词路由")
+            lbl_self.setStyleSheet(
+                "background-color: #F5F3FF; color: #6D28D9; border: 1px solid #DDD6FE;"
+                "padding: 1px 6px; border-radius: 6px; font-size: 10px; font-weight: 600;"
+            )
+            top_row.addWidget(lbl_self)
+
         top_row.addStretch(1)
 
         # 状态与切换合一的胶囊按钮
@@ -1532,6 +1542,23 @@ class PluginEditorDialog(QtWidgets.QDialog):
         except Exception as e:
             QtWidgets.QMessageBox.warning(self, "错误", f"加载配置失败: {str(e)}")
 
+    def _runtime_setting_value(self, key):
+        manager = self.plugin_manager
+        plugins = getattr(manager, "plugins", None)
+        if not isinstance(plugins, dict):
+            return None
+        plugin = plugins.get(self.trigger)
+        getter = getattr(plugin, "runtime_status", None)
+        if not callable(getter):
+            return None
+        try:
+            data = getter() or {}
+        except Exception:
+            return None
+        if not isinstance(data, dict):
+            return None
+        return data.get(key)
+
     def _load_custom_settings(self, config):
         """加载自定义配置项：每个配置项独立渲染为精致小卡片，短开关/数字自动排成双列网格"""
         self.config_fields.clear()
@@ -1581,6 +1608,11 @@ class PluginEditorDialog(QtWidgets.QDialog):
                 choices = choices or schema_field.get("choices") or []
                 if not isinstance(setting_info, dict):
                     value = schema_field.get("default", value)
+
+            if str(setting_type).strip().lower() in {"status", "readonly"}:
+                live = self._runtime_setting_value(key)
+                if live not in (None, ""):
+                    value = live
 
             if str(setting_type).strip().lower() in {"link", "url"}:
                 value = webui_url_from_settings(settings)
@@ -1995,6 +2027,15 @@ class PluginEditorDialog(QtWidgets.QDialog):
             self.config_fields[key] = ("link", line_edit)
             widget = row
 
+        elif setting_type in {"status", "readonly"}:
+            line_edit = QtWidgets.QLineEdit()
+            line_edit.setReadOnly(True)
+            line_edit.setText(str(value) if value is not None else "")
+            line_edit.setPlaceholderText("还没有")
+            line_edit.setFixedHeight(28)
+            self.config_fields[key] = ("status", line_edit)
+            widget = line_edit
+
         elif setting_type in {"string", "text", "secret", "password"}:
             if isinstance(value, list):
                 text = "\n".join(str(v) for v in value)
@@ -2044,14 +2085,20 @@ class PluginEditorDialog(QtWidgets.QDialog):
                 # 无论是 string 还是 text，只要是单行短文本（URL/路径/名称/模型等），一律使用紧凑单行 QLineEdit
                 line_edit = QtWidgets.QLineEdit()
                 line_edit.setText(text)
-                line_edit.setPlaceholderText("请输入...")
+                placeholder = ""
+                if isinstance(setting_info, dict):
+                    placeholder = str(setting_info.get("placeholder") or "").strip()
+                line_edit.setPlaceholderText(placeholder or "请输入...")
                 line_edit.setFixedHeight(28)
                 self.config_fields[key] = ("string", line_edit)
                 widget = line_edit
             else:
                 text_edit = QtWidgets.QTextEdit()
                 text_edit.setMaximumHeight(68)
-                text_edit.setPlaceholderText("请输入多行文本或 JSON...")
+                placeholder = ""
+                if isinstance(setting_info, dict):
+                    placeholder = str(setting_info.get("placeholder") or "").strip()
+                text_edit.setPlaceholderText(placeholder or "请输入多行文本或 JSON...")
                 text_edit.setPlainText(text)
                 self.config_fields[key] = ("text", text_edit)
                 widget = text_edit
@@ -2570,6 +2617,8 @@ class PluginEditorDialog(QtWidgets.QDialog):
                         return
                     _store_setting_value(key, value)
                 elif field_type == "link":
+                    continue
+                elif field_type == "status":
                     continue
                 elif field_type in {"bool", "boolean"}:
                     value = widget.isChecked()
