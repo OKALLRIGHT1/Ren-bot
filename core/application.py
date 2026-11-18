@@ -4511,6 +4511,7 @@ class Live2DApplication:
 
         self.qt_ui = QtChatTrayApp(
             on_send_callback=self.on_gui_send,
+            on_chat_ready_callback=self.brain.prewarm_memory_vector_index,
             on_tts_toggle_callback=self.set_tts_enabled,
             on_voice_toggle_callback=self.set_voice_sensor_enabled,  # 🎤 传递语音控制回调
             on_ptt_start_callback=self.start_push_to_talk,

@@ -549,6 +549,7 @@ MEMORY_DB_PATH = memory_db_dir()  # 记忆数据库路径
 MEMORY_SETTINGS = {
     # Memory Core 2.0. These are startup settings; restart after changing them.
     "memory_core_enabled": get_env_bool("MEMORY_CORE_ENABLED", "1"),
+    "memory_vector_prewarm": get_env_bool("MEMORY_VECTOR_PREWARM", "0"),
     "memory_core_profile_max_items": int(
         os.getenv("MEMORY_CORE_PROFILE_MAX_ITEMS", "6")
     ),

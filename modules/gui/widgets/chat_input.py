@@ -9,10 +9,12 @@ from PySide6 import QtCore, QtGui, QtWidgets
 
 class ChatInput(QtWidgets.QPlainTextEdit):
     sendRequested = QtCore.Signal()
+    firstShown = QtCore.Signal()
 
     def __init__(self, parent=None, *, history_limit: int = 50):
         super().__init__(parent)
         self.setObjectName("chatInput")
+        self._shown_once = False
         self.setTabChangesFocus(True)
         self.setUndoRedoEnabled(True)
         self.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
@@ -24,6 +26,12 @@ class ChatInput(QtWidgets.QPlainTextEdit):
         self._draft = ""
         self._history_limit = max(8, int(history_limit))
         self.textChanged.connect(self._adapt_height)
+
+    def showEvent(self, event: QtGui.QShowEvent):
+        super().showEvent(event)
+        if not self._shown_once:
+            self._shown_once = True
+            self.firstShown.emit()
 
     def keyPressEvent(self, event: QtGui.QKeyEvent):
         key = event.key()

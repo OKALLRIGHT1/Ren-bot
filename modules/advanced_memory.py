@@ -22,7 +22,7 @@ from typing import Optional
 
 from modules.prompt_parts import PromptParts, join_prompt_sections
 from modules.memory_sqlite import get_memory_store
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 from config import SYSTEM_RULES_PROMPT, DEFAULT_PERSONA
 from modules.character_manager import character_manager
 from config import EMBEDDING_CONFIG, MEMORY_DB_PATH, MEMORY_SETTINGS, MODELS
@@ -451,6 +451,23 @@ class AdvancedMemorySystem:
 
     def get_memory_vector_status(self) -> dict:
         return self.memory_vector_index.status()
+
+    def prewarm_memory_vector_index(self) -> Future | None:
+        """Called once when the Qt chat input first becomes visible."""
+        if not MEMORY_SETTINGS.get("memory_vector_prewarm", False) or not self.memory_core.enabled:
+            return
+        if "memory_vector_index" in vars(self):
+            return
+        if self.embedding_service.status().get("state") not in {"ready", "unverified"}:
+            return
+        return self._vector_executor.submit(self._open_memory_vector_index)
+
+    def _open_memory_vector_index(self) -> MemoryVectorIndex | None:
+        try:
+            # Share the lazy resource with queries and pending index jobs. Do not embed a dummy text.
+            return self.memory_vector_index
+        except Exception as exc:
+            self._logger.warning("Memory vector prewarm failed: %s", exc)
 
     def test_embedding_connection(self) -> dict:
         self.embedding_service.embed(["Live2D-Suzu embedding connection test"])

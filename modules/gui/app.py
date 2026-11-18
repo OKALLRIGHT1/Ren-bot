@@ -160,6 +160,7 @@ class QtChatTrayApp(QtCore.QObject):
         self,
         on_send_callback: Callable[..., None],
         *,
+        on_chat_ready_callback: Optional[Callable[[], object]] = None,
         on_tts_toggle_callback: Optional[Callable[[bool], None]] = None,
         on_voice_toggle_callback: Optional[
             Callable[[bool], None]
@@ -182,6 +183,7 @@ class QtChatTrayApp(QtCore.QObject):
         super().__init__()
         self.cfg = cfg or QtGuiConfig()
         self.on_send_callback = on_send_callback
+        self.on_chat_ready_callback = on_chat_ready_callback
         self.on_tts_toggle_callback = on_tts_toggle_callback
         self.on_voice_toggle_callback = on_voice_toggle_callback  # 🟢 保存回调
         self.on_ptt_start_callback = on_ptt_start_callback
@@ -556,6 +558,10 @@ class QtChatTrayApp(QtCore.QObject):
         self._input = ChatInput()
         self._input.setPlaceholderText("和我聊聊，或直接输入任务 / 指令…")
         self._input.sendRequested.connect(self._on_send_clicked)
+        if self.on_chat_ready_callback is not None:
+            self._input.firstShown.connect(
+                self.on_chat_ready_callback, QtCore.Qt.ConnectionType.QueuedConnection
+            )
 
         btn_send = QtWidgets.QPushButton("➤")
         btn_send.setObjectName("sendButton")
