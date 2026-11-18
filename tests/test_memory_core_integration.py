@@ -413,7 +413,7 @@ def test_advanced_memory_runtime_wires_shared_vector_index(tmp_path, monkeypatch
     store = MemorySQLite(str(tmp_path / "memory.sqlite"))
     client = Client()
     monkeypatch.setattr(advanced_memory, "get_memory_store", lambda: store)
-    monkeypatch.setattr(advanced_memory.chromadb, "PersistentClient", lambda path: client)
+    monkeypatch.setattr("chromadb.PersistentClient", lambda path: client)
     monkeypatch.setattr(
         advanced_memory,
         "load_runtime_settings_strict",
@@ -470,12 +470,17 @@ def test_advanced_memory_does_not_schedule_incompatible_vector_index():
 
     class Embedding:
         enabled = True
+        model = "changed"
 
         def status(self):
-            return {"state": "ready"}
+            return {"state": "ready", "dimension": 3}
 
-    class Index:
-        def status(self):
+    class Repository:
+        def next_vector_job_delay(self):
+            return 0
+
+        def vector_index_compatibility(self, *, model, dimension):
+            assert (model, dimension) == ("changed", 3)
             return {"rebuild_required": True}
 
     class Executor:
@@ -486,7 +491,7 @@ def test_advanced_memory_does_not_schedule_incompatible_vector_index():
         advanced_memory.AdvancedMemorySystem
     )
     brain.embedding_service = Embedding()
-    brain.memory_vector_index = Index()
+    brain.memory_core = SimpleNamespace(repository=Repository())
     brain._vector_schedule_lock = threading.Lock()
     brain._vector_sync_future = None
     brain._vector_executor = Executor()
@@ -598,6 +603,7 @@ def test_rebuild_knowledge_collection_reports_delete_failure():
     brain = advanced_memory.AdvancedMemorySystem.__new__(
         advanced_memory.AdvancedMemorySystem
     )
+    brain._resource_lock = threading.RLock()
     brain.chroma_client = Client()
     brain.embedding_fn = object()
     brain.knowledge_collection_metadata = {}

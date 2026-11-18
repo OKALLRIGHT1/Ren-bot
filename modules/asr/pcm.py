@@ -8,7 +8,7 @@ from typing import Any, Mapping
 
 import numpy as np
 
-from .engine import SAMPLE_RATE
+from .config import SAMPLE_RATE
 
 PCM_FORMAT_S16LE = "s16le"
 MAX_PCM_SAMPLES = 8000  # 500ms at 16 kHz

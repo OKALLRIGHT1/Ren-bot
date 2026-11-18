@@ -15,23 +15,8 @@ this directory can be copied out and used without the surrounding project.
 
 from __future__ import annotations
 
-from .config import AsrConfig, default_asr_config
+from .config import SAMPLE_RATE, AsrConfig, default_asr_config
 from .corrector import AsrCorrector, CorrectionRules, LearnedPairs
-from .engine import (
-    AsrEngine,
-    HttpAsrEngine,
-    SherpaQwen3Engine,
-    SherpaZipformerEngine,
-    SAMPLE_RATE,
-    ZIPFORMER_SAMPLES_PER_READ,
-    create_asr_engine,
-    format_hotwords,
-    missing_qwen3_reason,
-    qwen3_api_available,
-    qwen3_paths,
-    resolve_qwen3_model_dir,
-    resolve_vad_path,
-)
 from .ports import (
     CharacterProvider,
     HealthHook,
@@ -40,7 +25,6 @@ from .ports import (
     SettingsStore,
     default_logger,
 )
-from .sensor import VoiceSensor
 from .settings import (
     ASR_ENGINE_CHOICES,
     ASR_ENGINE_KEY,
@@ -61,20 +45,12 @@ from .settings import (
     text_contains_wake_word,
 )
 
-__all__ = [
-    # config
-    "AsrConfig",
-    "default_asr_config",
-    # corrector
-    "AsrCorrector",
-    "CorrectionRules",
-    "LearnedPairs",
-    # engine
+# Settings and PCM validation are also used on text-only desktops.
+_ENGINE_EXPORTS = (
     "AsrEngine",
     "HttpAsrEngine",
     "SherpaQwen3Engine",
     "SherpaZipformerEngine",
-    "SAMPLE_RATE",
     "ZIPFORMER_SAMPLES_PER_READ",
     "create_asr_engine",
     "format_hotwords",
@@ -83,6 +59,29 @@ __all__ = [
     "qwen3_paths",
     "resolve_qwen3_model_dir",
     "resolve_vad_path",
+)
+
+
+def __getattr__(name):
+    if name == "VoiceSensor":
+        from .sensor import VoiceSensor
+        return VoiceSensor
+    if name in _ENGINE_EXPORTS:
+        from . import engine
+        return getattr(engine, name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+__all__ = [
+    # config
+    "AsrConfig",
+    "SAMPLE_RATE",
+    "default_asr_config",
+    # corrector
+    "AsrCorrector",
+    "CorrectionRules",
+    "LearnedPairs",
+    *_ENGINE_EXPORTS,
     # ports
     "CharacterProvider",
     "HealthHook",

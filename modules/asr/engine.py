@@ -22,9 +22,9 @@ try:
 except ImportError:
     sherpa_onnx = None
 
+from .config import SAMPLE_RATE
 from .ports import HealthHook, LoggerPort
 
-SAMPLE_RATE = 16000
 ZIPFORMER_SAMPLES_PER_READ = 8000  # 0.5s
 MIN_ONNX_BYTES = 100 * 1024
 

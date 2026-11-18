@@ -3,13 +3,13 @@ import os
 import time
 from datetime import datetime
 
-import networkx as nx
-
 from config import MEMORY_DB_PATH, MEMORY_SETTINGS
 
 
 class GraphMemory:
     def __init__(self, graph_file="graph.json"):
+        import networkx as nx
+
         self.graph_file = os.path.join(MEMORY_DB_PATH, graph_file)
         self.G = nx.Graph()
         self.stopwords = set(
@@ -35,6 +35,8 @@ class GraphMemory:
         self.load_graph()
 
     def load_graph(self):
+        import networkx as nx
+
         if os.path.exists(self.graph_file):
             try:
                 with open(self.graph_file, "r", encoding="utf-8") as f:
@@ -65,6 +67,8 @@ class GraphMemory:
                 self.G[u][v]["weight"] = w
 
     def save_graph(self):
+        import networkx as nx
+
         os.makedirs(os.path.dirname(self.graph_file), exist_ok=True)
         self._apply_decay_if_needed()
         data = nx.node_link_data(self.G, edges="links")
@@ -87,6 +91,8 @@ class GraphMemory:
         self.save_graph()
 
     def get_related_keywords(self, start_keywords, depth=2, top_k=5):
+        import networkx as nx
+
         cache_key = f"{','.join(sorted(start_keywords))}:{depth}:{top_k}"
         if cache_key in self._related_cache:
             cached_time, cached_result = self._related_cache[cache_key]

@@ -16,7 +16,9 @@ import os
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
-__all__ = ["AsrConfig", "default_asr_config"]
+__all__ = ["AsrConfig", "default_asr_config", "SAMPLE_RATE"]
+
+SAMPLE_RATE = 16000
 
 
 @dataclass(frozen=True)

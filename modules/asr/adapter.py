@@ -15,7 +15,7 @@ single adapter.
 from __future__ import annotations
 
 import os
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 from .config import AsrConfig
 from .ports import (
@@ -24,7 +24,8 @@ from .ports import (
     LoggerPort,
     SettingsStore,
 )
-from .sensor import VoiceSensor
+if TYPE_CHECKING:
+    from .sensor import VoiceSensor
 
 __all__ = [
     "build_asr_config",
@@ -156,6 +157,8 @@ def build_voice_sensor(chat_service: Any) -> Optional[VoiceSensor]:
     logs the error).
     """
     try:
+        from .sensor import VoiceSensor
+
         cfg = build_asr_config()
         return VoiceSensor(
             chat_service=chat_service,

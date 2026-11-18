@@ -23,10 +23,6 @@ from typing import Optional
 from modules.prompt_parts import PromptParts, join_prompt_sections
 from modules.memory_sqlite import get_memory_store
 from concurrent.futures import ThreadPoolExecutor
-# jieba（含 finalseg 词典，~80MB）延迟到首次分词再加载：本模块被
-# core.application 启动即 import，顶层 import jieba 会把它塞进启动链。
-# chromadb 在 __init__ 就要建 PersistentClient，必须留在顶层。
-import chromadb
 from config import SYSTEM_RULES_PROMPT, DEFAULT_PERSONA
 from modules.character_manager import character_manager
 from config import EMBEDDING_CONFIG, MEMORY_DB_PATH, MEMORY_SETTINGS, MODELS
@@ -69,10 +65,27 @@ except Exception:
 # Profile / Graph: use modules.memory.ProfileStore and ModularGraphMemory only.
 # Local duplicate ProfileStore/GraphMemory classes were removed (dead code, 2026-07-30).
 
+class _LazyResource:
+    """Cache successful construction once per brain across concurrent first uses."""
+
+    def __init__(self, factory):
+        self.factory = factory
+        self.name = factory.__name__
+
+    def __get__(self, brain, owner=None):
+        if brain is None:
+            return self
+        with brain._resource_lock:
+            if self.name not in brain.__dict__:
+                brain.__dict__[self.name] = self.factory(brain)
+            return brain.__dict__[self.name]
+
+
 class AdvancedMemorySystem:
     def __init__(self):
         self._lock = threading.Lock()
         self._vector_lock = threading.Lock()
+        self._resource_lock = threading.RLock()
         # 默认 2，后续会从 MEMORY_SETTINGS 覆盖
         self.recall_min_chars = 2
 
@@ -93,8 +106,7 @@ class AdvancedMemorySystem:
         )
         self.memory_core.initialize()
 
-        # 2. ChromaDB 连接
-        self.chroma_client = chromadb.PersistentClient(path=MEMORY_DB_PATH)
+        # Resolve embedding settings now. Open storage on first use.
         self.embedding_service = build_configured_embedding_service(
             models=MODELS,
             runtime_settings=load_runtime_settings_strict(),
@@ -102,9 +114,6 @@ class AdvancedMemorySystem:
         )
         self.embedding_fn = ChromaEmbeddingFunction(self.embedding_service)
 
-        self.memory_collection = self.chroma_client.get_or_create_collection(
-            name="waifu_memory_advanced", embedding_function=self.embedding_fn
-        )
         self.knowledge_collection_metadata = {
             "embedding_model": self.embedding_service.model,
             "index_version": 1,
@@ -113,18 +122,6 @@ class AdvancedMemorySystem:
             self.knowledge_collection_metadata["embedding_dimension"] = int(
                 self.embedding_service.expected_dimension
             )
-        self.knowledge_collection = self.chroma_client.get_or_create_collection(
-            name="waifu_knowledge_base",
-            embedding_function=self.embedding_fn,
-            metadata=self.knowledge_collection_metadata,
-        )
-        self.knowledge_embedding_compatibility = (
-            self._knowledge_collection_compatibility(
-                self.knowledge_collection,
-                model=self.embedding_service.model,
-                dimension=self.embedding_service.expected_dimension,
-            )
-        )
         self.memory_vector_collection_name = self._memory_vector_collection_name(
             self.embedding_service.model,
             self.embedding_service.expected_dimension,
@@ -137,20 +134,8 @@ class AdvancedMemorySystem:
             self.memory_vector_collection_metadata["embedding_dimension"] = int(
                 self.embedding_service.expected_dimension
             )
-        self.current_memory_collection = self.chroma_client.get_or_create_collection(
-            name=self.memory_vector_collection_name,
-            metadata=self.memory_vector_collection_metadata,
-        )
-        self.memory_vector_index = MemoryVectorIndex(
-            repository=self.memory_core.repository,
-            collection=self.current_memory_collection,
-            embedding_service=self.embedding_service,
-        )
         self.memory_core.vector_search = self._query_memory_vector
         self.memory_core.vector_job_notifier = self._schedule_memory_vector_sync
-
-        # 3. 图谱
-        self.graph = ModularGraphMemory()
 
         # 4. Profile 档案管理
         self.profile_path = os.path.join(
@@ -348,6 +333,53 @@ class AdvancedMemorySystem:
         if self.embedding_service.enabled:
             self._schedule_memory_vector_sync(limit=10)
 
+    @_LazyResource
+    def chroma_client(self):
+        import chromadb
+
+        return chromadb.PersistentClient(path=MEMORY_DB_PATH)
+
+    @_LazyResource
+    def memory_collection(self):
+        return self.chroma_client.get_or_create_collection(
+            name="waifu_memory_advanced", embedding_function=self.embedding_fn
+        )
+
+    @_LazyResource
+    def knowledge_collection(self):
+        return self.chroma_client.get_or_create_collection(
+            name="waifu_knowledge_base",
+            embedding_function=self.embedding_fn,
+            metadata=self.knowledge_collection_metadata,
+        )
+
+    @_LazyResource
+    def knowledge_embedding_compatibility(self):
+        return self._knowledge_collection_compatibility(
+            self.knowledge_collection,
+            model=self.embedding_service.model,
+            dimension=self.embedding_service.expected_dimension,
+        )
+
+    @_LazyResource
+    def current_memory_collection(self):
+        return self.chroma_client.get_or_create_collection(
+            name=self.memory_vector_collection_name,
+            metadata=self.memory_vector_collection_metadata,
+        )
+
+    @_LazyResource
+    def memory_vector_index(self):
+        return MemoryVectorIndex(
+            repository=self.memory_core.repository,
+            collection=self.current_memory_collection,
+            embedding_service=self.embedding_service,
+        )
+
+    @_LazyResource
+    def graph(self):
+        return ModularGraphMemory()
+
     @staticmethod
     def _memory_vector_collection_name(model: str, dimension: int | None) -> str:
         identity = f"{str(model or 'unconfigured')}|{int(dimension or 0)}"
@@ -444,13 +476,16 @@ class AdvancedMemorySystem:
             return self.memory_vector_index.process_pending(limit=limit)
 
     def _schedule_memory_vector_sync(self, limit: int = 100) -> bool:
-        embedding_state = str(
-            (self.embedding_service.status() or {}).get("state") or ""
-        )
-        if embedding_state in {"disabled", "unconfigured"}:
+        embedding = self.embedding_service.status() or {}
+        if embedding.get("state") in {"disabled", "unconfigured"}:
             return False
-        index_status = dict(self.memory_vector_index.status() or {})
-        if index_status.get("rebuild_required"):
+        repository = self.memory_core.repository
+        if repository.next_vector_job_delay() is None:
+            return False
+        compatibility = repository.vector_index_compatibility(
+            model=self.embedding_service.model, dimension=embedding.get("dimension"),
+        )
+        if compatibility["rebuild_required"]:
             return False
         with self._vector_schedule_lock:
             if self._vector_sync_future is not None and not self._vector_sync_future.done():
@@ -502,12 +537,14 @@ class AdvancedMemorySystem:
         return index.query(text, **kwargs)
 
     def rebuild_memory_vector_index(self) -> dict:
-        with self._vector_lock:
+        from chromadb.errors import NotFoundError
+
+        with self._vector_lock, self._resource_lock:
             try:
                 self.chroma_client.delete_collection(
                     name=self.memory_vector_collection_name
                 )
-            except ValueError:
+            except (ValueError, NotFoundError):
                 pass
             self.current_memory_collection = (
                 self.chroma_client.get_or_create_collection(
@@ -535,7 +572,7 @@ class AdvancedMemorySystem:
         if not text:
             return []
         try:
-            # 使用 jieba 提取关键词（延迟加载，见文件头注释）
+            # 使用 jieba 提取关键词（延迟加载）
             import jieba.analyse
 
             return jieba.analyse.extract_tags(text, topK=5)
@@ -562,9 +599,15 @@ class AdvancedMemorySystem:
         return stats
 
     def rebuild_knowledge_collection(self) -> bool:
+        with self._resource_lock:
+            return self._rebuild_knowledge_collection()
+
+    def _rebuild_knowledge_collection(self) -> bool:
+        from chromadb.errors import NotFoundError
+
         try:
             self.chroma_client.delete_collection("waifu_knowledge_base")
-        except ValueError:
+        except (ValueError, NotFoundError):
             pass
         except Exception:
             active_logger = getattr(self, "_logger", None)
