@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import random
 import re
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Dict, Optional
 
 from services.chat_support import text_utils
 
@@ -195,109 +195,6 @@ class ReplyStyleService:
         if any(keyword in text for keyword in positive_keywords):
             return "explicit", "positive"
         return "neutral", "neutral"
-
-    def looks_like_plain_reaction_text(
-        self,
-        text: str,
-        *,
-        wants_detailed_answer: Callable[[str], bool],
-    ) -> bool:
-        raw = str(text or "").strip()
-        if not raw:
-            return False
-        if len(raw) > 48:
-            return False
-        lowered = raw.lower()
-        slow_complaint = any(hint in raw for hint in ("慢", "卡", "等", "超时"))
-        hard_task_hints = (
-            "[cmd:",
-            "http://",
-            "https://",
-            "```",
-            "/",
-            "\\",
-            "查",
-            "搜",
-            "搜索",
-            "链接",
-            "生成",
-            "画图",
-            "截图",
-            "打开",
-            "运行",
-            "报错",
-            "失败",
-            "接口",
-            "配置",
-            "插件",
-            "文件",
-            "提交",
-            "上传",
-            "github",
-            "git ",
-            "python",
-            "rust",
-            "cargo",
-            "npm",
-        )
-        if any(hint in lowered for hint in hard_task_hints) and not slow_complaint:
-            return False
-        question_hints = (
-            "?",
-            "？",
-            "为什么",
-            "怎么",
-            "如何",
-            "多少",
-            "哪里",
-            "啥情况",
-            "什么情况",
-            "能不能",
-            "可不可以",
-            "怎么办",
-        )
-        if any(hint in raw for hint in question_hints):
-            if not any(hint in raw for hint in ("在吗", "还在吗", "醒着吗")):
-                return False
-        if wants_detailed_answer(raw) and not slow_complaint:
-            return False
-        return True
-
-    def build_short_reaction(
-        self,
-        user_text: str,
-        *,
-        wants_detailed_answer: Callable[[str], bool],
-    ) -> tuple[str, str]:
-        raw = self.strip_wrapping_quotes(user_text)
-        if not self.looks_like_plain_reaction_text(
-            raw, wants_detailed_answer=wants_detailed_answer
-        ):
-            return "", "neutral"
-        compact = re.sub(r"\s+", "", raw.lower())
-        if not compact:
-            return "", "neutral"
-
-        def pick(options: tuple[str, ...]) -> str:
-            return random.choice(options)
-
-        if any(keyword in compact for keyword in ("在吗", "还在吗", "醒着吗")):
-            return pick(("我在。", "在。", "嗯，我在。")), "neutral"
-        if compact in {"嗯", "恩", "哦", "噢", "好", "行", "ok", "okay", "收到"}:
-            return pick(("嗯。", "好。", "我知道了。")), "neutral"
-        if any(keyword in compact for keyword in ("谢谢", "谢啦", "感谢", "thx", "thanks")):
-            return pick(("嗯。", "不用谢。", "没事。")), "happy"
-        if any(keyword in compact for keyword in ("过了", "成功了", "跑通了", "好了", "搞定了", "可以了", "ok了")):
-            return pick(("嗯，稳了。", "这样就好。", "先别再动它了。")), "happy"
-        if any(keyword in compact for keyword in ("好慢", "跑得慢", "跑的慢", "太慢", "卡", "超时", "等好久", "跑不动")):
-            return pick(("确实慢，先别急。", "像是卡在重活上了。", "先等它把这轮跑完。")), "think"
-        if any(keyword in compact for keyword in ("累", "困", "撑不住", "不想动", "没精神")):
-            return pick(("先缓一下。", "别硬撑。", "休息几分钟也行。")), "concern"
-        if any(keyword in compact for keyword in ("烦", "崩溃", "麻了", "服了", "无语", "裂开", "难受")):
-            return pick(("先别急。", "嗯，这个确实烦。", "先停一下也可以。")), "concern"
-        if len(compact) <= 8 and any(keyword in compact for keyword in ("早", "晚安", "睡了", "拜")):
-            return pick(("嗯。", "晚安。", "早点休息。")), "neutral"
-        return "", "neutral"
 
     def extract_apply_confirmation(
         self,

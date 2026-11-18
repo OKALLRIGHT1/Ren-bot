@@ -263,6 +263,7 @@ class MemoryCoreService:
 
     def list_current_memory_records(self, **kwargs: Any) -> list[dict[str, Any]]:
         self._ensure_initialized()
+        self._apply_user_task_lifecycle()
         return self.repository.list_current_records(**kwargs)
 
     def list_persons(self) -> list[dict[str, Any]]:
@@ -302,6 +303,15 @@ class MemoryCoreService:
         if deleted:
             self._notify_vector_worker()
         return deleted
+
+    def _apply_user_task_lifecycle(self) -> None:
+        try:
+            changed = int(self.repository.apply_user_task_lifecycle() or 0)
+        except Exception as exc:
+            logger.warning("user task lifecycle failed: %s", exc)
+            return
+        if changed:
+            self._notify_vector_worker()
 
     def _notify_vector_worker(self) -> None:
         if self.vector_job_notifier is None:
@@ -354,6 +364,7 @@ class MemoryCoreService:
             meta=safe_meta,
             session_id=str(session_id or "").strip() or None,
         )
+        self._apply_user_task_lifecycle()
         if role == "summary":
             _record_id, created = self.repository.upsert_record(
                 kind="summary",

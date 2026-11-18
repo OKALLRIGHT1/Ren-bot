@@ -22,12 +22,6 @@ class FinalizedModelReply:
 
 
 @dataclass(frozen=True)
-class ShortReaction:
-    text: str = ""
-    emotion: str = "neutral"
-
-
-@dataclass(frozen=True)
 class StreamFinalizedReply:
     text: str = ""
     feed_chunks: tuple[str, ...] = ()
@@ -64,18 +58,6 @@ def is_plain_direct_chat_candidate(
         and not preface_text
         and source_key in set(direct_chat_sources or [])
     )
-
-
-def build_short_reaction(
-    *,
-    eligible: bool,
-    user_text: str,
-    build_reaction: Callable[[str], tuple[str, str]],
-) -> ShortReaction:
-    if not eligible:
-        return ShortReaction()
-    text, emotion = build_reaction(user_text)
-    return ShortReaction(text=str(text or ""), emotion=str(emotion or "neutral"))
 
 
 def should_use_non_stream_flow(

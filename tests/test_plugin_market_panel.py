@@ -19,6 +19,53 @@ def _app():
     return app
 
 
+def test_local_cards_filter_and_toggle_in_place(tmp_path: Path):
+    _app()
+    root = tmp_path / "plugins"
+    for folder, name in (("life_hub", "生活提醒"), ("desktop_hub", "桌面")):
+        plugin_dir = root / folder
+        plugin_dir.mkdir(parents=True)
+        (plugin_dir / "plugin.py").write_text(
+            "class Plugin:\n"
+            f"    name = {name!r}\n"
+            f"    trigger = {folder!r}\n"
+            "    type = 'react'\n"
+            "    description = 'demo'\n",
+            encoding="utf-8",
+        )
+        (plugin_dir / "config.json").write_text(
+            '{"name": "%s", "trigger": "%s", "card_summary": "摘要"}' % (name, folder),
+            encoding="utf-8",
+        )
+    manager = PluginManager(plugin_dir=str(root), extra_plugin_dirs=[])
+    manager._persist_disabled_plugins = lambda: None
+    manager.load_plugins()
+    dialog = PluginManagerDialog(plugin_manager=manager, embedded=True)
+    dialog.resize(900, 640)
+    dialog.show()
+    QtWidgets.QApplication.processEvents()
+
+    assert len(dialog._cards_data) >= 2
+    first = dialog._cards_data[0]
+    card = first["card"]
+    trigger = first["trigger"]
+    dialog._set_status_filter("off")
+    QtWidgets.QApplication.processEvents()
+    assert card.isHidden() or not first["enabled"]
+    dialog._reset_local_filters()
+    dialog._on_switch_toggled(trigger, False)
+    QtWidgets.QApplication.processEvents()
+    assert dialog.card_widgets_by_trigger[trigger] is card
+    assert not manager.is_plugin_enabled(trigger)
+    assert card.objectName() == "pluginCardDisabled"
+    dialog._set_group_filter("desktop")
+    QtWidgets.QApplication.processEvents()
+    visible = [entry for entry in dialog._cards_data if not entry["card"].isHidden()]
+    assert visible
+    assert all(entry["group"] == "desktop" for entry in visible)
+    dialog.close()
+
+
 def test_capability_page_has_market_toggle(tmp_path: Path):
     _app()
     manager = PluginManager(plugin_dir=str(tmp_path / "plugins"), extra_plugin_dirs=[])

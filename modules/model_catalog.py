@@ -6,16 +6,12 @@ import re
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Set
 
 
-# Stable purpose ids used in custom_models.json and plugin filters.
+# Capability tags: what a model can actually do. Task routing is separate.
 MODEL_PURPOSE_OPTIONS: List[tuple[str, str]] = [
     ("chat", "聊天"),
-    ("tool_reasoning", "推理/工具"),
-    ("summary", "总结"),
+    ("vision", "视觉"),
     ("web_search", "联网搜索"),
-    ("vision", "视觉理解"),
     ("image_gen", "画图"),
-    ("image_edit", "图生图"),
-    ("translation", "翻译"),
     ("embedding", "向量"),
 ]
 
@@ -105,14 +101,14 @@ _PURPOSE_ALIASES: Dict[str, str] = {
     "聊天": "chat",
     "对话": "chat",
     "text": "chat",
-    "tool_reasoning": "tool_reasoning",
-    "reasoning": "tool_reasoning",
-    "tool": "tool_reasoning",
-    "推理": "tool_reasoning",
-    "工具": "tool_reasoning",
-    "summary": "summary",
-    "总结": "summary",
-    "摘要": "summary",
+    "tool_reasoning": "chat",
+    "reasoning": "chat",
+    "tool": "chat",
+    "推理": "chat",
+    "工具": "chat",
+    "summary": "chat",
+    "总结": "chat",
+    "摘要": "chat",
     "web_search": "web_search",
     "websearch": "web_search",
     "search": "web_search",
@@ -129,20 +125,176 @@ _PURPOSE_ALIASES: Dict[str, str] = {
     "画图": "image_gen",
     "生图": "image_gen",
     "绘图": "image_gen",
-    "image_edit": "image_edit",
-    "image_edits": "image_edit",
-    "img2img": "image_edit",
-    "图生图": "image_edit",
-    "修图": "image_edit",
-    "translation": "translation",
-    "translate": "translation",
-    "翻译": "translation",
+    "image_edit": "image_gen",
+    "image_edits": "image_gen",
+    "img2img": "image_gen",
+    "图生图": "image_gen",
+    "修图": "image_gen",
+    "translation": "chat",
+    "translate": "chat",
+    "翻译": "chat",
     "embedding": "embedding",
     "embed": "embedding",
     "向量": "embedding",
 }
 
-IMAGE_PURPOSES: Set[str] = {"image_gen", "image_edit"}
+IMAGE_PURPOSES: Set[str] = {"image_gen"}
+
+# Tasks shown in GUI / API. Empty chains fall back to 闲聊 except vision/image/search.
+# embedding is not a router task — it uses runtime_settings.embedding_model_ids.
+ROUTE_TASK_OPTIONS: List[tuple[str, str, str, tuple[str, ...], bool]] = [
+    ("default", "闲聊", "主回复；没单独配的任务也走这里", ("chat",), True),
+    ("tool_reasoning", "推理", "工具规划和复杂推理；空则用闲聊", ("chat",), True),
+    ("summary", "总结", "摘要压缩；空则用闲聊", ("chat",), True),
+    ("vision", "识图", "聊天模型不能看图时，用来描述图片和截图", ("vision",), False),
+    ("web_search", "联网搜索", "搜索插件；空则用插件自己的接口", ("web_search", "chat"), False),
+    ("image_gen", "画图", "文生图和图生图共用；带参考图时走模型的图生图接口", ("image_gen",), False),
+]
+
+
+def route_task_ids() -> List[str]:
+    return [item[0] for item in ROUTE_TASK_OPTIONS]
+
+
+def route_task_purposes(task_name: str) -> tuple[str, ...]:
+    wanted = str(task_name or "").strip()
+    for task_id, _label, _desc, purposes, _allow in ROUTE_TASK_OPTIONS:
+        if task_id == wanted:
+            return tuple(purposes)
+    return ()
+
+
+def route_task_allow_untagged(task_name: str) -> bool:
+    wanted = str(task_name or "").strip()
+    for task_id, _label, _desc, _purposes, allow_untagged in ROUTE_TASK_OPTIONS:
+        if task_id == wanted:
+            return bool(allow_untagged)
+    return True
+
+
+# Empty chains use 闲聊, except these capability-specific tasks.
+SPECIAL_ROUTE_TASKS: Set[str] = {"vision", "web_search", "image_gen"}
+
+
+def chat_fallback_task(task_name: str) -> str:
+    wanted = str(task_name or "").strip() or "default"
+    if wanted == "image_edit":
+        return "image_gen"
+    if wanted in SPECIAL_ROUTE_TASKS or wanted == "default":
+        return ""
+    return "default"
+
+
+def image_router_chain(router: Optional[Dict[str, Any]] = None) -> List[str]:
+    """画图链路。旧配置只填了图生图时，沿用那条链。"""
+    gen = router_chain(router, "image_gen")
+    if gen:
+        return gen
+    return router_chain(router, "image_edit")
+
+
+def vision_router_chain(
+    router: Optional[Dict[str, Any]] = None,
+    catalog: Optional[Dict[str, Any]] = None,
+    fallback_model: str = "",
+) -> List[str]:
+    """识图链路。空着时沿用 SENSOR_VISION_MODEL（默认 GLM-4V-Flash）。"""
+    chain = router_chain(router, "vision")
+    if chain:
+        return chain
+    fallback = str(fallback_model or "").strip()
+    if not fallback:
+        try:
+            from config import SENSOR_VISION_MODEL as fallback_id
+
+            fallback = str(fallback_id or "").strip()
+        except Exception:
+            fallback = ""
+    if not fallback:
+        return []
+    if catalog is None:
+        try:
+            from config import MODELS as catalog  # type: ignore
+        except Exception:
+            catalog = {}
+    if isinstance(catalog, dict) and fallback in catalog:
+        return [fallback]
+    return []
+
+
+def vision_capable_chat_model_ids(
+    catalog: Optional[Dict[str, Any]] = None,
+    router: Optional[Dict[str, Any]] = None,
+) -> List[str]:
+    """闲聊链里勾了「视觉」的模型。这些模型可以直接看图，不必再跑识图任务。"""
+    return resolve_router_model_ids(
+        "default",
+        catalog=catalog,
+        router=router,
+        required_purpose="vision",
+        allow_untagged=False,
+    )
+
+
+def chat_route_has_vision(
+    catalog: Optional[Dict[str, Any]] = None,
+    router: Optional[Dict[str, Any]] = None,
+) -> bool:
+    return bool(vision_capable_chat_model_ids(catalog=catalog, router=router))
+
+
+def image_data_url(image_base64: str) -> str:
+    raw = str(image_base64 or "").strip()
+    if not raw:
+        return ""
+    if raw.startswith("data:image/") and "," in raw:
+        return raw
+    if raw.startswith("base64://"):
+        raw = raw.split("://", 1)[1].strip()
+    return f"data:image/jpeg;base64,{raw}"
+
+
+def build_multimodal_user_content(
+    text: Any,
+    image_base64_list: Sequence[str],
+) -> Any:
+    """Build OpenAI-style user content with optional image parts."""
+    images = [str(item or "").strip() for item in (image_base64_list or []) if str(item or "").strip()]
+    if isinstance(text, list):
+        parts: List[Dict[str, Any]] = [item for item in text if isinstance(item, dict)]
+    else:
+        body = str(text or "").strip()
+        parts = [{"type": "text", "text": body}] if body else []
+    for raw in images:
+        url = image_data_url(raw)
+        if not url:
+            continue
+        parts.append({"type": "image_url", "image_url": {"url": url}})
+    if not parts:
+        return str(text or "")
+    if len(parts) == 1 and parts[0].get("type") == "text":
+        return parts[0].get("text") or ""
+    return parts
+
+
+def attach_images_to_last_user_message(
+    messages: Sequence[Any],
+    image_base64_list: Sequence[str],
+) -> List[Any]:
+    images = [str(item or "").strip() for item in (image_base64_list or []) if str(item or "").strip()]
+    out: List[Any] = [dict(item) if isinstance(item, dict) else item for item in (messages or [])]
+    if not images:
+        return out
+    for index in range(len(out) - 1, -1, -1):
+        msg = out[index]
+        if not isinstance(msg, dict) or str(msg.get("role") or "") != "user":
+            continue
+        out[index] = {
+            **msg,
+            "content": build_multimodal_user_content(msg.get("content"), images),
+        }
+        break
+    return out
 
 
 def normalize_purpose(value: Any) -> str:
@@ -365,9 +517,7 @@ def provider_fields_from_model(
     # Sensible defaults for image models when user only filled base_url/model.
     if not out.get("endpoint_path") and any(p in IMAGE_PURPOSES for p in purposes):
         out["endpoint_path"] = "/v1/images/generations"
-    if not out.get("edit_endpoint_path") and (
-        "image_edit" in purposes or "image_gen" in purposes
-    ):
+    if not out.get("edit_endpoint_path") and "image_gen" in purposes:
         out["edit_endpoint_path"] = "/v1/images/edits"
     if not out.get("api_mode") and any(p in IMAGE_PURPOSES for p in purposes):
         out["api_mode"] = "images"
@@ -406,7 +556,7 @@ def embedding_fields_from_model(
     }
 
 
-def _router_chain(router: Any, task_name: str) -> List[str]:
+def router_chain(router: Any, task_name: str) -> List[str]:
     if not isinstance(router, dict):
         return []
     raw = router.get(task_name, [])
@@ -415,6 +565,71 @@ def _router_chain(router: Any, task_name: str) -> List[str]:
     if isinstance(raw, list):
         return [str(x).strip() for x in raw if str(x).strip()]
     return []
+
+
+def _router_chain(router: Any, task_name: str) -> List[str]:
+    """Backward-compatible alias for router_chain()."""
+    return router_chain(router, task_name)
+
+
+def resolve_router_model_ids(
+    task_name: str,
+    *,
+    catalog: Optional[Dict[str, Any]] = None,
+    router: Optional[Dict[str, Any]] = None,
+    fallbacks: Optional[Sequence[str]] = None,
+    fallback_task: str = "",
+    required_purpose: str | Sequence[str] = "",
+    allow_untagged: bool = True,
+) -> List[str]:
+    """Return the explicit router chain, then fallback_task / named fallbacks.
+
+    Does not auto-include every purpose-tagged model. The chain is what runs;
+    required_purpose only drops models that cannot serve this task.
+    """
+    if catalog is None:
+        try:
+            from config import MODELS as catalog  # type: ignore
+        except Exception:
+            catalog = {}
+    if router is None:
+        try:
+            from config import LLM_ROUTER as router  # type: ignore
+        except Exception:
+            router = {}
+    if not isinstance(catalog, dict):
+        catalog = {}
+
+    task_id = str(task_name or "").strip()
+    selected = (
+        image_router_chain(router)
+        if task_id == "image_gen"
+        else router_chain(router, task_name)
+    )
+    fallback_name = str(fallback_task or "").strip()
+    if not selected and fallback_name and fallback_name != str(task_name or "").strip():
+        selected = router_chain(router, fallback_name)
+    if not selected:
+        selected = [
+            str(item).strip() for item in (fallbacks or []) if str(item).strip()
+        ]
+
+    wanted = normalize_purposes(required_purpose)
+    result: List[str] = []
+    seen: Set[str] = set()
+    for model_id in selected:
+        if not model_id or model_id in seen:
+            continue
+        seen.add(model_id)
+        row = catalog.get(model_id)
+        if not isinstance(row, dict):
+            continue
+        if wanted and not model_has_purpose(
+            row, wanted, allow_untagged=allow_untagged
+        ):
+            continue
+        result.append(model_id)
+    return result
 
 
 def list_model_options(
@@ -450,7 +665,7 @@ def list_model_options(
 def list_image_model_options(
     catalog: Optional[Dict[str, Any]] = None,
     *,
-    purposes: str | Sequence[str] = ("image_gen", "image_edit"),
+    purposes: str | Sequence[str] = "image_gen",
 ) -> List[Dict[str, str]]:
     """Backward-compatible image-model option helper."""
     return list_model_options(catalog, purposes=purposes)
@@ -468,7 +683,7 @@ def list_image_providers(
 
     Priority:
     1) selected_ids (plugin 里手动选的)
-    2) 任务路由 image_gen / image_edit
+    2) 任务路由「画图」；旧配置只填了图生图时沿用那条链
     Never auto-includes every image-tagged model.
     """
     if catalog is None:
@@ -485,21 +700,13 @@ def list_image_providers(
         except Exception:
             router = {}
 
-    allowed_purposes = (
-        ("image_edit", "image_gen") if image_base64 else ("image_gen", "image_edit")
-    )
+    allowed_purposes = ("image_gen",)
 
     selected: List[str] = []
     if selected_ids is not None:
         selected = [str(x).strip() for x in selected_ids if str(x).strip()]
     else:
-        # Explicit selection only. Fallback chain for edit when image_edit empty.
-        if image_base64:
-            selected = _router_chain(router, "image_edit") or _router_chain(
-                router, "image_gen"
-            )
-        else:
-            selected = _router_chain(router, "image_gen")
+        selected = image_router_chain(router)
 
     providers: List[Dict[str, Any]] = []
     seen: Set[str] = set()

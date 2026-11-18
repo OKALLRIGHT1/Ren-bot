@@ -503,11 +503,52 @@ class SensorEventService:
         image_base64: str,
         analyze_image: Callable[..., Any],
         chat_with_ai: Callable[..., str],
+        clean_title: str = "",
     ) -> SensorReplyGenerationResult:
         try:
             self_awareness_hint = self.build_live2d_self_awareness_hint(
                 {"source": "desktop"}
             )
+            try:
+                from modules.model_catalog import (
+                    attach_images_to_last_user_message,
+                    chat_route_has_vision,
+                )
+            except Exception:
+                attach_images_to_last_user_message = None
+                chat_route_has_vision = None
+
+            if callable(chat_route_has_vision) and chat_route_has_vision():
+                talk_prompt = self.build_vision_direct_prompt(
+                    context=context,
+                    clean_title=str(clean_title or "").strip(),
+                )
+                messages = [
+                    {"role": "system", "content": talk_prompt},
+                    {"role": "user", "content": "请给出一句符合上述要求的临场回应。"},
+                ]
+                if callable(attach_images_to_last_user_message):
+                    messages = attach_images_to_last_user_message(
+                        messages, [image_base64]
+                    )
+                reply = await asyncio.to_thread(
+                    chat_with_ai,
+                    messages,
+                    task_type="sensor_vision_talk",
+                    caller="sensor_vision_talk",
+                )
+                observation_event_id = (
+                    context.record_observation("屏幕截图（聊天模型直看）", "vision")
+                    if str(reply or "").strip()
+                    else ""
+                )
+                return SensorReplyGenerationResult(
+                    reply=str(reply or "").strip(),
+                    reason="generated" if str(reply or "").strip() else "empty_reply",
+                    branch="vision_separate",
+                    observation_event_id=observation_event_id,
+                )
+
             description_prompt = self.build_vision_description_prompt(
                 self_awareness_hint=self_awareness_hint
             )
@@ -667,6 +708,7 @@ class SensorEventService:
                     image_base64=image_base64,
                     analyze_image=analyze_image,
                     chat_with_ai=chat_with_ai,
+                    clean_title=clean_title,
                 )
 
             return SensorReplyGenerationResult(

@@ -21,6 +21,13 @@ from config import (
     PROVIDERS,
     SENSOR_VISION_MODEL,
 )
+from modules.model_catalog import (
+    chat_fallback_task,
+    resolve_router_model_ids,
+    router_chain,
+    vision_capable_chat_model_ids,
+    vision_router_chain,
+)
 from modules.security_redaction import redact_sensitive_text
 from modules.task_registry import check_caller_task
 
@@ -852,6 +859,55 @@ def _build_attempt_order(config: dict, model_key: str = "") -> list[str]:
     return attempts
 
 
+def _task_model_keys(task_type: str, model_keys_override=None) -> list[str]:
+    if model_keys_override is not None:
+        if isinstance(model_keys_override, str):
+            text = model_keys_override.strip()
+            return [text] if text else []
+        return [str(key).strip() for key in (model_keys_override or []) if str(key).strip()]
+    return resolve_router_model_ids(
+        task_type,
+        catalog=MODELS,
+        router=LLM_ROUTER,
+        fallback_task=chat_fallback_task(task_type),
+    )
+
+
+def _vision_model_keys(model_name: str | None = None) -> list[str]:
+    if model_name:
+        return [str(model_name).strip()] if str(model_name).strip() else []
+    chat_vision = vision_capable_chat_model_ids(catalog=MODELS, router=LLM_ROUTER)
+    if chat_vision:
+        return chat_vision
+    vision_chain = router_chain(LLM_ROUTER, "vision")
+    if vision_chain:
+        return resolve_router_model_ids(
+            "vision",
+            catalog=MODELS,
+            router=LLM_ROUTER,
+            required_purpose="vision",
+            allow_untagged=False,
+        )
+    fallback_chain = vision_router_chain(
+        LLM_ROUTER,
+        catalog=MODELS,
+        fallback_model=SENSOR_VISION_MODEL,
+    )
+    if fallback_chain:
+        return resolve_router_model_ids(
+            "vision",
+            catalog=MODELS,
+            router={"vision": fallback_chain},
+            fallbacks=[SENSOR_VISION_MODEL] if SENSOR_VISION_MODEL else [],
+        )
+    return resolve_router_model_ids(
+        "vision",
+        catalog=MODELS,
+        router=LLM_ROUTER,
+        fallbacks=[SENSOR_VISION_MODEL] if SENSOR_VISION_MODEL else [],
+    )
+
+
 async def analyze_image(
     image_base64: str,
     prompt: str = "请详细描述这张图片的内容。",
@@ -861,48 +917,59 @@ async def analyze_image(
     caller = caller or "vision"
     check = check_caller_task(caller, "vision")
     _warn_caller_task_check(check, prefix="[Vision]")
-    target_key = model_name if model_name else (SENSOR_VISION_MODEL or "default")
-    config = MODELS.get(target_key)
-    if not config:
-        return f"（视觉配置错误：找不到模型 {target_key}）"
-    config = _resolve_model_config(config)
+    model_keys = _vision_model_keys(model_name)
+    if not model_keys:
+        return "（视觉配置错误：请在任务路由里配置「识图」模型）"
 
-    print(f"[Vision] 调用模型: {target_key} caller={caller}")
-
-    client = None
-    try:
-        client = _build_async_openai_client(
-            api_key=config["api_key"],
-            base_url=config["base_url"],
-            timeout_sec=30,
+    last_error = ""
+    for idx, target_key in enumerate(model_keys, 1):
+        config = MODELS.get(target_key)
+        if not config:
+            last_error = f"找不到模型 {target_key}"
+            continue
+        config = _resolve_model_config(config)
+        print(
+            f"[Vision] 尝试 {idx}/{len(model_keys)}: {target_key} caller={caller}"
         )
-        response = await client.chat.completions.create(
-            model=config["model"],
-            messages=[
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": prompt},
-                        {
-                            "type": "image_url",
-                            "image_url": {
-                                "url": f"data:image/jpeg;base64,{image_base64}"
+
+        client = None
+        try:
+            client = _build_async_openai_client(
+                api_key=config["api_key"],
+                base_url=config["base_url"],
+                timeout_sec=30,
+            )
+            response = await client.chat.completions.create(
+                model=config["model"],
+                messages=[
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": prompt},
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": f"data:image/jpeg;base64,{image_base64}"
+                                },
                             },
-                        },
-                    ],
-                }
-            ],
-            max_tokens=500,
-            timeout=30,
-        )
-        content = getattr(response.choices[0].message, "content", "")
-        if content:
-            return str(content)
-    except Exception as e:
-        return f"（视觉识别失败: {e}）"
-    finally:
-        await _aclose_openai_client(client)
+                        ],
+                    }
+                ],
+                max_tokens=500,
+                timeout=30,
+            )
+            content = getattr(response.choices[0].message, "content", "")
+            if content:
+                return str(content)
+            last_error = "视觉识别返回为空"
+        except Exception as e:
+            last_error = str(e)
+            print(f"[Vision] 模型 {target_key} 失败: {e}")
+        finally:
+            await _aclose_openai_client(client)
 
+    if last_error:
+        return f"（视觉识别失败: {last_error}）"
     return "（视觉识别返回为空）"
 
 
@@ -917,9 +984,7 @@ async def chat_with_ai_stream(
     request_id = request_id or uuid.uuid4().hex[:8]
     check = check_caller_task(caller, task_type)
     _warn_caller_task_check(check, prefix="[LLM Stream]")
-    model_keys = LLM_ROUTER.get(task_type, LLM_ROUTER.get("default", []))
-    if isinstance(model_keys, str):
-        model_keys = [model_keys]
+    model_keys = _task_model_keys(task_type)
     if not model_keys:
         yield "（配置错误：无可用模型）"
         return
@@ -1114,15 +1179,7 @@ def chat_complete(
     )
     _warn_caller_task_check(check, prefix="[LLM Sync]", trace=trace)
 
-    model_keys = (
-        model_keys_override
-        if model_keys_override is not None
-        else LLM_ROUTER.get(task_type, LLM_ROUTER.get("default", []))
-    )
-    if isinstance(model_keys, str):
-        model_keys = [model_keys]
-    else:
-        model_keys = [str(key).strip() for key in (model_keys or []) if str(key).strip()]
+    model_keys = _task_model_keys(task_type, model_keys_override)
 
     preferred_model = (
         None

@@ -20,6 +20,64 @@ from urllib.parse import unquote, urlparse
 import config
 
 
+def napcat_watchdog_delay(
+    *,
+    enabled: bool,
+    listening: bool,
+    ws_connected: bool,
+    previous_delay: float,
+) -> float:
+    """Local gateway poll interval. Healthy sessions stay quiet."""
+    if not enabled:
+        return 120.0
+    if listening and ws_connected:
+        return 120.0
+    if listening:
+        return 45.0
+    if previous_delay >= 120 or previous_delay <= 0:
+        return 20.0
+    return float(min(120.0, max(20.0, previous_delay * 2)))
+
+
+def qq_profile_sync_fingerprint(char_id: str, nickname: str, avatar_path: str) -> Dict[str, Any]:
+    avatar = str(avatar_path or "").strip()
+    file_info = None
+    if avatar:
+        path = Path(avatar)
+        if path.is_file():
+            stat = path.stat()
+            file_info = {"size": int(stat.st_size), "mtime_ns": int(stat.st_mtime_ns)}
+    return {
+        "char_id": str(char_id or ""),
+        "nickname": str(nickname or "").strip(),
+        "avatar": avatar,
+        "file": file_info,
+    }
+
+
+def _qq_profile_sync_path() -> Path:
+    from modules.paths import data_path
+
+    return Path(data_path("qq_profile_sync.json"))
+
+
+def load_qq_profile_sync() -> Dict[str, Any]:
+    try:
+        payload = json.loads(_qq_profile_sync_path().read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def save_qq_profile_sync(fingerprint: Dict[str, Any]) -> None:
+    path = _qq_profile_sync_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(fingerprint, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+
 def _read_existing_napcat_token() -> str:
     search_roots = []
     env_config = os.getenv("NAPCAT_ONEBOT_CONFIG", "").strip()
@@ -235,6 +293,7 @@ from config import (
     NAPCAT_GROUP_REQUIRE_AT,
     NAPCAT_VOICE_REPLY_ENABLED,
     NAPCAT_VOICE_REPLY_PROBABILITY,
+    NAPCAT_HUMANIZE_SET_ONLINE,
     GUI_WS_HOST,
     GUI_WS_PORT,
     GUI_WS_PATH,
@@ -381,6 +440,7 @@ class Live2DApplication:
         self._napcat_enabled = bool(NAPCAT_ENABLED)
         self._napcat_server_running = False
         self._napcat_watchdog_task = None
+        self._qq_online_status_applied = False
         self._silent_bubble_seq = 0
 
         # [新增] 屏幕感知与语音组件
@@ -1813,32 +1873,94 @@ class Live2DApplication:
         )
         return listening
 
+    def _napcat_reverse_ws_connected(self) -> bool:
+        server = getattr(self, "chat_gateway_server", None)
+        picker = getattr(server, "_pick_active_ws", None)
+        if not callable(picker):
+            return False
+        try:
+            return picker() is not None
+        except Exception:
+            return False
+
+    async def _wait_for_napcat_reverse_ws(self, timeout: float = 40.0) -> bool:
+        deadline = time.monotonic() + max(0.0, float(timeout))
+        while time.monotonic() < deadline:
+            if self._napcat_reverse_ws_connected():
+                return True
+            await asyncio.sleep(1.0)
+        return self._napcat_reverse_ws_connected()
+
     async def _napcat_gateway_watchdog(self) -> None:
         await asyncio.sleep(8)
-        delay = 15
+        delay = 20.0
+        missing_since = None
+        warned = False
         while True:
             try:
-                if bool(getattr(self, "_napcat_enabled", False)):
-                    ok = await asyncio.to_thread(
+                enabled = bool(getattr(self, "_napcat_enabled", False))
+                listening = False
+                connected = False
+                if enabled:
+                    listening = await asyncio.to_thread(
                         self._ensure_napcat_gateway_listening, reason="watchdog"
                     )
-                    delay = 15 if ok else min(120, max(30, delay * 2))
-                else:
-                    delay = 30
+                    connected = bool(listening and self._napcat_reverse_ws_connected())
+                    now = time.monotonic()
+                    if listening and not connected:
+                        if missing_since is None:
+                            missing_since = now
+                        elif not warned and now - missing_since >= 60:
+                            warned = True
+                            if self.logger:
+                                self.logger.warning(
+                                    "NapCat 反向连接还没建立，QQ 可能没登录。群消息和去水印都进不来。"
+                                )
+                            self._report_qq_gateway_health(
+                                enabled=True,
+                                server_running=True,
+                                ws_connected=False,
+                            )
+                    else:
+                        if warned and connected:
+                            self._report_qq_gateway_health(
+                                enabled=True,
+                                server_running=True,
+                                ws_connected=True,
+                            )
+                        missing_since = None
+                        warned = False
+                    if connected:
+                        await self._ensure_qq_online_status("watchdog")
+                    else:
+                        self._qq_online_status_applied = False
+                delay = napcat_watchdog_delay(
+                    enabled=enabled,
+                    listening=bool(listening),
+                    ws_connected=bool(connected),
+                    previous_delay=delay,
+                )
             except asyncio.CancelledError:
                 raise
             except Exception as cop:
                 if self.logger:
                     self.logger.warning(f"NapCat gateway watchdog error: {cop}")
-                delay = min(120, max(30, delay * 2))
+                delay = min(120.0, max(20.0, delay * 2))
             await asyncio.sleep(delay)
 
     def _report_qq_gateway_health(
-        self, *, enabled: bool, server_running: bool
+        self,
+        *,
+        enabled: bool,
+        server_running: bool,
+        ws_connected: Optional[bool] = None,
     ) -> None:
         listening = self._napcat_gateway_is_listening() if enabled else False
         if not enabled:
             state, summary = "disabled", "QQ 网关未启用"
+        elif listening and ws_connected is False:
+            state, summary = "degraded", "本机网关在听，NapCat 还没连上"
+            server_running = True
         elif listening:
             state, summary = "healthy", "QQ 网关已启动"
             server_running = True
@@ -1846,12 +1968,15 @@ class Live2DApplication:
             state, summary = "degraded", "QQ 网关标记已启动，但 8095 未在监听"
         else:
             state, summary = "offline", "QQ 网关等待启动"
+        details: Dict[str, Any] = {"listener_running": bool(server_running)}
+        if ws_connected is not None:
+            details["ws_connected"] = bool(ws_connected)
         try:
             self.runtime_health.report(
                 "qq_gateway",
                 state,
                 summary,
-                details={"listener_running": bool(server_running)},
+                details=details,
             )
         except Exception:
             return
@@ -3444,6 +3569,7 @@ class Live2DApplication:
             self.loop.create_task(
                 self._sync_active_character_qq_profile(reason="startup")
             )
+            self.loop.create_task(self._ensure_qq_online_status("startup"))
             if self.gui_ws_server:
                 self.loop.create_task(self.gui_ws_server.start(self.loop))
             if self.gui_http_server:
@@ -3802,6 +3928,18 @@ class Live2DApplication:
                         f"[RoleQQSync] skipped: qq_profile disabled or empty for active {active_id} ({reason})"
                     )
                 return False
+            nickname = str(profile.get("nickname") or "").strip()
+            avatar = self._resolve_role_qq_avatar_value(profile.get("avatar") or "")
+            fingerprint = qq_profile_sync_fingerprint(active_id, nickname, avatar)
+            if load_qq_profile_sync() == fingerprint:
+                if self.logger:
+                    self.logger.info(
+                        f"[RoleQQSync] skipped: QQ 资料未变化 ({reason})"
+                    )
+                return True
+            if reason == "startup" and not self._napcat_reverse_ws_connected():
+                await self._wait_for_napcat_reverse_ws(40)
+            await self._ensure_qq_online_status(reason)
             if self.logger:
                 self.logger.info(
                     f"[RoleQQSync] syncing active character {active_id} ({reason})"
@@ -3864,50 +4002,108 @@ class Live2DApplication:
             "action": action,
         }
 
+    async def _ensure_qq_online_status(self, reason: str = "startup") -> bool:
+        if not bool(NAPCAT_HUMANIZE_SET_ONLINE):
+            return False
+        if not bool(getattr(self, "_napcat_enabled", False)):
+            return False
+        if bool(getattr(self, "_qq_online_status_applied", False)):
+            return True
+        if not self._napcat_reverse_ws_connected():
+            if reason == "startup":
+                await self._wait_for_napcat_reverse_ws(40)
+            if not self._napcat_reverse_ws_connected():
+                return False
+        try:
+            result = await self._call_napcat_action(
+                "set_online_status",
+                {"status": 10, "ext_status": 0, "battery_status": 0},
+            )
+            if result.get("ok"):
+                self._qq_online_status_applied = True
+                if self.logger:
+                    self.logger.info(f"[QQHumanize] online status set ({reason})")
+                return True
+            if self.logger:
+                self.logger.warning(
+                    f"[QQHumanize] set_online_status failed ({reason}): {result}"
+                )
+        except Exception as exc:
+            if self.logger:
+                self.logger.warning(
+                    f"[QQHumanize] set_online_status failed ({reason}): {exc}"
+                )
+        return False
+
     async def _sync_character_qq_profile(
         self, char_id: str, profile: Dict[str, str]
     ) -> None:
         nickname = str(profile.get("nickname") or "").strip()
         avatar = self._resolve_role_qq_avatar_value(profile.get("avatar") or "")
+        fingerprint = qq_profile_sync_fingerprint(char_id, nickname, avatar)
+        if load_qq_profile_sync() == fingerprint:
+            if self.logger:
+                self.logger.info(f"[RoleQQSync] skipped: QQ 资料未变化 for {char_id}")
+            return
+        if not self._napcat_reverse_ws_connected():
+            if self.logger:
+                self.logger.info(
+                    f"[RoleQQSync] skipped: NapCat 还没连上，不改资料 for {char_id}"
+                )
+            return
         try:
+            profile_ok = True
             if nickname:
                 current_result = await self._call_napcat_action("get_login_info", {})
-                current_data = self._napcat_action_data(current_result)
-                current_nickname = str(current_data.get("nickname") or "").strip()
-                if current_nickname == nickname:
+                if not current_result.get("ok"):
+                    profile_ok = False
                     if self.logger:
-                        self.logger.info(
-                            f"[RoleQQSync] nickname already matched for {char_id}: {nickname}"
+                        self.logger.warning(
+                            f"[RoleQQSync] nickname sync failed for {char_id}: {current_result}"
                         )
                 else:
-                    # Only send nickname here. QQ signature/status/说说 are not
-                    # part of role sync and must not be changed implicitly.
-                    result = await self._call_napcat_action(
-                        "set_qq_profile", {"nickname": nickname}
-                    )
-                    if self.logger:
-                        if result.get("ok"):
+                    current_data = self._napcat_action_data(current_result)
+                    current_nickname = str(current_data.get("nickname") or "").strip()
+                    if current_nickname == nickname:
+                        if self.logger:
                             self.logger.info(
-                                f"[RoleQQSync] nickname synced for {char_id}: {current_nickname or '-'} -> {nickname}"
+                                f"[RoleQQSync] nickname already matched for {char_id}: {nickname}"
                             )
+                    else:
+                        # Only send nickname here. QQ signature/status/说说 are not
+                        # part of role sync and must not be changed implicitly.
+                        result = await self._call_napcat_action(
+                            "set_qq_profile", {"nickname": nickname}
+                        )
+                        if result.get("ok"):
+                            if self.logger:
+                                self.logger.info(
+                                    f"[RoleQQSync] nickname synced for {char_id}: {current_nickname or '-'} -> {nickname}"
+                                )
                         else:
-                            self.logger.warning(
-                                f"[RoleQQSync] nickname sync failed for {char_id}: {result}"
-                            )
+                            profile_ok = False
+                            if self.logger:
+                                self.logger.warning(
+                                    f"[RoleQQSync] nickname sync failed for {char_id}: {result}"
+                                )
 
-            if avatar:
+            if avatar and profile_ok:
                 result = await self._call_napcat_action(
                     "set_qq_avatar", {"file": avatar}, timeout=15.0
                 )
-                if self.logger:
-                    if result.get("ok"):
+                if result.get("ok"):
+                    if self.logger:
                         self.logger.info(
                             f"[RoleQQSync] avatar synced for {char_id}: {avatar}"
                         )
-                    else:
+                else:
+                    profile_ok = False
+                    if self.logger:
                         self.logger.warning(
                             f"[RoleQQSync] avatar sync failed for {char_id}: {result}"
                         )
+            if profile_ok:
+                save_qq_profile_sync(fingerprint)
         except Exception as exc:
             if self.logger:
                 self.logger.warning(f"[RoleQQSync] sync failed for {char_id}: {exc}")

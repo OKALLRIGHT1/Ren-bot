@@ -335,12 +335,18 @@ class QtChatTrayApp(QtCore.QObject):
             self._win.setStyleSheet(get_panel_styles())
             if self._settings_dialog:
                 self._settings_dialog.setStyleSheet(get_settings_styles())
+                plugin_page = getattr(self._settings_dialog, "_plugin_page", None)
+                if plugin_page is not None and hasattr(plugin_page, "refresh_theme"):
+                    plugin_page.refresh_theme()
             if self._console_dialog:
                 self._console_dialog.setStyleSheet(get_tool_dialog_styles())
             if self._memory_dialog:
                 self._memory_dialog.setStyleSheet(get_memory_dialog_styles())
             if self._plugin_dialog:
-                self._plugin_dialog.setStyleSheet(get_tool_dialog_styles())
+                if hasattr(self._plugin_dialog, "refresh_theme"):
+                    self._plugin_dialog.refresh_theme()
+                else:
+                    self._plugin_dialog.setStyleSheet(get_tool_dialog_styles())
             if hasattr(self, "_expression_library_dialog") and self._expression_library_dialog:
                 self._expression_library_dialog.setStyleSheet(get_tool_dialog_styles())
             if hasattr(self, "_meme_dialog") and self._meme_dialog:

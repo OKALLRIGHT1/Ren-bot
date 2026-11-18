@@ -280,3 +280,22 @@ async def test_assemble_chat_context_messages_adds_capability_unavailable(
     assert "capability_unavailable:weather" in system
     assert "plugin disabled" in system
     assert "不要假装已经查询成功" in system
+
+
+@pytest.mark.asyncio
+async def test_assemble_chat_context_messages_attaches_pending_images(
+    monkeypatch,
+):
+    _stub_thought_and_guard(monkeypatch)
+    assembled = await assemble_chat_context_messages(
+        user_text="看看这张图",
+        ctx={"source": "qq_gateway", "_pending_vision_images": ["abc123"]},
+        hooks=_hooks(),
+        conversation_session_id="qq",
+        memory_session_id="owner_shared",
+    )
+    content = assembled.context_messages[-1]["content"]
+    assert isinstance(content, list)
+    assert content[0]["text"] == "看看这张图"
+    assert content[1]["type"] == "image_url"
+    assert "abc123" in content[1]["image_url"]["url"]

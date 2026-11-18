@@ -164,6 +164,7 @@ NapCat HTTP Webhook 要求 `Access Token`。启动时优先使用 `data/runtime_
 - `_split_long_gateway_part()` 会把过长自然句继续按中英文句号、问号、感叹号和逗号拆开。
 - URL 和代码块应保留为单条消息，避免链接和代码被拆坏。
 - 硬件状态的本地气泡也复用这套分段；如果 QQ 已分段但本地气泡没分段，优先查硬件状态专用发送路径是否绕过了 splitter。
+- 私聊多段间隔默认约 0.45–1.05s（`NAPCAT_HUMANIZE_*`）；群聊仍是 0.35s。关掉拟人后私聊也回到 0.35s。
 
 ### 切换角色后 QQ 昵称或头像没变
 
@@ -171,8 +172,21 @@ NapCat HTTP Webhook 要求 `Access Token`。启动时优先使用 `data/runtime_
 
 - 如果当前 QQ 昵称已经等于目标昵称，会跳过昵称修改。
 - 头像只有角色配置了 avatar 文件时才会设置。
-- 项目不会主动改签名、说说或在线状态；如果这些字段变化，优先查 NapCat `set_qq_profile` action 或外部 QQ 自动化。
+- 项目不会主动改签名或说说。
+- 连上 NapCat 后会设一次在线（`set_online_status`，status=10）。关掉用 `NAPCAT_HUMANIZE_SET_ONLINE=0`。
 - 如果昵称不同但没有变化，查 `core/application.py` 的角色切换日志，以及 NapCat 是否支持并放行 `set_qq_profile` / `set_qq_avatar`。
+
+### QQ 回发太像秒回 / 没有「正在输入」
+
+私聊拟人在 `GatewaySender.send_reply`：已读 → 正在输入 → 短延迟 → 发送。
+
+- 只对 `private:` 会话生效；群聊不会显示正在输入（NapCat 的 `set_input_status` 只支持私聊）。
+- 入站的「等对方打完字」是 `QQ_PRIVATE_CONTINUOUS_*`，不要和拟人开关搞混。
+- 改 NapCat `heartInterval` 没有用，那是 OneBot 探活。
+- 关掉整套：`NAPCAT_HUMANIZE_ENABLED=0`。
+- 只关某一项：`NAPCAT_HUMANIZE_MARK_READ=0` / `NAPCAT_HUMANIZE_TYPING=0` / `NAPCAT_HUMANIZE_SET_ONLINE=0`。
+- 打字等待：`NAPCAT_HUMANIZE_MS_PER_CHAR`（默认 90）、`MIN_DELAY_SEC`（0.45）、`MAX_DELAY_SEC`（2.2）。
+- 私聊多段间隔：`NAPCAT_HUMANIZE_PART_GAP_MIN_SEC` / `MAX_SEC`（默认 0.45–1.05）。
 
 ## 7. API Key 明明在别的软件可用，这里 401
 

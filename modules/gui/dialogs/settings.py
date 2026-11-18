@@ -133,16 +133,15 @@ try:
         get_model_purposes,
         list_models_by_purpose,
         normalize_purposes,
+        route_task_allow_untagged,
+        route_task_purposes,
     )
 except Exception:
     MODEL_PURPOSE_OPTIONS = [
         ("chat", "聊天"),
-        ("tool_reasoning", "推理/工具"),
-        ("summary", "总结"),
-        ("vision", "视觉理解"),
+        ("vision", "视觉"),
+        ("web_search", "联网搜索"),
         ("image_gen", "画图"),
-        ("image_edit", "图生图"),
-        ("translation", "翻译"),
         ("embedding", "向量"),
     ]
 
@@ -165,6 +164,12 @@ except Exception:
 
     def list_models_by_purpose(catalog=None, purpose="", **kwargs):
         return []
+
+    def route_task_purposes(task_name):
+        return ()
+
+    def route_task_allow_untagged(task_name):
+        return True
 
 
 class ProviderEditDialog(QtWidgets.QDialog):
@@ -487,7 +492,7 @@ class ModelEditDialog(QtWidgets.QDialog):
         purpose_title.setObjectName("cardTitle")
         purpose_layout.addWidget(purpose_title)
         purpose_hint = QtWidgets.QLabel(
-            "给模型打标签后，插件/路由可按用途筛选。例如画图插件只会使用勾选了「画图/图生图」的模型。",
+            "标签是模型能力。聊天模型勾了「视觉」，发图和屏幕吐槽会直接看图，不必再配识图任务。画图、搜索、向量仍要单独勾。",
             purpose_card,
         )
         purpose_hint.setObjectName("cardDesc")
@@ -515,7 +520,7 @@ class ModelEditDialog(QtWidgets.QDialog):
         image_layout = QtWidgets.QVBoxLayout(self.image_card)
         image_layout.setContentsMargins(14, 12, 14, 12)
         image_layout.setSpacing(8)
-        image_title = QtWidgets.QLabel("🎨 生图接口（画图/图生图用途）", self.image_card)
+        image_title = QtWidgets.QLabel("🎨 生图接口（画图用途）", self.image_card)
         image_title.setObjectName("cardTitle")
         image_layout.addWidget(image_title)
         image_hint = QtWidgets.QLabel(
@@ -751,7 +756,7 @@ class ModelEditDialog(QtWidgets.QDialog):
 
     def _refresh_image_fields_visibility(self):
         purposes = set(self._selected_purposes())
-        show_image = bool(purposes & {"image_gen", "image_edit"})
+        show_image = "image_gen" in purposes
         self.image_card.setVisible(show_image)
         self.embedding_card.setVisible("embedding" in purposes)
         self._refresh_request_preview()
@@ -774,7 +779,7 @@ class ModelEditDialog(QtWidgets.QDialog):
                 except Exception:
                     endpoint = base_url.rstrip("/") + "/" + path.lstrip("/")
             transport = self.combo_embedding_provider.currentText().strip()
-        elif purposes & {"image_gen", "image_edit"}:
+        elif "image_gen" in purposes:
             path = self.inp_endpoint.text().strip() or "/v1/images/generations"
             try:
                 from modules.model_catalog import join_endpoint_url
@@ -967,7 +972,7 @@ class ModelEditDialog(QtWidgets.QDialog):
                 self.inp_embedding_timeout.value()
             )
 
-        if purposes and set(purposes) & {"image_gen", "image_edit"}:
+        if purposes and "image_gen" in purposes:
             endpoint = self.inp_endpoint.text().strip()
             edit_endpoint = self.inp_edit_endpoint.text().strip()
             api_mode = self.inp_api_mode.text().strip()
@@ -1003,22 +1008,6 @@ class ModelEditDialog(QtWidgets.QDialog):
 
 
 class RouterConfigDialog(QtWidgets.QDialog):
-    # task_name -> purpose filter used when building the model pool
-    TASK_PURPOSE_FILTER = {
-        "image_gen": ("image_gen", "image_edit"),
-        "image_edit": ("image_edit", "image_gen"),
-        "vision": ("vision",),
-        "sensor_vision_talk": ("vision", "chat"),
-        "translation": ("translation", "chat"),
-        "summary": ("summary", "chat"),
-        "web_search": ("web_search",),
-        "tool_reasoning": ("tool_reasoning", "chat"),
-        "default": ("chat",),
-        "reply_polish": ("chat",),
-        "gatekeeper": ("chat", "tool_reasoning"),
-        "screen_classify": ("chat", "vision"),
-    }
-
     def __init__(self, parent=None, task_name="", current_chain=None):
         super().__init__(parent)
 
@@ -1033,7 +1022,7 @@ class RouterConfigDialog(QtWidgets.QDialog):
 
         self.result_chain = list(current_chain or [])
 
-        self.purpose_filter = self.TASK_PURPOSE_FILTER.get(self.task_name)
+        self.purpose_filter = route_task_purposes(self.task_name)
 
         self.all_models = self._collect_pool_models()
 
@@ -1043,12 +1032,7 @@ class RouterConfigDialog(QtWidgets.QDialog):
         keys = sorted(list(MODELS.keys()))
         if not self.purpose_filter:
             return keys
-        # 画图/图生图：候选池只显示已标记对应用途的模型；其它任务允许未标记模型。
-        allow_untagged = self.task_name not in {
-            "image_gen",
-            "image_edit",
-            "web_search",
-        }
+        allow_untagged = route_task_allow_untagged(self.task_name)
         filtered = list_models_by_purpose(
             MODELS, self.purpose_filter, allow_untagged=allow_untagged
         )
@@ -1802,6 +1786,16 @@ class QQUserProfileEditDialog(QtWidgets.QDialog):
         }
 
         self.accept()
+
+
+def _group_reply_form_settings(runtime):
+    from services.chat_support.group_reply_planner import (
+        config_from_mapping,
+        group_reply_settings,
+    )
+
+    source = runtime if isinstance(runtime, dict) else {}
+    return group_reply_settings(config_from_mapping(source))
 
 
 class SettingsDialog(QtWidgets.QDialog):
@@ -2607,6 +2601,7 @@ class SettingsDialog(QtWidgets.QDialog):
             "remote_chat_ui_append": bool(
                 runtime.get("remote_chat_ui_append", REMOTE_CHAT_UI_APPEND)
             ),
+            **_group_reply_form_settings(runtime),
         }
 
     def _format_owner_ids(self, values) -> str:
@@ -3963,6 +3958,18 @@ class SettingsDialog(QtWidgets.QDialog):
             except Exception as e:
                 self.gateway_mcp_preview.setText(f"MCP 服务器预览生成失败：{e}")
 
+    def _sync_group_reply_planner_fields(self, *_args):
+        enabled = self.gateway_group_planner_enabled.isChecked()
+        for widget in (
+            self.gateway_group_talk_value,
+            self.gateway_group_context_lines,
+            self.gateway_group_backoff_start,
+            self.gateway_group_backoff_base,
+            self.gateway_group_backoff_cap,
+            self.gateway_group_backoff_bypass,
+        ):
+            widget.setEnabled(enabled)
+
     def _collect_gateway_settings(self):
         return {
             "napcat_enabled": self.gateway_napcat_enabled.isChecked(),
@@ -4025,6 +4032,17 @@ class SettingsDialog(QtWidgets.QDialog):
                 if item.strip()
             ],
             "remote_chat_ui_append": self.gateway_ui_append.isChecked(),
+            "group_reply_planner_enabled": self.gateway_group_planner_enabled.isChecked(),
+            "group_reply_talk_value": float(self.gateway_group_talk_value.value()),
+            "group_reply_context_lines": int(self.gateway_group_context_lines.value()),
+            "group_reply_backoff_start_count": int(
+                self.gateway_group_backoff_start.value()
+            ),
+            "group_reply_backoff_base_sec": int(self.gateway_group_backoff_base.value()),
+            "group_reply_backoff_cap_sec": int(self.gateway_group_backoff_cap.value()),
+            "group_reply_backoff_bypass_count": int(
+                self.gateway_group_backoff_bypass.value()
+            ),
         }
 
     def _copy_gateway_webhook_url(self):
@@ -4105,6 +4123,17 @@ class SettingsDialog(QtWidgets.QDialog):
             "",
             "- QQ 回复是否显示到本地聊天框：对新消息立即生效",
         ]
+        group_reply_keys = (
+            "group_reply_planner_enabled",
+            "group_reply_talk_value",
+            "group_reply_context_lines",
+            "group_reply_backoff_start_count",
+            "group_reply_backoff_base_sec",
+            "group_reply_backoff_cap_sec",
+            "group_reply_backoff_bypass_count",
+        )
+        if any(old_settings.get(key) != new_settings.get(key) for key in group_reply_keys):
+            message_lines.append("- 群聊开口判断：下一条群消息就按新设置")
 
         if live_apply_ok:
             if new_settings.get("napcat_enabled"):
@@ -4766,6 +4795,54 @@ class SettingsDialog(QtWidgets.QDialog):
         self.gateway_group_require_at = QtWidgets.QCheckBox("群聊仅响应 @我")
 
         self.gateway_group_require_at.setChecked(bool(state["napcat_group_require_at"]))
+        self.gateway_group_require_at.setToolTip(
+            "关掉后，没 @ 的群消息也会进来。下面的开口判断决定要不要叫主模型。允许群聊仍是总开关。"
+        )
+
+        group_reply = _group_reply_form_settings(state)
+        self.gateway_group_planner_enabled = QtWidgets.QCheckBox("免 @ 时先判断要不要开口")
+        self.gateway_group_planner_enabled.setChecked(
+            bool(group_reply["group_reply_planner_enabled"])
+        )
+        self.gateway_group_planner_enabled.setToolTip(
+            "关掉「仅响应 @我」之后，普通群消息先走看门人模型。拿不准就沉默。"
+            "关掉本项后，进来的群消息会直接进主模型。"
+        )
+        self.gateway_group_talk_value = QtWidgets.QDoubleSpinBox()
+        self.gateway_group_talk_value.setRange(0.0, 1.0)
+        self.gateway_group_talk_value.setSingleStep(0.05)
+        self.gateway_group_talk_value.setDecimals(2)
+        self.gateway_group_talk_value.setValue(float(group_reply["group_reply_talk_value"]))
+        self.gateway_group_talk_value.setToolTip("0 几乎不接话，0.35 很安静，1 正常接话。不掷骰子。")
+        self.gateway_group_context_lines = QtWidgets.QSpinBox()
+        self.gateway_group_context_lines.setRange(1, 20)
+        self.gateway_group_context_lines.setValue(int(group_reply["group_reply_context_lines"]))
+        self.gateway_group_context_lines.setToolTip("判断和开口时附带的最近群消息条数。")
+        self.gateway_group_backoff_start = QtWidgets.QSpinBox()
+        self.gateway_group_backoff_start.setRange(1, 8)
+        self.gateway_group_backoff_start.setValue(
+            int(group_reply["group_reply_backoff_start_count"])
+        )
+        self.gateway_group_backoff_start.setToolTip("连续几次判断为不回之后，开始暂时不再叫看门人模型。")
+        self.gateway_group_backoff_base = QtWidgets.QSpinBox()
+        self.gateway_group_backoff_base.setRange(0, 120)
+        self.gateway_group_backoff_base.setSuffix(" 秒")
+        self.gateway_group_backoff_base.setValue(int(group_reply["group_reply_backoff_base_sec"]))
+        self.gateway_group_backoff_cap = QtWidgets.QSpinBox()
+        self.gateway_group_backoff_cap.setRange(15, 300)
+        self.gateway_group_backoff_cap.setSuffix(" 秒")
+        self.gateway_group_backoff_cap.setValue(int(group_reply["group_reply_backoff_cap_sec"]))
+        self.gateway_group_backoff_bypass = QtWidgets.QSpinBox()
+        self.gateway_group_backoff_bypass.setRange(1, 30)
+        self.gateway_group_backoff_bypass.setSuffix(" 条")
+        self.gateway_group_backoff_bypass.setValue(
+            int(group_reply["group_reply_backoff_bypass_count"])
+        )
+        self.gateway_group_backoff_bypass.setToolTip("放慢期间新消息积压到这个数量，就再判断一次。")
+        self.gateway_group_planner_enabled.toggled.connect(
+            self._sync_group_reply_planner_fields
+        )
+        self._sync_group_reply_planner_fields()
 
         self.gateway_image_vision_enabled = QtWidgets.QCheckBox("启用 QQ 图片识别")
 
@@ -4843,6 +4920,8 @@ class SettingsDialog(QtWidgets.QDialog):
 
         toggles.addWidget(self.gateway_group_require_at)
 
+        toggles.addWidget(self.gateway_group_planner_enabled)
+
         toggles.addWidget(self.gateway_image_vision_enabled)
 
         toggles.addWidget(self.gateway_voice_reply_enabled)
@@ -4854,6 +4933,18 @@ class SettingsDialog(QtWidgets.QDialog):
         toggle_widget.setLayout(toggles)
 
         form.addRow("消息策略", toggle_widget)
+
+        form.addRow("发言倾向", self.gateway_group_talk_value)
+
+        form.addRow("最近群消息", self.gateway_group_context_lines)
+
+        form.addRow("连续不回几次后放慢", self.gateway_group_backoff_start)
+
+        form.addRow("放慢", self.gateway_group_backoff_base)
+
+        form.addRow("最长放慢", self.gateway_group_backoff_cap)
+
+        form.addRow("积压再判断", self.gateway_group_backoff_bypass)
 
         qq_layout.addLayout(form)
 

@@ -59,7 +59,7 @@ def _int_config(raw: Dict[str, Any], key: str, default: int) -> int:
         return int(default)
 
 
-# 只补系统规则没写的本轮禁令，避免再念一遍「短句/别客服腔」。
+# 只补本轮禁令。句数跟角色人设，这里不再另写一遍。
 SCENE_CORE_LINES = (
     "禁止「切换得好硬/节奏很怪/状态不对/落差好大」等抽象标签。",
 )
@@ -295,27 +295,25 @@ def build_scene_prompt(
     detail_intent: bool = False,
     bypass_short_shell: bool = False,
 ) -> str:
-    """极简本轮约束：系统规则已有短句/聊天默认，这里只补禁令 + 渠道壳。"""
+    """本轮只补禁令和渠道。长短跟角色人设，不在这里再限句数。"""
+    del bypass_short_shell
     parts = ["【本轮】"]
     for line in SCENE_CORE_LINES:
         parts.append(f"- {line}")
 
     src = str(source or "").strip().lower()
     mt = str(message_type or "private").strip().lower() or "private"
-    use_short = not (detail_intent and bypass_short_shell)
 
     if detail_intent:
         parts.append("- 用户要展开：先结论，再必要说明；仍像聊天。")
-    elif use_short:
-        parts.append("- 默认 1～2 句短接话。")
 
     if is_qq_source(src):
         if is_group_message(src, mt):
-            parts.append("- QQ 群：别刷屏，短回。")
+            parts.append("- QQ 群：顺着当前话题接话，别刷屏。")
         else:
-            parts.append("- QQ 私聊：像真人消息；短句少用句号收尾。")
+            parts.append("- QQ 私聊：像真人消息；很短的句子少用句号收尾。")
     elif is_desktop_source(src):
-        parts.append("- 本地闲聊：自然短促即可。")
+        parts.append("- 本地闲聊：按角色的日常口气接话。")
 
     return "\n".join(parts)
 
@@ -726,6 +724,11 @@ async def assemble_chat_context_messages(
     external_sender_context = hooks.build_external_sender_context(ctx)
     if external_sender_context:
         special_context += f"\n\n{external_sender_context}"
+    group_context = ""
+    if isinstance(ctx, dict):
+        group_context = str(ctx.get("group_recent_transcript") or "").strip()
+    if group_context:
+        special_context += f"\n\n{group_context}"
 
     short_term_messages = hooks.get_short_term_messages(ctx)
     thought_block, thought_trace = await build_character_thought_block(
@@ -798,6 +801,16 @@ async def assemble_chat_context_messages(
         conversation_scope=conversation_scope,
     )
     context_messages = await _clean_prompt_messages(list(context_messages or []))
+    pending_images = ctx.get("_pending_vision_images") if isinstance(ctx, dict) else None
+    if pending_images:
+        try:
+            from modules.model_catalog import attach_images_to_last_user_message
+
+            context_messages = attach_images_to_last_user_message(
+                context_messages, pending_images
+            )
+        except Exception:
+            pass
 
     # --- snapshot_payload: lengths and section names only, no raw content ---
     system_parts = []

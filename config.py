@@ -96,6 +96,27 @@ NAPCAT_VOICE_REPLY_PROBABILITY = get_env_int(
     "NAPCAT_VOICE_REPLY_PROBABILITY", 25, 0, 100
 )
 NAPCAT_OWNER_USER_IDS = get_env_list("NAPCAT_OWNER_USER_IDS", "")
+# QQ 私聊回发拟人：已读 → 正在输入 → 短延迟 → 发送。只影响发出去的私聊，
+# 和 QQ_PRIVATE_CONTINUOUS_*（等对方打完字）不是同一件事。
+NAPCAT_HUMANIZE_ENABLED = get_env_bool("NAPCAT_HUMANIZE_ENABLED", "1")
+NAPCAT_HUMANIZE_MARK_READ = get_env_bool("NAPCAT_HUMANIZE_MARK_READ", "1")
+NAPCAT_HUMANIZE_TYPING = get_env_bool("NAPCAT_HUMANIZE_TYPING", "1")
+NAPCAT_HUMANIZE_SET_ONLINE = get_env_bool("NAPCAT_HUMANIZE_SET_ONLINE", "1")
+NAPCAT_HUMANIZE_MS_PER_CHAR = get_env_float(
+    "NAPCAT_HUMANIZE_MS_PER_CHAR", 90.0, min_value=20.0, max_value=300.0
+)
+NAPCAT_HUMANIZE_MIN_DELAY_SEC = get_env_float(
+    "NAPCAT_HUMANIZE_MIN_DELAY_SEC", 0.45, min_value=0.0, max_value=5.0
+)
+NAPCAT_HUMANIZE_MAX_DELAY_SEC = get_env_float(
+    "NAPCAT_HUMANIZE_MAX_DELAY_SEC", 2.2, min_value=0.2, max_value=8.0
+)
+NAPCAT_HUMANIZE_PART_GAP_MIN_SEC = get_env_float(
+    "NAPCAT_HUMANIZE_PART_GAP_MIN_SEC", 0.45, min_value=0.1, max_value=3.0
+)
+NAPCAT_HUMANIZE_PART_GAP_MAX_SEC = get_env_float(
+    "NAPCAT_HUMANIZE_PART_GAP_MAX_SEC", 1.05, min_value=0.1, max_value=5.0
+)
 QQ_PRIVATE_CONTINUOUS_MESSAGE_ENABLED = get_env_bool(
     "QQ_PRIVATE_CONTINUOUS_MESSAGE_ENABLED", "1"
 )
@@ -300,6 +321,28 @@ GATEKEEPER_PROMPT_TEMPLATE = """
 仅输出一个单词：YES 或 NO
 """
 
+# 群聊免 @ 之后的开口判断。不改「允许群聊 / 仅响应 @我」。
+# 走 gatekeeper（看门人）路由，不走闲聊主模型。倾向越低越安静。
+GROUP_REPLY_PLANNER_ENABLED = get_env_bool("GROUP_REPLY_PLANNER_ENABLED", "1")
+GROUP_REPLY_TALK_VALUE = get_env_float("GROUP_REPLY_TALK_VALUE", 0.35, 0.0, 1.0)
+GROUP_REPLY_CONTEXT_LINES = get_env_int("GROUP_REPLY_CONTEXT_LINES", 8, 1, 20)
+GROUP_REPLY_PLANNER_MAX_TOKENS = get_env_int("GROUP_REPLY_PLANNER_MAX_TOKENS", 24, 8, 64)
+GROUP_REPLY_PLANNER_TIMEOUT_SEC = get_env_float(
+    "GROUP_REPLY_PLANNER_TIMEOUT_SEC", 12.0, 3.0, 30.0
+)
+GROUP_REPLY_BACKOFF_BASE_SEC = get_env_float(
+    "GROUP_REPLY_BACKOFF_BASE_SEC", 15.0, 0.0, 120.0
+)
+GROUP_REPLY_BACKOFF_CAP_SEC = get_env_float(
+    "GROUP_REPLY_BACKOFF_CAP_SEC", 120.0, 15.0, 300.0
+)
+GROUP_REPLY_BACKOFF_START_COUNT = get_env_int(
+    "GROUP_REPLY_BACKOFF_START_COUNT", 2, 1, 8
+)
+GROUP_REPLY_BACKOFF_BYPASS_COUNT = get_env_int(
+    "GROUP_REPLY_BACKOFF_BYPASS_COUNT", 6, 1, 30
+)
+
 
 # ==================== 屏幕感知配置 ====================
 SCREEN_SENSOR_ENABLED = True
@@ -476,10 +519,11 @@ LLM_ROUTER = {
     "translation": [],
     "screen_classify": [],
     "sensor_vision_talk": [],
+    # QQ 图片 / 观察截图 / 屏幕视觉描述
+    "vision": [],
     # 代码助手专用链路
     "codex": CODEX_ROUTE_CHAIN,
     "image_gen": [],
-    "image_edit": [],
 }
 
 SENSOR_VISION_MODEL = "GLM-4V-Flash"
@@ -582,8 +626,31 @@ MEMORY_SETTINGS = {
     "recall_roles": get_env_list(
         "RECALL_ROLES", "user,assistant,summary"
     ),  # 从哪些角色召回记忆
-    # 时间衰减配置
+    # 时间衰减配置。30 天只参与旧检索排序，不删除记录。
     "memory_half_life_days": 30,  # 半衰期（天）
+    # 待办生命周期，对齐麦麦 [a_memorix.memory]。只作用于 user_task。
+    # 段落、画像、关系事实和日记不随这条曲线消失。
+    "memory_lifecycle_enabled": get_env_bool("MEMORY_LIFECYCLE_ENABLED", "1"),
+    "memory_half_life_hours": float(os.getenv("MEMORY_HALF_LIFE_HOURS", "24")),
+    "memory_lifecycle_interval_hours": float(
+        os.getenv("MEMORY_LIFECYCLE_INTERVAL_HOURS", "1")
+    ),
+    "memory_prune_threshold": float(os.getenv("MEMORY_PRUNE_THRESHOLD", "0.1")),
+    "memory_revive_threshold": float(os.getenv("MEMORY_REVIVE_THRESHOLD", "0.15")),
+    "memory_freeze_duration_hours": float(
+        os.getenv("MEMORY_FREEZE_DURATION_HOURS", "24")
+    ),
+    "memory_access_reinforcement_alpha": float(
+        os.getenv("MEMORY_ACCESS_REINFORCEMENT_ALPHA", "0.05")
+    ),
+    "memory_access_reinforcement_cooldown_minutes": float(
+        os.getenv("MEMORY_ACCESS_REINFORCEMENT_COOLDOWN_MINUTES", "60")
+    ),
+    "memory_explicit_reinforcement_alpha": float(
+        os.getenv("MEMORY_EXPLICIT_REINFORCEMENT_ALPHA", "0.5")
+    ),
+    "memory_weaken_alpha": float(os.getenv("MEMORY_WEAKEN_ALPHA", "0.5")),
+    "memory_lifecycle_batch_size": int(os.getenv("MEMORY_LIFECYCLE_BATCH_SIZE", "1000")),
     # LLM辅助配置
     "use_llm_selector": False,  # 是否使用LLM筛选记忆
     "llm_selector_min_interval_sec": 20,  # LLM筛选最小间隔，避免高频调用
@@ -655,10 +722,9 @@ SYSTEM_RULES_PROMPT = """
 
 【回复风格】
 - 默认按即时聊天来回复，不要写成说明文、总结、客服话术或小作文。
-- 默认只回 1 到 2 句；没有明确要求时，不要超过 3 句。
-- 优先短句，少解释套话；能直接说完，就不要铺垫。
+- 长短按当前角色人设。人设没写时，日常用短句；对方明确要详细分析、步骤、列表、原理、对比时再展开。
+- 少解释套话；能直接说完，就不要铺垫。
 - 少用“首先/其次/另外/总之/如果你需要我可以……”这类书面连接句。
-- 只有当用户明确要求详细分析、步骤、列表、原理、对比时，才展开写长一点。
 - 记忆只用于调整语气、称呼、取舍和连续感；除非用户明确问“还记得/之前说过什么”，不要主动复述用户以前说过的原句。
 
 【工具调用规则】
@@ -909,6 +975,31 @@ def load_custom_models(*, force: bool = False) -> bool:
                         elif isinstance(chain, str):
                             LLM_ROUTER[task] = [chain]
                     loaded_any = loaded_any or bool(router_data)
+            vision_chain = LLM_ROUTER.get("vision") or []
+            if isinstance(vision_chain, str):
+                vision_chain = [vision_chain] if vision_chain.strip() else []
+            if not vision_chain:
+                fallback = str(SENSOR_VISION_MODEL or "").strip()
+                if fallback and fallback in MODELS:
+                    LLM_ROUTER["vision"] = [fallback]
+                    model_row = MODELS.get(fallback)
+                    if isinstance(model_row, dict):
+                        purposes = model_row.get("purposes") or model_row.get("purpose") or []
+                        if isinstance(purposes, str):
+                            purpose_list = [
+                                part.strip()
+                                for part in purposes.replace("，", ",").split(",")
+                                if part.strip()
+                            ]
+                        elif isinstance(purposes, (list, tuple, set)):
+                            purpose_list = [
+                                str(item).strip() for item in purposes if str(item).strip()
+                            ]
+                        else:
+                            purpose_list = []
+                        if "vision" not in purpose_list:
+                            model_row["purposes"] = purpose_list + ["vision"]
+                            model_row.pop("purpose", None)
 
             providers_data = custom_data.get("providers", {})
             if isinstance(providers_data, dict):

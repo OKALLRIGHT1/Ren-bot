@@ -44,6 +44,17 @@
 - 设置 → 记忆 / 知识走 `MemoryGuiService` / `KnowledgeGuiService`，与聊天共用进程内 Memory Core；导入走 `ingest_knowledge_paths`。
 - `ctx["knowledge"]` = `BrainKnowledgePort`；另有 `gateway` / `tts` / `app`。`ctx["brain"]` 仍在。**已撤** `ctx["chat_service"]`。提示词技能层已删除，不再注入 `ctx["skills"]`。架构 P5（拆闲聊编排）已做。
 
+## QQ 私聊回发拟人（已读 / 正在输入）
+
+私聊回发前会走 `gateway_sender`：已读 → `set_input_status` → 按字数短延迟 → 再 `send_private_msg`。群聊不走这套。
+
+- 入口：`services/chat_support/qq_humanize.py`、`GatewaySender.send_reply`、`NapCatOneBotAdapter.set_input_status` / `mark_private_read`。
+- 这和 `QQ_PRIVATE_CONTINUOUS_*` 不是同一件事：后者是等对方打完字再合并入站。
+- NapCat `heartInterval` 只是 OneBot WebSocket 探活，改它不会让对面看起来更像真人。
+- 登录连上后可设一次在线（`set_online_status` status=10）。签名、说说仍不改。
+- 开关默认开：`NAPCAT_HUMANIZE_ENABLED` / `MARK_READ` / `TYPING` / `SET_ONLINE`。
+- 打字等待默认 90ms/字，夹在 0.45–2.2s；私聊多段间隔默认 0.45–1.05s。测试注入 `sleep_fn` / `rng`，`humanize_config=None` 时整套跳过。
+
 ## 运行健康 + Rust 纯文本屏幕
 
 - 进程内 `RuntimeHealthCenter` 只观测；Qt 顶栏与详情窗读同一 `snapshot()`，不经 HTTP 回环。

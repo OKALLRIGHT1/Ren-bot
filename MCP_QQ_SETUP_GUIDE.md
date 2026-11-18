@@ -127,8 +127,24 @@
 - 会进入主对话链路
 - 会照常走记忆 / 工具 / LLM
 - 会正常回发到 QQ
+- 私聊回发前会先已读、显示「正在输入」，再按字数短等一会儿（默认开）
+- 连上 NapCat 后会把账号设为在线；签名 / 说说不会改
 - **不会驱动 Live2D 气泡**
 - **不会驱动 TTS 发声**
+
+私聊拟人只影响发出去的私聊，和 `QQ_PRIVATE_CONTINUOUS_*`（等对方打完字再合并入站）不是同一件事。群聊不走这套。不要去改 NapCat 配置里的 `heartInterval`：那只是本程序和 NapCat 之间的 WebSocket 探活，对面看不见。
+
+| 环境变量 | 默认 | 作用 |
+| --- | --- | --- |
+| `NAPCAT_HUMANIZE_ENABLED` | `1` | 总开关。`0` 关掉已读 / 正在输入 / 打字等待 / 私聊分段间隔 |
+| `NAPCAT_HUMANIZE_MARK_READ` | `1` | 回发前把对方消息标已读 |
+| `NAPCAT_HUMANIZE_TYPING` | `1` | 显示「正在输入」，并按字数短等 |
+| `NAPCAT_HUMANIZE_SET_ONLINE` | `1` | 连上后设一次在线（status=10） |
+| `NAPCAT_HUMANIZE_MS_PER_CHAR` | `90` | 每个字大约等多少毫秒（再加一点抖动） |
+| `NAPCAT_HUMANIZE_MIN_DELAY_SEC` | `0.45` | 打字等待下限（秒） |
+| `NAPCAT_HUMANIZE_MAX_DELAY_SEC` | `2.2` | 打字等待上限（秒） |
+| `NAPCAT_HUMANIZE_PART_GAP_MIN_SEC` | `0.45` | 私聊多段之间最短间隔 |
+| `NAPCAT_HUMANIZE_PART_GAP_MAX_SEC` | `1.05` | 私聊多段之间最长间隔 |
 
 这就是你之前要求的：
 
@@ -1001,4 +1017,12 @@ rust-activity-agent/target/release/rust-activity-agent.exe
 - 当前设计是稳优先，每次列工具 / 调工具会重新建立会话。
 - `stdio` 服务首次调用慢是正常现象。
 - 需要低延迟时，后续应做连接复用和健康检查，但这会提高状态管理复杂度。
+
+### 25.6 QQ 回得太快 / 没有「正在输入」
+
+- 私聊拟人默认开：已读 → 正在输入 → 按字数短等 → 发送。关掉用 `NAPCAT_HUMANIZE_ENABLED=0`。
+- 只对私聊生效。群聊不会显示正在输入（NapCat 的 `set_input_status` 只支持私聊）。
+- 入站的「等对方打完字」是 `QQ_PRIVATE_CONTINUOUS_*`，不要和拟人开关搞混。
+- 改 NapCat `heartInterval` 没有用，那是 OneBot 探活，对面看不见。
+- 连上后会设一次在线。不想改在线状态：`NAPCAT_HUMANIZE_SET_ONLINE=0`。
 

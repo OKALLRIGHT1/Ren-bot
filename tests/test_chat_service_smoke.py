@@ -655,30 +655,6 @@ async def test_tool_reply_records_one_causal_event_chain(
     assert "天气结果：晴" in events[2].evidence_summary
 
 
-@pytest.mark.asyncio
-async def test_short_reaction_records_one_user_and_one_assistant_event(
-    chat_env, tmp_path, monkeypatch
-):
-    service = chat_env(with_event_store=True, tmp_path=tmp_path)
-    monkeypatch.setattr(
-        service.reply_style_service,
-        "build_short_reaction",
-        lambda text, **kwargs: ("嗯。", "neutral"),
-    )
-
-    await service.process("嗯", ctx={"source": "desktop"})
-
-    events = service.conversation_event_service.list_recent_for_ctx(
-        {"source": "desktop"}, limit=10
-    )
-    assert [event.event_type.value for event in events] == [
-        "user_message",
-        "assistant_message",
-    ]
-    assert events[0].exact_text == "嗯"
-    assert events[0].metadata.get("path") == "short_reaction"
-
-
 def test_legacy_sensor_followup_keyword_path_is_removed(chat_env):
     service = chat_env()
     assert not hasattr(service, "_looks_like_sensor_source_followup")

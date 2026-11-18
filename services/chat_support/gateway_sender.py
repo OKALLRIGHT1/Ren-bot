@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import random
 import re
 import shutil
 import tempfile
@@ -12,6 +13,11 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 from services.chat_support import text_utils
+from services.chat_support.qq_humanize import (
+    QqHumanizeConfig,
+    part_gap_sec,
+    typing_delay_sec,
+)
 
 
 QQ_REMOTE_SOURCES = {"qq_gateway", "napcat_qq"}
@@ -160,6 +166,9 @@ class GatewaySender:
             [], Optional[Callable[..., Awaitable[Optional[str]]]]
         ] = lambda: None,
         remote_sources: Optional[set[str]] = None,
+        humanize_config: Optional[QqHumanizeConfig] = None,
+        sleep_fn: Optional[Callable[[float], Awaitable[None]]] = None,
+        rng: Optional[random.Random] = None,
     ):
         self._chat_gateway_getter = chat_gateway_getter
         self.logger = logger
@@ -172,6 +181,9 @@ class GatewaySender:
         self.voice_probability_getter = voice_probability_getter
         self.voice_renderer_getter = voice_renderer_getter
         self.remote_sources = remote_sources or QQ_REMOTE_SOURCES
+        self.humanize_config = humanize_config
+        self._sleep = sleep_fn or asyncio.sleep
+        self._rng = rng if rng is not None else random.Random()
 
     @property
     def chat_gateway(self) -> Any:
@@ -334,8 +346,43 @@ class GatewaySender:
                 ok = False
                 self.logger.error(f"Gateway reply failed: {e}")
             if idx < len(parts) - 1:
-                await asyncio.sleep(0.35)
+                await self._sleep(self._part_gap_sec(session_id))
         return ok
+
+    def _part_gap_sec(self, session_id: str) -> float:
+        return part_gap_sec(self.humanize_config, session_id, self._rng)
+
+    async def _humanize_private_send(
+        self,
+        adapter_name: str,
+        session_id: str,
+        text: str,
+        channel_meta: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        cfg = self.humanize_config
+        if cfg is None or not cfg.applies_to_session(session_id):
+            return
+        gateway = self.chat_gateway
+        if gateway is None:
+            return
+        try:
+            if cfg.mark_read:
+                mark = getattr(gateway, "mark_private_read", None)
+                if callable(mark):
+                    message_id = ""
+                    if isinstance(channel_meta, dict):
+                        message_id = str(channel_meta.get("message_id") or "").strip()
+                    await mark(adapter_name, session_id, message_id=message_id)
+            if cfg.typing:
+                typing = getattr(gateway, "set_input_status", None)
+                if callable(typing):
+                    await typing(adapter_name, session_id, event_type=1)
+                    delay = typing_delay_sec(text, cfg, self._rng)
+                    if delay > 0:
+                        await self._sleep(delay)
+        except Exception as exc:
+            if self.logger is not None:
+                self.logger.warning(f"QQ humanize skipped: {exc}")
 
     async def send_file_reply(
         self, file_path: str, ctx: Optional[Dict[str, Any]] = None, file_name: str = ""
@@ -529,6 +576,9 @@ class GatewaySender:
             preview = preview[:240] + "..."
         self.logger.info(
             f"[QQ-OUT][{session_label}][{session_id}][to={sender_name or 'unknown'}] {preview}"
+        )
+        await self._humanize_private_send(
+            adapter_name, session_id, text, channel_meta
         )
 
         user_text = str((ctx or {}).get("user_text") or "")

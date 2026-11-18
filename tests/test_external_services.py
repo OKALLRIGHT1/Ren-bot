@@ -3,6 +3,8 @@ from __future__ import annotations
 from modules.external_services import (
     _build_launch_argv,
     _resolve_launch_spec,
+    _system_cmd_exe,
+    _windows_system_safe_env,
     dump_services_settings,
     ensure_service,
     load_services_settings,
@@ -112,15 +114,52 @@ def test_stop_managed_only_touches_started(monkeypatch):
 
 
 def test_windows_bat_launch_uses_hidden_cmd_call(monkeypatch):
-    argv, flags, startupinfo = _build_launch_argv(r"D:\tools\napcat\launch.bat", ["--quiet"])
-    assert argv[:4] == ["cmd.exe", "/d", "/c", "call"]
-    assert argv[4].endswith("launch.bat")
-    assert "--quiet" in argv
+    argv, flags, startupinfo, popen_cwd = _build_launch_argv(
+        r"D:\tools\napcat\launch.bat",
+        ["--quiet"],
+    )
+    cmd = _system_cmd_exe()
+    assert argv[:3] == [cmd, "/d", "/c"]
+    script = argv[3]
+    assert script.startswith('cd /d "')
+    assert "&& call " in script
+    assert script.endswith('launch.bat" --quiet') or "launch.bat" in script
+    assert "--quiet" in script
+    assert "msvcp" not in script
+    assert popen_cwd.lower().endswith(r"\system32")
     import subprocess
 
-    assert flags & subprocess.CREATE_NO_WINDOW
+    assert not flags & subprocess.CREATE_NO_WINDOW
     assert flags & subprocess.CREATE_NEW_PROCESS_GROUP
     assert not flags & subprocess.DETACHED_PROCESS
+    assert startupinfo is not None
+    assert startupinfo.wShowWindow == 0
+
+
+def test_windows_system_safe_env_puts_system32_ahead_of_conda():
+    env = _windows_system_safe_env(
+        {
+            "SystemRoot": r"C:\Windows",
+            "PATH": r"D:\Anaconda\envs\live2d-llm\Library\bin;C:\Windows\System32;C:\Windows",
+        }
+    )
+    parts = env["PATH"].split(";")
+    assert parts[0].lower().endswith(r"\system32")
+    assert not any("library\\bin" in item.lower() for item in parts)
+
+
+def test_windows_exe_launch_keeps_create_no_window():
+    argv, flags, startupinfo, popen_cwd = _build_launch_argv(
+        r"C:\tools\ollama.exe",
+        ["serve"],
+        cwd=r"C:\tools",
+    )
+    assert popen_cwd == r"C:\tools"
+    import subprocess
+
+    assert argv == [r"C:\tools\ollama.exe", "serve"]
+    assert flags & subprocess.CREATE_NO_WINDOW
+    assert flags & subprocess.CREATE_NEW_PROCESS_GROUP
     assert startupinfo is not None
 
 

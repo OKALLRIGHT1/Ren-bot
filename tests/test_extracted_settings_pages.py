@@ -105,6 +105,12 @@ def test_provider_and_llm_pages_construct():
     assert llm.llm_table.columnCount() == 6
     assert llm.llm_table.horizontalHeaderItem(2).text() == "供应商"
     assert "default" in llm.router_ui
+    assert "vision" in llm.router_ui
+    assert "web_search" in llm.router_ui
+    assert "image_gen" in llm.router_ui
+    assert "image_edit" not in llm.router_ui
+    assert "sensor_vision_talk" not in llm.router_ui
+    assert "memory_writeback" not in llm.router_ui
     assert "codex" not in llm.router_ui
     provider.close()
     llm.close()

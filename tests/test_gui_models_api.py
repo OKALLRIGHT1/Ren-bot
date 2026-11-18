@@ -69,8 +69,15 @@ def test_list_catalog_masks_providers_and_models(tmp_path: Path):
     assert data["router"]["default"] == ["chat-a"]
     assert data["purpose_options"]
     tasks = {item["id"]: item for item in data["route_tasks"]}
-    assert tasks["default"]["label"] == "默认回复"
-    assert tasks["tool_reasoning"]["purposes"] == ["tool_reasoning", "chat"]
+    assert tasks["default"]["label"] == "闲聊"
+    assert tasks["tool_reasoning"]["purposes"] == ["chat"]
+    assert "memory_writeback" not in tasks
+    assert "sensor_vision_talk" not in tasks
+    assert tasks["vision"]["label"] == "识图"
+    assert tasks["vision"]["purposes"] == ["vision"]
+    assert tasks["vision"]["allow_untagged"] is False
+    assert tasks["image_gen"]["label"] == "画图"
+    assert "image_edit" not in tasks
     # embedding is selected via runtime_settings.embedding_model_id, not LLM_ROUTER
     assert "embedding" not in tasks
     assert any(item["id"] == "embed-a" for item in data["models"])

@@ -63,7 +63,7 @@ PROMPT_FIELDS: tuple[dict[str, str], ...] = (
     {
         "key": "vision_direct_scene",
         "title": "看截图直接说话",
-        "desc": "VISION_MODE=direct 时，模型和截图一起出回复。",
+        "desc": "聊天模型能看图，或 VISION_MODE=direct 时，截图直接给模型看完再说话。",
         "placeholders": "{clean_title}",
         "default": (
             "你正贴在旁边看他的屏幕（当前窗口: [{clean_title}]）。\n"

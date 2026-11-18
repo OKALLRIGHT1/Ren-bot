@@ -20,6 +20,7 @@ CHARACTER_SUBJECT_PREFIX = "character:"
 CHARACTER_PROFILE_REPAIR_KEY = "character_profile_repair_v1"
 PERSONA_CURRENT_REPAIR_KEY = "persona_current_repair_v1"
 USER_TASK_QUESTION_ARCHIVE_KEY = "user_task_question_archive_v1"
+USER_TASK_LIFECYCLE_KEY = "memory_task_lifecycle_at"
 PERSONA_KINDS = frozenset({"preference", "fact", "rule", "profile", "relation"})
 PERSONA_SUPERSEDE_KINDS = ("preference", "fact", "rule", "profile", "relation")
 
@@ -292,13 +293,14 @@ class MemoryCoreRepository:
         repaired = self._repair_legacy_character_profiles(character_catalog or {})
         current_repaired = self._repair_persona_current_records()
         archived_tasks = self._archive_question_user_tasks()
+        forgotten_tasks = self.apply_user_task_lifecycle()
         self._ensure_persona_unique_indexes()
         self._archive_empty_records()
         self.enqueue_missing_vector_jobs()
         return {
             "schema_version": CURRENT_SCHEMA_VERSION,
             "migrated": migrated,
-            "repaired": repaired + current_repaired + archived_tasks,
+            "repaired": repaired + current_repaired + archived_tasks + forgotten_tasks,
         }
 
     def _archive_empty_records(self) -> None:
@@ -534,6 +536,275 @@ class MemoryCoreRepository:
         self._set_meta_value(conn, USER_TASK_QUESTION_ARCHIVE_KEY, "done")
         conn.commit()
         return archived
+
+    def apply_user_task_lifecycle(
+        self,
+        *,
+        now: Any = None,
+        force: bool = False,
+        config: Any = None,
+    ) -> int:
+        """Freeze or archive stale user_task rows. Returns how many changed."""
+        from modules.memory_core.lifecycle import (
+            config_from_mapping,
+            decide_user_task,
+        )
+
+        lifecycle_config = config or config_from_mapping(self._lifecycle_settings())
+        if not lifecycle_config.enabled:
+            return 0
+        now_ts = time.time() if now is None else float(now)
+        conn = self._connect()
+        last_run = parse_memory_time(self._meta_value(conn, USER_TASK_LIFECYCLE_KEY))
+        interval = lifecycle_config.interval_hours * 3600.0
+        if not force and last_run is not None and now_ts - last_run < interval:
+            return 0
+        rows = conn.execute(
+            "SELECT * FROM memory_records WHERE kind='other' AND key='user_task' "
+            "AND status IN ('active','frozen') AND manual_lock=0 "
+            "ORDER BY created_at ASC, id ASC LIMIT ?",
+            (int(lifecycle_config.batch_size),),
+        ).fetchall()
+        changed = 0
+        try:
+            for row in rows:
+                metadata = _parse_json(row["metadata_json"], {})
+                if not isinstance(metadata, dict):
+                    metadata = {}
+                decision = decide_user_task(
+                    status=str(row["status"] or ""),
+                    base_strength=self._lifecycle_base(metadata),
+                    anchor_ts=self._lifecycle_anchor(row, metadata),
+                    frozen_at_ts=self._lifecycle_optional_ts(metadata, "frozen_at_ts"),
+                    valid_until_ts=parse_memory_time(row["valid_until"]),
+                    protected_until_ts=self._lifecycle_optional_ts(metadata, "protected_until_ts"),
+                    manual_lock=bool(row["manual_lock"]),
+                    now_ts=now_ts,
+                    config=lifecycle_config,
+                )
+                if not decision.changed:
+                    continue
+                self._write_task_lifecycle(
+                    conn,
+                    row,
+                    metadata,
+                    status=decision.status,
+                    lifecycle=self._lifecycle_payload(decision, metadata),
+                    now_iso=datetime.fromtimestamp(now_ts, tz=timezone.utc).isoformat(),
+                )
+                changed += 1
+            self._set_meta_value(
+                conn,
+                USER_TASK_LIFECYCLE_KEY,
+                datetime.fromtimestamp(now_ts, tz=timezone.utc).isoformat(),
+            )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        return changed
+
+    def reinforce_user_task(
+        self,
+        record_id: str,
+        *,
+        mode: str,
+        now: Any = None,
+        config: Any = None,
+    ) -> str:
+        """Strengthen or weaken one task. Returns the resulting status, or ''."""
+        from modules.memory_core.lifecycle import apply_reinforcement, config_from_mapping
+
+        record_id = str(record_id or "").strip()
+        if not record_id:
+            return ""
+        lifecycle_config = config or config_from_mapping(self._lifecycle_settings())
+        now_ts = time.time() if now is None else float(now)
+        conn = self._connect()
+        row = conn.execute(
+            "SELECT * FROM memory_records WHERE id=?",
+            (record_id,),
+        ).fetchone()
+        if row is None or str(row["key"] or "") != "user_task":
+            return ""
+        metadata = _parse_json(row["metadata_json"], {})
+        if not isinstance(metadata, dict):
+            metadata = {}
+        life = metadata.get("lifecycle") if isinstance(metadata.get("lifecycle"), dict) else {}
+        decision = apply_reinforcement(
+            mode=mode,
+            status=str(row["status"] or ""),
+            base_strength=self._lifecycle_base(metadata),
+            anchor_ts=self._lifecycle_anchor(row, metadata),
+            frozen_at_ts=self._lifecycle_optional_ts(metadata, "frozen_at_ts"),
+            last_access_ts=self._optional_float(life.get("last_access_ts")),
+            manual_lock=bool(row["manual_lock"]),
+            now_ts=now_ts,
+            config=lifecycle_config,
+        )
+        if decision is None:
+            return str(row["status"] or "")
+        payload = self._lifecycle_payload(decision, metadata)
+        if decision.reason == "access":
+            payload["last_access_ts"] = now_ts
+        try:
+            self._write_task_lifecycle(
+                conn,
+                row,
+                metadata,
+                status=decision.status,
+                lifecycle=payload,
+                now_iso=datetime.fromtimestamp(now_ts, tz=timezone.utc).isoformat(),
+            )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        return decision.status
+
+    def _lifecycle_settings(self) -> dict[str, Any]:
+        try:
+            from config import MEMORY_SETTINGS
+
+            return dict(MEMORY_SETTINGS)
+        except Exception:
+            return {}
+
+    @staticmethod
+    def _lifecycle_block(metadata: dict[str, Any]) -> dict[str, Any]:
+        raw = metadata.get("lifecycle")
+        return dict(raw) if isinstance(raw, dict) else {}
+
+    def _lifecycle_base(self, metadata: dict[str, Any]) -> float:
+        try:
+            return float(self._lifecycle_block(metadata).get("base_strength", 1.0))
+        except (TypeError, ValueError):
+            return 1.0
+
+    def _lifecycle_anchor(self, row: sqlite3.Row, metadata: dict[str, Any]) -> Optional[float]:
+        life = self._lifecycle_block(metadata)
+        for raw in (life.get("anchor_ts"), row["last_confirmed_at"], row["created_at"]):
+            if isinstance(raw, (int, float)) and not isinstance(raw, bool):
+                return float(raw)
+            parsed = parse_memory_time(raw)
+            if parsed is not None:
+                return parsed
+        return None
+
+    @staticmethod
+    def _optional_float(value: Any) -> Optional[float]:
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            return float(value)
+        return None
+
+    def _lifecycle_optional_ts(self, metadata: dict[str, Any], field: str) -> Optional[float]:
+        raw = self._lifecycle_block(metadata).get(field)
+        numeric = self._optional_float(raw)
+        if numeric is not None:
+            return numeric
+        return parse_memory_time(raw)
+
+    @staticmethod
+    def _lifecycle_payload(decision: Any, metadata: dict[str, Any]) -> dict[str, Any]:
+        previous = metadata.get("lifecycle") if isinstance(metadata.get("lifecycle"), dict) else {}
+        payload = dict(previous)
+        payload.update(
+            {
+                "state": decision.status,
+                "base_strength": decision.base_strength,
+                "anchor_ts": decision.anchor_ts,
+                "frozen_at_ts": decision.frozen_at_ts,
+                "strength": decision.strength,
+                "reason": decision.reason,
+            }
+        )
+        return payload
+
+    def _write_task_lifecycle(
+        self,
+        conn: sqlite3.Connection,
+        row: sqlite3.Row,
+        metadata: dict[str, Any],
+        *,
+        status: str,
+        lifecycle: dict[str, Any],
+        now_iso: str,
+    ) -> None:
+        stored = dict(metadata)
+        stored["lifecycle"] = lifecycle
+        conn.execute(
+            "UPDATE memory_records SET status=?, metadata_json=?, updated_at=? WHERE id=?",
+            (status, _json(stored), now_iso, str(row["id"])),
+        )
+        self._enqueue_vector_job_conn(
+            conn,
+            str(row["id"]),
+            "upsert" if status == "active" else "delete",
+            now_iso,
+        )
+
+    def _restore_user_task_evidence(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        subject_id: str,
+        content: str,
+        now_iso: str,
+        now_ts: float,
+    ) -> str:
+        from modules.memory_core.lifecycle import fresh_lifecycle
+
+        row = conn.execute(
+            "SELECT * FROM memory_records WHERE kind='other' AND key='user_task' "
+            "AND status IN ('frozen','archived') AND subject_id=? AND content=? "
+            "ORDER BY updated_at DESC, id DESC LIMIT 1",
+            (subject_id, content),
+        ).fetchone()
+        if row is None:
+            return ""
+        metadata = _parse_json(row["metadata_json"], {})
+        if not isinstance(metadata, dict):
+            metadata = {}
+        metadata["lifecycle"] = fresh_lifecycle(now_ts)
+        conn.execute(
+            "UPDATE memory_records SET status='active', metadata_json=?, "
+            "last_confirmed_at=?, updated_at=? WHERE id=?",
+            (_json(metadata), now_iso, now_iso, str(row["id"])),
+        )
+        self._enqueue_vector_job_conn(conn, str(row["id"]), "upsert", now_iso)
+        return str(row["id"])
+
+    def _reset_user_task_clock(
+        self,
+        conn: sqlite3.Connection,
+        row: sqlite3.Row,
+        now_iso: str,
+        now_ts: float,
+    ) -> None:
+        from modules.memory_core.lifecycle import fresh_lifecycle
+
+        metadata = _parse_json(row["metadata_json"], {})
+        if not isinstance(metadata, dict):
+            metadata = {}
+        metadata["lifecycle"] = fresh_lifecycle(now_ts)
+        conn.execute(
+            "UPDATE memory_records SET status='active', metadata_json=?, "
+            "last_confirmed_at=?, updated_at=? WHERE id=?",
+            (_json(metadata), now_iso, now_iso, str(row["id"])),
+        )
+
+    @staticmethod
+    def _metadata_with_task_clock(
+        metadata: Optional[dict[str, Any]],
+        key: str,
+        now_ts: float,
+    ) -> dict[str, Any]:
+        from modules.memory_core.lifecycle import fresh_lifecycle
+
+        stored = dict(metadata or {})
+        if key == "user_task" and "lifecycle" not in stored:
+            stored["lifecycle"] = fresh_lifecycle(now_ts)
+        return stored
 
     def _persona_unique_kind_clause(self) -> str:
         kinds = ",".join(f"'{item}'" for item in sorted(PERSONA_KINDS))
@@ -1282,12 +1553,27 @@ class MemoryCoreRepository:
                     )
                 if kept is not None:
                     self._insert_evidence(conn, str(kept["id"]), evidence or [], now, observed_at)
-                    conn.execute(
-                        "UPDATE memory_records SET last_confirmed_at=?, updated_at=? WHERE id=?",
-                        (now, now, str(kept["id"])),
-                    )
+                    if key == "user_task" and not manual_lock:
+                        self._reset_user_task_clock(conn, kept, now, now_ts)
+                    else:
+                        conn.execute(
+                            "UPDATE memory_records SET last_confirmed_at=?, updated_at=? WHERE id=?",
+                            (now, now, str(kept["id"])),
+                        )
                     conn.commit()
                     return str(kept["id"]), False
+
+            if key == "user_task" and status == "active" and not manual_lock:
+                restored = self._restore_user_task_evidence(
+                    conn,
+                    subject_id=subject_id,
+                    content=content,
+                    now_iso=now,
+                    now_ts=now_ts,
+                )
+                if restored:
+                    conn.commit()
+                    return restored, False
 
             record_id = f"mr_{uuid.uuid4().hex[:16]}"
             conn.execute(
@@ -1314,7 +1600,7 @@ class MemoryCoreRepository:
                     valid_from,
                     valid_until,
                     1 if manual_lock else 0,
-                    _json(metadata or {}),
+                    _json(self._metadata_with_task_clock(metadata, key, now_ts)),
                     now,
                     now,
                     now,
@@ -1588,6 +1874,27 @@ class MemoryCoreRepository:
         merged_content = str(values.get("content", current["content"]) or "")
         values["normalized_key"] = self._normalize_key(merged_kind, merged_key, merged_content)
         values["updated_at"] = _now_iso()
+        merged_status = str(values.get("status", current.get("status")) or "active")
+        locking = bool(values.get("manual_lock", current.get("manual_lock")))
+        # The record editor has a lock checkbox and no status picker. Locking a
+        # recycled task is how a person pulls it back onto the wall.
+        if merged_key == "user_task" and locking and merged_status != "active":
+            values["status"] = "active"
+            merged_status = "active"
+        content_changed = (
+            "content" in values
+            and merged_content != str(current.get("content") or "").strip()
+        )
+        restored_task = merged_key == "user_task" and merged_status == "active" and (
+            str(current.get("status") or "") != "active" or content_changed
+        )
+        if restored_task:
+            from modules.memory_core.lifecycle import fresh_lifecycle
+
+            metadata = dict(current.get("metadata") or {})
+            metadata["lifecycle"] = fresh_lifecycle(time.time())
+            values["metadata_json"] = _json(metadata)
+            values["last_confirmed_at"] = values["updated_at"]
         assignments = ",".join(f"{key}=?" for key in values)
         with self._connect() as conn:
             conn.execute(

@@ -21,8 +21,20 @@ except ImportError:
     MODELS = {}
 
 try:
-    from modules.model_catalog import format_purposes_label, get_model_purposes
+    from modules.model_catalog import (
+        ROUTE_TASK_OPTIONS,
+        format_purposes_label,
+        get_model_purposes,
+    )
 except Exception:
+    ROUTE_TASK_OPTIONS = [
+        ("default", "闲聊", "主回复", ("chat",), True),
+        ("tool_reasoning", "推理", "工具规划；空则用闲聊", ("chat",), True),
+        ("summary", "总结", "摘要压缩；空则用闲聊", ("chat",), True),
+        ("vision", "识图", "聊天模型不能看图时用来描述图片", ("vision",), False),
+        ("web_search", "联网搜索", "搜索插件", ("web_search", "chat"), False),
+        ("image_gen", "画图", "文生图和图生图共用；带参考图时走图生图接口", ("image_gen",), False),
+    ]
 
     def get_model_purposes(model_cfg):
         if not isinstance(model_cfg, dict):
@@ -73,7 +85,7 @@ class LlmSettingsPage(QtWidgets.QWidget):
         title_wrap.setSpacing(2)
         title_wrap.addWidget(QtWidgets.QLabel("聊天模型", objectName="header"))
         page_hint = QtWidgets.QLabel(
-            "先加一个聊天用的模型。提供商和 Key 可以在「添加模型」里一起填；任务路由给进阶使用。"
+            "标签是模型能力。闲聊、推理、总结没单独配就共用闲聊；聊天模型勾了视觉，发图和屏幕吐槽会直接给它看。"
         )
         page_hint.setStyleSheet("color:#6B7280;")
         page_hint.setWordWrap(True)
@@ -159,7 +171,9 @@ class LlmSettingsPage(QtWidgets.QWidget):
         route_layout.setContentsMargins(14, 10, 14, 10)
         route_layout.setSpacing(6)
         route_layout.addWidget(QtWidgets.QLabel("任务路由", objectName="header"))
-        route_hint = QtWidgets.QLabel("日常优先关注闲聊、推理、总结。")
+        route_hint = QtWidgets.QLabel(
+            "只给需要换模型的任务配链路。识图只在聊天模型看不了图时才用。画图一条链路同时管文生图和图生图。"
+        )
         route_hint.setStyleSheet("color:#6B7280; font-size:11px;")
         route_hint.setWordWrap(True)
         route_layout.addWidget(route_hint)
@@ -171,18 +185,7 @@ class LlmSettingsPage(QtWidgets.QWidget):
         route_grid.setColumnStretch(0, 1)
         route_grid.setColumnStretch(1, 1)
 
-        route_items = [
-            ("default", "闲聊", "主回复"),
-            ("reply_polish", "润色", "回复润色/情绪兜底"),
-            ("tool_reasoning", "推理", "工具规划"),
-            ("summary", "总结", "摘要压缩"),
-            ("gatekeeper", "看门人", "是否触发"),
-            ("translation", "翻译", "语言转换"),
-            ("screen_classify", "屏幕分类", "画面分类"),
-            ("image_gen", "画图", "点编辑自选顺序，不会自动全选"),
-            ("image_edit", "图生图", "点编辑自选顺序，空则回退画图链"),
-        ]
-        for index, (task, label, desc) in enumerate(route_items):
+        for index, (task, label, desc, _purposes, _allow) in enumerate(ROUTE_TASK_OPTIONS):
             row_card = QtWidgets.QFrame()
             row_card.setObjectName("launchCard")
             row_layout = QtWidgets.QVBoxLayout(row_card)
@@ -302,10 +305,30 @@ class LlmSettingsPage(QtWidgets.QWidget):
 
     def refresh_router(self):
         for task, line in self.router_ui.items():
-            chain = LLM_ROUTER.get(task, [])
-            if isinstance(chain, str):
-                chain = [chain]
+            chain = self._router_chain_for_task(task)
             line.setText(" -> ".join(chain) if chain else "(未配置)")
+
+    def _router_chain_for_task(self, task):
+        if task == "image_gen":
+            try:
+                from modules.model_catalog import image_router_chain
+
+                return image_router_chain(LLM_ROUTER)
+            except Exception:
+                pass
+        if task == "vision":
+            try:
+                from modules.model_catalog import vision_router_chain
+
+                return vision_router_chain(LLM_ROUTER)
+            except Exception:
+                pass
+        chain = LLM_ROUTER.get(task, [])
+        if isinstance(chain, str):
+            chain = [chain] if chain else []
+        if not isinstance(chain, list):
+            return []
+        return [str(item).strip() for item in chain if str(item).strip()]
 
     def save_state(self):
         save_model_catalog(parent=self)
@@ -385,12 +408,12 @@ class LlmSettingsPage(QtWidgets.QWidget):
             self.refresh_models()
 
     def _on_conf_router(self, task):
-        chain = LLM_ROUTER.get(task, [])
-        if isinstance(chain, str):
-            chain = [chain]
+        chain = self._router_chain_for_task(task)
         dlg = self._router_dialog(self, task, list(chain))
         if dlg.exec() == QtWidgets.QDialog.DialogCode.Accepted:
             LLM_ROUTER[task] = dlg.result_chain
+            if task == "image_gen":
+                LLM_ROUTER.pop("image_edit", None)
             save_model_catalog(parent=self)
             self.refresh_router()
 

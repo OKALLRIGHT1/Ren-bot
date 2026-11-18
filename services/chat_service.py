@@ -48,8 +48,14 @@ from services.chat_support import (
 )
 from services.chat_support.direct_flow_service import DirectFlowHooks, run_direct_turn
 from services.chat_support.followup_service import FollowupService
+from services.chat_support.group_reply_planner import (
+    GroupReplyPlanner,
+    is_group_context,
+    mention_names,
+)
 from services.chat_support.reply_gatekeeper import should_reply as gatekeeper_should_reply
 from services.chat_support.flow_result import STATUS_REPLIED
+from services.chat_support.qq_humanize import QqHumanizeConfig
 from services.chat_support.qq_input_service import QqInputConfig, QqInputService
 from services.chat_support.qq_link_enrichment import QqLinkEnrichmentService
 from services.chat_support.qq_private_buffer import QqPrivateMessageBuffer
@@ -367,6 +373,7 @@ class ChatService:
             voice_probability_getter=lambda: self.gateway_voice_reply_probability,
             voice_renderer_getter=lambda: self.gateway_voice_renderer,
             remote_sources=QQ_REMOTE_SOURCES,
+            humanize_config=QqHumanizeConfig.from_env(),
         )
 
     def _create_gateway_context_service(
@@ -1031,6 +1038,10 @@ class ChatService:
         ctx: Optional[Dict[str, Any]] = None,
         emotion: Optional[str] = None,
     ):
+        try:
+            self._group_reply_planner().note_assistant(ctx, text)
+        except Exception:
+            pass
         return await self.gateway_sender.send_reply(text, ctx, emotion=emotion)
 
     async def _send_gateway_image_reply(
@@ -1792,26 +1803,64 @@ class ChatService:
             pass
         return clean
 
-    async def _describe_external_images(self, ctx: Optional[Dict[str, Any]]) -> str:
+    def _chat_route_has_vision(self) -> bool:
+        try:
+            from modules.model_catalog import chat_route_has_vision
+
+            return bool(chat_route_has_vision())
+        except Exception:
+            return False
+
+    async def _load_external_image_payloads(
+        self, ctx: Optional[Dict[str, Any]]
+    ) -> List[str]:
         if not isinstance(ctx, dict):
-            return ""
+            return []
         source = str(ctx.get("source") or "").strip().lower()
         if source not in {"qq_gateway", "napcat_qq"}:
-            return ""
+            return []
         channel_meta = ctx.get("channel_meta") or {}
         if not bool(channel_meta.get("image_vision_enabled", True)):
-            return ""
+            return []
         images = channel_meta.get("images") or []
         if not isinstance(images, list) or not images:
+            return []
+        try:
+            from integrations.chat_gateway.media_utils import load_image_base64
+        except Exception as exc:
+            self.logger.warning(f"QQ image helpers unavailable: {exc}")
+            return []
+        payloads: List[str] = []
+        for image_meta in images[:3]:
+            try:
+                image_base64 = await asyncio.to_thread(
+                    load_image_base64, image_meta, source="remote"
+                )
+            except Exception as exc:
+                self.logger.warning(f"QQ image load failed: {exc}")
+                continue
+            if image_base64:
+                payloads.append(image_base64)
+        return payloads
+
+    async def _describe_external_images(self, ctx: Optional[Dict[str, Any]]) -> str:
+        payloads = await self._load_external_image_payloads(ctx)
+        if not payloads:
+            return ""
+        if self._chat_route_has_vision() and isinstance(ctx, dict):
+            existing = list(ctx.get("_pending_vision_images") or [])
+            existing.extend(payloads)
+            ctx["_pending_vision_images"] = existing
+            ctx["has_screenshot"] = True
             return ""
 
         try:
-            from integrations.chat_gateway.media_utils import load_image_base64
             from modules.llm import analyze_image
         except Exception as exc:
             self.logger.warning(f"QQ image helpers unavailable: {exc}")
             return ""
 
+        channel_meta = ctx.get("channel_meta") or {} if isinstance(ctx, dict) else {}
         prompt = str(
             channel_meta.get("image_prompt")
             or "请客观详细描述这张QQ图片的内容，并提取其中可用于回复的关键信息。"
@@ -1822,14 +1871,8 @@ class ChatService:
         if self_awareness_hint:
             prompt += f"\n{self_awareness_hint}"
         image_summaries = []
-        for index, image_meta in enumerate(images[:3], 1):
+        for index, image_base64 in enumerate(payloads, 1):
             try:
-                image_base64 = await asyncio.to_thread(
-                    load_image_base64, image_meta, source="remote"
-                )
-                if not image_base64:
-                    image_summaries.append(f"[图片{index}] 无法读取图片数据。")
-                    continue
                 desc = await analyze_image(
                     image_base64, prompt, caller="qq_image_describe"
                 )
@@ -2521,6 +2564,67 @@ class ChatService:
             pass
         return wake_words, active_window
 
+    def _group_reply_planner(self) -> GroupReplyPlanner:
+        planner = getattr(self, "_group_reply_planner_instance", None)
+        if planner is None:
+            planner = GroupReplyPlanner.from_config()
+            self._group_reply_planner_instance = planner
+        return planner
+
+    def _plugin_group_keywords(self) -> list[str]:
+        manager = getattr(self, "plugin_manager", None)
+        getter = getattr(manager, "get_group_no_at_keywords", None)
+        if not callable(getter):
+            return []
+        try:
+            return [str(item) for item in (getter() or []) if str(item).strip()]
+        except Exception:
+            return []
+
+    async def _maybe_hold_group_chatter(
+        self,
+        user_text: str,
+        ctx: Optional[Dict[str, Any]],
+        output_profile: Optional[Dict[str, Any]],
+    ) -> bool:
+        """群消息不该进主模型时返回 True。私聊、桌面和总开关关闭时直接放行。"""
+        try:
+            decision = await self._group_reply_planner().decide(
+                user_text,
+                ctx,
+                mention_names=mention_names(self._get_active_character_profile()),
+                keywords=self._plugin_group_keywords(),
+                chat_with_ai=chat_with_ai,
+                logger=self.logger,
+            )
+        except Exception as exc:
+            if self.logger:
+                self.logger.warning(f"[GroupReply] 判断异常: {exc}")
+            if is_group_context(ctx):
+                await self._emit_idle_status(output_profile, reason="group_reply_hold")
+                return True
+            return False
+        if not decision.applicable:
+            return False
+        if decision.context_block and isinstance(ctx, dict):
+            ctx["group_recent_transcript"] = decision.context_block
+        if decision.reply:
+            if self.logger:
+                self.logger.info(f"[GroupReply] 开口 reason={decision.reason}")
+            return False
+        if self.logger:
+            self.logger.info(f"[GroupReply] 沉默 reason={decision.reason}")
+        try:
+            await self.event_bus.emit(
+                "chat.ignored",
+                content=user_text,
+                reason=decision.reason,
+            )
+        except Exception:
+            pass
+        await self._emit_idle_status(output_profile, reason="group_reply_hold")
+        return True
+
     async def _should_reply(
         self, user_text: str, ctx: Optional[Dict[str, Any]] = None
     ) -> bool:
@@ -2794,6 +2898,9 @@ class ChatService:
             )
             return
 
+        if await self._maybe_hold_group_chatter(user_text, ctx, output_profile):
+            return
+
         # =========================================================================
         # 3. 特殊指令拦截 (每日总结/补写)
         # =========================================================================
@@ -2980,18 +3087,26 @@ class ChatService:
                     if isinstance(ctx, dict):
                         ctx["has_screenshot"] = True
                     await self.event_bus.emit("ui.status", text="Analyzing Visuals...")
-                    try:
-                        from modules import llm
+                    image_b64 = str(obs_result.get("image_base64") or "").strip()
+                    if self._chat_route_has_vision() and image_b64 and isinstance(ctx, dict):
+                        existing = list(ctx.get("_pending_vision_images") or [])
+                        existing.append(image_b64)
+                        ctx["_pending_vision_images"] = existing
+                        obs_text = "【当前视觉环境】已附上当前屏幕截图，请直接看图。"
+                        self._dbg("聊天模型可看图，截图已直接附到对话")
+                    else:
+                        try:
+                            from modules import llm
 
-                        desc = await llm.analyze_image(
-                            obs_result["image_base64"],
-                            "请客观详细描述这张图片的内容。",
-                            caller="observe_image_describe",
-                        )
-                        obs_text = f"【当前视觉环境】\n{desc}"
-                        self._dbg("视觉描述获取成功")
-                    except Exception as e:
-                        obs_text = f"【视觉观察失败】{e}"
+                            desc = await llm.analyze_image(
+                                image_b64,
+                                "请客观详细描述这张图片的内容。",
+                                caller="observe_image_describe",
+                            )
+                            obs_text = f"【当前视觉环境】\n{desc}"
+                            self._dbg("视觉描述获取成功")
+                        except Exception as e:
+                            obs_text = f"【视觉观察失败】{e}"
                 elif obs_result:
                     obs_text = f"【观察数据】\n{str(obs_result)}"
 
@@ -3137,35 +3252,6 @@ class ChatService:
                 direct_chat_sources=direct_chat_sources,
             )
         )
-        short_reaction = reply_flow_service.build_short_reaction(
-            eligible=plain_direct_chat_candidate,
-            user_text=user_text,
-            build_reaction=lambda text: self.reply_style_service.build_short_reaction(
-                text,
-                wants_detailed_answer=self._wants_detailed_answer,
-            ),
-        )
-        short_reply = short_reaction.text
-        short_emo = short_reaction.emotion
-
-        if await output_coordinator.emit_short_reaction(
-            text=short_reply,
-            emotion=short_emo,
-            user_text=user_text,
-            ctx=ctx,
-            transcript_meta=transcript_channel_meta,
-            chat_log_source=chat_log_source,
-            output_profile=output_profile,
-            feedback_type=feedback_type,
-            feedback_reaction=feedback_reaction,
-            memory_session_id=memory_session_id,
-            learning=self.learning,
-            emit_assistant_text=self._emit_assistant_text,
-            add_memory_safe=self._add_memory_safe,
-            emit_idle_status_when_safe=self._emit_idle_status_when_safe,
-            record_message_pair=self._record_message_pair_events,
-        ):
-            return
 
         deferred_tool_flow = False
         # Direct chat keeps the plain-chat pass. Task-shaped lines discover

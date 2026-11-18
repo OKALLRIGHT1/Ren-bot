@@ -200,8 +200,14 @@ async def test_self_generation_never_inherits_previous_observation_event_id():
 
 
 @pytest.mark.asyncio
-async def test_vision_separate_generation_does_not_send_format_instruction_as_user_message():
+async def test_vision_separate_generation_does_not_send_format_instruction_as_user_message(
+    monkeypatch,
+):
     captured = {}
+    monkeypatch.setattr(
+        "modules.model_catalog.chat_route_has_vision",
+        lambda **_kwargs: False,
+    )
 
     async def fake_analyze_image(image_base64, prompt, caller=None):
         return "The user is reading a page."
@@ -225,6 +231,44 @@ async def test_vision_separate_generation_does_not_send_format_instruction_as_us
         if message.get("role") == "user"
     ]
     assert "现在只输出给我的那一句话。" not in user_contents
+
+
+@pytest.mark.asyncio
+async def test_vision_separate_generation_attaches_image_when_chat_has_vision(
+    monkeypatch,
+):
+    captured = {}
+    monkeypatch.setattr(
+        "modules.model_catalog.chat_route_has_vision",
+        lambda **_kwargs: True,
+    )
+
+    async def fake_analyze_image(*_args, **_kwargs):
+        raise AssertionError("chat-with-vision should skip analyze_image")
+
+    def fake_chat_with_ai(messages, *args, **kwargs):
+        captured["messages"] = messages
+        captured["task_type"] = kwargs.get("task_type")
+        return "<emo=neutral>屏幕上还在写代码。"
+
+    result = await _service().run_vision_separate_generation(
+        context=_context_with_observation_id("obs-direct"),
+        image_base64="abc123",
+        analyze_image=fake_analyze_image,
+        chat_with_ai=fake_chat_with_ai,
+        clean_title="main.py - Visual Studio Code",
+    )
+
+    assert result.reason == "generated"
+    assert result.observation_event_id == "obs-direct"
+    assert captured["task_type"] == "sensor_vision_talk"
+    system = captured["messages"][0]["content"]
+    assert "main.py - Visual Studio Code" in system
+    assert "当前屏幕内容" not in system
+    content = captured["messages"][-1]["content"]
+    assert isinstance(content, list)
+    assert content[1]["type"] == "image_url"
+    assert "abc123" in content[1]["image_url"]["url"]
 
 
 async def _async_identity_polish(**kwargs):
@@ -409,7 +453,12 @@ async def test_text_event_generation_skips_vision_when_disabled():
 
 
 @pytest.mark.asyncio
-async def test_event_generation_uses_vision_when_enabled():
+async def test_event_generation_uses_vision_when_enabled(monkeypatch):
+    monkeypatch.setattr(
+        "modules.model_catalog.chat_route_has_vision",
+        lambda **_kwargs: False,
+    )
+
     def chat_with_ai(messages, *args, **kwargs):
         return "<emo=neutral>还在抠这里？"
 
@@ -499,6 +548,10 @@ async def test_run_vision_generation_proceeds_when_focus_matches(monkeypatch):
         "config.SENSOR_VISION_CAPTURE_TARGET",
         "active_monitor",
         raising=False,
+    )
+    monkeypatch.setattr(
+        "modules.model_catalog.chat_route_has_vision",
+        lambda **_kwargs: False,
     )
 
     result = await service.run_vision_generation(

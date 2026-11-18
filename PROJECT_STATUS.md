@@ -22,7 +22,7 @@
 ## 当前重点
 
 - 主程序与 Live2D 前后端分离：`docs/superpowers/specs/2026-07-16-frontend-backend-separation-design.md` 与对应 07-16 计划。
-- QQ / NapCat 走 `integrations/chat_gateway/`；QQ 来源默认不驱动本地 Live2D/TTS。
+- QQ / NapCat 走 `integrations/chat_gateway/`；QQ 来源默认不驱动本地 Live2D/TTS。私聊回发会已读 + 正在输入 + 短延迟（`NAPCAT_HUMANIZE_*`）。
 - Agent 工具经插件 + `ActionGate`；见 `docs/agent-runtime.md` 与安全文档。
 - 知识/人设未做部分（A5/A6、B1–B4）：`docs/superpowers/plans/2026-08-13-knowledge-and-persona-timeline.md`。
 - 近史 Task 12 Planner 未做：`docs/superpowers/plans/2026-08-05-conversation-continuity.md`。

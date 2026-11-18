@@ -609,6 +609,74 @@ class NapCatOneBotAdapter(BaseChatAdapter):
             skip_http_fallback=skip_http_fallback,
         )
 
+    def _private_user_id(self, session_id: str) -> Optional[int]:
+        try:
+            chat_type, peer_id = self._parse_session(session_id)
+        except Exception:
+            return None
+        if chat_type != "private":
+            return None
+        try:
+            return int(peer_id)
+        except Exception:
+            return None
+
+    async def set_input_status(
+        self, session_id: str, event_type: int = 1, **kwargs: Any
+    ) -> Any:
+        user_id = self._private_user_id(session_id)
+        if user_id is None:
+            return {"ok": False, "reason": "not_private", "session_id": session_id}
+        return await self.call_action(
+            "set_input_status",
+            {"user_id": user_id, "event_type": int(event_type)},
+            timeout=float(kwargs.get("timeout") or 8.0),
+            skip_http_fallback=bool(kwargs.get("skip_http_fallback")),
+        )
+
+    async def mark_private_read(
+        self, session_id: str, message_id: str = "", **kwargs: Any
+    ) -> Any:
+        user_id = self._private_user_id(session_id)
+        if user_id is None:
+            return {"ok": False, "reason": "not_private", "session_id": session_id}
+        msg_id = str(message_id or "").strip()
+        timeout = float(kwargs.get("timeout") or 8.0)
+        skip_http_fallback = bool(kwargs.get("skip_http_fallback"))
+        if msg_id:
+            result = await self.call_action(
+                "mark_msg_as_read",
+                {"message_id": msg_id},
+                timeout=timeout,
+                skip_http_fallback=skip_http_fallback,
+            )
+            if isinstance(result, dict) and result.get("ok"):
+                return result
+        return await self.call_action(
+            "mark_private_msg_as_read",
+            {"user_id": user_id},
+            timeout=timeout,
+            skip_http_fallback=skip_http_fallback,
+        )
+
+    async def set_online_status(
+        self,
+        status: int = 10,
+        ext_status: int = 0,
+        battery_status: int = 0,
+        **kwargs: Any,
+    ) -> Any:
+        return await self.call_action(
+            "set_online_status",
+            {
+                "status": int(status),
+                "ext_status": int(ext_status),
+                "battery_status": int(battery_status),
+            },
+            timeout=float(kwargs.get("timeout") or 8.0),
+            skip_http_fallback=bool(kwargs.get("skip_http_fallback")),
+        )
+
     def normalize_notice(self, payload: Dict[str, Any]) -> Optional[ChatNoticeEvent]:
         if str(payload.get("post_type") or "").strip().lower() != "notice":
             return None

@@ -166,6 +166,21 @@ def test_qq_scene_prompt_contains_channel_shell():
         assert line in text
 
 
+def test_scene_prompt_leaves_length_to_persona():
+    from config import SYSTEM_RULES_PROMPT
+
+    assert "1 到 2 句" not in SYSTEM_RULES_PROMPT
+    assert "当前角色人设" in SYSTEM_RULES_PROMPT
+    for source, message_type in (
+        ("desktop", "private"),
+        ("napcat_qq", "private"),
+        ("napcat_qq", "group"),
+    ):
+        text = build_scene_prompt(source, message_type)
+        assert "1～2" not in text
+        assert "短接话" not in text
+
+
 def test_fixture_group_and_parity_cases():
     cases = json.loads(FIXTURES.read_text(encoding="utf-8"))
     for case in cases:

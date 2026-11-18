@@ -259,3 +259,66 @@ class ChatGateway:
                 "forward_id": forward_id,
             }
         return await fetcher(session_id, forward_id, **kwargs)
+
+    async def _call_adapter_method(
+        self, adapter_name: str, method_name: str, *args: Any, **kwargs: Any
+    ) -> Any:
+        adapter = self.adapters.get(adapter_name)
+        if not adapter:
+            return {"ok": False, "reason": f"unknown_adapter:{adapter_name}"}
+        fn = getattr(adapter, method_name, None)
+        if not callable(fn):
+            return {
+                "ok": False,
+                "reason": f"{method_name}_unsupported",
+                "adapter": adapter_name,
+            }
+        return await fn(*args, **kwargs)
+
+    async def set_input_status(
+        self,
+        adapter_name: str,
+        session_id: str,
+        event_type: int = 1,
+        **kwargs: Any,
+    ) -> Any:
+        return await self._call_adapter_method(
+            adapter_name,
+            "set_input_status",
+            session_id,
+            event_type=event_type,
+            **kwargs,
+        )
+
+    async def mark_private_read(
+        self,
+        adapter_name: str,
+        session_id: str,
+        message_id: str = "",
+        **kwargs: Any,
+    ) -> Any:
+        return await self._call_adapter_method(
+            adapter_name,
+            "mark_private_read",
+            session_id,
+            message_id=message_id,
+            **kwargs,
+        )
+
+    async def set_online_status(
+        self,
+        adapter_name: str = "napcat_qq",
+        *,
+        status: int = 10,
+        ext_status: int = 0,
+        battery_status: int = 0,
+        **kwargs: Any,
+    ) -> Any:
+        return await self._call_adapter_method(
+            adapter_name,
+            "set_online_status",
+            status=status,
+            ext_status=ext_status,
+            battery_status=battery_status,
+            **kwargs,
+        )

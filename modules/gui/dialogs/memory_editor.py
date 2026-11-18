@@ -514,7 +514,7 @@ class MemoryEditorDialog(QtWidgets.QDialog):
 
         self.memory_core_status_filter = QtWidgets.QComboBox()
         self.memory_core_status_filter.addItems(
-            ["active", "archived", "superseded", "全部状态"]
+            ["active", "frozen", "archived", "superseded", "全部状态"]
         )
         self.memory_core_status_filter.currentIndexChanged.connect(
             self._reload_memory_core_records

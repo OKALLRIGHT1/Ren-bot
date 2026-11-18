@@ -164,3 +164,18 @@ def test_qq_gateway_health_becomes_healthy_after_listener_starts():
     qq = health.snapshot(now=300.0)["components"]["qq_gateway"]
     assert qq["state"] == "healthy"
     assert qq["summary"] == "QQ 网关已启动"
+
+
+def test_qq_gateway_health_degrades_when_napcat_is_not_connected():
+    health = RuntimeHealthCenter(clock=lambda: 300.0)
+    app = _runtime_health_app(health)
+    app._napcat_gateway_is_listening = lambda: True
+
+    app._report_qq_gateway_health(
+        enabled=True, server_running=True, ws_connected=False
+    )
+
+    qq = health.snapshot(now=300.0)["components"]["qq_gateway"]
+    assert qq["state"] == "degraded"
+    assert qq["summary"] == "本机网关在听，NapCat 还没连上"
+    assert qq["details"]["ws_connected"] is False

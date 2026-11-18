@@ -5,10 +5,17 @@ import os
 import re
 import shutil
 
+from pathlib import Path
 from PySide6 import QtWidgets, QtCore, QtGui
-from modules.gui.styles import get_tool_dialog_styles
-from modules.gui.utils import FlowWidget
-from modules.gui.dialogs.plugin_market_panel import PluginMarketPanel
+from modules.gui.styles import get_tool_dialog_styles, get_ui_palette, hex_to_rgba
+from modules.gui.utils import FlowWidget, resolve_icon
+from modules.gui.dialogs.plugin_market_panel import (
+    PluginMarketPanel,
+    _ElidedLabel,
+    _badge_style,
+    _group_icon_spec,
+    _is_dark_palette,
+)
 from modules.gui.user_ia import (
     CAPABILITY_GROUP_LABELS,
     capability_group,
@@ -59,6 +66,72 @@ def webui_url_from_settings(settings) -> str:
     return composed
 
 
+class _ToggleSwitch(QtWidgets.QWidget):
+    """Small pill switch. Click flips it and emits toggled(bool)."""
+
+    toggled = QtCore.Signal(bool)
+
+    def __init__(self, checked: bool = False, parent=None):
+        super().__init__(parent)
+        self._checked = bool(checked)
+        self.setFixedSize(46, 26)
+        self.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
+        self.setFocusPolicy(QtCore.Qt.FocusPolicy.NoFocus)
+
+    def isChecked(self) -> bool:
+        return self._checked
+
+    def setChecked(self, value: bool) -> None:
+        value = bool(value)
+        if value == self._checked:
+            self.update()
+            return
+        self._checked = value
+        self.update()
+        self.toggled.emit(self._checked)
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == QtCore.Qt.MouseButton.LeftButton:
+            self._checked = not self._checked
+            self.update()
+            self.toggled.emit(self._checked)
+        super().mouseReleaseEvent(event)
+
+    def paintEvent(self, _event):
+        painter = QtGui.QPainter(self)
+        painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing, True)
+        palette = get_ui_palette()
+        accent = QtGui.QColor(palette.get("accent", "#0A84FF"))
+        accent_hover = QtGui.QColor(palette.get("accent_hover", "#0071E3"))
+        border = QtGui.QColor(palette.get("border", "#D1D5DB"))
+        soft = QtGui.QColor(palette.get("bg_soft", "#F4F5F7"))
+        enabled = self.isEnabled()
+        track = QtCore.QRectF(1, 3, 44, 20)
+        painter.setPen(QtCore.Qt.PenStyle.NoPen)
+        if self._checked:
+            gradient = QtGui.QLinearGradient(track.topLeft(), track.bottomRight())
+            top = QtGui.QColor(accent).lighter(118)
+            bottom = QtGui.QColor(accent_hover)
+            if not enabled:
+                top.setAlpha(120)
+                bottom.setAlpha(120)
+            gradient.setColorAt(0.0, top)
+            gradient.setColorAt(1.0, bottom)
+            painter.setBrush(gradient)
+        else:
+            track_color = QtGui.QColor(border)
+            track_color.setAlpha(210 if enabled else 120)
+            painter.setBrush(track_color if enabled else soft)
+        painter.drawRoundedRect(track, 10, 10)
+        knob_x = 24 if self._checked else 4
+        painter.setBrush(QtGui.QColor(15, 23, 42, 36 if enabled else 16))
+        painter.drawEllipse(QtCore.QRectF(knob_x + 0.6, 6.2, 16, 16))
+        knob = QtGui.QColor("#FFFFFF" if enabled else palette.get("bg_card", "#FFFFFF"))
+        painter.setBrush(knob)
+        painter.drawEllipse(QtCore.QRectF(knob_x, 5, 16, 16))
+        painter.end()
+
+
 class PluginManagerDialog(QtWidgets.QDialog):
     def __init__(
         self, parent=None, plugin_manager=None, main_app=None, embedded: bool = False
@@ -67,6 +140,13 @@ class PluginManagerDialog(QtWidgets.QDialog):
         self.plugin_manager = plugin_manager
         self.main_app = main_app
         self.embedded = bool(embedded)
+        self._developer_visible = is_developer_mode()
+        self._active_status = ""
+        self._group_buttons: dict[str, QtWidgets.QPushButton] = {}
+        self._status_buttons: dict[str, QtWidgets.QPushButton] = {}
+        self._toast_timer = QtCore.QTimer(self)
+        self._toast_timer.setSingleShot(True)
+        self._toast_timer.timeout.connect(self._hide_toast)
         if self.embedded:
             self.setWindowFlags(QtCore.Qt.WindowType.Widget)
             self.setSizePolicy(
@@ -74,35 +154,8 @@ class PluginManagerDialog(QtWidgets.QDialog):
                 QtWidgets.QSizePolicy.Policy.Expanding,
             )
         self.setWindowTitle("能力")
-        self.resize(700, 500)
+        self.resize(760, 560)
 
-        # 1. 现代化的样式表 (QSS)
-        qss = get_tool_dialog_styles()
-        if self.embedded:
-            qss += "\nQDialog { background: transparent; border: none; }"
-        qss += """
-            QFrame#pluginCard {
-                background: #FFFFFF;
-                border: 1px solid #E5E7EB;
-                border-radius: 10px;
-            }
-            QFrame#pluginCard:hover {
-                border-color: #93C5FD;
-                background: #FAFCFF;
-            }
-            QFrame#pluginCardDisabled {
-                background: #F9FAFB;
-                border: 1px solid #E5E7EB;
-                border-radius: 10px;
-            }
-            QFrame#pluginCardDisabled:hover {
-                border-color: #D1D5DB;
-                background: #F3F4F6;
-            }
-        """
-        self.setStyleSheet(qss)
-
-        # 2. 布局结构：嵌入设置页时压缩外壳，把空间留给卡片网格。
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(
             0 if self.embedded else 16,
@@ -113,10 +166,6 @@ class PluginManagerDialog(QtWidgets.QDialog):
 
         self.container = QtWidgets.QFrame()
         self.container.setObjectName("dialogShell")
-        if self.embedded:
-            self.container.setStyleSheet(
-                "QFrame#dialogShell { background: transparent; border: none; }"
-            )
         container_layout = QtWidgets.QVBoxLayout(self.container)
         container_layout.setContentsMargins(
             0 if self.embedded else 18,
@@ -124,14 +173,14 @@ class PluginManagerDialog(QtWidgets.QDialog):
             0 if self.embedded else 18,
             0 if self.embedded else 16,
         )
-        container_layout.setSpacing(8 if self.embedded else 12)
+        container_layout.setSpacing(10)
 
         if not self.embedded:
             header_row = QtWidgets.QHBoxLayout()
             header_row.setContentsMargins(0, 0, 0, 0)
             header_row.setSpacing(8)
-            icon_label = QtWidgets.QLabel("🔌")
-            icon_label.setStyleSheet("font-size: 18px;")
+            icon_label = QtWidgets.QLabel("🧩")
+            icon_label.setStyleSheet("font-size: 18px; background: transparent;")
             header_row.addWidget(icon_label)
             title = QtWidgets.QLabel("能力")
             title.setObjectName("dialogTitle")
@@ -140,86 +189,113 @@ class PluginManagerDialog(QtWidgets.QDialog):
             container_layout.addLayout(header_row)
 
             desc_label = QtWidgets.QLabel(
-                "她被允许做的事。关掉不需要的能力；开发类能力要打开「显示开发者选项」才出现。"
+                "她被允许做的事。点开关即可启用或关闭；双击卡片、或点「配置」改参数。"
             )
             desc_label.setObjectName("dialogDesc")
             desc_label.setWordWrap(True)
             container_layout.addWidget(desc_label)
 
-        # --- 本机能力 / 插件市场 ---
         view_row = QtWidgets.QHBoxLayout()
         view_row.setContentsMargins(0, 0, 0, 0)
         view_row.setSpacing(8)
+        self.view_segment = QtWidgets.QFrame()
+        self.view_segment.setObjectName("viewSegment")
+        segment_layout = QtWidgets.QHBoxLayout(self.view_segment)
+        segment_layout.setContentsMargins(3, 3, 3, 3)
+        segment_layout.setSpacing(2)
         self.local_view_button = QtWidgets.QPushButton("本机能力")
         self.market_view_button = QtWidgets.QPushButton("插件市场")
         for button in (self.local_view_button, self.market_view_button):
+            button.setObjectName("viewSegmentBtn")
             button.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
-            button.setFixedHeight(30)
+            button.setFixedHeight(28)
             button.setCheckable(True)
+            segment_layout.addWidget(button)
         self.local_view_button.clicked.connect(lambda: self._set_market_mode(False))
         self.market_view_button.clicked.connect(lambda: self._set_market_mode(True))
-        view_row.addWidget(self.local_view_button)
-        view_row.addWidget(self.market_view_button)
+        view_row.addWidget(self.view_segment)
         view_row.addStretch(1)
         container_layout.addLayout(view_row)
 
-        # --- 单行紧凑控制栏：搜索 + 分组筛选 + 统计 + 导入/刷新 ---
+        self.toast_bar = QtWidgets.QFrame()
+        self.toast_bar.setObjectName("pluginToast")
+        toast_layout = QtWidgets.QHBoxLayout(self.toast_bar)
+        toast_layout.setContentsMargins(12, 6, 8, 6)
+        toast_layout.setSpacing(8)
+        self.toast_label = QtWidgets.QLabel("")
+        self.toast_label.setObjectName("pluginToastText")
+        toast_layout.addWidget(self.toast_label, 1)
+        self.toast_bar.setVisible(False)
+        container_layout.addWidget(self.toast_bar)
+
+        self.local_tools = QtWidgets.QFrame()
+        self.local_tools.setObjectName("pluginToolbarCard")
+        tools_layout = QtWidgets.QVBoxLayout(self.local_tools)
+        tools_layout.setContentsMargins(12, 10, 12, 10)
+        tools_layout.setSpacing(8)
+
         filter_row = QtWidgets.QHBoxLayout()
         filter_row.setContentsMargins(0, 0, 0, 0)
         filter_row.setSpacing(8)
 
         self.search_input = QtWidgets.QLineEdit()
+        self.search_input.setObjectName("pluginSearchInput")
         self.search_input.setPlaceholderText("搜索能力名称、说明或触发词…")
         self.search_input.setClearButtonEnabled(True)
         self.search_input.textChanged.connect(self._filter_plugins)
-        self.search_input.setFixedHeight(30)
-        self.search_input.setStyleSheet("padding: 4px 10px; font-size: 12px;")
-
-        self.group_filter = QtWidgets.QComboBox()
-        self.group_filter.setFixedWidth(112)
-        self.group_filter.setFixedHeight(30)
-        self.group_filter.currentIndexChanged.connect(self._filter_plugins)
+        self.search_input.setFixedHeight(34)
 
         self.stats_label = QtWidgets.QLabel("")
-        self.stats_label.setStyleSheet("color: #6B7280; font-size: 11px; padding: 0 4px;")
+        self.stats_label.setObjectName("pluginStatsBadge")
+        self.stats_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
 
-        self.import_btn = QtWidgets.QPushButton("导入插件")
+        self.import_btn = QtWidgets.QPushButton("导入")
         self.refresh_btn = QtWidgets.QPushButton("刷新")
         for btn in (self.import_btn, self.refresh_btn):
+            btn.setObjectName("pluginToolBtn")
             btn.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
-            btn.setFixedHeight(30)
-            btn.setStyleSheet(
-                """
-                QPushButton {
-                    background: #FFFFFF;
-                    color: #374151;
-                    border: 1px solid #D1D5DB;
-                    border-radius: 8px;
-                    padding: 4px 10px;
-                    font-size: 12px;
-                    font-weight: 600;
-                }
-                QPushButton:hover {
-                    border-color: #93C5FD;
-                    color: #1D4ED8;
-                    background: #EFF6FF;
-                }
-                """
-            )
+            btn.setFixedHeight(34)
         self.import_btn.clicked.connect(self._import_local_plugin)
         self.refresh_btn.clicked.connect(self._refresh_plugins)
 
         filter_row.addWidget(self.search_input, 1)
-        filter_row.addWidget(self.group_filter)
         filter_row.addWidget(self.stats_label)
         filter_row.addWidget(self.import_btn)
         filter_row.addWidget(self.refresh_btn)
-        container_layout.addLayout(filter_row)
+        tools_layout.addLayout(filter_row)
 
-        self._developer_visible = is_developer_mode()
-        self._reload_group_filter()
+        pills_row = QtWidgets.QHBoxLayout()
+        pills_row.setContentsMargins(0, 0, 0, 0)
+        pills_row.setSpacing(6)
+        self.group_pills_host = QtWidgets.QWidget()
+        self.group_pills_layout = QtWidgets.QHBoxLayout(self.group_pills_host)
+        self.group_pills_layout.setContentsMargins(0, 0, 0, 0)
+        self.group_pills_layout.setSpacing(5)
+        pills_row.addWidget(self.group_pills_host)
 
-        # --- 小卡片滚动网格区 ---
+        sep = QtWidgets.QFrame()
+        sep.setObjectName("filterPillSep")
+        sep.setFixedSize(1, 16)
+        pills_row.addWidget(sep)
+
+        for status_key, label in (("", "全部"), ("on", "已启用"), ("off", "已关闭")):
+            btn = QtWidgets.QPushButton(label)
+            btn.setObjectName("filterPillBtn")
+            btn.setCheckable(True)
+            btn.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
+            btn.setFixedHeight(26)
+            btn.clicked.connect(functools.partial(self._set_status_filter, status_key))
+            self._status_buttons[status_key] = btn
+            pills_row.addWidget(btn)
+        pills_row.addStretch(1)
+        tools_layout.addLayout(pills_row)
+        container_layout.addWidget(self.local_tools)
+
+        # 保留下拉框，供分组筛选逻辑和外部读取；界面改用上面的胶囊。
+        self.group_filter = QtWidgets.QComboBox(self)
+        self.group_filter.setVisible(False)
+        self.group_filter.currentIndexChanged.connect(self._on_group_combo_changed)
+
         self._cards_data: list[dict] = []
         self.card_widgets_by_trigger: dict[str, QtWidgets.QFrame] = {}
 
@@ -238,22 +314,38 @@ class PluginManagerDialog(QtWidgets.QDialog):
         self.cards_container = QtWidgets.QWidget()
         self.cards_container.setAutoFillBackground(False)
         self.cards_outer_layout = QtWidgets.QVBoxLayout(self.cards_container)
-        self.cards_outer_layout.setContentsMargins(0, 2, 2, 2)
+        self.cards_outer_layout.setContentsMargins(0, 2, 2, 4)
         self.cards_outer_layout.setSpacing(8)
 
         self.cards_grid = QtWidgets.QGridLayout()
         self.cards_grid.setContentsMargins(0, 0, 0, 0)
-        self.cards_grid.setHorizontalSpacing(10)
-        self.cards_grid.setVerticalSpacing(8)
+        self.cards_grid.setHorizontalSpacing(12)
+        self.cards_grid.setVerticalSpacing(10)
         self.cards_grid.setColumnStretch(0, 1)
         self.cards_grid.setColumnStretch(1, 1)
         self.cards_outer_layout.addLayout(self.cards_grid)
 
+        self.empty_frame = QtWidgets.QFrame()
+        self.empty_frame.setObjectName("pluginEmptyCard")
+        empty_layout = QtWidgets.QVBoxLayout(self.empty_frame)
+        empty_layout.setContentsMargins(20, 28, 20, 28)
+        empty_layout.setSpacing(6)
         self.empty_label = QtWidgets.QLabel("没有找到匹配的能力")
+        self.empty_label.setObjectName("pluginEmptyTitle")
         self.empty_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
-        self.empty_label.setStyleSheet("color: #9CA3AF; font-size: 12px; padding: 28px 0;")
-        self.empty_label.setVisible(False)
-        self.cards_outer_layout.addWidget(self.empty_label)
+        empty_layout.addWidget(self.empty_label)
+        self.empty_reset_btn = QtWidgets.QPushButton("清除筛选")
+        self.empty_reset_btn.setObjectName("pluginToolBtn")
+        self.empty_reset_btn.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
+        self.empty_reset_btn.setFixedHeight(30)
+        self.empty_reset_btn.clicked.connect(self._reset_local_filters)
+        reset_row = QtWidgets.QHBoxLayout()
+        reset_row.addStretch(1)
+        reset_row.addWidget(self.empty_reset_btn)
+        reset_row.addStretch(1)
+        empty_layout.addLayout(reset_row)
+        self.empty_frame.setVisible(False)
+        self.cards_outer_layout.addWidget(self.empty_frame)
         self.cards_outer_layout.addStretch(1)
 
         self.cards_scroll.setWidget(self.cards_container)
@@ -263,28 +355,205 @@ class PluginManagerDialog(QtWidgets.QDialog):
         self.market_panel.setVisible(False)
         self.market_panel.plugins_changed.connect(self._refresh_plugins)
         container_layout.addWidget(self.market_panel, 1)
-        self._set_market_mode(False)
 
-        # 保留隐藏的 table 属性以兼容潜在外部引用
         self.table = QtWidgets.QTableWidget(self)
         self.table.setVisible(False)
 
         if not self.embedded:
             footer_layout = QtWidgets.QHBoxLayout()
             footer_layout.addStretch()
-
             close_btn = QtWidgets.QPushButton("关闭")
             close_btn.setObjectName("main_btn")
             close_btn.setMinimumWidth(96)
             close_btn.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
             close_btn.clicked.connect(self.close)
             footer_layout.addWidget(close_btn)
-
             container_layout.addLayout(footer_layout)
         layout.addWidget(self.container)
 
-        # 初始化数据
-        self._refresh_plugins()
+        self._reload_group_filter()
+        self.refresh_theme()
+        self._set_market_mode(False)
+
+    def refresh_theme(self) -> None:
+        palette = get_ui_palette()
+        dark = _is_dark_palette(palette)
+        card = palette.get("bg_card", "#FFFFFF")
+        soft = palette.get("bg_soft", "#F4F5F7")
+        border = palette.get("border", "#D8DBE0")
+        accent = palette.get("accent", "#0A84FF")
+        accent_hover = palette.get("accent_hover", "#0071E3")
+        accent_soft = palette.get("accent_soft", "#E8F1FF")
+        text = palette.get("text_primary", "#1D1D1F")
+        secondary = palette.get("text_secondary", "#6E6E73")
+        muted = palette.get("text_muted", "#8E8E93")
+        success = palette.get("success", "#30D158")
+        danger = palette.get("danger", "#FF453A")
+        segment_bg = soft
+        checked_fg = accent if dark else accent_hover
+        qss = get_tool_dialog_styles()
+        if self.embedded:
+            qss += "\nQDialog { background: transparent; border: none; }"
+            qss += "\nQFrame#dialogShell { background: transparent; border: none; }"
+        qss += f"""
+            QFrame#pluginToolbarCard {{
+                background: {card};
+                border: 1px solid {border};
+                border-radius: 14px;
+            }}
+            QFrame#viewSegment {{
+                background: {segment_bg};
+                border: 1px solid {border};
+                border-radius: 12px;
+            }}
+            QPushButton#viewSegmentBtn {{
+                background: transparent;
+                color: {secondary};
+                border: none;
+                border-radius: 9px;
+                padding: 2px 16px;
+                font-size: 12px;
+                font-weight: 600;
+                min-width: 88px;
+            }}
+            QPushButton#viewSegmentBtn:hover {{
+                color: {text};
+            }}
+            QPushButton#viewSegmentBtn:checked {{
+                background: {card};
+                color: {checked_fg};
+                font-weight: 700;
+            }}
+            QLineEdit#pluginSearchInput {{
+                background: {soft};
+                color: {text};
+                border: 1px solid {border};
+                border-radius: 10px;
+                padding: 5px 12px;
+                font-size: 12px;
+            }}
+            QLineEdit#pluginSearchInput:focus {{
+                background: {card};
+                border: 1.5px solid {accent};
+            }}
+            QLabel#pluginStatsBadge, QLabel#pluginToastText {{
+                color: {secondary};
+                font-size: 11px;
+                font-weight: 600;
+                background: transparent;
+            }}
+            QLabel#pluginStatsBadge {{
+                background: {soft};
+                border: 1px solid {border};
+                border-radius: 9px;
+                padding: 4px 10px;
+            }}
+            QFrame#pluginToast {{
+                background: {hex_to_rgba(accent_soft, 0.85)};
+                border: 1px solid {hex_to_rgba(accent, 0.35)};
+                border-radius: 10px;
+            }}
+            QFrame#filterPillSep {{
+                background: {border};
+                border: none;
+            }}
+            QPushButton#filterPillBtn {{
+                background: transparent;
+                color: {secondary};
+                border: 1px solid transparent;
+                border-radius: 13px;
+                padding: 2px 10px;
+                font-size: 11px;
+                font-weight: 600;
+            }}
+            QPushButton#filterPillBtn:hover {{
+                background: {soft};
+                color: {text};
+            }}
+            QPushButton#filterPillBtn:checked {{
+                background: {accent_soft};
+                color: {checked_fg};
+                border: 1px solid {hex_to_rgba(accent, 0.4)};
+                font-weight: 700;
+            }}
+            QPushButton#pluginToolBtn, QPushButton#pluginConfigBtn {{
+                background: {card};
+                color: {text};
+                border: 1px solid {border};
+                border-radius: 10px;
+                padding: 4px 12px;
+                font-size: 12px;
+                font-weight: 600;
+            }}
+            QPushButton#pluginConfigBtn {{
+                border-radius: 8px;
+                padding: 2px 10px;
+                font-size: 11px;
+            }}
+            QPushButton#pluginToolBtn:hover, QPushButton#pluginConfigBtn:hover {{
+                background: {accent_soft};
+                color: {checked_fg};
+                border-color: {hex_to_rgba(accent, 0.45)};
+            }}
+            QFrame#pluginCard {{
+                background: {card};
+                border: 1px solid {border};
+                border-radius: 14px;
+            }}
+            QFrame#pluginCard:hover {{
+                border-color: {hex_to_rgba(accent, 0.55)};
+                background: {hex_to_rgba(accent_soft, 0.28 if dark else 0.45)};
+            }}
+            QFrame#pluginCardDisabled {{
+                background: {hex_to_rgba(soft, 0.72)};
+                border: 1px solid {hex_to_rgba(border, 0.85)};
+                border-radius: 14px;
+            }}
+            QFrame#pluginCardDisabled:hover {{
+                border-color: {border};
+                background: {card};
+            }}
+            QFrame#pluginEmptyCard {{
+                background: {hex_to_rgba(soft, 0.5)};
+                border: 1px dashed {border};
+                border-radius: 14px;
+            }}
+            QLabel#pluginEmptyTitle {{
+                color: {secondary};
+                font-size: 13px;
+                font-weight: 600;
+                background: transparent;
+            }}
+            QLabel#pluginSelfBadge {{
+                background: {hex_to_rgba("#7C3AED", 0.16)};
+                color: {"#C4B5FD" if dark else "#6D28D9"};
+                border: 1px solid {hex_to_rgba("#7C3AED", 0.35)};
+                padding: 1px 6px;
+                border-radius: 7px;
+                font-size: 10px;
+                font-weight: 600;
+            }}
+        """
+        self.setStyleSheet(qss)
+        self._palette_cache = {
+            "text": text,
+            "secondary": secondary,
+            "muted": muted,
+            "success": success,
+            "danger": danger,
+            "dark": dark,
+        }
+        if hasattr(self, "market_panel"):
+            self.market_panel.refresh_theme()
+        self._sync_segment_checks()
+        if self._cards_data or self.plugin_manager:
+            self._refresh_plugins()
+        editor_cls = globals().get("PluginEditorDialog")
+        if editor_cls is not None:
+            for editor in self.findChildren(editor_cls):
+                refresher = getattr(editor, "refresh_theme", None)
+                if callable(refresher):
+                    refresher()
 
     def set_developer_visible(self, visible: bool):
         self._developer_visible = bool(visible)
@@ -293,22 +562,17 @@ class PluginManagerDialog(QtWidgets.QDialog):
         if hasattr(self, "market_panel"):
             self.market_panel.set_developer_visible(visible)
 
+    def _sync_segment_checks(self):
+        market = self.market_panel.isVisible() if hasattr(self, "market_panel") else False
+        self.local_view_button.setChecked(not market)
+        self.market_view_button.setChecked(market)
+
     def _set_market_mode(self, enabled: bool):
         market = bool(enabled)
         self.local_view_button.setChecked(not market)
         self.market_view_button.setChecked(market)
-        active = (
-            "QPushButton { background: #EFF6FF; color: #1D4ED8; border: 1px solid #93C5FD;"
-            " border-radius: 8px; padding: 4px 10px; font-size: 12px; font-weight: 700; }"
-        )
-        idle = (
-            "QPushButton { background: #FFFFFF; color: #374151; border: 1px solid #D1D5DB;"
-            " border-radius: 8px; padding: 4px 10px; font-size: 12px; font-weight: 600; }"
-            "QPushButton:hover { border-color: #93C5FD; color: #1D4ED8; background: #EFF6FF; }"
-        )
-        self.local_view_button.setStyleSheet(idle if market else active)
-        self.market_view_button.setStyleSheet(active if market else idle)
         for widget in (
+            self.local_tools,
             self.search_input,
             self.group_filter,
             self.stats_label,
@@ -317,6 +581,7 @@ class PluginManagerDialog(QtWidgets.QDialog):
             self.cards_scroll,
         ):
             widget.setVisible(not market)
+        self.group_filter.setVisible(False)
         self.market_panel.setVisible(market)
         if market:
             self.market_panel.set_developer_visible(self._developer_visible)
@@ -336,22 +601,113 @@ class PluginManagerDialog(QtWidgets.QDialog):
         idx = self.group_filter.findData(current)
         self.group_filter.setCurrentIndex(idx if idx >= 0 else 0)
         self.group_filter.blockSignals(False)
+        self._rebuild_group_pills()
+
+    def _rebuild_group_pills(self):
+        if not hasattr(self, "group_pills_layout"):
+            return
+        while self.group_pills_layout.count():
+            item = self.group_pills_layout.takeAt(0)
+            widget = item.widget() if item else None
+            if widget is not None:
+                widget.hide()
+                widget.deleteLater()
+        self._group_buttons.clear()
+        current = str(self.group_filter.currentData() or "")
+        if current == "developer" and not self._developer_visible:
+            current = ""
+            self.group_filter.blockSignals(True)
+            self.group_filter.setCurrentIndex(0)
+            self.group_filter.blockSignals(False)
+        specs = [("", "全部")]
+        for key, label in CAPABILITY_GROUP_LABELS.items():
+            if key == "developer" and not self._developer_visible:
+                continue
+            specs.append((key, label))
+        for key, label in specs:
+            button = QtWidgets.QPushButton(label, self.group_pills_host)
+            button.setObjectName("filterPillBtn")
+            button.setCheckable(True)
+            button.setChecked(key == current)
+            button.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
+            button.setFixedHeight(26)
+            button.clicked.connect(functools.partial(self._set_group_filter, key))
+            self._group_buttons[key] = button
+            self.group_pills_layout.addWidget(button)
+        self._sync_status_pills()
+
+    def _set_group_filter(self, key: str):
+        self.group_filter.blockSignals(True)
+        idx = self.group_filter.findData(key)
+        self.group_filter.setCurrentIndex(idx if idx >= 0 else 0)
+        self.group_filter.blockSignals(False)
+        for group_key, button in self._group_buttons.items():
+            button.setChecked(group_key == key)
+        self._filter_plugins()
+
+    def _on_group_combo_changed(self, _index=None):
+        current = str(self.group_filter.currentData() or "")
+        for group_key, button in self._group_buttons.items():
+            button.setChecked(group_key == current)
+        self._filter_plugins()
+
+    def _set_status_filter(self, key: str):
+        self._active_status = str(key or "")
+        self._sync_status_pills()
+        self._filter_plugins()
+
+    def _sync_status_pills(self):
+        for key, button in self._status_buttons.items():
+            button.setChecked(key == self._active_status)
+
+    def _reset_local_filters(self):
+        self._active_status = ""
+        self.search_input.blockSignals(True)
+        self.search_input.clear()
+        self.search_input.blockSignals(False)
+        self.group_filter.blockSignals(True)
+        self.group_filter.setCurrentIndex(0)
+        self.group_filter.blockSignals(False)
+        for key, button in self._group_buttons.items():
+            button.setChecked(key == "")
+        self._sync_status_pills()
+        self._filter_plugins()
 
     @staticmethod
     def _group_badge_style(group: str) -> str:
-        palette = {
-            "companion": ("#EEF2FF", "#4338CA", "#C7D2FE"),
-            "desktop": ("#ECFDF5", "#047857", "#A7F3D0"),
-            "qq": ("#EFF6FF", "#1D4ED8", "#BFDBFE"),
-            "developer": ("#FEF3C7", "#B45309", "#FDE68A"),
-        }
-        bg, fg, border = palette.get(group, ("#F3F4F6", "#4B5563", "#E5E7EB"))
-        return (
-            f"background-color: {bg}; color: {fg}; border: 1px solid {border};"
-            "padding: 1px 6px; border-radius: 6px; font-size: 10px; font-weight: 600;"
-        )
+        return _badge_style(group)
 
-    def _create_plugin_card(self, info: dict, group: str) -> QtWidgets.QFrame:
+    def _plugin_icon(self, trigger: str, group: str) -> QtWidgets.QLabel:
+        palette = get_ui_palette()
+        label = QtWidgets.QLabel()
+        label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        label.setFixedSize(38, 38)
+        icon_path = None
+        manager = self.plugin_manager
+        getter = getattr(manager, "get_plugin_icon_path", None)
+        if callable(getter):
+            try:
+                icon_path = getter(trigger)
+            except Exception:
+                icon_path = None
+        pixmap = QtGui.QPixmap()
+        if icon_path:
+            pixmap = resolve_icon(icon_path).pixmap(28, 28)
+        if not pixmap.isNull():
+            label.setPixmap(pixmap)
+            label.setStyleSheet(
+                "background: transparent; border-radius: 10px;"
+            )
+            return label
+        glyph, icon_bg, icon_fg = _group_icon_spec(group, palette)
+        label.setText(glyph)
+        label.setStyleSheet(
+            f"background-color: {icon_bg}; color: {icon_fg};"
+            "border-radius: 11px; font-size: 15px; font-weight: 700;"
+        )
+        return label
+
+    def _create_plugin_card(self, info: dict, group: str) -> tuple[QtWidgets.QFrame, dict]:
         trigger = str(info.get("trigger") or "")
         enabled = bool(info.get("enabled"))
         name = str(info.get("name") or trigger)
@@ -360,168 +716,150 @@ class PluginManagerDialog(QtWidgets.QDialog):
         visible = card_summary or summary
         access_summary = str(info.get("access_summary") or "").strip()
         group_label = capability_group_label(group)
+        colors = getattr(self, "_palette_cache", None) or {}
+        text = colors.get("text", "#1D1D1F")
+        secondary = colors.get("secondary", "#6E6E73")
+        muted = colors.get("muted", "#8E8E93")
 
         card = QtWidgets.QFrame(self.cards_container)
         card.setObjectName("pluginCard" if enabled else "pluginCardDisabled")
-        card.setFixedHeight(78)
+        card.setMinimumHeight(96)
+        card.setMaximumHeight(108)
         card.setSizePolicy(
             QtWidgets.QSizePolicy.Policy.Expanding,
             QtWidgets.QSizePolicy.Policy.Fixed,
         )
+        card.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
+        card.installEventFilter(self)
 
-        card_layout = QtWidgets.QVBoxLayout(card)
-        card_layout.setContentsMargins(12, 8, 12, 8)
-        card_layout.setSpacing(3)
+        row = QtWidgets.QHBoxLayout(card)
+        row.setContentsMargins(12, 10, 12, 10)
+        row.setSpacing(10)
+        icon = self._plugin_icon(trigger, group)
+        row.addWidget(icon, 0, QtCore.Qt.AlignmentFlag.AlignTop)
 
-        # 第一行：名称 + 分组标签 + 右侧状态开关胶囊 + 配置按钮
-        top_row = QtWidgets.QHBoxLayout()
-        top_row.setContentsMargins(0, 0, 0, 0)
-        top_row.setSpacing(6)
+        body = QtWidgets.QVBoxLayout()
+        body.setContentsMargins(0, 0, 0, 0)
+        body.setSpacing(3)
 
-        lbl_name = QtWidgets.QLabel(name)
-        name_color = "#111827" if enabled else "#6B7280"
-        lbl_name.setStyleSheet(
-            f"font-weight: 700; font-size: 13px; color: {name_color}; background: transparent;"
+        top = QtWidgets.QHBoxLayout()
+        top.setContentsMargins(0, 0, 0, 0)
+        top.setSpacing(6)
+        name_label = QtWidgets.QLabel(name)
+        name_label.setStyleSheet(
+            f"font-weight: 700; font-size: 13px; color: {text if enabled else muted}; background: transparent;"
         )
-        top_row.addWidget(lbl_name)
+        top.addWidget(name_label)
 
-        lbl_group = QtWidgets.QLabel(group_label)
-        lbl_group.setStyleSheet(self._group_badge_style(group))
-        lbl_group.setFixedHeight(18)
-        top_row.addWidget(lbl_group)
+        group_badge = QtWidgets.QLabel(group_label)
+        group_badge.setStyleSheet(self._group_badge_style(group))
+        group_badge.setFixedHeight(18)
+        top.addWidget(group_badge)
 
+        self_badge = None
         if bool(info.get("self_callable")):
-            lbl_self = QtWidgets.QLabel("可自调用")
-            lbl_self.setFixedHeight(18)
-            lbl_self.setToolTip("闲聊里她可以自己调用，不必等关键词路由")
-            lbl_self.setStyleSheet(
-                "background-color: #F5F3FF; color: #6D28D9; border: 1px solid #DDD6FE;"
-                "padding: 1px 6px; border-radius: 6px; font-size: 10px; font-weight: 600;"
-            )
-            top_row.addWidget(lbl_self)
-
-        top_row.addStretch(1)
-
-        # 状态与切换合一的胶囊按钮
-        toggle_btn = QtWidgets.QPushButton("● 已启用" if enabled else "○ 已禁用")
-        toggle_btn.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
-        toggle_btn.setFixedHeight(22)
-        if enabled:
-            toggle_btn.setToolTip("当前已启用，点击禁用此能力")
-            toggle_btn.setStyleSheet(
-                """
-                QPushButton {
-                    background-color: #DCFCE7; color: #15803D;
-                    border: 1px solid #86EFAC; border-radius: 11px;
-                    padding: 1px 8px; font-size: 11px; font-weight: 600;
-                    min-width: 56px;
-                }
-                QPushButton:hover {
-                    background-color: #FEE2E2; color: #B91C1C; border-color: #FCA5A5;
-                }
-                """
-            )
-        else:
-            toggle_btn.setToolTip("当前已禁用，点击启用此能力")
-            toggle_btn.setStyleSheet(
-                """
-                QPushButton {
-                    background-color: #F3F4F6; color: #6B7280;
-                    border: 1px solid #D1D5DB; border-radius: 11px;
-                    padding: 1px 8px; font-size: 11px; font-weight: 600;
-                    min-width: 56px;
-                }
-                QPushButton:hover {
-                    background-color: #DCFCE7; color: #15803D; border-color: #86EFAC;
-                }
-                """
-            )
-        toggle_btn.clicked.connect(functools.partial(self._toggle_plugin, trigger))
+            self_badge = QtWidgets.QLabel("可自调用")
+            self_badge.setObjectName("pluginSelfBadge")
+            self_badge.setFixedHeight(18)
+            self_badge.setToolTip("闲聊里她可以自己调用，不必等关键词")
+            top.addWidget(self_badge)
+        top.addStretch(1)
 
         edit_btn = QtWidgets.QPushButton("配置")
+        edit_btn.setObjectName("pluginConfigBtn")
         edit_btn.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
-        edit_btn.setFixedHeight(22)
-        edit_btn.setToolTip("修改参数、触发权限与元数据")
-        edit_btn.setStyleSheet(
-            """
-            QPushButton {
-                background-color: #FFFFFF; color: #2563EB; border: 1px solid #BFDBFE;
-                border-radius: 6px; padding: 1px 8px; font-size: 11px; font-weight: 600;
-                min-width: 38px;
-            }
-            QPushButton:hover { background-color: #EFF6FF; border-color: #2563EB; }
-            """
-        )
+        edit_btn.setFixedHeight(26)
+        edit_btn.setToolTip("修改参数、触发词和权限。双击卡片也可以。")
         edit_btn.clicked.connect(functools.partial(self._edit_plugin, trigger))
+        top.addWidget(edit_btn)
 
-        top_row.addWidget(toggle_btn)
-        top_row.addWidget(edit_btn)
-        card_layout.addLayout(top_row)
+        toggle = _ToggleSwitch(enabled)
+        toggle.setToolTip("已启用，点击关闭" if enabled else "已关闭，点击启用")
+        toggle.toggled.connect(functools.partial(self._on_switch_toggled, trigger))
+        top.addWidget(toggle)
+        body.addLayout(top)
 
-        # 第二行：单行紧凑描述（超出自动省略）
-        desc_color = "#4B5563" if enabled else "#9CA3AF"
-        lbl_desc = QtWidgets.QLabel()
-        lbl_desc.setStyleSheet(f"font-size: 11px; color: {desc_color}; background: transparent;")
-        lbl_desc.setWordWrap(False)
-        fm = lbl_desc.fontMetrics()
-        lbl_desc.setText(fm.elidedText(visible.replace("\n", " "), QtCore.Qt.TextElideMode.ElideRight, 280))
-        card_layout.addWidget(lbl_desc)
+        desc = _ElidedLabel(visible)
+        desc.setStyleSheet(
+            f"font-size: 12px; color: {secondary if enabled else muted}; background: transparent;"
+        )
+        body.addWidget(desc)
 
-        # 第三行：底部元信息（触发词 + 权限简述）
-        meta_parts = [f"触发词: {trigger}"]
+        meta_parts = [trigger]
         if access_summary:
             meta_parts.append(access_summary)
-        meta_text = "  ·  ".join(meta_parts)
-        lbl_meta = QtWidgets.QLabel()
-        lbl_meta.setStyleSheet("font-size: 10px; color: #9CA3AF; background: transparent;")
-        lbl_meta.setWordWrap(False)
-        lbl_meta.setText(
-            lbl_meta.fontMetrics().elidedText(meta_text, QtCore.Qt.TextElideMode.ElideRight, 290)
+        meta = _ElidedLabel("  ·  ".join(meta_parts))
+        meta.setStyleSheet(
+            f"font-size: 11px; color: {muted}; background: transparent;"
         )
-        card_layout.addWidget(lbl_meta)
+        body.addWidget(meta)
+        row.addLayout(body, 1)
 
-        tooltip_bits = [f"名称：{name}", f"分组：{group_label}", f"触发词：{trigger}"]
+        tooltip_bits = [name, f"分组：{group_label}", f"触发词：{trigger}"]
         if card_summary and card_summary != summary:
-            tooltip_bits.append(f"说明：{card_summary}")
+            tooltip_bits.append(card_summary)
             tooltip_bits.append(summary)
         elif summary:
-            tooltip_bits.append(f"说明：{summary}")
+            tooltip_bits.append(summary)
         if access_summary:
-            tooltip_bits.append(f"权限：{access_summary}")
+            tooltip_bits.append(access_summary)
+        tooltip_bits.append("双击打开配置")
         tooltip = "\n".join(tooltip_bits)
         card.setToolTip(tooltip)
-        lbl_name.setToolTip(tooltip)
-        lbl_desc.setToolTip(tooltip)
-        lbl_meta.setToolTip(tooltip)
+        name_label.setToolTip(tooltip)
+        desc.setToolTip(tooltip)
+        meta.setToolTip(tooltip)
+        card.setProperty("pluginTrigger", trigger)
+        for widget in (icon, name_label, group_badge, desc, meta, self_badge):
+            if widget is not None:
+                widget.setAttribute(
+                    QtCore.Qt.WidgetAttribute.WA_TransparentForMouseEvents, True
+                )
+        parts = {
+            "name": name_label,
+            "desc": desc,
+            "toggle": toggle,
+            "icon": icon,
+        }
+        return card, parts
 
-        return card
+    def eventFilter(self, watched, event):
+        if (
+            isinstance(watched, QtWidgets.QFrame)
+            and event.type() == QtCore.QEvent.Type.MouseButtonDblClick
+        ):
+            trigger = str(watched.property("pluginTrigger") or "")
+            if trigger:
+                self._edit_plugin(trigger)
+                return True
+        return super().eventFilter(watched, event)
 
     def _refresh_plugins(self):
-        # 清理旧卡片（包括被过滤隐藏、未在 grid 中的卡片）
         while self.cards_grid.count():
             self.cards_grid.takeAt(0)
         for entry in self._cards_data:
-            w = entry.get("card")
-            if w is not None:
-                w.hide()
-                w.deleteLater()
+            widget = entry.get("card")
+            if widget is not None:
+                widget.hide()
+                widget.deleteLater()
         self._cards_data.clear()
         self.card_widgets_by_trigger.clear()
 
         if not self.plugin_manager:
             self.stats_label.setText("0 项")
-            self.empty_label.setVisible(True)
+            self.empty_label.setText("当前还不能管理能力")
+            self.empty_frame.setVisible(True)
+            self.empty_reset_btn.setVisible(False)
             return
 
         plugins_info = self.plugin_manager.get_all_plugins_info()
         show_dev = bool(getattr(self, "_developer_visible", False))
-
         for info in plugins_info:
             trigger = str(info.get("trigger") or "")
             group = capability_group(trigger)
             if group == "developer" and not show_dev:
                 continue
-            card = self._create_plugin_card(info, group)
+            card, parts = self._create_plugin_card(info, group)
             search_blob = " ".join(
                 [
                     str(info.get("name") or ""),
@@ -537,11 +875,29 @@ class PluginManagerDialog(QtWidgets.QDialog):
                 "enabled": bool(info.get("enabled")),
                 "search_blob": search_blob,
                 "card": card,
+                "parts": parts,
+                "name": str(info.get("name") or trigger),
             }
             self._cards_data.append(entry)
             self.card_widgets_by_trigger[trigger] = card
-
+        self._update_filter_counts()
         self._filter_plugins()
+
+    def _update_filter_counts(self):
+        counts = {"": 0}
+        on_count = 0
+        for entry in self._cards_data:
+            counts[""] += 1
+            counts[entry["group"]] = counts.get(entry["group"], 0) + 1
+            if entry["enabled"]:
+                on_count += 1
+        for key, button in self._group_buttons.items():
+            base = "全部" if key == "" else capability_group_label(key)
+            button.setText(f"{base} {counts.get(key, 0)}")
+        off_count = counts.get("", 0) - on_count
+        labels = {"": "全部", "on": f"已启用 {on_count}", "off": f"已关闭 {off_count}"}
+        for key, button in self._status_buttons.items():
+            button.setText(labels.get(key, key))
 
     def _filter_plugins(self, _text=None):
         text = ""
@@ -550,8 +906,8 @@ class PluginManagerDialog(QtWidgets.QDialog):
         group = ""
         if hasattr(self, "group_filter"):
             group = str(self.group_filter.currentData() or "").strip()
+        status = str(getattr(self, "_active_status", "") or "")
 
-        # 先从网格移除所有项（不销毁 widget），再按可见顺序紧密排列成双列
         while self.cards_grid.count():
             self.cards_grid.takeAt(0)
 
@@ -559,6 +915,12 @@ class PluginManagerDialog(QtWidgets.QDialog):
         for entry in self._cards_data:
             card = entry["card"]
             if group and entry["group"] != group:
+                card.setVisible(False)
+                continue
+            if status == "on" and not entry["enabled"]:
+                card.setVisible(False)
+                continue
+            if status == "off" and entry["enabled"]:
                 card.setVisible(False)
                 continue
             if text and text not in entry["search_blob"]:
@@ -572,30 +934,111 @@ class PluginManagerDialog(QtWidgets.QDialog):
             card.setVisible(True)
 
         total_visible = len(visible_entries)
-        enabled_visible = sum(1 for e in visible_entries if e["enabled"])
+        enabled_visible = sum(1 for entry in visible_entries if entry["enabled"])
         if hasattr(self, "stats_label"):
-            self.stats_label.setText(f"显示 {total_visible} 项 · 已启用 {enabled_visible}")
-        if hasattr(self, "empty_label"):
-            self.empty_label.setVisible(total_visible == 0)
+            self.stats_label.setText(f"显示 {total_visible} · 已启用 {enabled_visible}")
+        if hasattr(self, "empty_frame"):
+            self.empty_frame.setVisible(total_visible == 0)
+            filtering = bool(text or group or status)
+            self.empty_label.setText(
+                "没有找到匹配的能力" if filtering or self._cards_data else "还没有可用的能力"
+            )
+            self.empty_reset_btn.setVisible(total_visible == 0 and filtering)
+
+    def _on_switch_toggled(self, trigger: str, checked: bool):
+        if not self.plugin_manager:
+            return
+        try:
+            current = self.plugin_manager.is_plugin_enabled(trigger)
+            if bool(checked) == bool(current):
+                return
+            ok = (
+                self.plugin_manager.enable_plugin(trigger)
+                if checked
+                else self.plugin_manager.disable_plugin(trigger)
+            )
+            if not ok:
+                self._set_switch_checked(trigger, current)
+                self._show_toast(f"没能切换「{trigger}」", False)
+                return
+            self._apply_enabled_state(trigger, checked)
+            name = self._entry_name(trigger)
+            self._show_toast(
+                f"已打开「{name}」" if checked else f"已关闭「{name}」",
+                checked,
+            )
+            self._filter_plugins()
+            self._update_filter_counts()
+        except Exception as exc:
+            self._set_switch_checked(trigger, not checked)
+            QtWidgets.QMessageBox.critical(self, "错误", f"操作失败: {exc}")
+
+    def _entry_name(self, trigger: str) -> str:
+        for entry in self._cards_data:
+            if entry["trigger"] == trigger:
+                return str(entry.get("name") or trigger)
+        return trigger
+
+    def _set_switch_checked(self, trigger: str, checked: bool):
+        for entry in self._cards_data:
+            if entry["trigger"] != trigger:
+                continue
+            toggle = entry.get("parts", {}).get("toggle")
+            if toggle is not None:
+                toggle.blockSignals(True)
+                toggle.setChecked(checked)
+                toggle.blockSignals(False)
+            return
+
+    def _apply_enabled_state(self, trigger: str, enabled: bool):
+        colors = getattr(self, "_palette_cache", None) or {}
+        text = colors.get("text", "#1D1D1F")
+        secondary = colors.get("secondary", "#6E6E73")
+        muted = colors.get("muted", "#8E8E93")
+        for entry in self._cards_data:
+            if entry["trigger"] != trigger:
+                continue
+            entry["enabled"] = bool(enabled)
+            card = entry["card"]
+            card.setObjectName("pluginCard" if enabled else "pluginCardDisabled")
+            card.style().unpolish(card)
+            card.style().polish(card)
+            parts = entry.get("parts") or {}
+            name_label = parts.get("name")
+            desc = parts.get("desc")
+            toggle = parts.get("toggle")
+            if name_label is not None:
+                name_label.setStyleSheet(
+                    "font-weight: 700; font-size: 13px; background: transparent; "
+                    f"color: {text if enabled else muted};"
+                )
+            if desc is not None:
+                desc.setStyleSheet(
+                    "font-size: 12px; background: transparent; "
+                    f"color: {secondary if enabled else muted};"
+                )
+            if toggle is not None:
+                toggle.setToolTip("已启用，点击关闭" if enabled else "已关闭，点击启用")
+            return
+
+    def _show_toast(self, message, is_success=True):
+        if hasattr(self, "toast_label"):
+            prefix = "已完成" if is_success else "请注意"
+            self.toast_label.setText(f"{prefix}  ·  {message}")
+            self.toast_bar.setVisible(True)
+            self._toast_timer.start(2400)
+        if self.main_app and hasattr(self.main_app, "append"):
+            self.main_app.append("system", message)
+
+    def _hide_toast(self):
+        if hasattr(self, "toast_bar"):
+            self.toast_bar.setVisible(False)
 
     def _toggle_plugin(self, trigger: str):
         if not self.plugin_manager:
             return
-        try:
-            if self.plugin_manager.is_plugin_enabled(trigger):
-                if self.plugin_manager.disable_plugin(trigger):
-                    self._show_toast(f"已关闭能力 [{trigger}]", False)
-            else:
-                if self.plugin_manager.enable_plugin(trigger):
-                    self._show_toast(f"已打开能力 [{trigger}]", True)
-            self._refresh_plugins()
-        except Exception as e:
-            QtWidgets.QMessageBox.critical(self, "错误", f"操作失败: {str(e)}")
-
-    def _show_toast(self, message, is_success):
-        """简单的系统消息反馈"""
-        if self.main_app:
-            self.main_app.append("system", message)
+        enabled = self.plugin_manager.is_plugin_enabled(trigger)
+        self._on_switch_toggled(trigger, not enabled)
 
     def _edit_plugin(self, trigger: str):
         if not self.plugin_manager:
@@ -604,26 +1047,23 @@ class PluginManagerDialog(QtWidgets.QDialog):
             dialog = PluginEditorDialog(
                 parent=self, plugin_manager=self.plugin_manager, trigger=trigger
             )
-            dialog.exec()
+            result = dialog.exec()
             self._refresh_plugins()
-        except Exception as e:
-            QtWidgets.QMessageBox.critical(
-                self, "错误", f"打开编辑对话框失败: {str(e)}"
-            )
+            if result == QtWidgets.QDialog.DialogCode.Accepted:
+                self._show_toast(f"已保存「{self._entry_name(trigger)}」的配置", True)
+        except Exception as exc:
+            QtWidgets.QMessageBox.critical(self, "错误", f"打开编辑对话框失败: {exc}")
 
     def _import_local_plugin(self):
         dir_path = QtWidgets.QFileDialog.getExistingDirectory(self, "选择插件文件夹")
         if not dir_path:
             return
-
-        # 简单校验：文件夹里有没有 plugin.py 和 config.json
         if not os.path.exists(os.path.join(dir_path, "plugin.py")):
             QtWidgets.QMessageBox.warning(self, "无效插件", "该文件夹下缺少 plugin.py")
             return
 
         folder_name = os.path.basename(dir_path)
         target_path = os.path.join("./plugins", folder_name)
-
         if os.path.exists(target_path):
             ret = QtWidgets.QMessageBox.question(
                 self, "覆盖确认", f"插件 {folder_name} 已存在，是否覆盖？"
@@ -632,34 +1072,28 @@ class PluginManagerDialog(QtWidgets.QDialog):
                 return
             try:
                 shutil.rmtree(target_path)
-            except Exception as e:
-                QtWidgets.QMessageBox.warning(self, "错误", f"无法删除旧文件: {e}")
+            except Exception as exc:
+                QtWidgets.QMessageBox.warning(self, "错误", f"无法删除旧文件: {exc}")
                 return
-
         try:
             shutil.copytree(dir_path, target_path)
-            QtWidgets.QMessageBox.information(
-                self, "成功", f"插件 {folder_name} 已导入！\n请点击刷新列表。"
-            )
-
-            # 自动刷新并重载
             if self.plugin_manager:
                 self.plugin_manager.load_plugins()
                 self._refresh_plugins()
-
-        except Exception as e:
-            QtWidgets.QMessageBox.critical(self, "错误", f"导入失败: {e}")
+            self._show_toast(f"已导入「{folder_name}」", True)
+        except Exception as exc:
+            QtWidgets.QMessageBox.critical(self, "错误", f"导入失败: {exc}")
 
 
 class TagChipEditor(QtWidgets.QWidget):
-    """胶囊标签编辑器：用于触发词（aliases）和普通字符串列表，告别手动回车换行。"""
+    """胶囊标签编辑器：一体化胶囊输入槽与柔和强调色标签。"""
 
     def __init__(
         self,
         parent: QtWidgets.QWidget | None = None,
         *,
-        placeholder: str = "输入内容后按回车或点击 + 添加（支持逗号批量分隔）...",
-        empty_text: str = "暂无项目，在下方输入后按回车添加",
+        placeholder: str = "输入内容后按回车或点右侧添加（支持逗号分隔）",
+        empty_text: str = "还没有额外条目，在下方输入后按回车添加",
         on_change=None,
     ):
         super().__init__(parent)
@@ -669,42 +1103,49 @@ class TagChipEditor(QtWidgets.QWidget):
 
         root = QtWidgets.QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
-        root.setSpacing(6)
+        root.setSpacing(0)
 
         self.chips_box = QtWidgets.QFrame(self)
         self.chips_box.setObjectName("tagChipBox")
         chips_box_layout = QtWidgets.QVBoxLayout(self.chips_box)
-        chips_box_layout.setContentsMargins(8, 6, 8, 6)
-        chips_box_layout.setSpacing(4)
+        chips_box_layout.setContentsMargins(10, 10, 10, 8)
+        chips_box_layout.setSpacing(8)
 
         self.empty_label = QtWidgets.QLabel(self._empty_text, self.chips_box)
-        self.empty_label.setStyleSheet("color: #94A3B8; font-size: 11px; padding: 2px 0;")
+        self.empty_label.setObjectName("tagEmptyLabel")
         chips_box_layout.addWidget(self.empty_label)
 
         self.flow_widget = FlowWidget(self.chips_box, margin=0, h_spacing=6, v_spacing=6)
         chips_box_layout.addWidget(self.flow_widget)
-        root.addWidget(self.chips_box)
+
+        self.divider = QtWidgets.QFrame(self.chips_box)
+        self.divider.setObjectName("tagInputDivider")
+        self.divider.setFixedHeight(1)
+        chips_box_layout.addWidget(self.divider)
 
         add_row = QtWidgets.QHBoxLayout()
-        add_row.setContentsMargins(0, 0, 0, 0)
-        add_row.setSpacing(6)
+        add_row.setContentsMargins(0, 2, 0, 0)
+        add_row.setSpacing(8)
 
-        self.input_edit = QtWidgets.QLineEdit(self)
+        self.input_edit = QtWidgets.QLineEdit(self.chips_box)
+        self.input_edit.setObjectName("tagInlineInput")
         self.input_edit.setPlaceholderText(placeholder)
         self.input_edit.setFixedHeight(28)
         self.input_edit.installEventFilter(self)
 
-        self.add_btn = QtWidgets.QPushButton("+ 添加", self)
-        self.add_btn.setObjectName("path_btn")
+        self.add_btn = QtWidgets.QPushButton("添加", self.chips_box)
+        self.add_btn.setObjectName("tagAddPillBtn")
         self.add_btn.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
         self.add_btn.setAutoDefault(False)
         self.add_btn.setDefault(False)
         self.add_btn.clicked.connect(self._commit_input)
 
         add_row.addWidget(self.input_edit, 1)
-        add_row.addWidget(self.add_btn)
-        root.addLayout(add_row)
+        add_row.addWidget(self.add_btn, 0)
+        chips_box_layout.addLayout(add_row)
+        root.addWidget(self.chips_box)
 
+        self.refresh_theme()
         self._rebuild_chips()
 
     def eventFilter(self, watched, event):
@@ -757,13 +1198,11 @@ class TagChipEditor(QtWidgets.QWidget):
             chip = QtWidgets.QFrame(self.flow_widget)
             chip.setObjectName("tagChip")
             chip_layout = QtWidgets.QHBoxLayout(chip)
-            chip_layout.setContentsMargins(8, 2, 4, 2)
+            chip_layout.setContentsMargins(10, 3, 5, 3)
             chip_layout.setSpacing(4)
 
             lbl = QtWidgets.QLabel(token, chip)
-            lbl.setStyleSheet(
-                "font-size: 11px; font-weight: 600; color: #1E293B; background: transparent;"
-            )
+            lbl.setObjectName("tagChipText")
             rm_btn = QtWidgets.QPushButton("×", chip)
             rm_btn.setObjectName("tagChipRemoveBtn")
             rm_btn.setFixedSize(16, 16)
@@ -779,6 +1218,13 @@ class TagChipEditor(QtWidgets.QWidget):
 
         self.flow_widget.updateGeometry()
         self.chips_box.updateGeometry()
+
+    def refresh_theme(self) -> None:
+        palette = get_ui_palette()
+        muted = palette.get("text_muted", "#8E8E93")
+        self.empty_label.setStyleSheet(
+            f"color: {muted}; font-size: 11px; background: transparent; padding: 2px 2px;"
+        )
 
     def set_items(self, items: list[str]):
         cleaned: list[str] = []
@@ -806,6 +1252,228 @@ class TagChipEditor(QtWidgets.QWidget):
         return "\n".join(self.items())
 
 
+class _EditorNavButton(QtWidgets.QPushButton):
+    """左侧栏分区导航按钮：圆角填充、左侧强调色竖条、副标题与计数胶囊。"""
+
+    def __init__(
+        self,
+        glyph: str,
+        title: str,
+        subtitle: str,
+        parent: QtWidgets.QWidget | None = None,
+    ):
+        super().__init__(parent)
+        self._glyph = glyph
+        self._title = title
+        self._subtitle = subtitle
+        self._badge = ""
+        self._hovered = False
+        self.setCheckable(True)
+        self.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
+        self.setAutoDefault(False)
+        self.setDefault(False)
+        self.setFixedHeight(56)
+        self.setMinimumWidth(164)
+        self.setText(title)
+
+    def set_badge(self, text: str) -> None:
+        self._badge = str(text or "").strip()
+        self.update()
+
+    def set_subtitle(self, text: str) -> None:
+        self._subtitle = str(text or "").strip()
+        self.update()
+
+    def enterEvent(self, event) -> None:
+        self._hovered = True
+        self.update()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event) -> None:
+        self._hovered = False
+        self.update()
+        super().leaveEvent(event)
+
+    def paintEvent(self, _event) -> None:
+        palette = get_ui_palette()
+        dark = _is_dark_palette(palette)
+        accent = QtGui.QColor(palette.get("accent", "#0A84FF"))
+        accent_hover = QtGui.QColor(palette.get("accent_hover", "#0071E3"))
+        accent_soft = QtGui.QColor(palette.get("accent_soft", "#E8F1FF"))
+        text_primary = QtGui.QColor(palette.get("text_primary", "#1D1D1F"))
+        text_secondary = QtGui.QColor(palette.get("text_secondary", "#6E6E73"))
+        text_muted = QtGui.QColor(palette.get("text_muted", "#8E8E93"))
+        soft_bg = QtGui.QColor(palette.get("bg_soft", "#F4F5F7"))
+
+        painter = QtGui.QPainter(self)
+        painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
+        rect = QtCore.QRectF(self.rect()).adjusted(1.0, 1.0, -1.0, -1.0)
+
+        active_fg = accent if dark else accent_hover
+        if self.isChecked():
+            gradient = QtGui.QLinearGradient(rect.topLeft(), rect.bottomRight())
+            wash = QtGui.QColor(accent_soft)
+            wash.setAlpha(245 if not dark else 200)
+            glow = QtGui.QColor(accent)
+            glow.setAlpha(58 if not dark else 86)
+            gradient.setColorAt(0.0, wash)
+            gradient.setColorAt(1.0, glow)
+            painter.setPen(
+                QtGui.QPen(
+                    QtGui.QColor(accent.red(), accent.green(), accent.blue(), 78), 1.0
+                )
+            )
+            painter.setBrush(gradient)
+            painter.drawRoundedRect(rect, 13.0, 13.0)
+
+            bar = QtCore.QRectF(
+                rect.left() + 5.0, rect.top() + 13.0, 3.0, rect.height() - 26.0
+            )
+            painter.setPen(QtCore.Qt.PenStyle.NoPen)
+            painter.setBrush(accent)
+            painter.drawRoundedRect(bar, 1.5, 1.5)
+        elif self._hovered:
+            hover_fill = QtGui.QColor(soft_bg)
+            hover_fill.setAlpha(220 if not dark else 150)
+            painter.setPen(QtCore.Qt.PenStyle.NoPen)
+            painter.setBrush(hover_fill)
+            painter.drawRoundedRect(rect, 13.0, 13.0)
+
+        icon_rect = QtCore.QRectF(
+            rect.left() + 14.0, rect.center().y() - 14.0, 28.0, 28.0
+        )
+        painter.setPen(QtCore.Qt.PenStyle.NoPen)
+        if self.isChecked():
+            tile = QtGui.QColor("#FFFFFF" if not dark else "#1C2430")
+            painter.setBrush(tile)
+            painter.setPen(
+                QtGui.QPen(
+                    QtGui.QColor(accent.red(), accent.green(), accent.blue(), 55), 1.0
+                )
+            )
+        else:
+            icon_bg = QtGui.QColor(soft_bg)
+            icon_bg.setAlpha(210 if not dark else 140)
+            painter.setBrush(icon_bg)
+        painter.drawRoundedRect(icon_rect, 9.0, 9.0)
+        painter.setPen(QtCore.Qt.PenStyle.NoPen)
+
+        glyph_font = QtGui.QFont(self.font())
+        glyph_font.setPixelSize(13)
+        glyph_font.setWeight(QtGui.QFont.Weight.Bold)
+        painter.setFont(glyph_font)
+        painter.setPen(active_fg if self.isChecked() else text_secondary)
+        painter.drawText(icon_rect, QtCore.Qt.AlignmentFlag.AlignCenter, self._glyph)
+
+        badge_width = 0.0
+        if self._badge:
+            badge_font = QtGui.QFont(self.font())
+            badge_font.setPixelSize(10)
+            badge_font.setWeight(QtGui.QFont.Weight.DemiBold)
+            fm_badge = QtGui.QFontMetrics(badge_font)
+            bw = max(20, fm_badge.horizontalAdvance(self._badge) + 12)
+            badge_width = float(bw) + 8.0
+            badge_rect = QtCore.QRectF(
+                rect.right() - bw - 10.0,
+                rect.top() + 10.0,
+                float(bw),
+                18.0,
+            )
+            painter.setPen(QtCore.Qt.PenStyle.NoPen)
+            if self.isChecked():
+                painter.setBrush(accent)
+                painter.drawRoundedRect(badge_rect, 9.0, 9.0)
+                painter.setPen(QtGui.QColor("#FFFFFF"))
+            else:
+                pill_bg = QtGui.QColor(soft_bg)
+                pill_bg.setAlpha(230 if not dark else 160)
+                painter.setBrush(pill_bg)
+                painter.drawRoundedRect(badge_rect, 9.0, 9.0)
+                painter.setPen(text_muted)
+            painter.setFont(badge_font)
+            painter.drawText(
+                badge_rect, QtCore.Qt.AlignmentFlag.AlignCenter, self._badge
+            )
+
+        text_left = icon_rect.right() + 9.0
+        text_right = rect.right() - 10.0 - badge_width
+        title_font = QtGui.QFont(self.font())
+        title_font.setPixelSize(12)
+        title_font.setWeight(
+            QtGui.QFont.Weight.Bold if self.isChecked() else QtGui.QFont.Weight.DemiBold
+        )
+        painter.setFont(title_font)
+        painter.setPen(active_fg if self.isChecked() else text_primary)
+        title_rect = QtCore.QRectF(
+            text_left, rect.top() + 8.0, max(30.0, text_right - text_left), 18.0
+        )
+        painter.drawText(
+            title_rect,
+            QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignVCenter,
+            self._title,
+        )
+
+        sub_font = QtGui.QFont(self.font())
+        sub_font.setPixelSize(10)
+        sub_font.setWeight(QtGui.QFont.Weight.Normal)
+        painter.setFont(sub_font)
+        painter.setPen(text_secondary if self.isChecked() else text_muted)
+        sub_rect = QtCore.QRectF(
+            text_left,
+            rect.top() + 26.0,
+            max(30.0, rect.right() - 10.0 - text_left),
+            16.0,
+        )
+        elided_sub = QtGui.QFontMetrics(sub_font).elidedText(
+            self._subtitle, QtCore.Qt.TextElideMode.ElideRight, int(sub_rect.width())
+        )
+        painter.drawText(
+            sub_rect,
+            QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignVCenter,
+            elided_sub,
+        )
+        painter.end()
+
+
+def _wrap_spin_stepper(
+    spinbox: QtWidgets.QSpinBox | QtWidgets.QDoubleSpinBox,
+    parent: QtWidgets.QWidget | None = None,
+) -> QtWidgets.QFrame:
+    """把原生 QSpinBox 包成胶囊式 [ − | 数值 | + ] 步进器，消除简陋的小上下箭头。"""
+    spinbox.setButtonSymbols(QtWidgets.QAbstractSpinBox.ButtonSymbols.NoButtons)
+    spinbox.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+    spinbox.setObjectName("stepperSpin")
+    spinbox.setFixedHeight(30)
+
+    shell = QtWidgets.QFrame(parent)
+    shell.setObjectName("stepperShell")
+    shell.setFixedHeight(36)
+    row = QtWidgets.QHBoxLayout(shell)
+    row.setContentsMargins(4, 3, 4, 3)
+    row.setSpacing(4)
+
+    minus_btn = QtWidgets.QPushButton("−", shell)
+    minus_btn.setObjectName("stepperBtn")
+    minus_btn.setFixedSize(28, 28)
+    minus_btn.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
+    minus_btn.setAutoDefault(False)
+    minus_btn.setDefault(False)
+    minus_btn.clicked.connect(spinbox.stepDown)
+
+    plus_btn = QtWidgets.QPushButton("+", shell)
+    plus_btn.setObjectName("stepperBtn")
+    plus_btn.setFixedSize(28, 28)
+    plus_btn.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
+    plus_btn.setAutoDefault(False)
+    plus_btn.setDefault(False)
+    plus_btn.clicked.connect(spinbox.stepUp)
+
+    row.addWidget(minus_btn, 0)
+    row.addWidget(spinbox, 1)
+    row.addWidget(plus_btn, 0)
+    return shell
+
+
 class PluginEditorDialog(QtWidgets.QDialog):
     _geometry_settings = QtCore.QSettings("Live2D-LLM", "PluginEditorDialog")
 
@@ -820,243 +1488,20 @@ class PluginEditorDialog(QtWidgets.QDialog):
         self._initial_geometry_applied = False
         self._restored_geometry = False
 
+        self._param_entries = []
+        self._visible_setting_count = 0
+        self._section_chosen = False
+        self._active_section = "params"
+        self._suspend_dirty = False
+        self._baseline = None
+        self._header_group = capability_group(str(trigger or ""))
+        self._header_icon_is_glyph = True
+
         self.setWindowTitle(f"配置能力 - {trigger}")
-        self.resize(680, 580)
-        self.setMinimumSize(540, 420)
+        self.resize(900, 660)
+        self.setMinimumSize(760, 540)
 
-        # 统一接入全局工具弹窗样式 + 小卡片工作台风格
-        self.setStyleSheet(
-            get_tool_dialog_styles()
-            + """
-            QDialog {
-                background-color: #F1F5F9;
-            }
-            QLabel {
-                background: transparent;
-            }
-            QCheckBox {
-                background: transparent;
-            }
-            QFrame#editorHeaderCard {
-                background: #FFFFFF;
-                border: 1px solid #E2E8F0;
-                border-radius: 10px;
-            }
-            QFrame#editorSectionCard {
-                background: #FFFFFF;
-                border: 1px solid #E2E8F0;
-                border-radius: 10px;
-            }
-            QFrame#permSubCard {
-                background: #F8FAFC;
-                border: 1px solid #E2E8F0;
-                border-radius: 8px;
-            }
-            QFrame#permSubCard QLabel, QFrame#permSubCard QCheckBox {
-                background: transparent;
-            }
-            QFrame#settingMiniCard {
-                background: #FFFFFF;
-                border: 1px solid #E2E8F0;
-                border-radius: 9px;
-            }
-            QFrame#settingMiniCard:hover {
-                border-color: #CBD5E1;
-            }
-            QFrame#settingMiniCard QLabel, QFrame#settingMiniCard QCheckBox {
-                background: transparent;
-            }
-            QFrame#tagChipBox {
-                background: #F8FAFC;
-                border: 1px solid #E2E8F0;
-                border-radius: 8px;
-            }
-            QFrame#tagChip {
-                background: #FFFFFF;
-                border: 1px solid #CBD5E1;
-                border-radius: 11px;
-            }
-            QFrame#tagChip:hover {
-                border-color: #93C5FD;
-                background: #EFF6FF;
-            }
-            QPushButton#tagChipRemoveBtn {
-                background: transparent;
-                color: #94A3B8;
-                border: none;
-                border-radius: 8px;
-                padding: 0px;
-                min-height: 16px;
-                max-height: 16px;
-                min-width: 16px;
-                max-width: 16px;
-                font-size: 12px;
-                font-weight: 700;
-            }
-            QPushButton#tagChipRemoveBtn:hover {
-                background: #FEE2E2;
-                color: #DC2626;
-            }
-            QLabel#sectionHeaderTitle {
-                font-size: 13px;
-                font-weight: 700;
-                color: #0F172A;
-            }
-            QPushButton#metaCollapseBtn {
-                background: transparent;
-                border: none;
-                text-align: left;
-                padding: 2px 0px;
-                font-size: 12px;
-                font-weight: 700;
-                color: #334155;
-            }
-            QPushButton#metaCollapseBtn:hover {
-                color: #2563EB;
-            }
-            QPushButton#path_btn {
-                padding: 4px 10px;
-                font-size: 11px;
-                min-height: 26px;
-                max-height: 28px;
-                border-radius: 6px;
-            }
-            QPushButton#dangerSmallBtn {
-                background-color: #FEF2F2;
-                color: #DC2626;
-                border: 1px solid #FECACA;
-                border-radius: 6px;
-                padding: 2px 8px;
-                font-size: 11px;
-                font-weight: 700;
-            }
-            QPushButton#dangerSmallBtn:hover {
-                background-color: #DC2626;
-                color: #FFFFFF;
-            }
-            """
-        )
-
-        layout = QtWidgets.QVBoxLayout(self)
-        layout.setContentsMargins(14, 14, 14, 14)
-        layout.setSpacing(10)
-
-        # --- 1. 顶部身份摘要小卡片 ---
-        header_card = QtWidgets.QFrame(self)
-        header_card.setObjectName("editorHeaderCard")
-        header_layout = QtWidgets.QHBoxLayout(header_card)
-        header_layout.setContentsMargins(14, 10, 14, 10)
-        header_layout.setSpacing(10)
-
-        header_left = QtWidgets.QVBoxLayout()
-        header_left.setContentsMargins(0, 0, 0, 0)
-        header_left.setSpacing(3)
-
-        title_row = QtWidgets.QHBoxLayout()
-        title_row.setContentsMargins(0, 0, 0, 0)
-        title_row.setSpacing(8)
-        self.header_name_label = QtWidgets.QLabel(str(trigger or "插件"), header_card)
-        self.header_name_label.setStyleSheet(
-            "font-size: 15px; font-weight: 700; color: #0F172A;"
-        )
-        title_row.addWidget(self.header_name_label)
-
-        group_key = capability_group(str(trigger or ""))
-        self.header_group_badge = QtWidgets.QLabel(
-            capability_group_label(group_key), header_card
-        )
-        self.header_group_badge.setStyleSheet(
-            PluginManagerDialog._group_badge_style(group_key)
-        )
-        self.header_group_badge.setFixedHeight(18)
-        title_row.addWidget(self.header_group_badge)
-
-        self.header_trigger_badge = QtWidgets.QLabel(f"⚡ {trigger}", header_card)
-        self.header_trigger_badge.setStyleSheet(
-            "background: #F1F5F9; color: #475569; border: 1px solid #E2E8F0;"
-            "padding: 1px 7px; border-radius: 5px; font-size: 10px; font-weight: 600;"
-            "font-family: 'Cascadia Mono', 'Consolas', monospace;"
-        )
-        self.header_trigger_badge.setFixedHeight(18)
-        title_row.addWidget(self.header_trigger_badge)
-        title_row.addStretch(1)
-        header_left.addLayout(title_row)
-
-        self.header_desc_label = QtWidgets.QLabel("", header_card)
-        self.header_desc_label.setStyleSheet("color: #64748B; font-size: 11px;")
-        self.header_desc_label.setWordWrap(True)
-        header_left.addWidget(self.header_desc_label)
-        header_layout.addLayout(header_left, 1)
-
-        if str(self.trigger or "").strip() == "knowledge_base":
-            ingest_btn = QtWidgets.QPushButton("📚 保存并学习", header_card)
-            ingest_btn.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
-            ingest_btn.setAutoDefault(False)
-            ingest_btn.clicked.connect(self._save_and_run_knowledge_ingest)
-            header_layout.addWidget(ingest_btn)
-        elif str(self.trigger or "").strip() == "search_web":
-            check_btn = QtWidgets.QPushButton("🌐 检测搜索接口", header_card)
-            check_btn.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
-            check_btn.setAutoDefault(False)
-            check_btn.clicked.connect(self._run_search_endpoint_check)
-            header_layout.addWidget(check_btn)
-
-        layout.addWidget(header_card)
-
-        # 保留隐藏的 tab_widget 属性以兼容外部引用/测试，实际采用一屏流式小卡片
-        self.tab_widget = QtWidgets.QTabWidget(self)
-        self.tab_widget.setVisible(False)
-        self.settings_tab = QtWidgets.QWidget()
-        self.basic_tab = QtWidgets.QWidget()
-        self.tab_widget.addTab(self.settings_tab, "⚙️ 参数与权限")
-        self.tab_widget.addTab(self.basic_tab, "🔧 触发词与元数据")
-
-        # --- 2. 单页流式小卡片滚动区 ---
-        self.settings_scroll = QtWidgets.QScrollArea(self)
-        self.settings_scroll.setWidgetResizable(True)
-        self.settings_scroll.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
-        self.settings_scroll.setStyleSheet(
-            "QScrollArea { background: transparent; border: none; }"
-            "QScrollArea > QWidget > QWidget { background: transparent; }"
-        )
-        layout.addWidget(self.settings_scroll, 1)
-
-        self._setup_card_stream()
-
-        # --- 3. 底部按钮区 ---
-        btn_layout = QtWidgets.QHBoxLayout()
-        btn_layout.setContentsMargins(0, 0, 0, 0)
-        btn_layout.setSpacing(8)
-
-        reset_btn = QtWidgets.QPushButton("恢复默认", self)
-        reset_btn.setObjectName("reset_btn")
-        reset_btn.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
-        reset_btn.setAutoDefault(False)
-        reset_btn.setDefault(False)
-        reset_btn.clicked.connect(self._reset_config)
-        btn_layout.addWidget(reset_btn)
-
-        btn_layout.addStretch(1)
-
-        cancel_btn = QtWidgets.QPushButton("取消", self)
-        cancel_btn.setObjectName("cancel_btn")
-        cancel_btn.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
-        cancel_btn.setAutoDefault(False)
-        cancel_btn.setDefault(False)
-        cancel_btn.clicked.connect(self.reject)
-        btn_layout.addWidget(cancel_btn)
-
-        save_btn = QtWidgets.QPushButton("保存配置", self)
-        save_btn.setObjectName("primaryAction")
-        save_btn.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
-        save_btn.setAutoDefault(False)
-        save_btn.setDefault(False)
-        save_btn.clicked.connect(self._save_config)
-        btn_layout.addWidget(save_btn)
-
-        layout.addLayout(btn_layout)
-
-        # 加载配置
+        self._build_editor_chrome()
         self._load_config()
 
     def showEvent(self, arg__1):
@@ -1073,7 +1518,7 @@ class PluginEditorDialog(QtWidgets.QDialog):
 
     def _settings_key(self) -> str:
         trigger = str(self.trigger or "default").strip() or "default"
-        return f"geometry/{trigger}"
+        return f"geometry_v2/{trigger}"
 
     def _save_window_geometry(self):
         try:
@@ -1105,11 +1550,11 @@ class PluginEditorDialog(QtWidgets.QDialog):
             self._initial_geometry_applied = True
             return
 
-        preferred_width = min(max(680, self.width()), int(available.width() * 0.58))
-        preferred_height = min(max(580, self.height()), int(available.height() * 0.78))
+        preferred_width = min(max(900, self.width()), int(available.width() * 0.72))
+        preferred_height = min(max(660, self.height()), int(available.height() * 0.84))
 
-        target_width = max(540, min(preferred_width, available.width()))
-        target_height = max(420, min(preferred_height, available.height()))
+        target_width = max(760, min(preferred_width, available.width()))
+        target_height = max(540, min(preferred_height, available.height()))
 
         self.resize(target_width, target_height)
         self._initial_geometry_applied = True
@@ -1162,278 +1607,1009 @@ class PluginEditorDialog(QtWidgets.QDialog):
 
         self.move(target_x, target_y)
 
-    def _setup_card_stream(self):
-        """构建一屏流式小卡片布局：触发词胶囊卡 + 权限小卡 + 参数小卡片网格 + 折叠基本信息卡"""
-        page_body = QtWidgets.QWidget(self.settings_scroll)
-        page_layout = QtWidgets.QVBoxLayout(page_body)
-        page_layout.setContentsMargins(2, 2, 4, 4)
+    _SECTION_COPY = {
+        "params": ("功能参数", "开关、数值、密钥和这个能力自己的配置"),
+        "access": ("触发与调用", "额外触发词、超时，以及谁可以调用它"),
+        "meta": ("能力信息", "展示名称、说明，以及锁定的协议标识"),
+    }
+
+    def _build_editor_chrome(self):
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(22, 18, 22, 16)
+        layout.setSpacing(14)
+
+        layout.addWidget(self._build_notice_bar())
+
+        body = QtWidgets.QHBoxLayout()
+        body.setContentsMargins(0, 0, 0, 0)
+        body.setSpacing(12)
+        body.addWidget(self._build_sidebar(), 0)
+        body.addWidget(self._build_stage(), 1)
+        layout.addLayout(body, 1)
+        layout.addWidget(self._build_footer())
+
+        self.tab_widget = QtWidgets.QTabWidget(self)
+        self.tab_widget.setVisible(False)
+        self.settings_tab = QtWidgets.QWidget()
+        self.basic_tab = QtWidgets.QWidget()
+        self.tab_widget.addTab(self.settings_tab, "功能参数")
+        self.tab_widget.addTab(self.basic_tab, "触发与能力信息")
+        layout.addWidget(self.tab_widget)
+
+        self._wire_form_watchers()
+        self._on_toggle_unlock_meta(False)
+        self._sync_access_control_inputs()
+        self._apply_editor_theme()
+
+    def _build_sidebar(self) -> QtWidgets.QFrame:
+        sidebar = QtWidgets.QFrame(self)
+        sidebar.setObjectName("editorSidebarCard")
+        sidebar.setFixedWidth(248)
+        self.section_bar = sidebar
+        column = QtWidgets.QVBoxLayout(sidebar)
+        column.setContentsMargins(14, 16, 14, 14)
+        column.setSpacing(12)
+
+        identity = QtWidgets.QHBoxLayout()
+        identity.setContentsMargins(2, 0, 2, 0)
+        identity.setSpacing(10)
+        self.header_icon = self._build_header_icon()
+        identity.addWidget(self.header_icon, 0, QtCore.Qt.AlignmentFlag.AlignTop)
+        name_col = QtWidgets.QVBoxLayout()
+        name_col.setContentsMargins(0, 0, 0, 0)
+        name_col.setSpacing(4)
+        self.header_name_label = QtWidgets.QLabel(str(self.trigger or "能力"), sidebar)
+        self.header_name_label.setWordWrap(True)
+        name_col.addWidget(self.header_name_label)
+        badge_row = QtWidgets.QHBoxLayout()
+        badge_row.setContentsMargins(0, 0, 0, 0)
+        badge_row.setSpacing(6)
+        self.header_group_badge = QtWidgets.QLabel(
+            capability_group_label(self._header_group), sidebar
+        )
+        self.header_group_badge.setStyleSheet(
+            PluginManagerDialog._group_badge_style(self._header_group)
+        )
+        self.header_group_badge.setFixedHeight(18)
+        self.header_trigger_badge = QtWidgets.QLabel(f"⚡ {self.trigger}", sidebar)
+        self.header_trigger_badge.setObjectName("editorTriggerBadge")
+        self.header_trigger_badge.setFixedHeight(18)
+        badge_row.addWidget(self.header_group_badge, 0)
+        badge_row.addWidget(self.header_trigger_badge, 0)
+        badge_row.addStretch(1)
+        name_col.addLayout(badge_row)
+        identity.addLayout(name_col, 1)
+        column.addLayout(identity)
+
+        self.header_desc_label = QtWidgets.QLabel("暂无能力说明", sidebar)
+        self.header_desc_label.setObjectName("editorHeaderDesc")
+        self.header_desc_label.setWordWrap(True)
+        column.addWidget(self.header_desc_label)
+
+        enable_row = QtWidgets.QFrame(sidebar)
+        enable_row.setObjectName("editorEnableRow")
+        enable_layout = QtWidgets.QHBoxLayout(enable_row)
+        enable_layout.setContentsMargins(12, 8, 12, 8)
+        enable_layout.setSpacing(8)
+        enable_copy = QtWidgets.QVBoxLayout()
+        enable_copy.setSpacing(0)
+        enable_title = QtWidgets.QLabel("插件开关", enable_row)
+        enable_title.setObjectName("settingFieldTitle")
+        self.enable_state_label = QtWidgets.QLabel("启用中", enable_row)
+        self.enable_state_label.setObjectName("settingFieldDesc")
+        enable_copy.addWidget(enable_title)
+        enable_copy.addWidget(self.enable_state_label)
+        self.plugin_enable_switch = _ToggleSwitch(True)
+        self.plugin_enable_switch.toggled.connect(self._on_plugin_enable_toggled)
+        enable_layout.addLayout(enable_copy, 1)
+        enable_layout.addWidget(self.plugin_enable_switch, 0)
+        column.addWidget(enable_row)
+
+        self._section_buttons = {}
+        nav_specs = (
+            ("params", "参", "功能参数", "开关、数值、密钥"),
+            ("access", "触", "触发与调用", "触发词和权限"),
+            ("meta", "信", "能力信息", "名称与协议"),
+        )
+        for key, glyph, title, subtitle in nav_specs:
+            button = _EditorNavButton(glyph, title, subtitle, sidebar)
+            button.setObjectName("editorNavBtn")
+            button.setAutoExclusive(True)
+            button.clicked.connect(
+                lambda _checked=False, section=key: self._select_section(section)
+            )
+            column.addWidget(button)
+            self._section_buttons[key] = button
+
+        column.addStretch(1)
+
+        self.sidebar_actions = QtWidgets.QFrame(sidebar)
+        self.sidebar_actions.setObjectName("editorActionWell")
+        actions = QtWidgets.QVBoxLayout(self.sidebar_actions)
+        actions.setContentsMargins(0, 0, 0, 0)
+        actions.setSpacing(6)
+        self.readme_btn = QtWidgets.QPushButton("使用说明", self.sidebar_actions)
+        self.readme_btn.setObjectName("ghostPillBtn")
+        self.readme_btn.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
+        self.readme_btn.setAutoDefault(False)
+        self.readme_btn.clicked.connect(self._open_readme)
+        readme_path = ""
+        getter = getattr(self.plugin_manager, "get_plugin_readme_path", None)
+        if callable(getter):
+            try:
+                readme_path = str(getter(self.trigger) or "")
+            except Exception:
+                readme_path = ""
+        self.readme_btn.setVisible(bool(readme_path))
+        actions.addWidget(self.readme_btn)
+
+        trigger = str(self.trigger or "").strip()
+        if trigger == "knowledge_base":
+            ingest_btn = QtWidgets.QPushButton("保存并学习", self.sidebar_actions)
+            ingest_btn.setObjectName("ghostPillBtn")
+            ingest_btn.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
+            ingest_btn.setAutoDefault(False)
+            ingest_btn.clicked.connect(self._save_and_run_knowledge_ingest)
+            actions.addWidget(ingest_btn)
+        elif trigger == "search_web":
+            check_btn = QtWidgets.QPushButton("检测搜索接口", self.sidebar_actions)
+            check_btn.setObjectName("ghostPillBtn")
+            check_btn.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
+            check_btn.setAutoDefault(False)
+            check_btn.clicked.connect(self._run_search_endpoint_check)
+            actions.addWidget(check_btn)
+        self.sidebar_actions.setVisible(actions.count() > 0 and any(
+            actions.itemAt(index).widget() and not actions.itemAt(index).widget().isHidden()
+            for index in range(actions.count())
+        ))
+        column.addWidget(self.sidebar_actions)
+
+        self.sidebar_mode_label = QtWidgets.QLabel("", sidebar)
+        self.sidebar_mode_label.setObjectName("editorModeLine")
+        self.sidebar_mode_label.setWordWrap(True)
+        column.addWidget(self.sidebar_mode_label)
+        return sidebar
+
+    def _build_stage(self) -> QtWidgets.QFrame:
+        stage = QtWidgets.QFrame(self)
+        stage.setObjectName("editorStageCard")
+        self.stage_card = stage
+        column = QtWidgets.QVBoxLayout(stage)
+        column.setContentsMargins(16, 14, 16, 12)
+        column.setSpacing(10)
+
+        header = QtWidgets.QHBoxLayout()
+        header.setContentsMargins(2, 0, 2, 0)
+        header.setSpacing(12)
+        titles = QtWidgets.QVBoxLayout()
+        titles.setContentsMargins(0, 0, 0, 0)
+        titles.setSpacing(2)
+        self.stage_kicker = QtWidgets.QLabel("配置", stage)
+        self.stage_kicker.setObjectName("stageKicker")
+        self.stage_title = QtWidgets.QLabel("功能参数", stage)
+        self.stage_title.setObjectName("stageTitle")
+        self.stage_subtitle = QtWidgets.QLabel("", stage)
+        self.stage_subtitle.setObjectName("stageSubtitle")
+        self.stage_subtitle.setWordWrap(True)
+        titles.addWidget(self.stage_kicker)
+        titles.addWidget(self.stage_title)
+        titles.addWidget(self.stage_subtitle)
+        header.addLayout(titles, 1)
+
+        self.param_search = QtWidgets.QLineEdit(stage)
+        self.param_search.setObjectName("pluginSearchInput")
+        self.param_search.setPlaceholderText("搜索参数")
+        self.param_search.setClearButtonEnabled(True)
+        self.param_search.setFixedHeight(34)
+        self.param_search.setMinimumWidth(180)
+        self.param_search.setMaximumWidth(240)
+        self.param_search.textChanged.connect(self._reflow_settings)
+        self.param_search.setVisible(False)
+        self._search_action = self.param_search.addAction(
+            self._make_search_icon(),
+            QtWidgets.QLineEdit.ActionPosition.TrailingPosition,
+        )
+        header.addWidget(self.param_search, 0, QtCore.Qt.AlignmentFlag.AlignTop)
+        column.addLayout(header)
+
+        self.section_stack = QtWidgets.QStackedWidget(stage)
+        self.section_stack.addWidget(self._build_params_page())
+        self.section_stack.addWidget(self._build_access_page())
+        self.section_stack.addWidget(self._build_meta_page())
+        column.addWidget(self.section_stack, 1)
+        return stage
+
+    def _build_footer(self) -> QtWidgets.QFrame:
+        footer_card = QtWidgets.QFrame(self)
+        footer_card.setObjectName("editorFooterCard")
+        self.footer_card = footer_card
+        footer = QtWidgets.QHBoxLayout(footer_card)
+        footer.setContentsMargins(12, 10, 12, 10)
+        footer.setSpacing(8)
+        self.reset_btn = QtWidgets.QPushButton("恢复默认", footer_card)
+        self.reset_btn.setObjectName("ghostPillBtn")
+        self.reset_btn.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
+        self.reset_btn.setAutoDefault(False)
+        self.reset_btn.clicked.connect(self._reset_config)
+        footer.addWidget(self.reset_btn)
+        footer.addStretch(1)
+
+        self.dirty_label = QtWidgets.QLabel("✓  已与磁盘同步", footer_card)
+        self.dirty_label.setObjectName("editorDirtyOff")
+        self.dirty_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        self.dirty_label.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Maximum,
+            QtWidgets.QSizePolicy.Policy.Fixed,
+        )
+        footer.addWidget(self.dirty_label, 0, QtCore.Qt.AlignmentFlag.AlignCenter)
+        footer.addStretch(1)
+
+        self.cancel_btn = QtWidgets.QPushButton("取消", footer_card)
+        self.cancel_btn.setObjectName("cancel_btn")
+        self.cancel_btn.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
+        self.cancel_btn.setAutoDefault(False)
+        self.cancel_btn.clicked.connect(self.reject)
+        footer.addWidget(self.cancel_btn)
+
+        self.save_btn = QtWidgets.QPushButton("保存更改", footer_card)
+        self.save_btn.setObjectName("primaryAction")
+        self.save_btn.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
+        self.save_btn.setAutoDefault(False)
+        self.save_btn.clicked.connect(self._save_config)
+        footer.addWidget(self.save_btn)
+        return footer_card
+
+    def _build_notice_bar(self) -> QtWidgets.QFrame:
+        self.notice_bar = QtWidgets.QFrame(self)
+        self.notice_bar.setObjectName("editorNoticeWarn")
+        notice_layout = QtWidgets.QHBoxLayout(self.notice_bar)
+        notice_layout.setContentsMargins(12, 8, 12, 8)
+        notice_layout.setSpacing(8)
+        self.notice_label = QtWidgets.QLabel("", self.notice_bar)
+        self.notice_label.setObjectName("editorNoticeText")
+        self.notice_label.setWordWrap(True)
+        notice_layout.addWidget(self.notice_label, 1)
+        self.notice_bar.setVisible(False)
+        return self.notice_bar
+
+    def _plugin_enabled_now(self) -> bool:
+        manager = self.plugin_manager
+        checker = getattr(manager, "is_plugin_enabled", None)
+        if not callable(checker):
+            return True
+        try:
+            return bool(checker(self.trigger))
+        except Exception:
+            return True
+
+    def _sync_enable_switch(self):
+        if not hasattr(self, "plugin_enable_switch"):
+            return
+        enabled = self._plugin_enabled_now()
+        switch = self.plugin_enable_switch
+        switch.blockSignals(True)
+        switch.setChecked(enabled)
+        switch.blockSignals(False)
+        manager = self.plugin_manager
+        can_toggle = callable(getattr(manager, "enable_plugin", None)) and callable(
+            getattr(manager, "disable_plugin", None)
+        )
+        switch.setEnabled(can_toggle)
+        if hasattr(self, "enable_state_label"):
+            self.enable_state_label.setText("启用中" if enabled else "已停用")
+
+    def _on_plugin_enable_toggled(self, checked: bool):
+        manager = self.plugin_manager
+        enable = getattr(manager, "enable_plugin", None)
+        disable = getattr(manager, "disable_plugin", None)
+        if not callable(enable) or not callable(disable):
+            self._sync_enable_switch()
+            return
+        ok = False
+        try:
+            ok = bool(enable(self.trigger) if checked else disable(self.trigger))
+        except Exception:
+            ok = False
+        if not ok:
+            self._sync_enable_switch()
+            self._show_notice("插件开关没有改成功", "warn")
+            return
+        self._sync_enable_switch()
+
+    def _refresh_sidebar_summary(self):
+        if not hasattr(self, "sidebar_mode_label"):
+            return
+        mode = ""
+        if hasattr(self, "type_combo"):
+            mode = self.type_combo.currentText().strip()
+        timeout = self.timeout_input.value() if hasattr(self, "timeout_input") else 0
+        alias_count = len(self.aliases_input._items) if hasattr(self, "aliases_input") else 0
+        self.sidebar_mode_label.setText(
+            f"{mode or 'react'}  ·  {timeout} 秒  ·  {alias_count} 个别名"
+        )
+
+    def _build_header_icon(self) -> QtWidgets.QLabel:
+        label = QtWidgets.QLabel()
+        label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        label.setFixedSize(52, 52)
+        icon_path = None
+        getter = getattr(self.plugin_manager, "get_plugin_icon_path", None)
+        if callable(getter):
+            try:
+                icon_path = getter(self.trigger)
+            except Exception:
+                icon_path = None
+        pixmap = QtGui.QPixmap()
+        if icon_path:
+            pixmap = resolve_icon(icon_path).pixmap(34, 34)
+        if not pixmap.isNull():
+            label.setPixmap(pixmap)
+            label.setStyleSheet("background: transparent; border-radius: 16px;")
+            self._header_icon_is_glyph = False
+            return label
+        self._header_icon_is_glyph = True
+        self._paint_header_glyph(label)
+        return label
+
+    def _paint_header_glyph(self, label: QtWidgets.QLabel):
+        glyph, icon_bg, icon_fg = _group_icon_spec(self._header_group, get_ui_palette())
+        label.setText(glyph)
+        tint = QtGui.QColor(icon_bg)
+        if not tint.isValid():
+            tint = QtGui.QColor("#EEF2FF")
+        top = tint.lighter(112).name()
+        label.setStyleSheet(
+            "background: qlineargradient(x1:0, y1:0, x2:1, y2:1, "
+            f"stop:0 {top}, stop:1 {icon_bg});"
+            f"color: {icon_fg}; border-radius: 16px; font-size: 20px; font-weight: 700;"
+            f"border: 1px solid {hex_to_rgba('#FFFFFF', 0.72)};"
+        )
+
+    def _make_scroll(self) -> QtWidgets.QScrollArea:
+        scroll = QtWidgets.QScrollArea(self)
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
+        scroll.setStyleSheet(
+            "QScrollArea { background: transparent; border: none; }"
+            "QScrollArea > QWidget > QWidget { background: transparent; }"
+        )
+        return scroll
+
+    def _build_params_page(self) -> QtWidgets.QScrollArea:
+        self.settings_scroll = self._make_scroll()
+        page = QtWidgets.QWidget()
+        page_layout = QtWidgets.QVBoxLayout(page)
+        page_layout.setContentsMargins(2, 4, 8, 8)
         page_layout.setSpacing(10)
 
-        # --- 卡片 1：🎯 快捷触发词（胶囊标签流，告别手动回车换行）---
-        aliases_card = QtWidgets.QFrame(page_body)
-        aliases_card.setObjectName("editorSectionCard")
-        aliases_layout = QtWidgets.QVBoxLayout(aliases_card)
-        aliases_layout.setContentsMargins(12, 10, 12, 10)
-        aliases_layout.setSpacing(6)
+        self.params_empty = QtWidgets.QFrame(page)
+        self.params_empty.setObjectName("editorEmptyCard")
+        empty_layout = QtWidgets.QVBoxLayout(self.params_empty)
+        empty_layout.setContentsMargins(20, 28, 20, 28)
+        empty_layout.setSpacing(6)
+        empty_title = QtWidgets.QLabel("这个能力没有单独的功能参数", self.params_empty)
+        empty_title.setObjectName("sectionHeaderTitle")
+        empty_title.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        empty_body = QtWidgets.QLabel("触发词、超时和谁可以调用它，在「触发与权限」。", self.params_empty)
+        empty_body.setObjectName("settingFieldDesc")
+        empty_body.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        empty_body.setWordWrap(True)
+        empty_layout.addWidget(empty_title)
+        empty_layout.addWidget(empty_body)
+        self.params_empty.setVisible(False)
+        page_layout.addWidget(self.params_empty)
 
+        self.custom_settings_card = QtWidgets.QWidget(page)
+        custom_layout = QtWidgets.QVBoxLayout(self.custom_settings_card)
+        custom_layout.setContentsMargins(0, 0, 0, 0)
+        custom_layout.setSpacing(8)
+        self.settings_container = QtWidgets.QWidget(self.custom_settings_card)
+        self.settings_layout = QtWidgets.QVBoxLayout(self.settings_container)
+        self.settings_layout.setContentsMargins(0, 0, 0, 0)
+        self.settings_layout.setSpacing(10)
+        self._param_groups = {}
+
+        self.param_filter_empty = QtWidgets.QFrame(self.settings_container)
+        self.param_filter_empty.setObjectName("editorEmptyCard")
+        filter_layout = QtWidgets.QVBoxLayout(self.param_filter_empty)
+        filter_layout.setContentsMargins(16, 18, 16, 18)
+        filter_layout.setSpacing(8)
+        filter_label = QtWidgets.QLabel("没有匹配的参数", self.param_filter_empty)
+        filter_label.setObjectName("sectionHeaderTitle")
+        filter_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        clear_btn = QtWidgets.QPushButton("清空筛选", self.param_filter_empty)
+        clear_btn.setObjectName("path_btn")
+        clear_btn.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
+        clear_btn.setAutoDefault(False)
+        clear_btn.clicked.connect(self.param_search.clear)
+        filter_layout.addWidget(filter_label)
+        filter_layout.addWidget(clear_btn, 0, QtCore.Qt.AlignmentFlag.AlignHCenter)
+        self.param_filter_empty.setVisible(False)
+        self.settings_layout.addWidget(self.param_filter_empty)
+
+        self.hidden_hint_label = QtWidgets.QLabel("", self.settings_container)
+        self.hidden_hint_label.setObjectName("settingFieldDesc")
+        self.hidden_hint_label.setWordWrap(True)
+        self.hidden_hint_label.setVisible(False)
+        self.settings_layout.addWidget(self.hidden_hint_label)
+        custom_layout.addWidget(self.settings_container)
+        page_layout.addWidget(self.custom_settings_card)
+        page_layout.addStretch(1)
+        self.settings_scroll.setWidget(page)
+        return self.settings_scroll
+
+    def _build_access_page(self) -> QtWidgets.QScrollArea:
+        scroll = self._make_scroll()
+        page = QtWidgets.QWidget()
+        page_layout = QtWidgets.QVBoxLayout(page)
+        page_layout.setContentsMargins(2, 4, 8, 8)
+        page_layout.setSpacing(12)
+
+        aliases_card = QtWidgets.QFrame(page)
+        aliases_card.setObjectName("editorGroupCard")
+        aliases_layout = QtWidgets.QVBoxLayout(aliases_card)
+        aliases_layout.setContentsMargins(14, 12, 14, 14)
+        aliases_layout.setSpacing(10)
         aliases_head = QtWidgets.QHBoxLayout()
-        aliases_head.setContentsMargins(0, 0, 0, 0)
         aliases_head.setSpacing(8)
-        aliases_title = QtWidgets.QLabel("🎯 快捷触发词", aliases_card)
+        aliases_title = QtWidgets.QLabel("快捷触发词", aliases_card)
         aliases_title.setObjectName("sectionHeaderTitle")
         aliases_head.addWidget(aliases_title)
-
         self.alias_count_badge = QtWidgets.QLabel("0 个", aliases_card)
-        self.alias_count_badge.setStyleSheet(
-            "background: #EFF6FF; color: #2563EB; border: 1px solid #BFDBFE;"
-            "padding: 1px 6px; border-radius: 8px; font-size: 10px; font-weight: 600;"
-        )
+        self.alias_count_badge.setObjectName("countBadge")
         aliases_head.addWidget(self.alias_count_badge)
         aliases_head.addStretch(1)
-
-        aliases_hint = QtWidgets.QLabel("命中任一词即可唤醒此能力", aliases_card)
-        aliases_hint.setStyleSheet("color: #94A3B8; font-size: 11px;")
-        aliases_head.addWidget(aliases_hint)
         aliases_layout.addLayout(aliases_head)
-
+        aliases_hint = QtWidgets.QLabel("命中其中任意一个，都会唤起这个能力", aliases_card)
+        aliases_hint.setObjectName("settingFieldDesc")
+        aliases_layout.addWidget(aliases_hint)
         self.aliases_input = TagChipEditor(
             aliases_card,
-            placeholder="输入新触发词（如 /日报、查天气），按回车或点 + 添加，支持逗号分隔多个…",
-            empty_text="暂无额外触发别名（仅使用主触发词），可在下方输入添加",
-            on_change=self._update_alias_count_badge,
+            placeholder="输入触发词，回车添加。逗号可以一次加多个",
+            empty_text="还没有额外触发词，目前只认主触发词",
+            on_change=self._on_alias_change,
         )
         aliases_layout.addWidget(self.aliases_input)
         page_layout.addWidget(aliases_card)
 
-        # --- 卡片 2：🛡️ 触发范围与超时（双列内嵌小卡片）---
-        access_card = QtWidgets.QFrame(page_body)
-        access_card.setObjectName("editorSectionCard")
-        access_layout = QtWidgets.QVBoxLayout(access_card)
-        access_layout.setContentsMargins(12, 10, 12, 10)
-        access_layout.setSpacing(8)
+        limits = QtWidgets.QFrame(page)
+        limits.setObjectName("editorGroupCard")
+        limits_layout = QtWidgets.QVBoxLayout(limits)
+        limits_layout.setContentsMargins(6, 8, 6, 8)
+        limits_layout.setSpacing(0)
+        limits_title = QtWidgets.QLabel("调用限制", limits)
+        limits_title.setObjectName("groupHeader")
+        limits_layout.addWidget(limits_title)
 
-        access_head = QtWidgets.QHBoxLayout()
-        access_head.setContentsMargins(0, 0, 0, 0)
-        access_title = QtWidgets.QLabel("🛡️ 触发范围与超时", access_card)
-        access_title.setObjectName("sectionHeaderTitle")
-        access_head.addWidget(access_title)
-        access_head.addStretch(1)
-
-        timeout_lbl = QtWidgets.QLabel("超时限制:", access_card)
-        timeout_lbl.setStyleSheet("color: #475569; font-size: 11px; font-weight: 600;")
-        self.timeout_input = QtWidgets.QSpinBox(access_card)
+        self.timeout_input = QtWidgets.QSpinBox(limits)
         self.timeout_input.setRange(1, 300)
         self.timeout_input.setSuffix(" 秒")
-        self.timeout_input.setFixedWidth(82)
-        self.timeout_input.setFixedHeight(26)
-        access_head.addWidget(timeout_lbl)
-        access_head.addWidget(self.timeout_input)
-        access_layout.addLayout(access_head)
+        timeout_stepper = _wrap_spin_stepper(self.timeout_input, limits)
+        timeout_stepper.setFixedWidth(168)
+        limits_layout.addWidget(
+            self._inset_row(
+                limits,
+                "超时限制",
+                "单次调用超过这个时间会停下来",
+                timeout_stepper,
+            )
+        )
+        self.allow_local_checkbox = _ToggleSwitch(True)
+        limits_layout.addWidget(
+            self._inset_row(
+                limits,
+                "允许桌面本地触发",
+                "麦克风、桌面聊天框和屏幕插话都可以用它",
+                self.allow_local_checkbox,
+            )
+        )
+        page_layout.addWidget(limits)
 
-        perm_cols = QtWidgets.QHBoxLayout()
-        perm_cols.setContentsMargins(0, 0, 0, 0)
-        perm_cols.setSpacing(8)
+        qq_card = QtWidgets.QFrame(page)
+        qq_card.setObjectName("editorGroupCard")
+        qq_layout = QtWidgets.QVBoxLayout(qq_card)
+        qq_layout.setContentsMargins(6, 8, 6, 10)
+        qq_layout.setSpacing(0)
+        qq_title = QtWidgets.QLabel("QQ 通道", qq_card)
+        qq_title.setObjectName("groupHeader")
+        qq_layout.addWidget(qq_title)
+        self.allow_remote_qq_checkbox = _ToggleSwitch(True)
+        qq_layout.addWidget(
+            self._inset_row(
+                qq_card,
+                "允许 QQ 消息触发",
+                "关掉之后，下面三项一起停用",
+                self.allow_remote_qq_checkbox,
+            )
+        )
+        self.qq_perm_row = QtWidgets.QFrame(qq_card)
+        self.qq_perm_row.setObjectName("permSubCard")
+        pills = QtWidgets.QHBoxLayout(self.qq_perm_row)
+        pills.setContentsMargins(12, 10, 12, 10)
+        pills.setSpacing(16)
+        self.allow_qq_owner_checkbox = _ToggleSwitch(True)
+        self.allow_qq_others_checkbox = _ToggleSwitch(False)
+        self.allow_group_without_at_checkbox = _ToggleSwitch(False)
+        for label, switch in (
+            ("主人", self.allow_qq_owner_checkbox),
+            ("其他联系人", self.allow_qq_others_checkbox),
+            ("群聊免 @", self.allow_group_without_at_checkbox),
+        ):
+            pills.addWidget(self._mini_switch(self.qq_perm_row, label, switch))
+        pills.addStretch(1)
+        qq_layout.addWidget(self.qq_perm_row)
+        self.allow_remote_qq_checkbox.toggled.connect(self._sync_access_control_inputs)
+        page_layout.addWidget(qq_card)
+        page_layout.addStretch(1)
+        scroll.setWidget(page)
+        return scroll
 
-        # 左小卡：桌面本地
-        local_sub = QtWidgets.QFrame(access_card)
-        local_sub.setObjectName("permSubCard")
-        local_sub_layout = QtWidgets.QVBoxLayout(local_sub)
-        local_sub_layout.setContentsMargins(10, 8, 10, 8)
-        local_sub_layout.setSpacing(3)
-        self.allow_local_checkbox = QtWidgets.QCheckBox("💻 允许桌面本地触发", local_sub)
-        self.allow_local_checkbox.setStyleSheet("font-weight: 600; font-size: 12px; color: #1E293B; background: transparent;")
-        local_desc = QtWidgets.QLabel("麦克风语音、桌面聊天框与屏幕插话", local_sub)
-        local_desc.setStyleSheet("color: #64748B; font-size: 11px; padding-left: 24px; background: transparent;")
-        local_sub_layout.addWidget(self.allow_local_checkbox)
-        local_sub_layout.addWidget(local_desc)
-        perm_cols.addWidget(local_sub, 4)
+    def _build_meta_page(self) -> QtWidgets.QScrollArea:
+        scroll = self._make_scroll()
+        page = QtWidgets.QWidget()
+        page_layout = QtWidgets.QVBoxLayout(page)
+        page_layout.setContentsMargins(2, 4, 8, 8)
+        page_layout.setSpacing(12)
 
-        # 右小卡：QQ 侧
-        qq_sub = QtWidgets.QFrame(access_card)
-        qq_sub.setObjectName("permSubCard")
-        qq_sub_layout = QtWidgets.QVBoxLayout(qq_sub)
-        qq_sub_layout.setContentsMargins(10, 8, 10, 8)
-        qq_sub_layout.setSpacing(4)
-        self.allow_remote_qq_checkbox = QtWidgets.QCheckBox("🐧 允许 QQ 消息触发", qq_sub)
-        self.allow_remote_qq_checkbox.setStyleSheet("font-weight: 600; font-size: 12px; color: #1E293B; background: transparent;")
-        qq_sub_layout.addWidget(self.allow_remote_qq_checkbox)
+        card = QtWidgets.QFrame(page)
+        card.setObjectName("editorGroupCard")
+        body = QtWidgets.QVBoxLayout(card)
+        body.setContentsMargins(14, 12, 14, 14)
+        body.setSpacing(10)
 
-        qq_sub_row = QtWidgets.QHBoxLayout()
-        qq_sub_row.setContentsMargins(24, 0, 0, 0)
-        qq_sub_row.setSpacing(10)
-        self.allow_qq_owner_checkbox = QtWidgets.QCheckBox("主人", qq_sub)
-        self.allow_qq_others_checkbox = QtWidgets.QCheckBox("其他联系人", qq_sub)
-        self.allow_group_without_at_checkbox = QtWidgets.QCheckBox("群聊免 @", qq_sub)
-        for cb in (
+        intro = QtWidgets.QLabel("展示给人和模型看的信息", card)
+        intro.setObjectName("groupHeader")
+        body.addWidget(intro)
+
+        row = QtWidgets.QHBoxLayout()
+        row.setSpacing(12)
+        self.name_input = QtWidgets.QLineEdit(card)
+        self.name_input.setFixedHeight(34)
+        self.name_input.textChanged.connect(self._sync_header_name)
+        row.addLayout(self._field_block(card, "显示名称", self.name_input), 1)
+        self.example_input = QtWidgets.QLineEdit(card)
+        self.example_input.setPlaceholderText("示例调用参数")
+        self.example_input.setFixedHeight(34)
+        row.addLayout(self._field_block(card, "示例参数", self.example_input), 1)
+        body.addLayout(row)
+
+        desc_label = QtWidgets.QLabel("功能描述", card)
+        desc_label.setObjectName("settingFieldTitle")
+        desc_hint = QtWidgets.QLabel("写在能力卡片上，也供大模型判断什么时候该用它", card)
+        desc_hint.setObjectName("settingFieldDesc")
+        self.desc_input = QtWidgets.QTextEdit(card)
+        self.desc_input.setMaximumHeight(96)
+        self.desc_input.setPlaceholderText("这段话会写在能力卡片上")
+        self.desc_input.textChanged.connect(
+            lambda: self._sync_header_desc(self.desc_input.toPlainText())
+        )
+        body.addWidget(desc_label)
+        body.addWidget(desc_hint)
+        body.addWidget(self.desc_input)
+        page_layout.addWidget(card)
+
+        proto = QtWidgets.QFrame(page)
+        proto.setObjectName("editorGroupCard")
+        proto_layout = QtWidgets.QVBoxLayout(proto)
+        proto_layout.setContentsMargins(14, 12, 14, 14)
+        proto_layout.setSpacing(8)
+        proto_head = QtWidgets.QHBoxLayout()
+        proto_title = QtWidgets.QLabel("底层标识", proto)
+        proto_title.setObjectName("sectionHeaderTitle")
+        proto_head.addWidget(proto_title)
+        proto_head.addStretch(1)
+        self.unlock_meta_checkbox = _ToggleSwitch(False)
+        proto_head.addWidget(self._mini_switch(proto, "解锁修改", self.unlock_meta_checkbox))
+        proto_layout.addLayout(proto_head)
+        proto_note = QtWidgets.QLabel(
+            "主触发词和执行模式平时锁定。改错会导致这个能力对不上。", proto
+        )
+        proto_note.setObjectName("settingFieldDesc")
+        proto_note.setWordWrap(True)
+        proto_layout.addWidget(proto_note)
+        proto_row = QtWidgets.QHBoxLayout()
+        proto_row.setSpacing(12)
+        self.trigger_input = QtWidgets.QLineEdit(proto)
+        self.trigger_input.setFixedHeight(34)
+        proto_row.addLayout(self._field_block(proto, "主触发词", self.trigger_input), 1)
+        self.type_combo = QtWidgets.QComboBox(proto)
+        self.type_combo.addItems(["react", "direct", "observe", "delegate"])
+        self.type_combo.setFixedHeight(34)
+        proto_row.addLayout(self._field_block(proto, "执行模式", self.type_combo), 1)
+        proto_layout.addLayout(proto_row)
+        self.unlock_meta_checkbox.toggled.connect(self._on_toggle_unlock_meta)
+        page_layout.addWidget(proto)
+        page_layout.addStretch(1)
+        scroll.setWidget(page)
+        return scroll
+
+    def _inset_row(self, parent, title, detail, control):
+        row = QtWidgets.QFrame(parent)
+        row.setObjectName("settingMiniCard")
+        layout = QtWidgets.QHBoxLayout(row)
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setSpacing(12)
+        layout.addLayout(self._switch_copy(row, title, detail), 1)
+        layout.addWidget(
+            control,
+            0,
+            QtCore.Qt.AlignmentFlag.AlignRight | QtCore.Qt.AlignmentFlag.AlignVCenter,
+        )
+        return row
+
+    def _field_block(self, parent, title, widget):
+        col = QtWidgets.QVBoxLayout()
+        col.setSpacing(4)
+        label = QtWidgets.QLabel(title, parent)
+        label.setObjectName("settingFieldTitle")
+        col.addWidget(label)
+        col.addWidget(widget)
+        return col
+
+    def _labeled_switch_card(self, parent, title, detail, switch):
+        card = QtWidgets.QFrame(parent)
+        card.setObjectName("editorSectionCard")
+        layout = QtWidgets.QHBoxLayout(card)
+        layout.setContentsMargins(12, 10, 12, 10)
+        layout.setSpacing(12)
+        layout.addLayout(self._switch_copy(card, title, detail), 1)
+        layout.addWidget(
+            switch,
+            0,
+            QtCore.Qt.AlignmentFlag.AlignRight | QtCore.Qt.AlignmentFlag.AlignVCenter,
+        )
+        return card
+
+    def _inline_switch_row(self, parent, title, detail, switch):
+        row = QtWidgets.QWidget(parent)
+        layout = QtWidgets.QHBoxLayout(row)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(12)
+        layout.addLayout(self._switch_copy(row, title, detail), 1)
+        layout.addWidget(
+            switch,
+            0,
+            QtCore.Qt.AlignmentFlag.AlignRight | QtCore.Qt.AlignmentFlag.AlignVCenter,
+        )
+        return row
+
+    def _switch_copy(self, parent, title, detail):
+        col = QtWidgets.QVBoxLayout()
+        col.setSpacing(2)
+        title_label = QtWidgets.QLabel(title, parent)
+        title_label.setObjectName("settingFieldTitle")
+        detail_label = QtWidgets.QLabel(detail, parent)
+        detail_label.setObjectName("settingFieldDesc")
+        detail_label.setWordWrap(True)
+        col.addWidget(title_label)
+        col.addWidget(detail_label)
+        return col
+
+    def _mini_switch(self, parent, text, switch):
+        wrap = QtWidgets.QWidget(parent)
+        row = QtWidgets.QHBoxLayout(wrap)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(6)
+        label = QtWidgets.QLabel(text, wrap)
+        label.setObjectName("settingFieldDesc")
+        row.addWidget(label)
+        row.addWidget(switch)
+        return wrap
+
+    def _wire_form_watchers(self):
+        for widget in (
+            self.name_input,
+            self.trigger_input,
+            self.type_combo,
+            self.example_input,
+            self.desc_input,
+            self.timeout_input,
+            self.allow_local_checkbox,
+            self.allow_remote_qq_checkbox,
             self.allow_qq_owner_checkbox,
             self.allow_qq_others_checkbox,
             self.allow_group_without_at_checkbox,
+            self.aliases_input,
         ):
-            cb.setStyleSheet("font-size: 11px; color: #334155; background: transparent;")
-            qq_sub_row.addWidget(cb)
-        qq_sub_row.addStretch(1)
-        qq_sub_layout.addLayout(qq_sub_row)
-        perm_cols.addWidget(qq_sub, 6)
+            self._watch_editor(widget)
 
-        access_layout.addLayout(perm_cols)
-        self.allow_remote_qq_checkbox.toggled.connect(self._sync_access_control_inputs)
-        page_layout.addWidget(access_card)
+    def _select_section(self, section: str):
+        order = {"params": 0, "access": 1, "meta": 2}
+        section = section if section in order else "params"
+        self._active_section = section
+        self._section_chosen = True
+        if hasattr(self, "section_stack"):
+            self.section_stack.setCurrentIndex(order[section])
+        for key, button in self._section_buttons.items():
+            if key != section:
+                button.setChecked(False)
+        chosen = self._section_buttons.get(section)
+        if chosen is not None:
+            chosen.setChecked(True)
+        for button in self._section_buttons.values():
+            button.update()
+        title, subtitle = self._SECTION_COPY.get(section, ("配置", ""))
+        if hasattr(self, "stage_title"):
+            self.stage_title.setText(title)
+            self.stage_subtitle.setText(subtitle)
+        show_search = section == "params" and self._visible_setting_count >= 5
+        if hasattr(self, "param_search"):
+            self.param_search.setVisible(show_search)
+        if hasattr(self, "tab_widget"):
+            self.tab_widget.setCurrentIndex(0 if section == "params" else 1)
 
-        # --- 区域 3：⚙️ 功能参数（双列/自适应小卡片网格，无参数时自动隐藏）---
-        self.custom_settings_card = QtWidgets.QWidget(page_body)
-        custom_sec_layout = QtWidgets.QVBoxLayout(self.custom_settings_card)
-        custom_sec_layout.setContentsMargins(0, 2, 0, 0)
-        custom_sec_layout.setSpacing(6)
+    def _sync_header_name(self, text: str):
+        self.header_name_label.setText(str(text or "").strip() or str(self.trigger or "能力"))
 
-        param_head = QtWidgets.QHBoxLayout()
-        param_head.setContentsMargins(4, 0, 4, 0)
-        param_head.setSpacing(8)
-        param_title = QtWidgets.QLabel("⚙️ 功能参数", self.custom_settings_card)
-        param_title.setObjectName("sectionHeaderTitle")
-        param_head.addWidget(param_title)
+    def _sync_header_desc(self, text: str):
+        cleaned = " ".join(str(text or "").split())
+        self.header_desc_label.setText(cleaned or "暂无能力说明")
 
-        self.param_count_badge = QtWidgets.QLabel("", self.custom_settings_card)
-        self.param_count_badge.setStyleSheet(
-            "background: #F1F5F9; color: #475569; border: 1px solid #E2E8F0;"
-            "padding: 1px 6px; border-radius: 8px; font-size: 10px; font-weight: 600;"
+    def _on_alias_change(self, count: int):
+        self._update_alias_count_badge(count)
+        access_button = self._section_buttons.get("access")
+        if isinstance(access_button, _EditorNavButton):
+            access_button.set_badge(str(count) if count else "")
+            access_button.set_subtitle(f"{count} 个触发词" if count else "触发词和权限")
+        self._refresh_sidebar_summary()
+        self._on_form_edited()
+
+    def _sync_param_chrome(self):
+        count = int(getattr(self, "_visible_setting_count", 0) or 0)
+        button = self._section_buttons.get("params")
+        if isinstance(button, _EditorNavButton):
+            button.set_badge(str(count) if count else "")
+            button.set_subtitle(f"{count} 项可配" if count else "没有单独参数")
+        elif button is not None:
+            button.setText(f"功能参数  {count}" if count else "功能参数")
+        if hasattr(self, "params_empty"):
+            self.params_empty.setVisible(count == 0)
+        if hasattr(self, "custom_settings_card"):
+            self.custom_settings_card.setVisible(count > 0)
+        if hasattr(self, "param_search"):
+            self.param_search.setVisible(
+                count >= 5 and getattr(self, "_active_section", "params") == "params"
+            )
+        self._reflow_settings()
+
+    _PARAM_GROUP_ORDER = ("switch", "value", "secret", "text")
+    _PARAM_GROUP_TITLES = {
+        "switch": "开关",
+        "value": "数值与选项",
+        "secret": "密钥",
+        "text": "文本与地址",
+    }
+
+    def _ensure_param_group(self, name: str) -> QtWidgets.QFrame:
+        card = self._param_groups.get(name)
+        if card is not None:
+            return card
+        card = QtWidgets.QFrame(self.settings_container)
+        card.setObjectName("editorGroupCard")
+        lay = QtWidgets.QVBoxLayout(card)
+        lay.setContentsMargins(6, 4, 6, 6)
+        lay.setSpacing(0)
+        title = QtWidgets.QLabel(self._PARAM_GROUP_TITLES.get(name, name), card)
+        title.setObjectName("groupHeader")
+        lay.addWidget(title)
+        if name == "secret":
+            note = QtWidgets.QLabel("只保存在这台电脑的密钥库里，配置文件保持为空", card)
+            note.setObjectName("settingFieldNote")
+            note.setWordWrap(True)
+            lay.addWidget(note)
+        card.hide()
+        self._param_groups[name] = card
+        return card
+
+    def _reflow_settings(self, *_args):
+        if not hasattr(self, "settings_layout"):
+            return
+        query = ""
+        if hasattr(self, "param_search"):
+            query = self.param_search.text().strip().lower()
+        layout = self.settings_layout
+        while layout.count():
+            layout.takeAt(0)
+        grouped = {name: [] for name in self._PARAM_GROUP_ORDER}
+        blocks = []
+        for entry in self._param_entries:
+            matched = (not query) or query in entry["search"]
+            entry["card"].setVisible(matched)
+            if not matched:
+                continue
+            if entry.get("group") == "block":
+                blocks.append(entry)
+            else:
+                grouped.setdefault(entry.get("group") or "text", []).append(entry)
+        visible_any = False
+        for name in self._PARAM_GROUP_ORDER:
+            rows = grouped.get(name) or []
+            card = self._ensure_param_group(name)
+            group_layout = card.layout()
+            keep = 2 if name == "secret" else 1
+            while group_layout.count() > keep:
+                group_layout.takeAt(keep)
+            if not rows:
+                card.hide()
+                continue
+            for entry in rows:
+                group_layout.addWidget(entry["card"])
+            card.show()
+            layout.addWidget(card)
+            visible_any = True
+        for entry in blocks:
+            layout.addWidget(entry["card"])
+            visible_any = True
+        if hasattr(self, "param_filter_empty"):
+            layout.addWidget(self.param_filter_empty)
+            filtering = bool(query) and bool(self._param_entries)
+            self.param_filter_empty.setVisible(filtering and not visible_any)
+        if hasattr(self, "hidden_hint_label"):
+            layout.addWidget(self.hidden_hint_label)
+
+    def _show_notice(self, text: str, kind: str = "warn"):
+        self.notice_label.setText(str(text or ""))
+        self.notice_bar.setObjectName(
+            "editorNoticeInfo" if kind == "info" else "editorNoticeWarn"
         )
-        param_head.addWidget(self.param_count_badge)
-        param_head.addStretch(1)
-        custom_sec_layout.addLayout(param_head)
+        self.notice_bar.style().unpolish(self.notice_bar)
+        self.notice_bar.style().polish(self.notice_bar)
+        self.notice_bar.setVisible(True)
 
-        self.settings_container = QtWidgets.QWidget(self.custom_settings_card)
-        self.settings_layout = QtWidgets.QVBoxLayout(self.settings_container)
-        self.settings_layout.setContentsMargins(0, 0, 0, 0)
-        self.settings_layout.setSpacing(6)
+    def _hide_notice(self):
+        if hasattr(self, "notice_bar"):
+            self.notice_bar.setVisible(False)
 
-        self.settings_grid = QtWidgets.QGridLayout()
-        self.settings_grid.setContentsMargins(0, 0, 0, 0)
-        self.settings_grid.setHorizontalSpacing(8)
-        self.settings_grid.setVerticalSpacing(8)
-        self.settings_grid.setColumnStretch(0, 1)
-        self.settings_grid.setColumnStretch(1, 1)
-        self.settings_layout.addLayout(self.settings_grid)
+    def _reject_form(self, message: str, section: str = "params", key: str | None = None):
+        self._select_section(section)
+        if key:
+            self._highlight_setting(key)
+        self._show_notice(message, "warn")
 
-        self.hidden_hint_label = QtWidgets.QLabel("", self.settings_container)
-        self.hidden_hint_label.setWordWrap(True)
-        self.hidden_hint_label.setStyleSheet("color: #64748B; font-size: 11px; padding: 2px 4px;")
-        self.hidden_hint_label.setVisible(False)
-        self.settings_layout.addWidget(self.hidden_hint_label)
+    def _highlight_setting(self, key: str):
+        target = None
+        for entry in self._param_entries:
+            warn = entry["key"] == key
+            entry["card"].setObjectName("settingMiniCardWarn" if warn else "settingMiniCard")
+            entry["card"].style().unpolish(entry["card"])
+            entry["card"].style().polish(entry["card"])
+            if warn:
+                target = entry["card"]
+        if target is not None and hasattr(self, "settings_scroll"):
+            self.settings_scroll.ensureWidgetVisible(target)
 
-        custom_sec_layout.addWidget(self.settings_container)
-        page_layout.addWidget(self.custom_settings_card)
+    def _on_form_edited(self, *_args):
+        if getattr(self, "_suspend_dirty", False):
+            return
+        self._hide_notice()
+        self._refresh_sidebar_summary()
+        self._refresh_dirty_label()
 
-        # --- 卡片 4：🔧 基本信息与底层协议（默认折叠，点击展开）---
-        meta_card = QtWidgets.QFrame(page_body)
-        meta_card.setObjectName("editorSectionCard")
-        meta_layout = QtWidgets.QVBoxLayout(meta_card)
-        meta_layout.setContentsMargins(12, 8, 12, 8)
-        meta_layout.setSpacing(8)
+    def _watch_editor(self, widget):
+        if widget is None or getattr(widget, "_dirty_watched", False):
+            return
+        try:
+            widget._dirty_watched = True
+        except Exception:
+            return
+        if isinstance(widget, TagChipEditor):
+            widget.input_edit.textChanged.connect(self._on_form_edited)
+            return
+        if isinstance(widget, _ToggleSwitch):
+            widget.toggled.connect(self._on_form_edited)
+        elif isinstance(widget, QtWidgets.QLineEdit):
+            widget.textChanged.connect(self._on_form_edited)
+        elif isinstance(widget, QtWidgets.QTextEdit):
+            widget.textChanged.connect(self._on_form_edited)
+        elif isinstance(widget, (QtWidgets.QSpinBox, QtWidgets.QDoubleSpinBox)):
+            widget.valueChanged.connect(self._on_form_edited)
+        elif isinstance(widget, QtWidgets.QComboBox):
+            widget.currentTextChanged.connect(self._on_form_edited)
 
-        self.meta_toggle_btn = QtWidgets.QPushButton(
-            "▸  🔧 名称、功能描述与底层标识（低频项，点击展开）", meta_card
+    def _watch_field(self, field_type, widget):
+        del field_type
+        if isinstance(widget, list):
+            for item in widget:
+                if isinstance(item, dict):
+                    self._watch_editor(item.get("alias"))
+                    self._watch_editor(item.get("path"))
+                else:
+                    self._watch_editor(item)
+            return
+        if isinstance(widget, TagChipEditor):
+            widget._on_change = lambda _count: self._on_form_edited()
+            self._watch_editor(widget)
+            return
+        self._watch_editor(widget)
+
+    def _snapshot_value(self, field_type, widget):
+        if field_type == "list" and isinstance(widget, TagChipEditor):
+            return (tuple(widget._items), widget.input_edit.text())
+        if field_type in {"bool", "boolean"}:
+            return bool(widget.isChecked())
+        if field_type == "number":
+            return widget.value()
+        if field_type == "choice":
+            return widget.currentText()
+        if field_type == "model_queue" and isinstance(widget, dict):
+            return tuple(widget.get("selected") or [])
+        if field_type == "path_list" and isinstance(widget, list):
+            return tuple(item.text() for item in widget)
+        if field_type == "app_list" and isinstance(widget, list):
+            return tuple(
+                (item["alias"].text(), item["path"].text())
+                for item in widget
+                if isinstance(item, dict)
+            )
+        if isinstance(widget, QtWidgets.QTextEdit):
+            return widget.toPlainText()
+        if hasattr(widget, "text"):
+            return widget.text()
+        return None
+
+    def _form_fingerprint(self):
+        settings = tuple(
+            (key, field_type, self._snapshot_value(field_type, widget))
+            for key, (field_type, widget) in self.config_fields.items()
         )
-        self.meta_toggle_btn.setObjectName("metaCollapseBtn")
-        self.meta_toggle_btn.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
-        self.meta_toggle_btn.setAutoDefault(False)
-        self.meta_toggle_btn.setDefault(False)
-        self.meta_toggle_btn.clicked.connect(self._toggle_meta_card)
-        meta_layout.addWidget(self.meta_toggle_btn)
-
-        self.meta_body = QtWidgets.QWidget(meta_card)
-        meta_body_layout = QtWidgets.QVBoxLayout(self.meta_body)
-        meta_body_layout.setContentsMargins(0, 4, 0, 2)
-        meta_body_layout.setSpacing(8)
-
-        row1 = QtWidgets.QHBoxLayout()
-        row1.setSpacing(10)
-        name_col = QtWidgets.QVBoxLayout()
-        name_col.setSpacing(2)
-        name_lbl = QtWidgets.QLabel("显示名称", self.meta_body)
-        name_lbl.setStyleSheet("font-size: 11px; font-weight: 600; color: #475569;")
-        self.name_input = QtWidgets.QLineEdit(self.meta_body)
-        self.name_input.setFixedHeight(28)
-        self.name_input.textChanged.connect(
-            lambda t: self.header_name_label.setText(t.strip() or str(self.trigger or "插件"))
+        alias_pending = ""
+        alias_items = ()
+        if hasattr(self, "aliases_input"):
+            alias_items = tuple(self.aliases_input._items)
+            alias_pending = self.aliases_input.input_edit.text()
+        return (
+            self.name_input.text(),
+            self.trigger_input.text(),
+            self.type_combo.currentText(),
+            alias_items,
+            alias_pending,
+            self.desc_input.toPlainText(),
+            self.example_input.text(),
+            self.timeout_input.value(),
+            self.allow_local_checkbox.isChecked(),
+            self.allow_remote_qq_checkbox.isChecked(),
+            self.allow_qq_owner_checkbox.isChecked(),
+            self.allow_qq_others_checkbox.isChecked(),
+            self.allow_group_without_at_checkbox.isChecked(),
+            settings,
         )
-        name_col.addWidget(name_lbl)
-        name_col.addWidget(self.name_input)
 
-        ex_col = QtWidgets.QVBoxLayout()
-        ex_col.setSpacing(2)
-        ex_lbl = QtWidgets.QLabel("示例参数", self.meta_body)
-        ex_lbl.setStyleSheet("font-size: 11px; font-weight: 600; color: #475569;")
-        self.example_input = QtWidgets.QLineEdit(self.meta_body)
-        self.example_input.setPlaceholderText("示例调用参数")
-        self.example_input.setFixedHeight(28)
-        ex_col.addWidget(ex_lbl)
-        ex_col.addWidget(self.example_input)
+    def _refresh_dirty_label(self):
+        if not hasattr(self, "dirty_label"):
+            return
+        dirty = self._form_fingerprint() != self._baseline
+        self.dirty_label.setText("有未保存的更改" if dirty else "✓  已与磁盘同步")
+        self.dirty_label.setObjectName("editorDirtyOn" if dirty else "editorDirtyOff")
+        self.dirty_label.style().unpolish(self.dirty_label)
+        self.dirty_label.style().polish(self.dirty_label)
 
-        row1.addLayout(name_col, 1)
-        row1.addLayout(ex_col, 1)
-        meta_body_layout.addLayout(row1)
+    def _finish_load_state(self):
+        self._suspend_dirty = False
+        self._baseline = self._form_fingerprint()
+        self._refresh_dirty_label()
+        self._sync_param_chrome()
+        self._sync_enable_switch()
+        self._refresh_sidebar_summary()
+        if not self._section_chosen:
+            self._select_section("params" if self._visible_setting_count else "access")
+        else:
+            self._select_section(self._active_section)
 
-        desc_lbl = QtWidgets.QLabel("功能描述（供界面展示与大模型理解何时调用）", self.meta_body)
-        desc_lbl.setStyleSheet("font-size: 11px; font-weight: 600; color: #475569;")
-        self.desc_input = QtWidgets.QTextEdit(self.meta_body)
-        self.desc_input.setMaximumHeight(54)
-        self.desc_input.setPlaceholderText("供界面展示及大模型理解用途的功能描述")
-        meta_body_layout.addWidget(desc_lbl)
-        meta_body_layout.addWidget(self.desc_input)
-
-        proto_head = QtWidgets.QHBoxLayout()
-        proto_title = QtWidgets.QLabel("底层协议标识（谨慎修改）", self.meta_body)
-        proto_title.setStyleSheet("font-size: 11px; font-weight: 700; color: #64748B;")
-        proto_head.addWidget(proto_title)
-        proto_head.addStretch(1)
-
-        self.unlock_meta_checkbox = QtWidgets.QCheckBox("解锁修改", self.meta_body)
-        self.unlock_meta_checkbox.setStyleSheet("font-size: 11px; color: #64748B;")
-        self.unlock_meta_checkbox.toggled.connect(self._on_toggle_unlock_meta)
-        proto_head.addWidget(self.unlock_meta_checkbox)
-        meta_body_layout.addLayout(proto_head)
-
-        proto_row = QtWidgets.QHBoxLayout()
-        proto_row.setSpacing(10)
-        trig_col = QtWidgets.QVBoxLayout()
-        trig_col.setSpacing(2)
-        trig_lbl = QtWidgets.QLabel("主触发词 (Trigger)", self.meta_body)
-        trig_lbl.setStyleSheet("font-size: 11px; color: #64748B;")
-        self.trigger_input = QtWidgets.QLineEdit(self.meta_body)
-        self.trigger_input.setFixedHeight(28)
-        trig_col.addWidget(trig_lbl)
-        trig_col.addWidget(self.trigger_input)
-
-        type_col = QtWidgets.QVBoxLayout()
-        type_col.setSpacing(2)
-        type_lbl = QtWidgets.QLabel("执行模式 (Type)", self.meta_body)
-        type_lbl.setStyleSheet("font-size: 11px; color: #64748B;")
-        self.type_combo = QtWidgets.QComboBox(self.meta_body)
-        self.type_combo.addItems(["react", "direct", "observe"])
-        self.type_combo.setFixedHeight(28)
-        type_col.addWidget(type_lbl)
-        type_col.addWidget(self.type_combo)
-
-        proto_row.addLayout(trig_col, 1)
-        proto_row.addLayout(type_col, 1)
-        meta_body_layout.addLayout(proto_row)
-
-        self.meta_body.setVisible(False)
-        meta_layout.addWidget(self.meta_body)
-        page_layout.addWidget(meta_card)
-
-        self._on_toggle_unlock_meta(False)
-        self._sync_access_control_inputs()
-        page_layout.addStretch(1)
-
-        self.settings_scroll.setWidget(page_body)
-
-    def _toggle_meta_card(self):
-        expanded = not self.meta_body.isVisible()
-        self.meta_body.setVisible(expanded)
-        arrow = "▾" if expanded else "▸"
-        hint = "点击收起" if expanded else "低频项，点击展开"
-        self.meta_toggle_btn.setText(f"{arrow}  🔧 名称、功能描述与底层标识（{hint}）")
+    def refresh_theme(self) -> None:
+        self._apply_editor_theme()
+        if getattr(self, "_header_icon_is_glyph", False) and hasattr(self, "header_icon"):
+            self._paint_header_glyph(self.header_icon)
+        if hasattr(self, "header_group_badge"):
+            self.header_group_badge.setStyleSheet(
+                PluginManagerDialog._group_badge_style(self._header_group)
+            )
+        self._restyle_queue_lists()
+        for chip in self.findChildren(TagChipEditor):
+            chip.refresh_theme()
+        for switch in self.findChildren(_ToggleSwitch):
+            switch.update()
+        for button in getattr(self, "_section_buttons", {}).values():
+            button.update()
 
     def _update_alias_count_badge(self, count: int):
         if hasattr(self, "alias_count_badge"):
@@ -1470,8 +2646,524 @@ class PluginEditorDialog(QtWidgets.QDialog):
         self.allow_qq_others_checkbox.setEnabled(qq_enabled)
         self.allow_group_without_at_checkbox.setEnabled(qq_enabled)
 
+    def paintEvent(self, event):
+        painter = QtGui.QPainter(self)
+        painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing, True)
+        palette = get_ui_palette()
+        dark = _is_dark_palette(palette)
+        app_bg = QtGui.QColor(palette.get("bg_app", "#E7EDF5"))
+        accent = QtGui.QColor(palette.get("accent", "#0A84FF"))
+        rect = QtCore.QRectF(self.rect())
+        gradient = QtGui.QLinearGradient(rect.topLeft(), rect.bottomRight())
+        if dark:
+            top = QtGui.QColor(app_bg).lighter(118)
+            bottom = QtGui.QColor(app_bg).darker(112)
+        else:
+            top = QtGui.QColor(app_bg).lighter(108)
+            bottom = QtGui.QColor(app_bg).darker(103)
+        gradient.setColorAt(0.0, top)
+        gradient.setColorAt(1.0, bottom)
+        painter.fillRect(rect, gradient)
+        glow = QtGui.QRadialGradient(QtCore.QPointF(rect.width() * 0.12, 24), 340)
+        glow_color = QtGui.QColor(accent)
+        glow_color.setAlpha(26 if not dark else 34)
+        glow.setColorAt(0.0, glow_color)
+        glow.setColorAt(1.0, QtGui.QColor(accent.red(), accent.green(), accent.blue(), 0))
+        painter.setPen(QtCore.Qt.PenStyle.NoPen)
+        painter.setBrush(glow)
+        painter.drawEllipse(QtCore.QRectF(-120, -160, 520, 380))
+        painter.end()
+        del event
+
+    def _make_search_icon(self) -> QtGui.QIcon:
+        palette = get_ui_palette()
+        color = QtGui.QColor(palette.get("text_muted", "#8E8E93"))
+        pixmap = QtGui.QPixmap(16, 16)
+        pixmap.fill(QtCore.Qt.GlobalColor.transparent)
+        painter = QtGui.QPainter(pixmap)
+        painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing, True)
+        painter.setPen(QtGui.QPen(color, 1.6))
+        painter.setBrush(QtCore.Qt.BrushStyle.NoBrush)
+        painter.drawEllipse(QtCore.QRectF(1.4, 1.4, 8.6, 8.6))
+        painter.drawLine(QtCore.QPointF(8.8, 8.8), QtCore.QPointF(13.4, 13.4))
+        painter.end()
+        return QtGui.QIcon(pixmap)
+
+    def _polish_surface(self, widget, blur=26, y=7, alpha=34):
+        if widget is None:
+            return
+        palette = get_ui_palette()
+        dark = _is_dark_palette(palette)
+        effect = QtWidgets.QGraphicsDropShadowEffect(widget)
+        effect.setBlurRadius(blur + (8 if dark else 0))
+        effect.setOffset(0, y)
+        if dark:
+            effect.setColor(QtGui.QColor(0, 0, 0, 110))
+        else:
+            effect.setColor(QtGui.QColor(28, 52, 96, alpha))
+        widget.setGraphicsEffect(effect)
+
+    def _apply_editor_theme(self):
+        palette = get_ui_palette()
+        dark = _is_dark_palette(palette)
+        card = palette.get("bg_card", "#FFFFFF")
+        soft = palette.get("bg_soft", "#F4F5F7")
+        border = palette.get("border", "#D8DBE0")
+        accent = palette.get("accent", "#0A84FF")
+        accent_hover = palette.get("accent_hover", "#0071E3")
+        accent_soft = palette.get("accent_soft", "#E8F1FF")
+        text = palette.get("text_primary", "#1D1D1F")
+        secondary = palette.get("text_secondary", "#6E6E73")
+        muted = palette.get("text_muted", "#8E8E93")
+        danger = palette.get("danger", "#FF453A")
+        warning = palette.get("warning", "#F59E0B")
+        app_bg = palette.get("bg_app", "#EBECEF")
+        checked = accent if dark else accent_hover
+        self.setStyleSheet(
+            get_tool_dialog_styles()
+            + f"""
+            QDialog {{
+                background: transparent;
+            }}
+            QLabel, QCheckBox {{
+                background: transparent;
+                color: {text};
+            }}
+            QFrame#editorSidebarCard, QFrame#editorStageCard, QFrame#editorFooterCard {{
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 {hex_to_rgba(card, 0.97)},
+                    stop:1 {hex_to_rgba(card, 0.90)});
+                border: 1px solid {hex_to_rgba("#FFFFFF" if not dark else border, 0.72 if not dark else 0.38)};
+                border-radius: 20px;
+            }}
+            QFrame#editorGroupCard, QFrame#editorSectionCard {{
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 {hex_to_rgba(card, 0.99)},
+                    stop:1 {hex_to_rgba(soft, 0.55)});
+                border: 1px solid {hex_to_rgba(border, 0.55)};
+                border-radius: 16px;
+            }}
+            QFrame#editorEnableRow {{
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
+                    stop:0 {hex_to_rgba(card, 0.96)},
+                    stop:1 {hex_to_rgba(soft, 0.92)});
+                border: 1px solid {hex_to_rgba(border, 0.35)};
+                border-radius: 14px;
+            }}
+            QFrame#editorActionWell {{
+                background: transparent;
+                border: none;
+            }}
+            QFrame#settingMiniCard {{
+                background: transparent;
+                border: none;
+                border-bottom: 1px solid {hex_to_rgba(border, 0.9)};
+                border-radius: 0px;
+            }}
+            QFrame#settingMiniCard:hover {{
+                background: {hex_to_rgba(accent, 0.05)};
+            }}
+            QFrame#settingMiniCardWarn {{
+                background: {hex_to_rgba(warning, 0.12)};
+                border: 1px solid {warning};
+                border-radius: 10px;
+            }}
+            QLineEdit, QComboBox, QTextEdit {{
+                background: {card};
+                border: 1px solid {hex_to_rgba(border, 0.75)};
+                border-radius: 12px;
+                min-height: 32px;
+                padding: 4px 10px;
+                color: {text};
+            }}
+            QLineEdit:focus, QComboBox:focus, QTextEdit:focus {{
+                border: 1.5px solid {accent};
+                background: {card};
+            }}
+            QLineEdit#pluginSearchInput {{
+                background: {card};
+                color: {text};
+                border: 1px solid {hex_to_rgba(border, 0.7)};
+                border-radius: 14px;
+                padding: 4px 12px;
+                font-size: 12px;
+                min-height: 36px;
+            }}
+            QLineEdit#pluginSearchInput:focus {{
+                border: 1.5px solid {accent};
+            }}
+            QFrame#editorEmptyCard {{
+                background: {hex_to_rgba(soft, 0.72)};
+                border: 1px dashed {border};
+                border-radius: 12px;
+            }}
+            QFrame#editorNoticeWarn {{
+                background: {hex_to_rgba(warning, 0.14)};
+                border: 1px solid {hex_to_rgba(warning, 0.45)};
+                border-radius: 10px;
+            }}
+            QFrame#editorNoticeInfo {{
+                background: {accent_soft};
+                border: 1px solid {hex_to_rgba(accent, 0.4)};
+                border-radius: 10px;
+            }}
+            QLabel#editorNoticeText {{
+                color: {text};
+                font-size: 12px;
+                background: transparent;
+            }}
+            QLabel#editorDirtyOn {{
+                color: {warning};
+                background: {hex_to_rgba(warning, 0.13)};
+                border: 1px solid {hex_to_rgba(warning, 0.32)};
+                border-radius: 12px;
+                padding: 5px 12px;
+                font-size: 12px;
+                font-weight: 700;
+            }}
+            QLabel#editorDirtyOff {{
+                color: {muted};
+                background: transparent;
+                border: none;
+                padding: 4px 8px;
+                font-size: 12px;
+                font-weight: 600;
+            }}
+            QLabel#stageKicker, QLabel#groupHeader {{
+                color: {muted};
+                font-size: 11px;
+                font-weight: 700;
+                letter-spacing: 0.6px;
+                background: transparent;
+            }}
+            QLabel#groupHeader {{
+                padding: 8px 10px 2px 10px;
+            }}
+            QLabel#stageTitle {{
+                color: {text};
+                font-size: 20px;
+                font-weight: 800;
+                background: transparent;
+            }}
+            QLabel#stageSubtitle, QLabel#editorModeLine {{
+                color: {muted};
+                font-size: 12px;
+                font-weight: 500;
+                background: transparent;
+            }}
+            QLabel#countBadge {{
+                background: {accent_soft};
+                color: {checked};
+                border: 1px solid {hex_to_rgba(accent, 0.35)};
+                padding: 1px 6px;
+                border-radius: 8px;
+                font-size: 10px;
+                font-weight: 600;
+            }}
+            QLabel#settingFieldTitle, QLabel#sectionHeaderTitle {{
+                color: {text};
+                font-weight: 700;
+                background: transparent;
+            }}
+            QLabel#settingFieldTitle {{
+                font-size: 13px;
+                font-weight: 700;
+            }}
+            QLabel#sectionHeaderTitle {{
+                font-size: 13px;
+            }}
+            QLabel#settingFieldDesc, QLabel#tagEmptyLabel {{
+                color: {muted};
+                font-size: 11px;
+                font-weight: 500;
+                background: transparent;
+            }}
+            QLabel#settingFieldWarn {{
+                color: {warning};
+                font-size: 11px;
+                background: transparent;
+            }}
+            QLabel#settingFieldNote {{
+                color: {checked};
+                font-size: 11px;
+                background: transparent;
+                padding: 0px 8px 6px 8px;
+            }}
+            QFrame#permSubCard {{
+                background: {soft};
+                border: none;
+                border-radius: 12px;
+                margin: 4px 8px 6px 8px;
+            }}
+            QFrame#tagChipBox {{
+                background: {soft};
+                border: 1px solid {border};
+                border-radius: 14px;
+            }}
+            QFrame#tagInputDivider {{
+                background: {border};
+                border: none;
+                min-height: 1px;
+                max-height: 1px;
+            }}
+            QLineEdit#tagInlineInput {{
+                background: transparent;
+                border: none;
+                padding: 0px 4px;
+                min-height: 26px;
+                font-size: 12px;
+            }}
+            QLineEdit#tagInlineInput:focus {{
+                border: none;
+                background: transparent;
+            }}
+            QPushButton#tagAddPillBtn {{
+                background: {accent};
+                color: #FFFFFF;
+                border: none;
+                border-radius: 9px;
+                padding: 4px 14px;
+                font-size: 12px;
+                font-weight: 700;
+                min-height: 28px;
+            }}
+            QPushButton#tagAddPillBtn:hover {{
+                background: {accent_hover};
+            }}
+            QFrame#tagChip {{
+                background: {accent_soft};
+                border: none;
+                border-radius: 11px;
+            }}
+            QLabel#tagChipText {{
+                color: {checked};
+                font-size: 12px;
+                font-weight: 600;
+                background: transparent;
+            }}
+            QFrame#stepperShell {{
+                background: {card};
+                border: 1px solid {hex_to_rgba(border, 0.65)};
+                border-radius: 12px;
+            }}
+            QPushButton#stepperBtn {{
+                background: {soft};
+                color: {secondary};
+                border: none;
+                border-radius: 8px;
+                padding: 0px;
+                min-width: 28px;
+                max-width: 28px;
+                min-height: 28px;
+                max-height: 28px;
+                font-size: 16px;
+                font-weight: 700;
+            }}
+            QPushButton#stepperBtn:hover {{
+                background: {accent_soft};
+                color: {checked};
+            }}
+            QSpinBox#stepperSpin, QDoubleSpinBox#stepperSpin {{
+                background: transparent;
+                border: none;
+                padding: 0px 2px;
+                min-height: 26px;
+                font-size: 13px;
+                font-weight: 700;
+                color: {text};
+            }}
+            QLabel#editorTriggerBadge {{
+                background: {soft};
+                color: {secondary};
+                border: 1px solid {border};
+                padding: 1px 7px;
+                border-radius: 6px;
+                font-size: 10px;
+                font-weight: 600;
+            }}
+            QLabel#editorHeaderDesc {{
+                color: {secondary};
+                font-size: 12px;
+            }}
+            QPushButton#tagChipRemoveBtn {{
+                background: transparent;
+                color: {muted};
+                border: none;
+                border-radius: 8px;
+                padding: 0px;
+                min-height: 16px;
+                max-height: 16px;
+                min-width: 16px;
+                max-width: 16px;
+                font-size: 12px;
+                font-weight: 700;
+            }}
+            QPushButton#tagChipRemoveBtn:hover {{
+                background: {hex_to_rgba(danger, 0.16)};
+                color: {danger};
+            }}
+            QLabel#sectionHeaderTitle {{
+                font-size: 13px;
+                font-weight: 700;
+                color: {text};
+            }}
+            QPushButton#metaCollapseBtn {{
+                background: transparent;
+                border: none;
+                text-align: left;
+                padding: 2px 0px;
+                font-size: 12px;
+                font-weight: 700;
+                color: {secondary};
+            }}
+            QPushButton#metaCollapseBtn:hover {{
+                color: {checked};
+            }}
+            QPushButton#ghostPillBtn, QPushButton#path_btn, QPushButton#cancel_btn {{
+                background: {card};
+                color: {text};
+                border: 1px solid {hex_to_rgba(border, 0.8)};
+                border-radius: 12px;
+                padding: 6px 14px;
+                font-size: 12px;
+                font-weight: 600;
+                min-height: 36px;
+            }}
+            QPushButton#ghostPillBtn:hover, QPushButton#path_btn:hover, QPushButton#cancel_btn:hover {{
+                background: {accent_soft};
+                color: {checked};
+                border-color: {hex_to_rgba(accent, 0.4)};
+            }}
+            QPushButton#primaryAction {{
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 {QtGui.QColor(accent).lighter(112).name()},
+                    stop:1 {accent});
+                color: #FFFFFF;
+                border: none;
+                min-height: 38px;
+                padding: 6px 20px;
+                border-radius: 12px;
+                font-size: 13px;
+                font-weight: 700;
+            }}
+            QPushButton#primaryAction:hover {{
+                background: {accent_hover};
+                color: #FFFFFF;
+            }}
+            QPushButton#dangerSmallBtn {{
+                background-color: {hex_to_rgba(danger, 0.12)};
+                color: {danger};
+                border: 1px solid {hex_to_rgba(danger, 0.35)};
+                border-radius: 6px;
+                padding: 2px 8px;
+                font-size: 11px;
+                font-weight: 700;
+            }}
+            QPushButton#dangerSmallBtn:hover {{
+                background-color: {danger};
+                color: #FFFFFF;
+            }}
+            """
+        )
+        if hasattr(self, "header_name_label"):
+            self.header_name_label.setStyleSheet(
+                f"font-size: 16px; font-weight: 800; color: {text}; background: transparent;"
+            )
+            self.header_desc_label.setStyleSheet(
+                f"color: {muted}; font-size: 12px; font-weight: 500; background: transparent;"
+            )
+            self.header_desc_label.setMaximumHeight(52)
+        if hasattr(self, "_search_action"):
+            self._search_action.setIcon(self._make_search_icon())
+        self._polish_surface(getattr(self, "section_bar", None), blur=28, y=8, alpha=32)
+        self._polish_surface(getattr(self, "stage_card", None), blur=28, y=8, alpha=30)
+        self._polish_surface(getattr(self, "footer_card", None), blur=22, y=6, alpha=26)
+        if hasattr(self, "save_btn"):
+            accent_shadow = QtGui.QColor(accent)
+            accent_shadow.setAlpha(88 if not dark else 70)
+            glow = QtWidgets.QGraphicsDropShadowEffect(self.save_btn)
+            glow.setBlurRadius(16)
+            glow.setOffset(0, 4)
+            glow.setColor(accent_shadow)
+            self.save_btn.setGraphicsEffect(glow)
+        if hasattr(self, "header_icon"):
+            icon_shadow = QtWidgets.QGraphicsDropShadowEffect(self.header_icon)
+            icon_shadow.setBlurRadius(16)
+            icon_shadow.setOffset(0, 4)
+            icon_shadow.setColor(QtGui.QColor(15, 23, 42, 40 if not dark else 90))
+            self.header_icon.setGraphicsEffect(icon_shadow)
+        self._restyle_queue_lists()
+        for chip in self.findChildren(TagChipEditor):
+            chip.refresh_theme()
+
+    def _queue_list_qss(self) -> str:
+        palette = get_ui_palette()
+        card = palette.get("bg_card", "#FFFFFF")
+        soft = palette.get("bg_soft", "#F4F5F7")
+        border = palette.get("border", "#D8DBE0")
+        text = palette.get("text_primary", "#1D1D1F")
+        accent = palette.get("accent", "#0A84FF")
+        accent_soft = palette.get("accent_soft", "#E8F1FF")
+        return (
+            f"QListWidget {{ background: {soft}; color: {text}; border: 1px solid {border};"
+            " border-radius: 8px; padding: 4px; font-size: 12px; }}"
+            "QListWidget::item { padding: 6px 8px; border-radius: 6px; }"
+            f"QListWidget::item:hover {{ background: {accent_soft}; }}"
+            f"QListWidget::item:selected {{ background: {accent}; color: #FFFFFF; }}"
+            f"QListWidget {{ alternate-background-color: {card}; }}"
+        )
+
+    def _restyle_queue_lists(self):
+        style = self._queue_list_qss()
+        for widget in self.findChildren(QtWidgets.QListWidget):
+            if widget.objectName() == "queueList":
+                widget.setStyleSheet(style)
+
+    def _open_readme(self):
+        getter = getattr(self.plugin_manager, "get_plugin_readme_path", None)
+        path = ""
+        if callable(getter):
+            try:
+                path = str(getter(self.trigger) or "")
+            except Exception:
+                path = ""
+        if not path or not os.path.exists(path):
+            QtWidgets.QMessageBox.information(self, "使用说明", "这个能力还没有使用说明。")
+            return
+        try:
+            text = Path(path).read_text(encoding="utf-8")
+        except OSError as exc:
+            QtWidgets.QMessageBox.warning(self, "使用说明", f"读不了说明文件：{exc}")
+            return
+        dialog = QtWidgets.QDialog(self)
+        dialog.setWindowTitle(f"使用说明 · {self.trigger}")
+        dialog.resize(640, 520)
+        dialog.setStyleSheet(get_tool_dialog_styles())
+        layout = QtWidgets.QVBoxLayout(dialog)
+        browser = QtWidgets.QTextBrowser(dialog)
+        browser.setOpenExternalLinks(True)
+        if hasattr(browser, "setMarkdown"):
+            browser.setMarkdown(text)
+        else:
+            browser.setPlainText(text)
+        layout.addWidget(browser, 1)
+        close_btn = QtWidgets.QPushButton("关闭", dialog)
+        close_btn.clicked.connect(dialog.accept)
+        row = QtWidgets.QHBoxLayout()
+        row.addStretch(1)
+        row.addWidget(close_btn)
+        layout.addLayout(row)
+        dialog.exec()
+
     def _load_config(self):
         """加载插件配置"""
+        self._suspend_dirty = True
+        try:
+            self._load_config_inner()
+        finally:
+            self._finish_load_state()
+
+    def _load_config_inner(self):
         if not self.plugin_manager or not self.trigger:
             return
 
@@ -1498,13 +3190,13 @@ class PluginEditorDialog(QtWidgets.QDialog):
             desc_text = str(config.get("description") or "")
             self.name_input.setText(name_text)
             self.trigger_input.setText(config.get("trigger", ""))
-            self.type_combo.setCurrentText(config.get("type", "react"))
-
-            if hasattr(self, "header_name_label"):
-                self.header_name_label.setText(name_text)
-            if hasattr(self, "header_desc_label"):
-                self.header_desc_label.setText(desc_text or "暂无能力说明")
-                self.header_desc_label.setVisible(bool(desc_text))
+            plugin_type = str(config.get("type") or "react")
+            if self.type_combo.findText(plugin_type) < 0:
+                self.type_combo.addItem(plugin_type)
+            self.type_combo.setCurrentText(plugin_type)
+            self.setWindowTitle(f"配置 · {name_text}")
+            self._sync_header_name(name_text)
+            self._sync_header_desc(desc_text)
 
             aliases = config.get("aliases", [])
             if isinstance(aliases, list):
@@ -1562,22 +3254,25 @@ class PluginEditorDialog(QtWidgets.QDialog):
     def _load_custom_settings(self, config):
         """加载自定义配置项：每个配置项独立渲染为精致小卡片，短开关/数字自动排成双列网格"""
         self.config_fields.clear()
-        while self.settings_grid.count():
-            item = self.settings_grid.takeAt(0)
-            w = item.widget() if item else None
-            if w is not None:
-                w.hide()
-                w.deleteLater()
+        for entry in list(self._param_entries):
+            card = entry.get("card")
+            if card is not None:
+                card.hide()
+                card.deleteLater()
+        self._param_entries = []
+        while self.settings_layout.count():
+            self.settings_layout.takeAt(0)
 
         settings = config.get("settings", {})
         if not settings:
-            self.custom_settings_card.setVisible(False)
+            self._visible_setting_count = 0
+            self.hidden_hint_label.clear()
+            self.hidden_hint_label.setVisible(False)
+            self._sync_param_chrome()
             return
 
         hidden_count = 0
         visible_count = 0
-        grid_row = 0
-        grid_col = 0
 
         for key, setting_info in settings.items():
             schema_field = self.config_schema_fields.get(str(key), {})
@@ -1646,6 +3341,9 @@ class PluginEditorDialog(QtWidgets.QDialog):
             )
             if not widget:
                 continue
+            stored = self.config_fields.get(key)
+            if stored:
+                self._watch_field(stored[0], stored[1])
 
             visible_count += 1
             field_type, _ = self.config_fields.get(key, (setting_type, None))
@@ -1655,37 +3353,41 @@ class PluginEditorDialog(QtWidgets.QDialog):
                 "app_list",
                 "model_queue",
             } or isinstance(widget, QtWidgets.QTextEdit)
-
-            is_half_card = (
-                not is_block_widget
-                and field_type in {"boolean", "bool", "number"}
-                and len(str(description or "")) <= 32
-                and not validation_error
-            )
+            if is_block_widget:
+                group_name = "block"
+            elif field_type in {"boolean", "bool"}:
+                group_name = "switch"
+            elif field_type in {"number", "choice"}:
+                group_name = "value"
+            elif field_type == "secret":
+                group_name = "secret"
+            else:
+                group_name = "text"
 
             mini_card = QtWidgets.QFrame(self.settings_container)
-            mini_card.setObjectName("settingMiniCard")
+            mini_card.setObjectName(
+                "editorGroupCard" if is_block_widget else "settingMiniCard"
+            )
 
             if is_block_widget:
                 card_layout = QtWidgets.QVBoxLayout(mini_card)
-                card_layout.setContentsMargins(12, 9, 12, 9)
-                card_layout.setSpacing(5)
+                card_layout.setContentsMargins(14, 12, 14, 12)
+                card_layout.setSpacing(6)
 
                 lbl_title = QtWidgets.QLabel(str(label), mini_card)
-                lbl_title.setStyleSheet(
-                    "font-weight: 700; font-size: 12px; color: #1E293B; background: transparent;"
-                )
+                lbl_title.setObjectName("settingFieldTitle")
+                lbl_title.setWordWrap(True)
                 card_layout.addWidget(lbl_title)
 
                 if description:
                     desc_label = QtWidgets.QLabel(str(description), mini_card)
-                    desc_label.setStyleSheet("color: #64748B; font-size: 11px; background: transparent;")
+                    desc_label.setObjectName("settingFieldDesc")
                     desc_label.setWordWrap(True)
                     card_layout.addWidget(desc_label)
 
                 if validation_error:
                     warn_label = QtWidgets.QLabel(f"格式提醒：{validation_error}", mini_card)
-                    warn_label.setStyleSheet("color: #B45309; font-size: 11px; background: transparent;")
+                    warn_label.setObjectName("settingFieldWarn")
                     warn_label.setWordWrap(True)
                     card_layout.addWidget(warn_label)
 
@@ -1700,28 +3402,19 @@ class PluginEditorDialog(QtWidgets.QDialog):
                 left_col.setSpacing(2)
 
                 lbl_title = QtWidgets.QLabel(str(label), mini_card)
-                lbl_title.setStyleSheet(
-                    "font-weight: 700; font-size: 12px; color: #1E293B; background: transparent;"
-                )
+                lbl_title.setObjectName("settingFieldTitle")
+                lbl_title.setWordWrap(True)
                 left_col.addWidget(lbl_title)
 
                 if description:
                     desc_label = QtWidgets.QLabel(str(description), mini_card)
-                    desc_label.setStyleSheet("color: #64748B; font-size: 11px; background: transparent;")
+                    desc_label.setObjectName("settingFieldDesc")
                     desc_label.setWordWrap(True)
                     left_col.addWidget(desc_label)
 
-                if setting_type in {"secret", "password"}:
-                    store_label = QtWidgets.QLabel(
-                        "安全存储于本机密钥库，config.json 默认留空", mini_card
-                    )
-                    store_label.setStyleSheet("color: #2563EB; font-size: 10px; background: transparent;")
-                    store_label.setWordWrap(True)
-                    left_col.addWidget(store_label)
-
                 if validation_error:
                     warn_label = QtWidgets.QLabel(f"格式提醒：{validation_error}", mini_card)
-                    warn_label.setStyleSheet("color: #B45309; font-size: 11px; background: transparent;")
+                    warn_label.setObjectName("settingFieldWarn")
                     warn_label.setWordWrap(True)
                     left_col.addWidget(warn_label)
 
@@ -1738,32 +3431,31 @@ class PluginEditorDialog(QtWidgets.QDialog):
                         widget, 1, QtCore.Qt.AlignmentFlag.AlignVCenter
                     )
 
-            if is_half_card:
-                self.settings_grid.addWidget(mini_card, grid_row, grid_col)
-                if grid_col == 0:
-                    grid_col = 1
-                else:
-                    grid_col = 0
-                    grid_row += 1
-            else:
-                if grid_col == 1:
-                    grid_col = 0
-                    grid_row += 1
-                self.settings_grid.addWidget(mini_card, grid_row, 0, 1, 2)
-                grid_row += 1
+            mini_card.setVisible(False)
+            self._param_entries.append(
+                {
+                    "key": str(key),
+                    "label": str(label),
+                    "description": str(description or ""),
+                    "card": mini_card,
+                    "half": False,
+                    "group": group_name,
+                    "search": " ".join(
+                        [str(key), str(label or ""), str(description or "")]
+                    ).lower(),
+                }
+            )
 
-        self.custom_settings_card.setVisible(visible_count > 0 or hidden_count > 0)
-        if hasattr(self, "param_count_badge"):
-            self.param_count_badge.setText(f"{visible_count} 项")
-            self.param_count_badge.setVisible(visible_count > 0)
-
+        self._visible_setting_count = visible_count
         if hidden_count:
             self.hidden_hint_label.setText(
-                "注：关注地区和数据源地址等内部项已收起，请用插件本机页修改，避免手改大段 JSON。"
+                "有些内部参数已收起，保存时会原样保留。请用这个能力自己的页面修改。"
             )
             self.hidden_hint_label.setVisible(True)
         else:
+            self.hidden_hint_label.clear()
             self.hidden_hint_label.setVisible(False)
+        self._sync_param_chrome()
 
     def _validate_setting_default(self, key, setting_type, value, choices):
         key_lower = str(key or "").strip().lower()
@@ -1890,6 +3582,8 @@ class PluginEditorDialog(QtWidgets.QDialog):
         item_layout.addWidget(delete_btn)
 
         layout.insertWidget(layout.count() - 1, item_widget)
+        self._watch_editor(path_input)
+        self._on_form_edited()
         return path_input
 
     def _delete_path_item(self, layout, item_widget, path_input):
@@ -1957,6 +3651,9 @@ class PluginEditorDialog(QtWidgets.QDialog):
         layout.insertWidget(layout.count() - 1, item_widget)
 
         app_inputs.append({"alias": alias_input, "path": path_input})
+        self._watch_editor(alias_input)
+        self._watch_editor(path_input)
+        self._on_form_edited()
         return app_inputs[-1]
 
     def _delete_app_list_item(self, layout, item_widget, app_inputs):
@@ -2103,20 +3800,48 @@ class PluginEditorDialog(QtWidgets.QDialog):
                 self.config_fields[key] = ("text", text_edit)
                 widget = text_edit
 
-        elif setting_type in {"number", "int", "integer"}:
-            spinbox = QtWidgets.QSpinBox()
-            spinbox.setRange(min_val, max_val)
-            spinbox.setValue(int(value) if value is not None else min_val)
-            spinbox.setFixedHeight(28)
-            spinbox.setMinimumWidth(88)
+        elif setting_type in {"number", "int", "integer", "float"}:
+            step = setting_info.get("step") if isinstance(setting_info, dict) else None
+            use_float = setting_type == "float" or any(
+                isinstance(item, float) for item in (value, min_val, max_val, step)
+            )
+            if use_float:
+                spinbox = QtWidgets.QDoubleSpinBox()
+                decimals = 1
+                for item in (value, min_val, max_val, step):
+                    if isinstance(item, float):
+                        text = f"{item:.6f}".rstrip("0")
+                        if "." in text:
+                            decimals = max(decimals, len(text.split(".", 1)[1]))
+                decimals = min(decimals, 6)
+                spinbox.setDecimals(decimals)
+                spinbox.setRange(float(min_val), float(max_val))
+                if isinstance(step, (int, float)) and not isinstance(step, bool):
+                    spinbox.setSingleStep(float(step))
+                else:
+                    spinbox.setSingleStep(10 ** (-decimals))
+                try:
+                    numeric = float(value) if value is not None else float(min_val)
+                except (TypeError, ValueError):
+                    numeric = float(min_val)
+                spinbox.setValue(numeric)
+            else:
+                spinbox = QtWidgets.QSpinBox()
+                spinbox.setRange(int(min_val), int(max_val))
+                try:
+                    numeric = int(value) if value is not None else int(min_val)
+                except (TypeError, ValueError):
+                    numeric = int(min_val)
+                spinbox.setValue(numeric)
             self.config_fields[key] = ("number", spinbox)
-            widget = spinbox
+            stepper = _wrap_spin_stepper(spinbox)
+            stepper.setMinimumWidth(156 if use_float else 132)
+            widget = stepper
 
         elif setting_type == "boolean" or setting_type == "bool":
-            checkbox = QtWidgets.QCheckBox("启用")
-            checkbox.setChecked(bool(value) if value is not None else False)
-            self.config_fields[key] = ("boolean", checkbox)
-            widget = checkbox
+            switch = _ToggleSwitch(bool(value) if value is not None else False)
+            self.config_fields[key] = ("boolean", switch)
+            widget = switch
 
         elif setting_type == "list":
             is_path_list = False
@@ -2272,7 +3997,7 @@ class PluginEditorDialog(QtWidgets.QDialog):
             purpose = (
                 setting_info.get("purpose")
                 or setting_info.get("purposes")
-                or ["image_gen", "image_edit"]
+                or ["image_gen"]
             )
             max_items = max(0, int(setting_info.get("max_items") or 0))
         try:
@@ -2320,65 +4045,52 @@ class PluginEditorDialog(QtWidgets.QDialog):
                 f"还没有可选项。请先到「模型与路由」添加模型并勾选用途「{purpose_label}」。"
             )
             empty.setWordWrap(True)
-            empty.setStyleSheet("color:#B45309;")
+            empty.setObjectName("settingFieldWarn")
             root_layout.addWidget(empty)
 
-        body = QtWidgets.QHBoxLayout()
-        body.setSpacing(8)
+        chain_hint = QtWidgets.QLabel("靠前的模型先尝试。双击一行也能加入或移出。")
+        chain_hint.setObjectName("settingFieldDesc")
+        chain_hint.setWordWrap(True)
+        root_layout.addWidget(chain_hint)
 
-        left_box = QtWidgets.QVBoxLayout()
+        body = QtWidgets.QGridLayout()
+        body.setHorizontalSpacing(8)
+        body.setVerticalSpacing(6)
+
         lbl_pool = QtWidgets.QLabel("可选模型")
-        lbl_pool.setStyleSheet("font-size: 11px; font-weight: 600; color: #475569; background: transparent;")
-        left_box.addWidget(lbl_pool)
+        lbl_pool.setObjectName("settingFieldTitle")
+        lbl_chain = QtWidgets.QLabel("执行顺序")
+        lbl_chain.setObjectName("settingFieldTitle")
+        body.addWidget(lbl_pool, 0, 0)
+        body.addWidget(lbl_chain, 0, 2)
+
         list_pool = QtWidgets.QListWidget()
-        list_pool.setMinimumHeight(160)
-        list_pool.setStyleSheet(
-            "QListWidget { background: #F8FAFC; border: 1px solid #E2E8F0; border-radius: 8px; padding: 4px; font-size: 11px; }"
-            "QListWidget::item { padding: 6px 8px; border-radius: 6px; color: #1E293B; }"
-            "QListWidget::item:hover { background: #EFF6FF; color: #1D4ED8; }"
-            "QListWidget::item:selected { background: #2563EB; color: #FFFFFF; }"
-        )
-        left_box.addWidget(list_pool)
-        body.addLayout(left_box, 1)
+        list_chain = QtWidgets.QListWidget()
+        for widget in (list_pool, list_chain):
+            widget.setObjectName("queueList")
+            widget.setMinimumHeight(180)
+            widget.setStyleSheet(self._queue_list_qss())
+        body.addWidget(list_pool, 1, 0)
+        body.addWidget(list_chain, 1, 2)
 
         mid = QtWidgets.QVBoxLayout()
+        mid.setSpacing(6)
         mid.addStretch()
-        btn_add = QtWidgets.QPushButton("->")
-        btn_rm = QtWidgets.QPushButton("<-")
-        btn_mid_style = (
-            "QPushButton { background: #FFFFFF; border: 1px solid #CBD5E1; border-radius: 6px; padding: 4px 10px; font-size: 12px; font-weight: 700; color: #334155; }"
-            "QPushButton:hover { background: #EFF6FF; border-color: #93C5FD; color: #1D4ED8; }"
-            "QPushButton:pressed { background: #DBEAFE; }"
-        )
-        btn_add.setStyleSheet(btn_mid_style)
-        btn_rm.setStyleSheet(btn_mid_style)
-        mid.addWidget(btn_add)
-        mid.addWidget(btn_rm)
+        btn_add = QtWidgets.QPushButton("加入 →")
+        btn_rm = QtWidgets.QPushButton("← 移除")
+        btn_up = QtWidgets.QPushButton("↑ 上移")
+        btn_down = QtWidgets.QPushButton("↓ 下移")
+        for button in (btn_add, btn_rm, btn_up, btn_down):
+            button.setObjectName("path_btn")
+            button.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
+            button.setAutoDefault(False)
+            button.setMinimumWidth(88)
+            mid.addWidget(button)
         mid.addStretch()
-        body.addLayout(mid)
-
-        right_box = QtWidgets.QVBoxLayout()
-        lbl_chain = QtWidgets.QLabel("执行链（上优先）")
-        lbl_chain.setStyleSheet("font-size: 11px; font-weight: 600; color: #475569; background: transparent;")
-        right_box.addWidget(lbl_chain)
-        list_chain = QtWidgets.QListWidget()
-        list_chain.setMinimumHeight(160)
-        list_chain.setStyleSheet(
-            "QListWidget { background: #F8FAFC; border: 1px solid #E2E8F0; border-radius: 8px; padding: 4px; font-size: 11px; }"
-            "QListWidget::item { padding: 6px 8px; border-radius: 6px; color: #1E293B; }"
-            "QListWidget::item:hover { background: #EFF6FF; color: #1D4ED8; }"
-            "QListWidget::item:selected { background: #2563EB; color: #FFFFFF; }"
-        )
-        right_box.addWidget(list_chain)
-        sort_row = QtWidgets.QHBoxLayout()
-        btn_up = QtWidgets.QPushButton("上移")
-        btn_down = QtWidgets.QPushButton("下移")
-        btn_up.setStyleSheet(btn_mid_style)
-        btn_down.setStyleSheet(btn_mid_style)
-        sort_row.addWidget(btn_up)
-        sort_row.addWidget(btn_down)
-        right_box.addLayout(sort_row)
-        body.addLayout(right_box, 1)
+        body.addLayout(mid, 1, 1)
+        body.setColumnStretch(0, 1)
+        body.setColumnStretch(2, 1)
+        body.setRowStretch(1, 1)
         root_layout.addLayout(body)
 
         state = {"selected": list(selected)}
@@ -2388,8 +4100,8 @@ class PluginEditorDialog(QtWidgets.QDialog):
 
         def _refresh():
             list_chain.clear()
-            for mid in state["selected"]:
-                item = QtWidgets.QListWidgetItem(_label_for(mid))
+            for index, mid in enumerate(state["selected"], start=1):
+                item = QtWidgets.QListWidgetItem(f"{index}. {_label_for(mid)}")
                 item.setData(QtCore.Qt.ItemDataRole.UserRole, mid)
                 list_chain.addItem(item)
             list_pool.clear()
@@ -2410,6 +4122,7 @@ class PluginEditorDialog(QtWidgets.QDialog):
             if mid and mid not in state["selected"]:
                 state["selected"].append(mid)
                 _refresh()
+                self._on_form_edited()
 
         def _rm():
             row = list_chain.currentRow()
@@ -2417,6 +4130,7 @@ class PluginEditorDialog(QtWidgets.QDialog):
                 return
             state["selected"].pop(row)
             _refresh()
+            self._on_form_edited()
 
         def _up():
             row = list_chain.currentRow()
@@ -2428,6 +4142,7 @@ class PluginEditorDialog(QtWidgets.QDialog):
             )
             _refresh()
             list_chain.setCurrentRow(row - 1)
+            self._on_form_edited()
 
         def _down():
             row = list_chain.currentRow()
@@ -2439,6 +4154,7 @@ class PluginEditorDialog(QtWidgets.QDialog):
             )
             _refresh()
             list_chain.setCurrentRow(row + 1)
+            self._on_form_edited()
 
         btn_add.clicked.connect(_add)
         btn_rm.clicked.connect(_rm)
@@ -2509,9 +4225,7 @@ class PluginEditorDialog(QtWidgets.QDialog):
             name = self.name_input.text().strip()
             trigger = self.trigger_input.text().strip()
             if not name or not trigger:
-                QtWidgets.QMessageBox.warning(
-                    self, "验证失败", "插件名称和触发词不能为空"
-                )
+                self._reject_form("显示名称和主触发词不能为空", section="meta")
                 return
 
             # 构建新配置
@@ -2613,7 +4327,7 @@ class PluginEditorDialog(QtWidgets.QDialog):
                     ]
                     error = _validate_before_store(key, field_type, value)
                     if error:
-                        QtWidgets.QMessageBox.warning(self, "验证失败", error)
+                        self._reject_form(error, section="params", key=key)
                         return
                     _store_setting_value(key, value)
                 elif field_type == "link":
@@ -2630,7 +4344,7 @@ class PluginEditorDialog(QtWidgets.QDialog):
                     value = widget.currentText().strip()
                     error = _validate_before_store(key, field_type, value)
                     if error:
-                        QtWidgets.QMessageBox.warning(self, "验证失败", error)
+                        self._reject_form(error, section="params", key=key)
                         return
                     _store_setting_value(key, value)
                 elif field_type == "model_queue":
@@ -2675,7 +4389,7 @@ class PluginEditorDialog(QtWidgets.QDialog):
                         value = widget.text().strip()
                     error = _validate_before_store(key, field_type, value)
                     if error:
-                        QtWidgets.QMessageBox.warning(self, "验证失败", error)
+                        self._reject_form(error, section="params", key=key)
                         return
                     _store_setting_value(key, value)
 
@@ -2686,9 +4400,11 @@ class PluginEditorDialog(QtWidgets.QDialog):
 
             # 保存到文件
             if self.plugin_manager.save_plugin_config(self.trigger, new_config):
-                QtWidgets.QMessageBox.information(self, "成功", "插件配置已保存")
+                self._baseline = self._form_fingerprint()
+                self._refresh_dirty_label()
                 self.accept()
             else:
+                self._show_notice("保存插件配置失败", "warn")
                 QtWidgets.QMessageBox.warning(self, "失败", "保存插件配置失败")
 
         except Exception as e:

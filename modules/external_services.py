@@ -134,6 +134,44 @@ def _windows_create_no_window_flag() -> int:
     return int(getattr(subprocess, "CREATE_NO_WINDOW", 0))
 
 
+def _system_cmd_exe() -> str:
+    """Use System32 cmd.exe. PATH may put Conda first and break DLL init."""
+    root = os.environ.get("SystemRoot") or os.environ.get("WINDIR") or r"C:\Windows"
+    cmd = os.path.join(root, "System32", "cmd.exe")
+    return cmd if os.path.isfile(cmd) else "cmd.exe"
+
+
+def _windows_system_safe_env(base: Optional[Dict[str, str]] = None) -> Dict[str, str]:
+    """Keep Conda Library\\bin from shadowing System32 when starting cmd.exe."""
+    env = dict(base if base is not None else os.environ)
+    path = env.get("PATH") or env.get("Path") or ""
+    system_root = env.get("SystemRoot") or env.get("WINDIR") or r"C:\Windows"
+    system32 = os.path.join(system_root, "System32")
+    parts: list[str] = []
+    seen: set[str] = set()
+
+    def add(item: str) -> None:
+        key = os.path.normcase(item.rstrip("\\/"))
+        if not item or key in seen:
+            return
+        seen.add(key)
+        parts.append(item)
+
+    add(system32)
+    add(system_root)
+    for item in path.split(os.pathsep):
+        text = str(item or "").strip()
+        if not text:
+            continue
+        lowered = os.path.normcase(text)
+        if "\\library\\bin" in lowered or "/library/bin" in lowered:
+            continue
+        add(text)
+    env["PATH"] = os.pathsep.join(parts)
+    env["Path"] = env["PATH"]
+    return env
+
+
 def _decode_process_output(raw: bytes | str | None) -> str:
     if raw is None:
         return ""
@@ -227,25 +265,45 @@ def find_listening_pids(port: int) -> List[int]:
     return pids
 
 
-def _build_launch_argv(command: str, args: List[str]) -> tuple[List[str], int, Any]:
-    """Build silent launch argv/flags.
+def _cmd_quote(value: str) -> str:
+    text = str(value or "")
+    return '"' + text.replace('"', '""') + '"'
 
-    Windows .bat/.cmd are executed under a hidden cmd.exe (no `start /b`),
-    so we keep a process handle long enough for port warmup and tree kill.
+
+def _windows_system_dir() -> str:
+    root = os.environ.get("SystemRoot") or os.environ.get("WINDIR") or r"C:\Windows"
+    system32 = os.path.join(root, "System32")
+    return system32 if os.path.isdir(system32) else root
+
+
+def _build_launch_argv(
+    command: str,
+    args: List[str],
+    *,
+    cwd: str = "",
+) -> tuple[List[str], int, Any, Optional[str]]:
+    """Build silent launch argv/flags and the cwd used for CreateProcess.
+
+    Windows .bat/.cmd stay under System32 cmd.exe so we can track the PID.
+    cmd itself must not start inside the tool directory: NapCat ships its own
+    msvcp140.dll, and cmd.exe loads that copy (0xc0000142) on startup and again
+    when Windows tears the process down at shutdown. The bat still runs there
+    via `cd /d` after cmd has loaded system DLLs.
     """
     creationflags = 0
     startupinfo = None
     argv = [command, *args]
+    popen_cwd = str(cwd or "").strip() or None
     if os.name == "nt":
-        creationflags = int(
-            getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
-            | getattr(subprocess, "CREATE_NO_WINDOW", 0)
-        )
+        creationflags = int(getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0))
         lower = str(command or "").lower()
         if lower.endswith((".bat", ".cmd")):
-            # Keep cmd as parent until the bat returns. Avoid `start /b`
-            # which detaches immediately and breaks PID tracking/status.
-            argv = ["cmd.exe", "/d", "/c", "call", command, *args]
+            work = str(cwd or "").strip() or str(Path(command).parent)
+            script = f"cd /d {_cmd_quote(work)} && call {_cmd_quote(command)}"
+            if args:
+                script += " " + " ".join(_cmd_quote(str(item)) for item in args)
+            argv = [_system_cmd_exe(), "/d", "/c", script]
+            popen_cwd = _windows_system_dir()
         elif lower.endswith(".ps1"):
             argv = [
                 "powershell.exe",
@@ -265,7 +323,9 @@ def _build_launch_argv(command: str, args: List[str]) -> tuple[List[str], int, A
             startupinfo.wShowWindow = 0  # SW_HIDE
         except Exception:
             startupinfo = None
-    return argv, creationflags, startupinfo
+        if not lower.endswith((".bat", ".cmd", ".ps1")):
+            creationflags |= int(getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    return argv, creationflags, startupinfo, popen_cwd
 
 
 def candidate_ports(service_id: str, primary_port: int) -> List[int]:
@@ -793,11 +853,17 @@ def start_service(
         cwd = str(maybe_dir) if maybe_dir.exists() else None
 
     # Silent launch by default: no console window, independent process group.
-    argv, creationflags, startupinfo = _build_launch_argv(command, args)
+    argv, creationflags, startupinfo, popen_cwd = _build_launch_argv(
+        command, args, cwd=cwd or ""
+    )
+    popen_env = None
+    if os.name == "nt" and str(command or "").lower().endswith((".bat", ".cmd", ".ps1")):
+        popen_env = _windows_system_safe_env()
     try:
         proc = subprocess.Popen(
             argv,
-            cwd=cwd or None,
+            cwd=popen_cwd,
+            env=popen_env,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,

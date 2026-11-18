@@ -6,7 +6,7 @@
 | --- | --- |
 | [dsh-tool-awareness.md](dsh-tool-awareness.md) | DSH 的对话回合、工具自知和插件披露；对照任的路由，列出可借鉴的点 |
 | [memory.md](memory.md) | 记忆 / 知识库契约：谁是事实源、GUI 页、召回、写回、知识门控 |
-| [shipped-features.md](shipped-features.md) | 已落地行为摘要（搜索确认、徽章、知识门控、自然聊、GUI 接线、久坐弹窗） |
+| [shipped-features.md](shipped-features.md) | 已落地行为摘要（搜索确认、徽章、知识门控、自然聊、QQ 私聊拟人、GUI 接线、久坐弹窗） |
 | [project_slimdown.md](project_slimdown.md) | 瘦身规则；不要一次重写 `ChatService` / Settings |
 | [coupling-and-overdesign-review.md](coupling-and-overdesign-review.md) | 2026-08-18 审查原文 + 后续批次落地状态 |
 
@@ -20,7 +20,8 @@
 
 1. `ChatService.process()` 装配 ctx、路由工具 / 日记 / 传感器
 2. 普通直聊：Character Thought（HTTP `timeout_sec` + `max_tokens`）→ 词法表情（默认 1 条）→ `AdvancedMemorySystem.build_prompt`（知识门控）→ 主回复 → 禁词守卫 → 展示
-3. 闲聊**不再**二次 polish（`qq_polish_mode` 已删）。传感器草稿像观察报告时仍可改写；工具直出文本的软化还在
+3. QQ 私聊发出去时：`GatewaySender` 先已读、再「正在输入」、按字数短等，然后分段发送。群聊不走拟人。入口 `services/chat_support/qq_humanize.py`
+4. 闲聊**不再**二次 polish（`qq_polish_mode` 已删）。传感器草稿像观察报告时仍可改写；工具直出文本的软化还在
 
 入口：`services/chat_service.py`、`services/chat_support/character_thought.py`、`natural_chat_pipeline.py`、`forbidden_phrase_guard.py`、`modules/memory/knowledge_gate.py`。
 

@@ -181,3 +181,198 @@ def test_chat_complete_does_not_retry_rate_limit_as_tools_unsupported(monkeypatc
     )
     assert result.text.startswith("❌")
     assert "only" in llm._MODEL_COOLDOWNS
+
+
+def _async_openai_client(create):
+    class FakeCompletions:
+        async def create(self, **kwargs):
+            return create(kwargs)
+
+    class FakeAsyncOpenAI:
+        def __init__(self, *, api_key, base_url, **_kwargs):
+            self.chat = type("Chat", (), {"completions": FakeCompletions()})()
+
+        async def close(self):
+            return None
+
+    return FakeAsyncOpenAI
+
+
+@pytest.mark.asyncio
+async def test_analyze_image_uses_vision_router_chain(monkeypatch):
+    calls = []
+
+    def create(kwargs):
+        calls.append(kwargs["model"])
+        return _text_response(f"seen-{kwargs['model']}")
+
+    monkeypatch.setattr(llm, "AsyncOpenAI", _async_openai_client(create))
+    monkeypatch.setattr(
+        llm,
+        "MODELS",
+        {
+            "vl-a": {
+                "model": "vision-a",
+                "api_key": "x",
+                "base_url": "a",
+                "purposes": ["vision"],
+            },
+            "vl-b": {
+                "model": "vision-b",
+                "api_key": "x",
+                "base_url": "b",
+                "purposes": ["vision"],
+            },
+        },
+    )
+    monkeypatch.setattr(llm, "LLM_ROUTER", {"vision": ["vl-b", "vl-a"]})
+    monkeypatch.setattr(llm, "SENSOR_VISION_MODEL", "vl-a")
+
+    result = await llm.analyze_image("abc", prompt="看图", caller="qq_image_describe")
+    assert result == "seen-vision-b"
+    assert calls == ["vision-b"]
+
+
+@pytest.mark.asyncio
+async def test_analyze_image_prefers_chat_model_with_vision(monkeypatch):
+    calls = []
+
+    def create(kwargs):
+        calls.append(kwargs["model"])
+        return _text_response("from-chat")
+
+    monkeypatch.setattr(llm, "AsyncOpenAI", _async_openai_client(create))
+    monkeypatch.setattr(
+        llm,
+        "MODELS",
+        {
+            "chat-vl": {
+                "model": "chat-vision",
+                "api_key": "x",
+                "base_url": "c",
+                "purposes": ["chat", "vision"],
+            },
+            "vl-only": {
+                "model": "vision-only",
+                "api_key": "x",
+                "base_url": "v",
+                "purposes": ["vision"],
+            },
+        },
+    )
+    monkeypatch.setattr(
+        llm,
+        "LLM_ROUTER",
+        {"default": ["chat-vl"], "vision": ["vl-only"]},
+    )
+
+    result = await llm.analyze_image("abc")
+    assert result == "from-chat"
+    assert calls == ["chat-vision"]
+
+
+@pytest.mark.asyncio
+async def test_analyze_image_skips_chat_models_in_vision_route(monkeypatch):
+    calls = []
+
+    def create(kwargs):
+        calls.append(kwargs["model"])
+        return _text_response("ok")
+
+    monkeypatch.setattr(llm, "AsyncOpenAI", _async_openai_client(create))
+    monkeypatch.setattr(
+        llm,
+        "MODELS",
+        {
+            "chat-a": {
+                "model": "chat-only",
+                "api_key": "x",
+                "base_url": "c",
+                "purposes": ["chat"],
+            },
+            "vl-a": {
+                "model": "vision-a",
+                "api_key": "x",
+                "base_url": "a",
+                "purposes": ["vision"],
+            },
+        },
+    )
+    monkeypatch.setattr(llm, "LLM_ROUTER", {"vision": ["chat-a", "vl-a"]})
+
+    result = await llm.analyze_image("abc")
+    assert result == "ok"
+    assert calls == ["vision-a"]
+
+
+@pytest.mark.asyncio
+async def test_analyze_image_falls_back_to_sensor_vision_model(monkeypatch):
+    calls = []
+
+    def create(kwargs):
+        calls.append(kwargs["model"])
+        return _text_response("ok")
+
+    monkeypatch.setattr(llm, "AsyncOpenAI", _async_openai_client(create))
+    monkeypatch.setattr(
+        llm,
+        "MODELS",
+        {
+            "vl-legacy": {
+                "model": "legacy-v",
+                "api_key": "x",
+                "base_url": "legacy",
+            }
+        },
+    )
+    monkeypatch.setattr(llm, "LLM_ROUTER", {"vision": []})
+    monkeypatch.setattr(llm, "SENSOR_VISION_MODEL", "vl-legacy")
+
+    result = await llm.analyze_image("abc")
+    assert result == "ok"
+    assert calls == ["legacy-v"]
+
+
+@pytest.mark.asyncio
+async def test_analyze_image_reports_missing_vision_route(monkeypatch):
+    monkeypatch.setattr(llm, "MODELS", {})
+    monkeypatch.setattr(llm, "LLM_ROUTER", {"vision": []})
+    monkeypatch.setattr(llm, "SENSOR_VISION_MODEL", "gone")
+    result = await llm.analyze_image("abc")
+    assert "请在任务路由里配置「识图」模型" in result
+
+
+@pytest.mark.asyncio
+async def test_analyze_image_falls_through_failed_primary(monkeypatch):
+    calls = []
+
+    def create(kwargs):
+        calls.append(kwargs["model"])
+        if kwargs["model"] == "vision-a":
+            raise RuntimeError("primary down")
+        return _text_response("backup ok")
+
+    monkeypatch.setattr(llm, "AsyncOpenAI", _async_openai_client(create))
+    monkeypatch.setattr(
+        llm,
+        "MODELS",
+        {
+            "vl-a": {
+                "model": "vision-a",
+                "api_key": "x",
+                "base_url": "a",
+                "purposes": ["vision"],
+            },
+            "vl-b": {
+                "model": "vision-b",
+                "api_key": "x",
+                "base_url": "b",
+                "purposes": ["vision"],
+            },
+        },
+    )
+    monkeypatch.setattr(llm, "LLM_ROUTER", {"vision": ["vl-a", "vl-b"]})
+
+    result = await llm.analyze_image("abc")
+    assert result == "backup ok"
+    assert calls == ["vision-a", "vision-b"]
