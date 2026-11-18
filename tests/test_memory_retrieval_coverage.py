@@ -105,3 +105,74 @@ def test_more_relevant_record_beats_generic_matches_before_limit(tmp_path):
         query_terms=["星河", "预算"], subject_id="owner", session_id="here", limit=1,
     )
     assert [row["id"] for row in rows] == [target]
+
+
+@pytest.mark.parametrize("ineligible", ["expired", "future", "wrong_kind"])
+def test_entity_recall_reaches_the_41st_linked_record(tmp_path, ineligible):
+    core = _core(tmp_path)
+    repo = core.repository
+    entities = [repo.upsert_entity(name) for name in ("星河", "月亮")]
+    target = add(core, "budget", "原定金额为八万元")
+    repo.link_record_entities(target, entities)
+    for i in range(40):
+        kind = "summary" if ineligible == "wrong_kind" else "episode"
+        rid, _ = repo.upsert_record(
+            kind=kind, key=str(i), content=f"较新的记录 {i}", subject_id="owner",
+            session_id="here",
+            valid_until="2000-01-01" if ineligible == "expired" else None,
+        )
+        repo.link_record_entities(rid, entities)
+    # Make the cutoff deterministic even on clocks with coarse resolution.
+    conn = repo._connect()
+    with conn:
+        conn.execute("UPDATE memory_records SET last_confirmed_at='1990-01-01' WHERE id=?", (target,))
+        if ineligible == "future":
+            # Older databases can contain future-dated rows rejected by today's writer.
+            conn.execute("UPDATE memory_records SET valid_from='2099-01-01' WHERE id<>?", (target,))
+    rows = core._with_entity_hits(
+        [], search_text="星河和月亮", person_id="owner", session_id="here", kinds=iter(["episode"]),
+    )
+    assert [row["id"] for row in rows] == [target]
+    assert rows[0]["entity_hit"] is True
+
+
+def test_linked_records_share_current_window_and_scope_semantics(tmp_path):
+    core = _core(tmp_path)
+    repo = core.repository
+    entity = repo.upsert_entity("茶单")
+    conn = repo._connect()
+    # 2020-01-01 00:00 UTC, also 08:00 in +08:00.
+    instant = 1577836800
+    for key, start, end, subject, session in [
+        ("opens_now", "2020-01-01T08:00:00+08:00", "", "owner", "here"),
+        ("ends_now", "", "2020-01-01", "owner", "here"),
+        ("legacy_global", "unknown", None, "", ""),
+        ("another_group", "", "", "owner", "elsewhere"),
+        ("visitor", "", "", "qq:42", "here"),
+    ]:
+        rid, _ = repo.upsert_record(kind="episode", key=key, content=key, subject_id=subject, session_id=session)
+        repo.link_record_entities(rid, [entity])
+        with conn:
+            conn.execute("UPDATE memory_records SET valid_from=?, valid_until=? WHERE id=?", (start, end, rid))
+    for person, expected in [("owner", {"opens_now", "legacy_global"}), ("qq:42", {"visitor"})]:
+        rows = repo.records_for_entities([entity], subject_id=person, session_id="here",
+                                         kinds=["episode"], current_at=instant)
+        assert {row["key"] for row in rows} == expected
+    assert repo.records_for_entities([entity], subject_id="owner", kinds=[], current_at=instant) == []
+
+
+def test_chinese_short_terms_keep_short_only_matches_and_rank_mixed_hits_first(tmp_path):
+    core = _core(tmp_path)
+    both = add(core, "both", "乌龙茶预算", importance=0.1)
+    short_only = add(core, "budget", "年度预算", importance=0.9)
+    long_only = add(core, "tea", "买乌龙茶", importance=0.7)
+    single_only = add(core, "leaves", "购买红茶", importance=0.9)
+
+    def ids(*terms):
+        return [row["id"] for row in core.repository.search_current_records(
+            query_terms=terms, subject_id="owner", session_id="here",
+        )]
+
+    assert ids("茶") == [single_only, long_only, both]
+    assert ids("预算") == [short_only, both]
+    assert ids("乌龙茶", "预算") == [both, short_only, long_only]

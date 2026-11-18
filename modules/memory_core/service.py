@@ -1423,18 +1423,13 @@ class MemoryCoreService:
             linked = self.repository.records_for_entities(
                 entity_ids,
                 subject_id=person_id,
-                session_id=session_id,
+                session_id=str(session_id or "").strip(),
+                kinds=kinds,
+                current_at=time.time(),
             )
             degree = self.repository.max_relation_degree(entity_ids, subject_id=person_id)
         except Exception:
             return records
-        allowed_kinds = set(kinds)
-        linked = [
-            row for row in linked
-            if is_current(row)
-            and row.get("kind") in allowed_kinds
-            and self._record_matches_scope(row, person_id=person_id, session_id=session_id)
-        ]
         if degree > 50:
             linked = self._pagerank_rows(linked)
         linked_ids = {str(row.get("id") or "") for row in linked}

@@ -49,6 +49,15 @@ def normalize_memory_time(value: Any) -> Optional[str]:
     return datetime.fromtimestamp(timestamp, tz=timezone.utc).isoformat()
 
 
+def _current_window_sql(conn: sqlite3.Connection) -> str:
+    # Match is_current for legacy dates, time zones and open-ended intervals.
+    conn.create_function("memory_time", 1, parse_memory_time, deterministic=True)
+    return (
+        "(memory_time(valid_from) IS NULL OR memory_time(valid_from)<=?) AND "
+        "(memory_time(valid_until) IS NULL OR memory_time(valid_until)>?)"
+    )
+
+
 def is_current(record: Optional[dict[str, Any]], now: Any = None) -> bool:
     if not record:
         return False
@@ -1768,12 +1777,7 @@ class MemoryCoreRepository:
             now_ts = float(current_at) if isinstance(current_at, (int, float)) else parse_memory_time(current_at)
             if now_ts is None:
                 now_ts = time.time()
-            # Use the same date semantics as is_current, including legacy dates.
-            conn.create_function("memory_time", 1, parse_memory_time, deterministic=True)
-            where.extend([
-                "(memory_time(valid_from) IS NULL OR memory_time(valid_from)<=?)",
-                "(memory_time(valid_until) IS NULL OR memory_time(valid_until)>?)",
-            ])
+            where.append(_current_window_sql(conn))
             args.extend([now_ts, now_ts])
         select = "*"
         score_args: list[Any] = []
@@ -2287,6 +2291,8 @@ class MemoryCoreRepository:
         *,
         subject_id: str,
         session_id: str = "",
+        kinds: Optional[Iterable[str]] = None,
+        current_at: Optional[float] = None,
         limit: int = 40,
     ) -> list[dict[str, Any]]:
         ids = [str(item or "").strip() for item in entity_ids if str(item or "").strip()]
@@ -2303,16 +2309,25 @@ class MemoryCoreRepository:
         if session_id:
             subject_sql += " AND m.session_id IN (?, '')"
             subject_args.append(session_id)
+        conn = self._connect()
+        filters = [f"link.entity_id IN ({placeholders})", "m.status='active'", subject_sql]
+        args = [*ids, *subject_args]
+        if kinds is not None:
+            allowed = tuple(kinds)
+            if not allowed:
+                return []
+            filters.append("m.kind IN (" + ",".join("?" for _ in allowed) + ")")
+            args.extend(allowed)
+        if current_at is not None:
+            filters.append(_current_window_sql(conn))
+            args.extend([current_at, current_at])
         sql = (
             "SELECT DISTINCT m.* FROM memory_records m "
             "JOIN memory_record_entities link ON link.record_id=m.id "
-            f"WHERE link.entity_id IN ({placeholders}) AND m.status='active' AND {subject_sql} "
-            "ORDER BY m.last_confirmed_at DESC LIMIT ?"
+            f"WHERE {' AND '.join(filters)} "
+            "ORDER BY m.last_confirmed_at DESC, m.id LIMIT ?"
         )
-        rows = self._connect().execute(
-            sql,
-            [*ids, *subject_args, max(1, min(80, int(limit)))],
-        ).fetchall()
+        rows = conn.execute(sql, [*args, max(1, min(80, int(limit)))]).fetchall()
         return [self._row_to_record(row) for row in rows]
 
     def relation_degree(self, entity_id: str, *, subject_id: str) -> int:
