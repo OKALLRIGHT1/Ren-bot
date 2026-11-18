@@ -9,6 +9,7 @@ from modules.paths import data_path
 # 路径锚定（docs/部分重构.md §13.1）：环境变量注入时走用户数据目录，
 # 否则保持 './data/runtime_settings.json' 相对路径（开发模式行为不变）。
 RUNTIME_SETTINGS_PATH = Path(data_path("runtime_settings.json"))
+_settings_revision = 0
 EMBEDDING_MODEL_ID_KEY = "embedding_model_id"
 EMBEDDING_MODEL_IDS_KEY = "embedding_model_ids"
 OLLAMA_AUTOSTART_KEY = "ollama_autostart_enabled"
@@ -44,8 +45,14 @@ def load_runtime_settings_strict() -> Dict[str, Any]:
     return _read_runtime_settings(strict=True)
 
 
-def save_runtime_settings(settings: Dict[str, Any]) -> bool:
-    path = RUNTIME_SETTINGS_PATH
+def runtime_settings_revision() -> int:
+    """Successful in-process saves, for consumers that cache parsed settings."""
+    return _settings_revision
+
+
+def save_runtime_settings(settings: Dict[str, Any], *, path: Path | None = None) -> bool:
+    global _settings_revision
+    path = RUNTIME_SETTINGS_PATH if path is None else path
     temp_path = None
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -60,6 +67,8 @@ def save_runtime_settings(settings: Dict[str, Any]) -> bool:
             json.dump(settings, f, ensure_ascii=False, indent=2)
             f.write("\n")
         os.replace(temp_path, path)
+        if path == RUNTIME_SETTINGS_PATH:
+            _settings_revision += 1
         return True
     except Exception:
         return False

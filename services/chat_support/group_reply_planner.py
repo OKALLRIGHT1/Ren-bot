@@ -13,7 +13,7 @@ from __future__ import annotations
 import asyncio
 import re
 import time
-from collections import deque
+from collections import OrderedDict, deque
 from dataclasses import dataclass, field
 from typing import Any, Callable, Deque, Optional, Sequence
 
@@ -66,7 +66,7 @@ class _SessionState:
     silence_streak: int = 0
     last_model_check_at: float = 0.0
     messages_since_check: int = 0
-    checking: bool = False
+    last_activity: float = 0.0
 
 
 def is_group_context(ctx: Optional[dict]) -> bool:
@@ -347,20 +347,61 @@ def load_group_reply_config(runtime: Optional[dict] = None) -> GroupReplyPlanner
     return config_from_mapping(runtime)
 
 
+class _GroupReplyConfigSnapshot:
+    """Refresh on a successful settings save, or a file edit from another process."""
+
+    def __init__(self):
+        self.config = default_group_reply_config()
+        self.revision = -1
+        self.signature = None
+        self.next_check = 0.0
+
+    def __call__(self) -> GroupReplyPlannerConfig:
+        from modules import runtime_settings
+
+        revision = runtime_settings.runtime_settings_revision()
+        now = time.monotonic()
+        saved = revision != self.revision
+        if not saved and now < self.next_check:
+            return self.config
+        self.next_check = now + 1.0
+        self.revision = revision
+        path = runtime_settings.RUNTIME_SETTINGS_PATH
+        try:
+            try:
+                stat = path.stat()
+                signature = (path, stat.st_mtime_ns, stat.st_size, stat.st_ino)
+            except FileNotFoundError:
+                signature = (path, None)
+            if saved or signature != self.signature:
+                self.config = config_from_mapping(runtime_settings.load_runtime_settings_strict())
+                self.signature = signature
+        except (OSError, runtime_settings.RuntimeSettingsError):
+            # A partially written external edit is retried on the next check.
+            self.signature = None
+        return self.config
+
+
 class GroupReplyPlanner:
     def __init__(
         self,
         config: Optional[GroupReplyPlannerConfig] = None,
         *,
         load_config: Optional[Callable[[], GroupReplyPlannerConfig]] = None,
+        max_sessions: int = 256,
+        idle_ttl_sec: float = 3600,
     ):
         self.config = config or GroupReplyPlannerConfig()
         self._load_config = load_config
-        self._sessions: dict[str, _SessionState] = {}
+        self._max_sessions = max(1, max_sessions)
+        self._idle_ttl = idle_ttl_sec
+        self._sessions: OrderedDict[str, _SessionState] = OrderedDict()
+        self._in_flight: dict[str, _SessionState] = {}
+        self._expiry_timer: Optional[asyncio.TimerHandle] = None
 
     @classmethod
     def from_config(cls) -> "GroupReplyPlanner":
-        loader = load_group_reply_config
+        loader = _GroupReplyConfigSnapshot()
         return cls(loader(), load_config=loader)
 
     def _use_config(self) -> GroupReplyPlannerConfig:
@@ -373,7 +414,7 @@ class GroupReplyPlanner:
         return self.config
 
     def note_assistant(self, ctx: Optional[dict], text: str) -> None:
-        if not self._use_config().enabled or not is_group_context(ctx):
+        if not is_group_context(ctx) or not self._use_config().enabled:
             return
         key = session_key(ctx)
         clean = self._clip(text)
@@ -400,11 +441,11 @@ class GroupReplyPlanner:
         logger: Any = None,
         now: Callable[[], float] = time.time,
     ) -> GroupReplyDecision:
-        self._use_config()
-        if not self.config.enabled:
-            return GroupReplyDecision(False, True, "disabled")
         if not is_group_context(ctx):
             return GroupReplyDecision(False, True, "not_group")
+        config = self._use_config()
+        if not config.enabled:
+            return GroupReplyDecision(False, True, "disabled")
         key = session_key(ctx)
         if not key:
             return GroupReplyDecision(False, True, "no_session")
@@ -428,7 +469,7 @@ class GroupReplyPlanner:
         if is_low_content(text):
             self._append_user(state, sender, text)
             return GroupReplyDecision(True, False, "low_content")
-        if state.checking:
+        if key in self._in_flight:
             self._append_user(state, sender, text)
             return GroupReplyDecision(True, False, "in_flight")
 
@@ -439,7 +480,8 @@ class GroupReplyPlanner:
                 self._append_user(state, sender, text)
                 return GroupReplyDecision(True, False, "backoff")
 
-        state.checking = True
+        self._sessions.pop(key, None)
+        self._in_flight[key] = state
         used_model = False
         try:
             prompt = build_planner_prompt(
@@ -469,9 +511,10 @@ class GroupReplyPlanner:
                 except Exception:
                     pass
         finally:
-            state.checking = False
+            del self._in_flight[key]
+            self._retain_idle(key, state)
 
-        self._append_user(state, sender, text)
+        self._append_user(state, sender, text, config=config)
         state.last_model_check_at = now_ts
         state.messages_since_check = 0
         if reply:
@@ -480,7 +523,7 @@ class GroupReplyPlanner:
                 True,
                 True,
                 reason,
-                format_group_context_block(prior, limit=self.config.context_lines),
+                format_group_context_block(prior, limit=config.context_lines),
                 used_model,
             )
         state.silence_streak += 1
@@ -504,24 +547,62 @@ class GroupReplyPlanner:
         )
 
     def _state(self, key: str) -> _SessionState:
-        state = self._sessions.get(key)
+        if key in self._in_flight:
+            return self._in_flight[key]
+        self._prune_idle()
+        state = self._sessions.pop(key, None)
         if state is None:
             state = _SessionState(
                 lines=deque(maxlen=max(1, int(self.config.store_lines or 1)))
             )
-            self._sessions[key] = state
+        self._retain_idle(key, state)
         return state
 
-    def _append_user(self, state: _SessionState, sender: str, text: str) -> None:
-        clean = self._clip(text)
+    def _retain_idle(self, key: str, state: _SessionState) -> None:
+        state.last_activity = time.monotonic()
+        self._sessions[key] = state
+        self._prune_idle()
+        if self._sessions and self._expiry_timer is None:
+            self._schedule_expiry()
+
+    def _idle_timeout(self) -> float:
+        return max(self._idle_ttl, self.config.backoff_base_sec, self.config.backoff_cap_sec)
+
+    def _prune_idle(self) -> None:
+        cutoff = time.monotonic() - self._idle_timeout()
+        while self._sessions:
+            oldest = next(iter(self._sessions.values()))
+            if (len(self._sessions) + len(self._in_flight) <= self._max_sessions
+                    and oldest.last_activity > cutoff):
+                break
+            self._sessions.popitem(last=False)
+
+    def _schedule_expiry(self) -> None:
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return  # Synchronous callers also prune on the next access.
+        oldest = next(iter(self._sessions.values()))
+        delay = oldest.last_activity + self._idle_timeout() - time.monotonic()
+        self._expiry_timer = loop.call_later(max(0, delay), self._expire_idle)
+
+    def _expire_idle(self) -> None:
+        self._expiry_timer = None
+        self._prune_idle()
+        if self._sessions:
+            self._schedule_expiry()
+
+    def _append_user(self, state: _SessionState, sender: str, text: str, *,
+                     config: Optional[GroupReplyPlannerConfig] = None) -> None:
+        clean = self._clip(text, config=config)
         if not clean:
             return
         who = str(sender or "有人").strip() or "有人"
         state.lines.append(GroupLine(who[:24], clean, "user"))
 
-    def _clip(self, text: str) -> str:
+    def _clip(self, text: str, *, config: Optional[GroupReplyPlannerConfig] = None) -> str:
         clean = " ".join(str(text or "").split())
-        limit = max(8, int(self.config.line_chars or 8))
+        limit = max(8, int((config or self.config).line_chars or 8))
         if len(clean) > limit:
             return clean[: limit - 1] + "…"
         return clean

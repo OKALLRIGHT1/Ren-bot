@@ -2316,9 +2316,13 @@ class MemoryCoreRepository:
         return [self._row_to_record(row) for row in rows]
 
     def relation_degree(self, entity_id: str, *, subject_id: str) -> int:
-        entity_id = str(entity_id or "").strip()
-        if not entity_id:
+        return self.max_relation_degree([entity_id], subject_id=subject_id)
+
+    def max_relation_degree(self, entity_ids: Iterable[str], *, subject_id: str) -> int:
+        ids = {str(item).strip() for item in entity_ids if item and str(item).strip()}
+        if not ids:
             return 0
+        placeholders = ",".join("?" for _ in ids)
         subject = str(subject_id or "owner").strip() or "owner"
         if subject == "owner":
             subject_sql = "m.subject_id IN (?, '')"
@@ -2326,13 +2330,14 @@ class MemoryCoreRepository:
         else:
             subject_sql = "m.subject_id=?"
             subject_args = [subject]
-        row = self._connect().execute(
+        rows = self._connect().execute(
             "SELECT COUNT(*) AS n FROM memory_records m "
             "JOIN memory_record_entities link ON link.record_id=m.id "
-            f"WHERE link.entity_id=? AND m.kind='relation' AND m.status='active' AND {subject_sql}",
-            [entity_id, *subject_args],
-        ).fetchone()
-        return int(row["n"] if row else 0)
+            f"WHERE link.entity_id IN ({placeholders}) AND m.kind='relation' "
+            f"AND m.status='active' AND {subject_sql} GROUP BY link.entity_id",
+            [*ids, *subject_args],
+        )
+        return max((int(row["n"]) for row in rows), default=0)
 
     def find_active_persona(self, *, subject_id: str, kind: str, key: str) -> Optional[dict[str, Any]]:
         row = self._find_active_identity(

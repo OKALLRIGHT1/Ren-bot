@@ -1536,6 +1536,7 @@ async def test_qq_image_reference_without_image_does_not_reach_llm(
                 "session_id": "group:100",
                 "message_type": "group",
                 "is_owner": True,
+                "targets_self": True,
                 "images": [],
                 "has_image": False,
                 "reply": {},
@@ -1610,6 +1611,8 @@ async def test_qq_group_messages_do_not_use_private_buffer(chat_env, monkeypatch
     captured = []
 
     def fake_chat(messages, *args, **kwargs):
+        if kwargs.get("caller") == "group_reply_planner":
+            return "YES"
         captured.append(messages[-1]["content"])
         return "群聊回复"
 

@@ -1425,10 +1425,7 @@ class MemoryCoreService:
                 subject_id=person_id,
                 session_id=session_id,
             )
-            degree = max(
-                self.repository.relation_degree(entity_id, subject_id=person_id)
-                for entity_id in entity_ids
-            )
+            degree = self.repository.max_relation_degree(entity_ids, subject_id=person_id)
         except Exception:
             return records
         allowed_kinds = set(kinds)

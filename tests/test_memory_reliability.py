@@ -18,6 +18,57 @@ def add_record(core, *, session="private_A", subject="owner", **extra):
     )
 
 
+def test_recall_batches_degree_counts_and_preserves_pagerank_threshold(tmp_path, monkeypatch):
+    core = _core(tmp_path)
+    repo = core.repository
+    left = repo.upsert_entity("星河")
+    right = repo.upsert_entity("月亮")
+
+    def link(i, entities, *, subject="owner", kind="relation", status="active"):
+        rid, _ = repo.upsert_record(
+            kind=kind, key=str(i), content=f"关系 {i}", subject_id=subject, status=status,
+        )
+        repo.link_record_entities(rid, entities)
+
+    for i in range(49):
+        link(i, [left])
+    link("shared", [left, right], subject="")
+    link("foreign", [left], subject="visitor")
+    link("old", [left], status="archived")
+    link("episode", [left], kind="episode")
+
+    assert repo.max_relation_degree([left, right, left, ""], subject_id="owner") == 50
+    assert repo.relation_degree(right, subject_id="owner") == 1
+    assert repo.relation_degree(right, subject_id="visitor") == 0
+    assert repo.max_relation_degree([left, right], subject_id="visitor") == 1
+    assert repo.max_relation_degree(["missing"], subject_id="owner") == 0
+    assert repo.max_relation_degree([], subject_id="owner") == 0
+
+    ranked = []
+
+    def rank(rows):
+        ranked.append(True)
+        return rows
+
+    monkeypatch.setattr(core, "_pagerank_rows", rank)
+    for expected in (0, 1):
+        if expected:
+            link("new", [left])
+        statements = []
+        conn = repo._connect()
+        conn.set_trace_callback(statements.append)
+        try:
+            rows = core._with_entity_hits(
+                [], search_text="星河和月亮", person_id="owner", session_id="here", kinds=["relation"],
+            )
+        finally:
+            conn.set_trace_callback(None)
+        assert rows and all(row["entity_hit"] for row in rows)
+        assert len(ranked) == expected
+        counts = [q for q in statements if "count(" in q.lower() and "memory_record_entities" in q]
+        assert len(counts) == 1
+
+
 @pytest.mark.parametrize("session,subject,extra,visible", [
     ("private_A", "owner", {}, False),
     ("group_B", "owner", {}, True),

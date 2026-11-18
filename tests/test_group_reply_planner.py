@@ -1,3 +1,6 @@
+import asyncio
+from unittest.mock import AsyncMock, Mock
+
 import pytest
 
 from services.chat_support.group_reply_planner import (
@@ -272,3 +275,113 @@ async def test_loader_applies_on_the_next_decision():
     second = await ask("这个话题你怎么看")
     assert second.reply is True
     assert "可以正常接话" in model.calls[1]["messages"][0]["content"]
+
+
+@pytest.mark.asyncio
+async def test_non_group_service_paths_skip_group_preparation():
+    from services.chat_service import ChatService
+
+    service = Mock(spec=ChatService)
+    service.gateway_sender = Mock(send_reply=AsyncMock(return_value=True))
+    private = _group()
+    private["channel_meta"]["message_type"] = "private"
+    for ctx in (private, {"source": "desktop"}):
+        assert not await ChatService._maybe_hold_group_chatter(service, "hi", ctx, {})
+        assert await ChatService._send_gateway_reply(service, "hi", ctx)
+    service._group_reply_planner.assert_not_called()
+    service._get_active_character_profile.assert_not_called()
+    service._plugin_group_keywords.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_group_snapshot_reused_until_successful_save(tmp_path, monkeypatch):
+    from modules import runtime_settings as settings
+
+    path = tmp_path / "runtime_settings.json"
+    monkeypatch.setattr(settings, "RUNTIME_SETTINGS_PATH", path)
+    assert settings.save_runtime_settings({"group_reply_planner_enabled": True})
+    read = Mock(wraps=settings.load_runtime_settings_strict)
+    monkeypatch.setattr(settings, "load_runtime_settings_strict", read)
+    planner = GroupReplyPlanner.from_config()
+    ctx = _group(at=True)
+    for _ in range(5):
+        assert (await planner.decide("hi", ctx)).reason == "at"
+        planner.note_assistant(ctx, "yes")
+    planner._load_config.next_check = 0
+    assert (await planner.decide("hi", ctx)).reason == "at"
+    assert read.call_count == 1
+    assert settings.save_runtime_settings({"group_reply_planner_enabled": False})
+    assert (await planner.decide("hi", ctx)).reason == "disabled"
+    with monkeypatch.context() as patch:
+        patch.setattr(settings.os, "replace", Mock(side_effect=OSError))
+        assert not settings.save_runtime_settings({"group_reply_planner_enabled": True})
+    assert (await planner.decide("hi", ctx)).reason == "disabled"
+    assert read.call_count == 2
+
+    # Simulate the next external-file poll without waiting on the wall clock.
+    planner._load_config.next_check = 0
+    path.write_text("{", encoding="utf-8")
+    assert (await planner.decide("hi", ctx)).reason == "disabled"
+    planner._load_config.next_check = 0
+    path.write_text('{"group_reply_planner_enabled":true}', encoding="utf-8")
+    assert (await planner.decide("hi", ctx)).reason == "at"
+
+
+def _named_group(name):
+    ctx = _group()
+    ctx["channel_meta"]["session_id"] = name
+    return ctx
+
+
+def test_idle_cache_evicts_least_recent_group():
+    planner = GroupReplyPlanner(max_sessions=2)
+    for name in ("a", "b", "a", "c"):
+        planner.note_assistant(_named_group(name), name)
+    assert list(planner._sessions) == ["a", "c"]
+    for i in range(20):
+        planner.note_assistant(_named_group(str(i)), "hello")
+    assert list(planner._sessions) == ["18", "19"]
+
+
+@pytest.mark.asyncio
+async def test_idle_timer_releases_quiet_group_without_more_traffic():
+    config = GroupReplyPlannerConfig(backoff_base_sec=0, backoff_cap_sec=0)
+    planner = GroupReplyPlanner(config, idle_ttl_sec=0.01)
+    planner.note_assistant(_group(), "hello")
+    await asyncio.sleep(0.05)
+    assert not planner._sessions
+    assert planner._expiry_timer is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cancel", [True, False])
+async def test_busy_groups_survive_cache_pressure_and_release_on_exit(cancel):
+    planner = GroupReplyPlanner(max_sessions=1)
+    ready = asyncio.Queue()
+
+    async def ask(messages, **kwargs):
+        gate = asyncio.Event()
+        ready.put_nowait(gate)
+        await gate.wait()
+        return "NO"
+
+    tasks = []
+    gates = []
+    for name in ("a", "b"):
+        task = asyncio.create_task(planner.decide("闲聊", _named_group(name), chat_with_ai=ask))
+        tasks.append(task)
+        gates.append(await ready.get())
+    planner.note_assistant(_named_group("c"), "hello")
+    assert (await planner.decide("又一句", _named_group("a"))).reason == "in_flight"
+    if cancel:
+        tasks[0].cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await tasks[0]
+    else:
+        gates[0].set()
+        assert (await tasks[0]).reason == "model_no"
+    gates[1].set()
+    await tasks[1]
+    assert not planner._in_flight
+    assert list(planner._sessions) == ["b"]
+    assert planner._sessions["b"].silence_streak == 1

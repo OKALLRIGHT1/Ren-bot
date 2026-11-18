@@ -534,14 +534,10 @@ class Live2DApplication:
         ).start()
 
     def _save_runtime_settings(self, settings: Dict[str, Any]):
-        path = self.runtime_settings_path
-        try:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            with path.open("w", encoding="utf-8") as f:
-                json.dump(settings, f, ensure_ascii=False, indent=2)
-        except Exception as e:
-            if self.logger:
-                self.logger.warning(f"保存运行时设置失败: {e}")
+        from modules.runtime_settings import save_runtime_settings
+
+        if not save_runtime_settings(settings, path=self.runtime_settings_path) and self.logger:
+            self.logger.warning(f"保存运行时设置失败: {self.runtime_settings_path}")
 
     def _publish_gui_activity_endpoint(self) -> None:
         server = getattr(self, "gui_http_server", None)

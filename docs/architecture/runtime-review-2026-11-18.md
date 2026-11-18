@@ -1,0 +1,91 @@
+# Ren-bot 主程序架构与性能审查
+
+2026-11-18 · 主仓库 `main` · [abf917a](https://github.com/OKALLRIGHT1/Ren-bot/commit/abf917a0e1d5239d39aefed9ceb54e5a3182ab69)
+
+**已修复三项。** 群聊配置在保存后刷新，空闲群状态按容量和时间回收，实体度数一次批量查询。下文保留审查基线和对应的复测结果。大库关键词召回、启动耗时与插件界面仍有优化空间。
+
+审查覆盖主程序启动、消息分派、群聊决策、SQLite 召回与插件管理界面。测量使用 Windows、本仓库虚拟环境、Python 3.11.18、SQLite 3.53.1 和合成数据。模型推理、QQ 网络往返、独立插件的内部执行与真实用户数据均未参与测量。此前架构审查中已完成的知识端口和聊天流水线拆分，可查阅[历史记录](coupling-and-overdesign-review.md)。
+
+## 一、群状态回收（已修复）
+
+审查基线中，每个群的历史行数有上限，持有所有群状态的字典却只增不减。现在默认保留最近使用的 256 个群，空闲 1 小时回收，实际过期时间至少覆盖配置的最长退避窗口。事件循环用一个定时器处理空闲队列，即使再无消息也会清理。同步入口在访问时清理。等待模型的群单独保留，所有群都在等待时可以暂时超过容量，决策结束或取消即收缩。[状态与回收逻辑](../../services/chat_support/group_reply_planner.py#L549)
+
+**同一负载的前后对照。** 从空规划器开始，每群调用一次 `note_assistant` 并发送相同短消息。创建规划器后开启 `tracemalloc`，垃圾回收后读取存活分配。1,000 个群时由 1,000 项、1.01 MiB 降到 256 项、约 0.28 MiB。10,000 个群时由 10,000 项、10.00 MiB 降到 256 项、约 0.29 MiB。这是无模型调用的合成负载，仅衡量 Python 跟踪内存。[群聊回归测试](../../tests/test_group_reply_planner.py)
+
+## 二、群聊配置复用（已修复）
+
+此前入站决策与出站回复各自打开并解析设置文件。现在 QQ 私聊和桌面消息在创建规划器、取角色称呼和插件关键词之前就返回。群聊入站和出站共用同一份解析结果。进程内成功写入设置后，下一次群聊访问立即读入新值。手工修改或其他进程写入时，访问方每秒最多检查一次文件元数据，发现变化再解析。保存失败或读到残缺 JSON 时继续沿用最近的有效配置。[入站入口](../../services/chat_service.py#L2585) · [出站入口](../../services/chat_service.py#L1035) · [配置快照](../../services/chat_support/group_reply_planner.py#L350)
+
+回归用例连续进行五轮群聊决策和回复，只触发一次配置读取。成功保存后下一条群消息应用新开关，失败保存不触发重读。外部文件先写坏、再修复的情况同样有覆盖。[配置回归测试](../../tests/test_group_reply_planner.py)
+
+## 三、记忆关键词召回的主要成本在排序和取前 K 条之前
+
+作用域索引可先缩小记录范围。随后，每个候选都要对每个查询词执行一次或多次 `instr(lower(content || ' ' || key), ?)`，还要判断有效期并按命中数排序。查询词上限为 96。生产方法的查询计划显示使用 `idx_memory_records_scope`，并出现 `USE TEMP B-TREE FOR ORDER BY`。结果上限为 20 也不能省掉前面的匹配。[实际查询构造](../../modules/memory_core/repository.py#L1736)
+
+| 同一作用域的有效记录 | 1 个词 | 8 个词 |
+| ---: | ---: | ---: |
+| 1,000 | 0.92 ms | 3.04 ms |
+| 10,000 | 8.63 ms | 31.49 ms |
+| 50,000 | 60.82 ms | 213.01 ms |
+
+**复测方法。** 在临时 SQLite 库用 `MemoryCoreRepository.initialize()` 创建正式表及索引。批量写入同一 owner、同一 session 的短 episode，每百条有一条包含 `target`，其余为 `sample text noise`，有效期为空。调用 `search_current_records(limit=20)`，分别传入 `target` 或追加 7 个无命中的词。每档预热一次，再取七次耗时的中位数。该数字只覆盖本地关键词查询与结果转换。短文本、单作用域和热缓存均会影响外推。
+
+**建议。** 先用真实查询词数和每个作用域的可见行数确定慢查询分布。若大库常见，评估由子串索引生成候选 ID，再用原有 SQL 精排。对中文双字、单字符、标点和跨 content/key 拼接的查询保留完整回退，避免引入漏召回。用同一数据集对照结果 ID、顺序、写入成本、索引体积和查询 p95。仓库已有覆盖旧记录、低权重记录、字面标点与过期过滤的[回归用例](../../tests/test_memory_retrieval_coverage.py)。
+
+**实体度数查询已修复。** 实体召回原先为每个命中实体单独执行关系计数，默认最多 20 次。现在对命中的实体 ID 用一条 SQL 分组计数，取各组的最大度数。保留原有主体范围、有效状态与关系类型筛选，最大度数超过 50 时启用图排序。回归用例在双实体命中时记录 SQLite 实际执行的语句，验证仅执行一条计数查询，并覆盖最大度数为 50 和 51 的边界。[召回调用](../../modules/memory_core/service.py#L1416) · [批量计数](../../modules/memory_core/repository.py#L2321) · [回归测试](../../tests/test_memory_reliability.py)
+
+**另有一项召回改进待做。** 关联记录先取 40 条，随后才在 Python 过滤有效期和种类，可能挤掉仍有效的记录。可用第 41 位是唯一有效记录的样本验证，再调整过滤顺序。[关联记录查询](../../modules/memory_core/repository.py#L2284)
+
+## 四、启动阶段应分开测量模块导入与向量库初始化
+
+全新 Python 进程中，仅执行 `import core.application` 的一次采样耗时 **2.62 秒**，进程工作集增加 **105.8 MiB**。测量前已导入 psutil，用 `perf_counter` 和同一 PID 的 `memory_info().rss` 取前后差值。此时 chromadb、numpy、openai 均已载入。这个读数涵盖整个传递依赖树，不能直接当作延迟加载 Chroma 可节省的资源。[应用级导入](../../core/application.py#L317) · [记忆构造器与集合创建](../../modules/advanced_memory.py#L97)
+
+**建议。** 先分别记录进程启动至窗口可用、首次普通回复、首次向量检索三个时间点的耗时和工作集。若启动即构造 `AdvancedMemorySystem`，单纯移动 import 只会转移耗时；应先确认哪些运行模式可以推迟创建客户端和集合，再沿该边界延迟初始化。验收应包含并发首次访问、初始化失败后的重试，以及首次需要向量检索时新增的等待。
+
+## 五、按状态所有权拆分应用、记忆仓储与插件编辑器
+
+下表行数取自审查基线 abf917a，方法数只计类体直接定义的同步及异步方法。拆分顺序取决于调用边界与回归风险。
+
+| 模块 | 耦合证据 | 建议的第一步 |
+| --- | --- | --- |
+| [core/application.py](../../core/application.py#L3849)，4,743 行，Live2DApplication 有 129 个方法 | 应用负责装配，也持有 QQ 角色资料同步、语音传感器启停和会话任务取消的状态。QQ 头像或昵称同步策略变化会触及主应用 | 先移出 QQ 资料同步的指纹、排程与同步操作，应用只转交角色切换及启动事件。沿用现有资料同步测试，保留主人的 QQ 私聊与桌面共享会话 |
+| [services/chat_service.py](../../services/chat_service.py#L256)，3,686 行，158 个方法 | 构造器既装配输入缓冲和发送器，也创建传感器、日记和情绪服务。已有 AppPort，同时 app 属性仍回退查找 __main__.app_instance，依赖随启动方式变化 | 从一个调用者开始，将它实际使用的能力显式注入。分别用直接构造与应用启动入口验证，再收缩全局回退 |
+| [modules/memory_core/repository.py](../../modules/memory_core/repository.py#L93)，2,628 行，86 个方法 | 初始化同时管 schema、旧数据修复和周期性任务；同一类还管理关键词召回、实体关系、向量任务。拆错边界会割裂记录写入与入队的事务 | 优先提取初始化迁移和只读召回 SQL；让现有仓储继续拥有写事务。验证旧库升级、记录写入失败时的回滚、并发更新与重试 |
+| [modules/gui/dialogs/plugin_manager.py](../../modules/gui/dialogs/plugin_manager.py#L1477)，4,517 行，PluginEditorDialog 有 84 个方法 | 编辑器一次创建参数、访问权限、元数据三页，并负责 schema 映射与配置保存。同文件的管理窗口还复制插件目录、重载插件和重建卡片 | 先分离配置到表单的双向转换，以旧版配置和未知字段做往返测试。列表已有按 trigger 的卡片映射，可独立优化局部刷新 |
+
+**插件界面有一个可单独交付的小改动。** 编辑对话框关闭后无条件调用全量刷新，取消编辑也会销毁并重建所有卡片。可先确认有没有独立保存或立即生效的操作，仅在数据变化时更新对应卡片，同步搜索文本和筛选计数。用 10、100 个插件统计取消或保存一次触发的卡片创建数，并验证焦点、搜索结果和开关状态。该项收益集中在插件管理界面。[编辑返回路径](../../modules/gui/dialogs/plugin_manager.py#L1043) · [卡片重建逻辑](../../modules/gui/dialogs/plugin_manager.py#L837)
+
+## 六、相关开源项目有哪些做法值得借鉴
+
+### 消息路径与群状态：NoneBot、python-telegram-bot
+
+**配置的加载者和使用者可以分开。** NoneBot 的插件示例在加载时取得类型化配置，处理消息时读取已有对象。Ren-bot 已经有 `GroupReplyPlannerConfig`，最小改动是让设置层在保存成功后替换这份快照。每次群聊决策开始时取一次引用，整轮沿用；私聊在准备关键词之前就返回。这样仍能在桌面改完设置后立即生效。验证时可在两条群消息之间切换开关，再用一次保存失败确认旧配置仍可用。[NoneBot 配置示例](https://nonebot.dev/docs/2.4.3/appendices/config) · [Ren-bot 群聊配置入口](../../services/chat_support/group_reply_planner.py#L350)
+
+**缓存应有总容量，淘汰时还要考虑谁正在用它。** python-telegram-bot 用有容量上限的 LRU 缓存保存回调数据，并提供按最近访问时间清理的入口。它处理的是按钮回调。Ren-bot 的群状态还承载退避和等待中的模型决策，适合先淘汰最久未使用且没有决策在途的群。若所有候选都在使用，可以暂缓淘汰，在决策结束时再收缩。容量按实际活跃群数选取。回归场景可固定为 A 群等待模型、B/C 群填满缓存、A 群收到结果，核对 A 的退避仍只更新一次，随后缓存回落到上限。[python-telegram-bot 缓存源码](https://github.com/python-telegram-bot/python-telegram-bot/blob/master/src/telegram/ext/_callbackdatacache.py) · [Ren-bot 群状态](../../services/chat_support/group_reply_planner.py#L549)
+
+### 记忆检索：sqlite-utils 的索引维护，SQLite 的子串匹配
+
+sqlite-utils 把建全文索引、填充历史行、维护更新触发器和重建索引做成独立操作。Ren-bot 已有 FTS5 表及增删改触发器，现有关键词路径仍使用字面子串匹配。若试验 trigram，先按生产查询的同一表达式索引 `content || ' ' || key`，覆盖跨字段的文本；再做历史行回填和更新、删除、重建的一致性测试。这样能单独验证索引生命周期，也能在旧库迁移中断时继续使用现有查询。[sqlite-utils 索引实现](https://github.com/simonw/sqlite-utils/blob/main/sqlite_utils/db.py) · [Ren-bot 现有 FTS 表和触发器](../../modules/memory_core/repository.py#L253)
+
+**本地小实验改变了索引的验收条件。** 在项目虚拟环境新建内存 FTS5 trigram 表，依次写入“星河预算”“单列预算”“a_b 100%”，对比带引号的字面量 `MATCH` 与现行 `instr`。结果如下。SQLite 规定 trigram 全文匹配的查询片段至少包含三个 Unicode 字符。[SQLite trigram 说明](https://sqlite.org/fts5.html#the_trigram_tokenizer)
+
+| 查询词 | trigram 命中行数 | 字面子串命中行数 |
+| --- | ---: | ---: |
+| 星河预 | 1 | 1 |
+| 预算 | 0 | 2 |
+| a_b | 1 | 1 |
+| % | 0 | 1 |
+
+Ren-bot 会按命中的查询词数量排序。对于“星河预”和“预算”混合的查询，只走长词索引会漏掉“单列预算”。第一版可让含短词的查询整体走现有 SQL；待样本证明有必要，再把长词候选与短词匹配结果取并集。两条路径都应在作用域、有效期和完整命中分数确定后取前 K 条。先用真实词长分布估算索引能覆盖多少查询，再比较 p95、写入成本和库大小。上表验证了匹配语义，实际加速幅度仍待测量。[Ren-bot 查询计分](../../modules/memory_core/repository.py#L1783)
+
+### 插件边界：AstrBot 的配置表单，MaiBot 的会话接口
+
+**通用表单与插件专属操作可分别演进。** AstrBot 让普通设置通过 schema 呈现，带运行状态、文件和交互流程的功能可以由插件提供独立视图。Ren-bot 已会读取字段 schema，但通用编辑器内仍有 `knowledge_base` 分支和“保存并导入知识”动作。建议先让同一份字段描述驱动 Qt 控件的读取、校验和写回，再把知识导入收敛为具名操作。这个改动可沿用 Qt 和现有插件格式。验收时用旧配置往返一次，检查未知字段保留、取消编辑不会启动导入、普通插件不创建知识导入控件。[AstrBot 插件视图指南](https://docs.astrbot.app/en/dev/star/guides/plugin-pages.html) · [Ren-bot 专属分支](../../modules/gui/dialogs/plugin_manager.py#L1747) · [知识导入动作](../../modules/gui/dialogs/plugin_manager.py#L4417)
+
+**会话访问与结果投递应各有清楚的接口。** MaiBot SDK 允许插件通过 chat 接口定位会话，再向指定会话发送结果。对 Ren-bot 的后台智能体，值得沿用的是“提交任务时确定目标”这一点。主人的 QQ 私聊与桌面共享历史和任务访问权，发起渠道仍决定完成通知送到哪里。重构应用层时可把这条约定固化为跨渠道测试：从 QQ 提交，在桌面查看，完成时只向最初的 QQ 会话投递一次；群聊无法读取该任务。这样能检验宿主通信接口是否足够窄，也能保护已有行为。[MaiBot SDK 会话与发送示例](https://github.com/Mai-with-u/maibot-plugin-sdk/blob/main/docs/guide.md) · [Ren-bot 会话任务隔离](../../core/application.py#L3599)
+
+## 后续实施顺序
+
+1. 用真实查询的词长和可见行数评估关键词候选索引的覆盖率，同时验证关联记录过滤顺序。
+2. 分别记录窗口可用、首次普通回复、首次向量检索的耗时和工作集，再决定延迟初始化范围。
+3. 插件表单与 QQ 资料同步各自小步拆分，逐项对照行为测试。

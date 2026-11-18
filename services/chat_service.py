@@ -1039,7 +1039,8 @@ class ChatService:
         emotion: Optional[str] = None,
     ):
         try:
-            self._group_reply_planner().note_assistant(ctx, text)
+            if is_group_context(ctx):
+                self._group_reply_planner().note_assistant(ctx, text)
         except Exception:
             pass
         return await self.gateway_sender.send_reply(text, ctx, emotion=emotion)
@@ -2588,6 +2589,8 @@ class ChatService:
         output_profile: Optional[Dict[str, Any]],
     ) -> bool:
         """群消息不该进主模型时返回 True。私聊、桌面和总开关关闭时直接放行。"""
+        if not is_group_context(ctx):
+            return False
         try:
             decision = await self._group_reply_planner().decide(
                 user_text,
@@ -2600,10 +2603,8 @@ class ChatService:
         except Exception as exc:
             if self.logger:
                 self.logger.warning(f"[GroupReply] 判断异常: {exc}")
-            if is_group_context(ctx):
-                await self._emit_idle_status(output_profile, reason="group_reply_hold")
-                return True
-            return False
+            await self._emit_idle_status(output_profile, reason="group_reply_hold")
+            return True
         if not decision.applicable:
             return False
         if decision.context_block and isinstance(ctx, dict):
