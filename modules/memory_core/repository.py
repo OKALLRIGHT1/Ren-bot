@@ -10,6 +10,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Optional
 
+from . import keyword_index
+
 
 VECTOR_MAX_ATTEMPTS = 5
 VECTOR_RETRY_BASE_SECONDS = 2.0
@@ -95,6 +97,7 @@ def _parse_json(value: Any, default: Any) -> Any:
 class MemoryCoreRepository:
     def __init__(self, store: Any) -> None:
         self.store = store
+        self._has_keyword_index = False
 
     def _connect(self) -> sqlite3.Connection:
         return self.store._connect()
@@ -103,6 +106,7 @@ class MemoryCoreRepository:
         self,
         *,
         character_catalog: Optional[dict[str, dict[str, Any]]] = None,
+        keyword_index_enabled: Optional[bool] = None,
     ) -> dict[str, int]:
         self._backup_before_first_migration()
         with self._connect() as conn:
@@ -306,6 +310,7 @@ class MemoryCoreRepository:
         self._ensure_persona_unique_indexes()
         self._archive_empty_records()
         self.enqueue_missing_vector_jobs()
+        self._has_keyword_index = keyword_index.configure(self._connect(), keyword_index_enabled)
         return {
             "schema_version": CURRENT_SCHEMA_VERSION,
             "migrated": migrated,
@@ -1773,6 +1778,8 @@ class MemoryCoreRepository:
             where.append("kind IN (" + ",".join("?" for _ in kind_list) + ")")
             args.extend(kind_list)
         conn = self._connect()
+        num_scope_filters = len(where)
+        num_scope_args = len(args)
         if current_at is not None:
             now_ts = float(current_at) if isinstance(current_at, (int, float)) else parse_memory_time(current_at)
             if now_ts is None:
@@ -1804,8 +1811,21 @@ class MemoryCoreRepository:
             sql += " WHERE " + " AND ".join(where)
         sql += f" ORDER BY {order}, id LIMIT ?"
         args.append(max(1, min(2000, int(limit))))
-        rows = conn.execute(sql, [*score_args, *args]).fetchall()
-        return [self._row_to_record(row) for row in rows]
+        params = [*score_args, *args]
+        cursor = None
+        if self._has_keyword_index and query_terms is not None:
+            try:
+                cursor = keyword_index.indexed_cursor(
+                    conn, sql, params, terms, where[:num_scope_filters], args[:num_scope_args],
+                )
+            except sqlite3.OperationalError as exc:
+                # A second process may have disabled the optional index.
+                if str(exc) != f"no such table: {keyword_index.TABLE}":
+                    raise
+                self._has_keyword_index = False
+        if cursor is None:
+            cursor = conn.execute(sql, params)
+        return [self._row_to_record(row) for row in cursor]
 
     def list_current_records(
         self,

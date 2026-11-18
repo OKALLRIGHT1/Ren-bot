@@ -574,6 +574,7 @@ MEMORY_SETTINGS = {
     # Long-term writeback (MaiBot-style person facts + chat summary).
     # Transcript is always kept; memory_records only when extract succeeds.
     "memory_writeback_enabled": get_env_bool("MEMORY_WRITEBACK_ENABLED", "1"),
+    "memory_keyword_index_enabled": get_env_bool("MEMORY_KEYWORD_INDEX_ENABLED", "0"),
     "memory_writeback_person_fact_enabled": get_env_bool(
         "MEMORY_WRITEBACK_PERSON_FACT_ENABLED", "1"
     ),

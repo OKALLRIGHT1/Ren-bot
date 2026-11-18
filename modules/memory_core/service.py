@@ -186,6 +186,10 @@ class MemoryCoreService:
     def initialize(self) -> dict[str, int]:
         result = self.repository.initialize(
             character_catalog=self._get_character_catalog(),
+            keyword_index_enabled=(
+                self._setting_bool("memory_keyword_index_enabled", False)
+                if "memory_keyword_index_enabled" in self.settings else None
+            ),
         )
         self._initialized = True
         self._ensure_writeback_service()
